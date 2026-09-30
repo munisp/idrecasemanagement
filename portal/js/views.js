@@ -38,7 +38,9 @@ const Views = (() => {
 
   async function caseDetail(id) {
     try {
-      const [c, docs] = await Promise.all([Api.cases.get(id), Api.cases.documents(id)]);
+      const [c, docs, activities] = await Promise.all([
+        Api.cases.get(id), Api.cases.documents(id), Api.cases.activities(id),
+      ]);
       let html = `<h1>${esc(c.case_number)}</h1><p>${badge(c.status)} · ${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
 
       // Workflow actions by role + status
@@ -70,6 +72,12 @@ const Views = (() => {
           ${!d.sealed ? ` · <a href="javascript:void 0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}</td></tr>`).join("") +
         `</tbody></table>` : `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
+
+      // CRM activity timeline (voice calls auto-attached, milestones, notes)
+      html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
+        activities.map((a) => `<tr><td>${badge(a.type)}</td><td>${esc(a.body)}</td>
+          <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
+        `</tbody></table>` : `<p class="muted">No activity yet — voice calls and milestones attach automatically.</p>`);
 
       queueMicrotask(() => {
         acts.forEach((a, i) =>
@@ -200,7 +208,30 @@ const Views = (() => {
   async function voice() {
     try {
       const [intake, logs] = await Promise.all([Api.voice.intake(), Api.voice.logs()]);
-      return `<h1>Voice console</h1><h2>Intake requests (${intake.length})</h2>` +
+      queueMicrotask(() => $("#ob-call")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = Object.fromEntries(new FormData(ev.target));
+        try {
+          const r = await Api.voice.outbound(f.to, f.case_number, f.script);
+          alert(`Outbound call ${r.status}`);
+          location.reload();
+        } catch (e) { alert(e.message); }
+      }));
+      return `<h1>Voice console</h1>
+        <h2>Outbound call</h2>
+        <form id="ob-call" class="form">
+          <label>Phone number <input name="to" placeholder="+1…" required /></label>
+          <label>Case number <input name="case_number" placeholder="CMS-TX-2026-00001" /></label>
+          <label>Script <select name="script">
+            <option value="window_closing">Offer window closing reminder</option>
+            <option value="determination_issued">Determination issued</option>
+            <option value="fee_reminder">Fee payment reminder</option>
+            <option value="general">General update</option>
+          </select></label>
+          <button>Place outbound call</button>
+          <p class="muted">Requires outbound calling enabled in the tenant voice config.</p>
+        </form>
+        <h2>Intake requests (${intake.length})</h2>` +
         (intake.length ? `<table><thead><tr><th>Caller</th><th>Organization</th><th>Summary</th><th>Status</th><th>At</th></tr></thead><tbody>` +
           intake.map((v) => `<tr><td>${esc(v.caller_name)}<br/><span class="muted">${esc(v.caller_phone)}</span></td>
             <td>${esc(v.organization)}</td><td>${esc(v.summary)}</td><td>${badge(v.status)}</td><td>${fmtDate(v.created_at)}</td></tr>`).join("") +

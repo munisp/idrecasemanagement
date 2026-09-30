@@ -266,6 +266,8 @@ func main() {
 		// Voice console + compliance reports (JWT-authenticated reads).
 		r.Get("/voice/intake", s.listVoiceIntake)
 		r.Get("/voice/logs", s.listVoiceLogs)
+		r.Post("/voice/outbound", s.outboundCall)          // trigger outbound calls
+		r.Get("/cases/{caseId}/activities", s.listActivities) // CRM record timeline
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
 	})
@@ -648,6 +650,9 @@ func (s *server) voiceEvents(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprint(evt.DynamicVariables["caller_phone"]),
 		fmt.Sprint(evt.DynamicVariables["case_number"]),
 		evt.Transcript)
+	// CRM auto-update: attach the call to the case timeline + link intake.
+	s.recordVoiceActivity(r, tenant,
+		fmt.Sprint(evt.DynamicVariables["case_number"]), evt.Transcript)
 	s.publish(r.Context(), tenant, "voice", map[string]any{
 		"type": "voice.event", "event": evt.Type, "case_number": evt.DynamicVariables["case_number"],
 	})

@@ -53,3 +53,19 @@ CREATE TABLE IF NOT EXISTS public.npi_cache (
     source     text NOT NULL DEFAULT 'live',   -- live | bulk_seed
     checked_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- CRM activity timeline (case record feed: voice calls, notes, milestones).
+CREATE TABLE IF NOT EXISTS public.case_activities (
+    id         bigserial PRIMARY KEY,
+    tenant     text NOT NULL,
+    case_id    text NOT NULL,
+    type       text NOT NULL,   -- VOICE_CALL | NOTE | MILESTONE | OUTBOUND_TRIGGER
+    body       text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS case_activities_case ON public.case_activities (tenant, case_id);
+
+-- Voice platform outbound configuration per tenant.
+ALTER TABLE public.voice_configs
+    ADD COLUMN IF NOT EXISTS platform_base_url text,     -- e.g. https://api.getline.ai
+    ADD COLUMN IF NOT EXISTS outbound_api_key  text;     -- vault-sealed in prod

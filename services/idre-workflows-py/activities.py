@@ -64,7 +64,18 @@ async def request_lawful_reveal(case_id: str) -> None:
 
 @activity.defn
 async def notify_party(tenant: str, channel: str, to: str, template: str, data: dict) -> None:
-    """Email/SMS/voice-outbound trigger (voice milestones go to getline.ai-style API)."""
+    """Email/SMS via notifier; voice milestones place REAL outbound calls
+    through the tenant-configured voice platform (getline.ai-style API)."""
+    if channel == "voice":
+        async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
+            resp = await client.post(
+                f"/v1/tenants/{tenant}/voice/outbound",
+                json={"to": to, "case_number": data.get("case_number", ""),
+                      "script": template, "variables": data},
+                headers={"Authorization": f"Bearer {os.environ.get('WORKER_TOKEN','')}"},
+            )
+            resp.raise_for_status()
+        return
     async with httpx.AsyncClient(base_url=NOTIFY_URL, timeout=15) as client:
         await client.post("/send", json={
             "tenant": tenant, "channel": channel, "to": to,

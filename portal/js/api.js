@@ -40,6 +40,7 @@ const Api = (() => {
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
+      activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },
     onboarding: {
       submit: (payload) => req("POST", `${t()}/onboarding/applications`, payload),
@@ -49,6 +50,8 @@ const Api = (() => {
     voice: {
       intake: () => req("GET", `${t()}/voice/intake`),
       logs: () => req("GET", `${t()}/voice/logs`),
+      outbound: (to, caseNumber, script) =>
+        req("POST", `${t()}/voice/outbound`, { to, case_number: caseNumber, script }),
     },
     reports: {
       sla: () => req("GET", `${t()}/reports/sla`),
