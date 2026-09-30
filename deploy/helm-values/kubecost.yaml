@@ -1,0 +1,16 @@
+# Kubecost: per-tenant (per-state) chargeback for shared platform cost.
+kubecostProductConfigs:
+  clusterName: idre-prod
+  labelMappingConfigs:
+    enabled: true
+    # Tenant attribution: pods/jobs labelled tenant=<state> bill to that state;
+    # shared infra (gateway, kafka, temporal) is amortized by request volume.
+    tenant_label: tenant
+global:
+  prometheus:
+    enabled: true
+persistentVolume: { size: 32Gi }
+reporting:
+  # Monthly cost report lands next to the CMS report in the gold zone.
+  savedReports: [tenant-monthly]
+serviceMonitor: { enabled: true }

@@ -1,0 +1,16 @@
+# KubeRay operator; RayCluster CR:
+# head: dashboard :8265, GCS :6379
+# workers: autoscaling 1..6, 4CPU/8Gi each
+# Ray Serve endpoints exposed behind APISIX route /ml/* (JWT-validated).
+operator:
+  replicaCount: 1
+cluster:
+  head:
+    resources:
+      requests: { cpu: "2", memory: 4Gi }
+  worker:
+    minReplicas: 1
+    maxReplicas: 6
+    resources:
+      requests: { cpu: "4", memory: 8Gi }
+serviceMonitor: { enabled: true }

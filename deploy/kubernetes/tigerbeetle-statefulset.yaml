@@ -1,0 +1,60 @@
+# TigerBeetle 3-replica cluster — ledger-per-tenant for escrow/fees.
+# Follows upstream production guidance: dedicated nodes, local NVMe preferred.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tigerbeetle
+  namespace: idre-core
+spec:
+  serviceName: tigerbeetle
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: tigerbeetle }
+  template:
+    metadata:
+      labels: { app: tigerbeetle, app.kubernetes.io/part-of: idre }
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: tigerbeetle }
+      containers:
+        - name: tigerbeetle
+          image: ghcr.io/tigerbeetle/tigerbeetle:0.16.0
+          args:
+            - start
+            - --addresses=$(POD_IP):3000,tigerbeetle-1.tigerbeetle:3000,tigerbeetle-2.tigerbeetle:3000
+            - /data/tigerbeetle
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+          ports: [{ containerPort: 3000 }]
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { cpu: "4", memory: 8Gi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-nvme   # provision per-cluster; gp3/io2 acceptable
+        resources: { requests: { storage: 100Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: tigerbeetle, namespace: idre-core }
+spec:
+  clusterIP: None
+  selector: { app: tigerbeetle }
+  ports: [{ port: 3000 }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: tigerbeetle, namespace: idre-core }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app: tigerbeetle } }

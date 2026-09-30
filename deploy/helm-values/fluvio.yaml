@@ -1,0 +1,16 @@
+# Fluvio: lightweight edge ingestion (state SSL registries, voice webhooks).
+spu:
+  replicas: 2
+  storage:
+    size: 50Gi
+connectors:
+  # Inbound HTTP connectors receive registry/voice webhooks; SmartModules
+  # validate schemas before bridging to Kafka topic idre.<state>.<domain>.
+  - name: ssl-registry-tx
+    type: http-source
+    topic: idre.tx.ssl-registry
+  - name: voice-webhooks-tx
+    type: http-source
+    topic: idre.tx.voice
+# Kafka bridge: fluvio -> kafka (idre.<st>.* topics), at-least-once with
+# idempotent keys carried through as Kafka record keys.

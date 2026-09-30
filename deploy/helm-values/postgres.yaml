@@ -1,0 +1,19 @@
+# CloudNativePG operator values; the Cluster CR below is applied separately.
+mode: standalone
+cluster:
+  instances: 3
+  storage:
+    size: 200Gi
+    storageClass: gp3
+  # Schema-per-tenant provisioning is idempotent: scripts/init-schemas.sql runs
+  # on bootstrap; new tenants are provisioned by scripts/provision-tenant.sh.
+  postgresql:
+    parameters:
+      wal_level: logical        # logical slots for the outbox/CDC publisher
+      max_replication_slots: "16"
+      shared_preload_libraries: "pg_stat_statements"
+  monitoring:
+    enablePodMonitor: true
+  backup:
+    retentionPolicy: "30d"
+    # PITR to S3 (MinIO in-cluster endpoint) — required for 6-year retention.

@@ -1,0 +1,31 @@
+# Strimzi operator. Cluster CR:
+# apiVersion: kafka.strimzi.io/v1beta2, kind: Kafka
+kafka:
+  replicas: 3
+  listeners:
+    - name: plain
+      port: 9092
+      type: internal
+      tls: false
+    - name: tls
+      port: 9093
+      type: internal
+      tls: true
+  config:
+    offsets.topic.replication.factor: 3
+    min.insync.replicas: 2
+    default.replication.factor: 3
+    # Topic ACLs enforce the idre.<state>.* per-tenant prefix isolation.
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 500Gi
+        class: gp3
+  metricsConfig:
+    type: strimziMetrics
+zookeeper: { replicas: 3 }   # or KRaft via useKRaft: true
+entityOperator:
+  topicOperator: {}
+  userOperator: {}           # manages SCRAM users + ACLs as KafkaUser CRs

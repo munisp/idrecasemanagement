@@ -1,0 +1,16 @@
+mode: distributed
+replicas: 4
+rootUser: idre
+rootPassword: idre-secret   # prod: from external secret
+buckets:
+  - name: lakehouse    # Delta/Parquet zones (bronze/silver/gold)
+  - name: idre-docs    # encrypted documents (ciphertext only; vault holds keys)
+    policy: none
+    # Bucket policy denies cross-tenant prefix access for service accounts:
+    # idre-docs/<state>/* is writable only by that tenant's workload identity.
+persistence:
+  size: 1Ti
+  storageClass: gp3
+metrics:
+  serviceMonitor: { enabled: true }
+serverSideEncryption: true   # SSE-S3; envelope keys still held by vault-rs

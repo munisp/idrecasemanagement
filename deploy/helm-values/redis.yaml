@@ -1,0 +1,9 @@
+architecture: replication
+replica: { replicaCount: 2 }
+sentinel: { enabled: true }
+auth: { enabled: true, existingSecret: redis }
+# Cache only — IDRE directory, fee schedules, state configs, rate-limit buckets.
+# No source of truth lives here; eviction is always safe.
+maxmemory: 2gb
+maxmemoryPolicy: allkeys-lru
+metrics: { enabled: true, serviceMonitor: { enabled: true } }

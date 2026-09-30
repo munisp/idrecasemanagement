@@ -1,0 +1,10 @@
+master: { replicaCount: 1 }
+worker:
+  replicaCount: 3
+  resources:
+    requests: { cpu: "2", memory: 4Gi }
+    limits: { cpu: "4", memory: 8Gi }
+# Delta Lake + Sedona jars are baked into the job images (services/analytics-py
+# Dockerfile). Jobs: bronze->silver->gold, CMS monthly report, geo analytics.
+serviceAccount: { create: true }
+metrics: { enabled: true }
