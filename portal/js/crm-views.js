@@ -155,5 +155,23 @@ const CrmViews = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { pipeline, accounts, account360, accountNew, leads, convert, tasks, done, search };
+  // ---- Calendar (deadline agenda) --------------------------------------------------------
+  async function calendar() {
+    try {
+      const items = await Api.cm.calendar();
+      items.sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+      const groups = {};
+      items.forEach((i) => (groups[i.due_date] ||= []).push(i));
+      const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+      const html = Object.keys(groups).map((d) =>
+        `<div class="cal-day"><h3>${day(d)}</h3>` + groups[d].map((i) =>
+          `<div class="cal-item ${i.type === "OFFER_WINDOW_CLOSE" ? "cal-stat" : "cal-task"}">
+             ${badge(i.type)} ${i.case_number
+               ? `<a href="#/cases/${i.case_id}">${esc(i.case_number)}</a> — ` : ""}${esc(i.title)}</div>`).join("") +
+        `</div>`).join("");
+      return `<h1>Calendar</h1>` + (html || `<p class="muted">No upcoming deadlines or tasks.</p>`);
+    } catch (e) { return `<h1>Calendar</h1>` + err(e); }
+  }
+
+  return { pipeline, accounts, account360, accountNew, leads, convert, tasks, done, search, calendar };
 })();

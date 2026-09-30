@@ -32,14 +32,33 @@ const Views = (() => {
 
   // ---- Case list / detail ----------------------------------------------------
   async function cases() {
-    try { return `<h1>Disputes</h1>` + caseTable(await Api.cases.list()); }
-    catch (e) { return `<h1>Disputes</h1>` + err(e); }
+    try {
+      const [list, saved] = await Promise.all([Api.cases.list(), Api.cm.views().catch(() => [])]);
+      const v = new URLSearchParams(location.hash.split("?")[1] || "").get("view");
+      const sv = saved.find((s) => s.id === v);
+      const rows = sv && sv.filters && sv.filters.status ? list.filter((c) => c.status === sv.filters.status) : list;
+      const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+      const bar = `<p class="viewbar">
+        <select onchange="location.hash='#/cases?view='+this.value"><option value="">All disputes</option>${opts}</select>
+        <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
+        ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>`;
+      return `<h1>Disputes</h1>` + bar + caseTable(rows);
+    } catch (e) { return `<h1>Disputes</h1>` + err(e); }
+  }
+
+  async function saveCurrentView() {
+    const name = prompt("View name:");
+    if (!name) return;
+    const status = prompt("Filter by status (leave blank for all):");
+    await Api.cm.saveView({ name, filters: status ? { status } : {} });
+    location.reload();
   }
 
   async function caseDetail(id) {
     try {
-      const [c, docs, activities] = await Promise.all([
+      const [c, docs, activities, checklist, rels] = await Promise.all([
         Api.cases.get(id), Api.cases.documents(id), Api.cases.activities(id),
+        Api.cm.checklist(id), Api.cm.relationships(id),
       ]);
       let html = `<h1>${esc(c.case_number)}</h1><p>${badge(c.status)} · ${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
 
@@ -72,6 +91,25 @@ const Views = (() => {
           ${!d.sealed ? ` · <a href="javascript:void 0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}</td></tr>`).join("") +
         `</tbody></table>` : `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
+
+      // Case-management panels: relationships, checklist, letters
+      if (rels.length)
+        html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
+          `<tr><td>${badge(r.rel_type)}</td><td>${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
+      const stages = {};
+      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
+      html += `<h2>Stage checklists</h2>` + Object.entries(stages).map(([stage, items]) =>
+        `<h3>${esc(stage)}</h3><ul class="checklist">` + items.map((i) =>
+          `<li>${i.done ? "✅" : (can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN")
+            ? `<button class="mini" onclick="Views.check('${i.id}')">check</button>` : "⬜")}
+            ${esc(i.item)}${i.required ? " *" : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
+        `</ul>`).join("");
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
+        html += `<div class="actions">
+          <button onclick="Views.assign('${id}')">Assign / route</button>
+          <button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
+          <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
+        </div>`;
 
       // CRM activity timeline (voice calls auto-attached, milestones, notes)
       html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
@@ -106,6 +144,30 @@ const Views = (() => {
         <pre>${esc(JSON.stringify(r.extracted || {}, null, 2))}</pre>
         ${(r.findings || []).length ? `<p class="error">Findings: ${esc(JSON.stringify(r.findings))}</p>` : ""}`;
     } catch (e) { box.innerHTML = err(e); }
+  }
+
+  async function check(itemId) { await Api.cm.checkItem(itemId); location.reload(); }
+
+  async function assign(caseId) {
+    const role = prompt("Assign as (CASE_MANAGER / ARBITRATOR):", "CASE_MANAGER");
+    if (!role) return;
+    const assignee = prompt("Assignee sub (blank = workload-balanced auto):", "") || "";
+    try {
+      const r = await Api.cm.assign(caseId, role.toUpperCase(), assignee);
+      alert(`Assigned to ${r.assigned_to}`);
+      location.reload();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function letter(caseId, template) {
+    let qs = "";
+    if (template === "determination_letter") {
+      const winning = prompt("Winning party:"); if (!winning) return;
+      const rationale = prompt("Rationale:") || "";
+      qs = `?winning_party=${encodeURIComponent(winning)}&rationale=${encodeURIComponent(rationale)}`;
+    }
+    try { await Api.cm.letter(caseId, template, qs); alert("Letter generated — see Documents."); location.reload(); }
+    catch (e) { alert(e.message); }
   }
 
   function offerForm(caseId) {
@@ -258,5 +320,5 @@ const Views = (() => {
     } catch (e) { return `<h1>Compliance reports</h1>` + err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis };
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView };
 })();

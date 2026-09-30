@@ -281,6 +281,21 @@ func main() {
 		r.Post("/tasks/{taskId}/complete", s.completeTask)
 		r.Post("/notes", s.addNote)
 		r.Get("/search", s.globalSearch)
+
+		// Case management: assignment, escalation, relationships, checklists,
+		// calendar, notifications, saved views, letters.
+		r.Post("/cases/{caseId}/assign", s.assignCase)
+		r.Post("/cases/{caseId}/escalate", s.escalateCase)
+		r.Post("/cases/relate", s.relateCases)
+		r.Get("/cases/{caseId}/relationships", s.caseRelationships)
+		r.Get("/cases/{caseId}/checklist", s.getChecklist)
+		r.Post("/checklists/{itemId}/check", s.checkItem)
+		r.Get("/calendar", s.calendar)
+		r.Get("/notifications", s.listNotifications)
+		r.Post("/notifications/{notifId}/read", s.readNotification)
+		r.Get("/views", s.listSavedViews)
+		r.Post("/views", s.saveView)
+		r.Post("/cases/{caseId}/letters/{template}", s.generateLetter)
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
 	})
@@ -292,6 +307,9 @@ func main() {
 		r.Post("/tools/intake", s.voiceIntake)
 		r.Post("/events", s.voiceEvents) // HMAC-signed platform → us webhooks
 	})
+
+	// Inbound email (Mailgun/SES-style provider webhook, token-authenticated).
+	r.Post("/api/email/inbound", s.emailInbound)
 
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	must(http.ListenAndServe(cfg.Addr, r))
@@ -375,7 +393,13 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"workflow start failed"}`, http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"case_id": caseID, "workflow_id": wfID})
+	// Case-management enrichment: stage checklists + duplicate detection.
+	s.ensureChecklist(tenant, caseID)
+	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"case_id": caseID, "workflow_id": wfID,
+		"possible_duplicates": dups, // non-blocking warning, triage via /cases/relate
+	})
 }
 
 func (s *server) listCases(w http.ResponseWriter, r *http.Request) {

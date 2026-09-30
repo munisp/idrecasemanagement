@@ -29,9 +29,28 @@
   if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "New dispute"]);
   links.push(["#/onboarding", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "Voice console"]);
+  links.push(["#/calendar", "Calendar"]);
   if (has("FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "Reports"]);
   nav.innerHTML = links.map(([h, l]) => `<a href="${h}">${l}</a>`).join("") +
+    `<button id="bell" class="bell" title="Notifications">🔔<span id="bell-n" class="bell-n"></span></button>` +
     `<input id="gq" placeholder="Search…" style="padding:.25rem .5rem;border-radius:6px;border:0" />`;
+  document.getElementById("bell").onclick = async () => {
+    const n = await Api.cm.notifications().catch(() => []);
+    const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
+    w.className = "notif-panel";
+    w.innerHTML = `<h3>Notifications</h3>` + (n.length ? n.map((x) =>
+      `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>location.reload())">
+         <b>${x.type}</b> — ${x.message} <span class="muted">${new Date(x.created_at).toLocaleString()}</span></div>`).join("")
+      : `<p class="muted">No notifications.</p>`);
+    document.body.appendChild(w);
+    setTimeout(() => document.addEventListener("click", (e) => { if (!w.contains(e.target) && e.target.id !== "bell") w.remove(); }, { once: true }), 0);
+  };
+  (async () => {
+    const n = await Api.cm.notifications().catch(() => []);
+    const unread = n.filter((x) => !x.read_at).length;
+    const b = document.getElementById("bell-n");
+    if (unread) { b.textContent = unread; b.style.display = "inline-block"; }
+  })();
   whoami.innerHTML = `${me.name} · ${Api.getTenant().toUpperCase()} · <a href="javascript:void(0)" id="lo">sign out</a>`;
   document.getElementById("gq").addEventListener("keydown", (e) => {
     if (e.key === "Enter") location.hash = `#/search/${encodeURIComponent(e.target.value)}`;
@@ -50,6 +69,7 @@
     [/^#\/crm\/leads$/, CrmViews.leads],
     [/^#\/crm\/tasks$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
+    [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],
     [/^#\/voice$/, Views.voice],

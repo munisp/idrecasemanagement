@@ -85,11 +85,17 @@ async def notify_party(tenant: str, channel: str, to: str, template: str, data: 
 
 @activity.defn
 async def flag_cms_breach(tenant: str, case_id: str, clock: str, detail: str) -> None:
-    """Statutory breach → surfaced on the next CMS monthly report."""
+    """Statutory breach → CMS report + ESCALATION (supervisor notification chain)."""
     with _conn() as c:
         c.execute(
             "INSERT INTO public.sla_breaches (tenant, case_id, clock, detail) VALUES (%s,%s,%s,%s)",
             (tenant, case_id, clock, detail),
+        )
+    async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
+        await client.post(
+            f"/v1/tenants/{tenant}/cases/{case_id}/escalate",
+            json={"clock": clock, "detail": detail},
+            headers={"Authorization": f"Bearer {os.environ.get('WORKER_TOKEN','')}"},
         )
 
 

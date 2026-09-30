@@ -70,5 +70,19 @@ const Api = (() => {
       addNote: (p) => req("POST", `${t()}/notes`, p),
       search: (q) => req("GET", `${t()}/search?q=${encodeURIComponent(q)}`),
     },
+    cm: {
+      assign: (caseId, role, assignee) => req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee }),
+      escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
+      relate: (p) => req("POST", `${t()}/cases/relate`, p),
+      relationships: (caseId) => req("GET", `${t()}/cases/${caseId}/relationships`),
+      checklist: (caseId) => req("GET", `${t()}/cases/${caseId}/checklist`),
+      checkItem: (itemId) => req("POST", `${t()}/checklists/${itemId}/check`),
+      calendar: () => req("GET", `${t()}/calendar`),
+      notifications: () => req("GET", `${t()}/notifications`),
+      readNotif: (id) => req("POST", `${t()}/notifications/${id}/read`),
+      views: () => req("GET", `${t()}/views`),
+      saveView: (p) => req("POST", `${t()}/views`, p),
+      letter: (caseId, template, qs) => req("POST", `${t()}/cases/${caseId}/letters/${template}${qs || ""}`),
+    },
   };
 })();
