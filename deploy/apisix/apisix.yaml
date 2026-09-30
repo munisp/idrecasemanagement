@@ -1,0 +1,58 @@
+# APISIX standalone mode: OIDC (Keycloak) + tenant context + open-appsec WAF hook.
+routes:
+  - id: case-api
+    uri: /v1/tenants/*
+    upstream:
+      type: roundrobin
+      nodes: { "case-api:8080": 1 }
+    plugins:
+      openid-connect:
+        bearer_only: true
+        client_id: case-api
+        client_secret: ${KEYCLOAK_CLIENT_SECRET}
+        discovery: ${KEYCLOAK_ISSUER}/.well-known/openid-configuration
+        realm: idre
+      limit-count:
+        count: 600
+        time_window: 60
+        rejected_code: 429
+      proxy-rewrite:
+        headers:
+          set:
+            X-Gateway: apisix
+
+  - id: vault-internal
+    uri: /internal/*
+    upstream:
+      nodes: { "vault:8081": 1 }
+    plugins:
+      # East-west only: never exposed publicly; mTLS + network policy enforce it.
+      ip-restriction:
+        whitelist: ["10.0.0.0/8", "172.16.0.0/12"]
+
+  - id: voice-webhooks
+    uri: /api/voice/*
+    upstream:
+      nodes: { "case-api:8080": 1 }
+    plugins:
+      limit-count: { count: 120, time_window: 60, rejected_code: 429 }
+      # open-appsec agent attaches here in k8s (WAF: ML detection + API schema enforcement)
+
+  - id: ray-serve-ml
+    uri: /ml/*
+    upstream:
+      nodes: { "ray-head:8093": 1 }
+    plugins:
+      openid-connect:
+        bearer_only: true
+        client_id: case-api
+        client_secret: ${KEYCLOAK_CLIENT_SECRET}
+        discovery: ${KEYCLOAK_ISSUER}/.well-known/openid-configuration
+        realm: idre
+
+global_rules:
+  - id: 1
+    plugins:
+      cors: { allow_origins: "*", allow_methods: "**", allow_headers: "**" }
+      prometheus: {}
+#END

@@ -1,0 +1,28 @@
+replicaCount: 2
+production: true
+proxy: edge
+extraEnvVars:
+  - name: KC_DB
+    value: postgres
+  - name: KC_DB_URL
+    value: jdbc:postgresql://postgres-rw.idre-core:5432/keycloak
+  - name: KC_HOSTNAME
+    value: auth.example.org
+  - name: KC_HEALTH_ENABLED
+    value: "true"
+existingSecret:
+  name: keycloak
+  passwordKey: admin-password
+keycloakConfigCli:
+  enabled: true
+  configuration:
+    realm-idre.json:
+      file: deploy/keycloak/realm-idre.json   # realm, clients, roles, tenant groups
+ingress:
+  enabled: true
+  hostname: auth.example.org
+  ingressClassName: apisix
+postgresql: { enabled: false }   # use the shared CNPG cluster
+metrics:
+  enabled: true
+  serviceMonitor: { enabled: true }

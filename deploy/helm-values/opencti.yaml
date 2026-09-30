@@ -1,0 +1,19 @@
+# OpenCTI threat-intelligence platform (k8s-only; heavy dependency graph).
+replicaCount: 1
+env:
+  APP__ADMIN_EMAIL: soc@example.org
+  APP__BASE_URL: https://cti.example.org
+  # OpenCTI shares the platform's OpenSearch + Redis + RabbitMQ dependencies.
+  ELASTICSEARCH__URL: http://opensearch-cluster-master.idre-data:9200
+  REDIS__HOSTNAME: redis-master.idre-core
+connectors:
+  # Feed examples: MITRE ATT&CK, abuse.ch URLhaus, CIRCL MISP.
+  # A scheduled 'ioc-export' connector writes etc/lists/opencti-iocs for Wazuh
+  # and pushes blocklists to APISIX via the Admin API.
+  - mitre
+  - urlhaus
+  - abuseipdb
+ingress:
+  enabled: true
+  hostname: cti.example.org
+  ingressClassName: apisix

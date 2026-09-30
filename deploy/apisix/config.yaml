@@ -1,0 +1,15 @@
+apisix:
+  node_listen: 9080
+  enable_admin: false
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml
+# open-appsec (k8s): attach the appsec agent as an external plugin on this gateway.
+plugins:
+  - prometheus
+  - openid-connect
+  - limit-count
+  - proxy-rewrite
+  - ip-restriction
+  - cors

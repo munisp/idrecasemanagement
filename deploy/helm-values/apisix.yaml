@@ -1,0 +1,30 @@
+replicaCount: 3
+gateway:
+  type: LoadBalancer
+  tls:
+    enabled: true
+    # cert-manager issues Let's Encrypt certs; open-appsec WAF agent attached below.
+ingress-controller:
+  enabled: true
+  config:
+    apisix:
+      adminAPIVersion: v3
+apisix:
+  deployment:
+    role: data_plane
+  extraEnvVars:
+    - name: APISIX_STAND_ALONE
+      value: "false"   # etcd-backed in prod; standalone yaml used only for local
+# open-appsec: deploy the appsec agent in this namespace and enable the APISIX
+# integration (see https://docs.openappsec.io — APISIX attachment). The agent
+# enforces ML-based detection, API schema validation, and bot mitigation.
+etcd:
+  enabled: true
+  replicaCount: 3
+metrics:
+  serviceMonitor: { enabled: true }
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 65

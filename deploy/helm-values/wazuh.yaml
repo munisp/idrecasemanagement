@@ -1,0 +1,23 @@
+# Wazuh SIEM/XDR: manager + indexer integration with the shared OpenSearch.
+manager:
+  master: { replicas: 1 }
+  worker: { replicas: 2 }
+agents:
+  daemonset: true            # one agent per node: FIM, log analysis, vuln scans
+filebeat:
+  # Alerts flow into the shared OpenSearch cluster as wazuh-alerts-* indices,
+  # where the idre-retention-6y ISM policy and OpenCTI IOC correlation apply.
+  opensearchHosts: ["opensearch-cluster-master.idre-data:9200"]
+customRules: |
+  <!-- FIM on cryptographic trust boundary + ledger data directories -->
+  <rule id="100100" level="12">
+    <if_sid>550</if_sid>
+    <field name="file">^/data/tigerbeetle|^/var/lib/vault</field>
+    <description>Integrity change on ledger/vault data directory</description>
+  </rule>
+  <!-- IOC correlation feed from OpenCTI (STIX indicators pushed daily) -->
+  <rule id="100200" level="10">
+    <if_group>web,accesslog</if_group>
+    <list field="srcip" lookup="address_match_key">etc/lists/opencti-iocs</list>
+    <description>Request from OpenCTI-flagged indicator</description>
+  </rule>

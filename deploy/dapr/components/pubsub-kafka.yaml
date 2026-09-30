@@ -1,0 +1,22 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: idre-pubsub
+  namespace: idre-core
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "kafka.idre-data:9092"
+    - name: authType
+      value: "none"          # prod: mtls via cert-manager
+    - name: consumerGroup
+      value: "idre-services"
+    - name: disableEntityManagement
+      value: "false"
+    - name: maxMessageBytes
+      value: "1048576"
+scopes:
+  - case-api
+  - notifier

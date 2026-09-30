@@ -1,0 +1,79 @@
+{
+  "realm": "idre",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "attributes": { "business-unit": "cms-federal-idr" },
+  "clients": [
+    {
+      "clientId": "case-portal",
+      "publicClient": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "redirectUris": ["https://portal.example.org/*", "http://localhost:5173/*"],
+      "webOrigins": ["https://portal.example.org", "http://localhost:5173"],
+      "attributes": { "pkce.code.challenge.method": "S256" }
+    },
+    {
+      "clientId": "case-api",
+      "bearerOnly": true,
+      "publicClient": false,
+      "secret": "change-me-in-production"
+    },
+    {
+      "clientId": "voice-integration",
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "secret": "change-me-in-production"
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "PLATFORM_ADMIN" },
+      { "name": "FEDERAL_ADMIN" },
+      { "name": "CASE_MANAGER" },
+      { "name": "ARBITRATOR" },
+      { "name": "STATE_AUDITOR" },
+      { "name": "FINANCE" },
+      { "name": "PARTY" }
+    ]
+  },
+  "groups": [
+    { "name": "tenant/tx", "path": "/tenant/tx" },
+    { "name": "tenant/ny", "path": "/tenant/ny" },
+    { "name": "tenant/ca", "path": "/tenant/ca" }
+  ],
+  "protocolMappers": [
+    {
+      "name": "groups",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-group-membership-mapper",
+      "config": { "full.path": "true", "claim.name": "groups", "access.token.claim": "true" }
+    }
+  ],
+  "users": [
+    {
+      "username": "federal.admin",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "password123", "temporary": false }],
+      "realmRoles": ["FEDERAL_ADMIN"]
+    },
+    {
+      "username": "cm.tx",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "password123", "temporary": false }],
+      "realmRoles": ["CASE_MANAGER"],
+      "groups": ["/tenant/tx"]
+    },
+    {
+      "username": "arbiter.tx",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "password123", "temporary": false }],
+      "realmRoles": ["ARBITRATOR"],
+      "groups": ["/tenant/tx"]
+    }
+  ],
+  "bruteForceProtected": true,
+  "passwordPolicy": "length(12) and digits(1) and upperCase(1) and specialChars(1) and notUsername",
+  "otpPolicyType": "totp"
+}

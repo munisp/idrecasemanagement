@@ -1,0 +1,32 @@
+server:
+  replicaCount: 2
+  config:
+    persistence:
+      default:
+        driver: sql
+        sql:
+          driver: postgres12
+          host: postgres-rw.idre-core
+          port: 5432
+          user: idre
+          database: temporal
+          existingSecret: temporal-db
+      visibility:
+        driver: sql
+        sql:
+          driver: postgres12
+          host: postgres-rw.idre-core
+          port: 5432
+          user: idre
+          database: temporal_visibility
+          existingSecret: temporal-db
+    namespaces:
+      create: true
+      namespace:
+        - name: idre
+          retention: 30d   # workflow history retention (audit trail)
+web:
+  enabled: true            # Temporal UI
+cassandra: { enabled: false }
+elasticsearch: { enabled: false }   # OpenSearch advanced visibility is optional
+prometheus: { enabled: true }

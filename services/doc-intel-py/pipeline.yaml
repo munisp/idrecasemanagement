@@ -1,0 +1,60 @@
+# Document intelligence pipeline — dockable stages.
+# Each stage is a named plugin; "dock" order and activation are data, not code.
+# Disable a stage by removing it or setting enabled: false; add a new stage by
+# implementing stage_<name>() in pipeline.py and appending an entry here.
+
+pipeline: idr-document-v1
+
+stages:
+  - name: classify           # fast doc-type guess from filename + first-page text
+    enabled: true
+
+  - name: docling            # PRIMARY parser: PDF/DOCX/HTML -> structured doc
+    enabled: true            # (layout, reading order, tables, figures, formulas)
+    config:
+      do_ocr: true           # Docling's own OCR for embedded images
+      do_table_structure: true
+      ocr_lang: [en]
+
+  - name: ocr                # PaddleOCR fallback for scanned/low-text pages
+    enabled: true
+    when: low_text_coverage  # conditional docking: runs only if Docling found little text
+    config:
+      lang: en
+      use_doc_orientation_classify: true
+      use_doc_unwarping: true
+      use_textline_orientation: true
+
+  - name: layout             # PP-StructureV3 seal/stamp detection (Docling has none)
+    enabled: true
+    config:
+      use_table_recognition: false  # tables already handled by Docling
+      use_formula_recognition: false
+      use_seal_recognition: true    # stamps/seals matter for determinations
+
+  - name: vlm_extract        # VLM semantic extraction over Docling markdown + first page
+    enabled: true
+    config:
+      endpoint: ${VLM_ENDPOINT:-http://vllm:8000/v1}
+      model: ${VLM_MODEL:-paddleocr-vl}   # or Qwen2.5-VL-72B-Instruct etc.
+      max_tokens: 2048
+      schema: idr_claim                 # extraction schema (see SCHEMAS below)
+
+  - name: validate           # cross-check extracted fields against the case record
+    enabled: true
+
+  - name: index              # OpenSearch full-text + structured index
+    enabled: true
+
+# Extraction schemas the VLM is asked to fill (JSON Schema-ish, enforced loosely).
+schemas:
+  idr_claim:
+    fields: [claim_number, cpt_hcpcs_codes, service_date, billed_amount_usd,
+             qpa_usd, provider_name, provider_tin, provider_npi, payer_name,
+             member_id, place_of_service]
+  determination_letter:
+    fields: [case_number, idre_entity, prevailing_party, awarded_amount_usd,
+             rationale_summary, signature_present, determination_date]
+  eob:
+    fields: [claim_number, allowed_amount_usd, patient_responsibility_usd,
+             denial_codes, service_lines]

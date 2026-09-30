@@ -1,0 +1,20 @@
+clusterName: idre-search
+nodeGroup: master
+replicas: 3
+roles: [master, ingest, data, remote_cluster_client]
+config:
+  opensearch.yml: |
+    plugins.security.disabled: false
+    # ISM policy applied via deploy/opensearch/ism-policy.json:
+    # hot 90d -> warm 2y -> cold -> delete at 6y (federal retention mandate).
+persistence:
+  size: 500Gi
+  storageClass: gp3
+extraEnvs:
+  - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    valueFrom: { secretKeyRef: { name: opensearch, key: admin-password } }
+sysctlInit: { enabled: true }
+serviceMonitor: { enabled: true }
+dashboards:
+  enabled: true
+# Index sets: idre-cases-*, idre-audit-*, idre-voice-*, wazuh-alerts-*
