@@ -4,7 +4,7 @@ const SHELL = "idre-shell-v1";
 const API = "idre-api-v1";
 const SHELL_ASSETS = [
   "/", "/index.html", "/css/app.css", "/manifest.webmanifest",
-  "/js/config.js", "/js/auth.js", "/js/api.js", "/js/views.js", "/js/app.js",
+  "/js/config.js", "/js/auth.js", "/js/api.js", "/js/views.js", "/js/crm-views.js", "/js/app.js",
   "/icons/icon.svg",
 ];
 

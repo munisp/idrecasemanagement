@@ -1,0 +1,159 @@
+// crm-views.js — CRM screens: pipeline kanban, accounts 360, leads, tasks, search.
+const CrmViews = (() => {
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
+  const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
+  const err = (e) => `<p class="error">${esc(e.message)}</p>`;
+
+  // ---- Pipeline (kanban over case statuses) ----------------------------------
+  const PIPELINE = [
+    ["INITIATED", "Initiated"], ["OFFER_WINDOW_OPEN", "Offer window"],
+    ["OFFERS_REVEALED", "Revealed"], ["DETERMINED", "Determined"],
+    ["CLOSED_PAID", "Closed (paid)"],
+  ];
+  async function pipeline() {
+    try {
+      const cases = await Api.cases.list();
+      const cols = PIPELINE.map(([status, label]) => {
+        const items = cases.filter((c) => c.status === status);
+        return `<div class="kanban-col"><h3>${label} <span class="muted">${items.length}</span></h3>` +
+          items.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
+            <b>${esc(c.case_number)}</b><br/><span class="muted">${esc(c.service_line)} · $${(c.qpa_cents / 100).toLocaleString()}</span></div>`).join("") +
+          `</div>`;
+      });
+      return `<h1>Pipeline</h1><div class="kanban">${cols.join("")}</div>`;
+    } catch (e) { return `<h1>Pipeline</h1>` + err(e); }
+  }
+
+  // ---- Accounts ---------------------------------------------------------------
+  async function accounts() {
+    try {
+      const list = await Api.crm.accounts();
+      return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>` +
+        (list.length ? `<table><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead><tbody>` +
+          list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
+            <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No accounts yet — convert leads or create one.</p>`);
+    } catch (e) { return `<h1>Accounts</h1>` + err(e); }
+  }
+
+  async function account360(id) {
+    try {
+      const d = await Api.crm.account360(id);
+      const a = d.account;
+      let html = `<h1>${esc(a.legal_name)}</h1><p>${badge(a.type)} · NPI ${esc(a.npi) || "—"} · ${esc(a.phone) || "—"}</p>`;
+      html += `<h2>Contacts (${d.contacts.length})</h2>` +
+        (d.contacts.length ? `<table><tbody>` + d.contacts.map((c) =>
+          `<tr><td>${esc(c.name)}</td><td>${esc(c.role_title)}</td><td>${esc(c.email)}</td><td>${esc(c.phone)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No contacts.</p>`) +
+        `<form id="nc" class="form"><b>Add contact</b>
+           <input name="name" placeholder="Name" required />
+           <input name="role_title" placeholder="Role (e.g. Billing lead)" />
+           <input name="email" type="email" placeholder="Email" />
+           <input name="phone" placeholder="Phone" /><button>Add</button></form>`;
+      html += `<h2>Disputes (${d.cases.length})</h2>` +
+        (d.cases.length ? `<table><tbody>` + d.cases.map((c) =>
+          `<tr class="click" onclick="location.hash='#/cases/${c.id}'"><td>${esc(c.case_number)}</td>
+           <td>${badge(c.status)}</td><td>${esc(c.service_line)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No disputes for this account.</p>`);
+      html += `<h2>Notes</h2>` +
+        (d.notes.length ? `<table><tbody>` + d.notes.map((n) =>
+          `<tr><td>${esc(n.body)}</td><td class="muted">${fmtDate(n.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No notes.</p>`) +
+        `<form id="nn" class="form"><b>Add note</b><input name="body" required /><button>Add note</button></form>`;
+      queueMicrotask(() => {
+        document.querySelector("#nc")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const f = Object.fromEntries(new FormData(ev.target));
+          await Api.crm.createContact({ account_id: id, ...f });
+          location.reload();
+        });
+        document.querySelector("#nn")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const f = Object.fromEntries(new FormData(ev.target));
+          await Api.crm.addNote({ record_type: "ACCOUNT", record_id: id, body: f.body });
+          location.reload();
+        });
+      });
+      return html;
+    } catch (e) { return err(e); }
+  }
+
+  function accountNew() {
+    queueMicrotask(() => document.querySelector("#na").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const f = Object.fromEntries(new FormData(ev.target));
+      await Api.crm.createAccount(f);
+      location.hash = "#/crm/accounts";
+    }));
+    return `<h1>New account</h1><form id="na" class="form">
+      <label>Type <select name="type"><option>PROVIDER</option><option>PAYER</option><option>IDRE</option><option>AUDITOR</option><option>OTHER</option></select></label>
+      <label>Legal name <input name="legal_name" required /></label>
+      <label>NPI <input name="npi" /></label>
+      <label>Phone <input name="phone" /></label>
+      <button>Create account</button></form>`;
+  }
+
+  // ---- Leads ---------------------------------------------------------------------
+  async function leads() {
+    try {
+      const list = await Api.crm.leads();
+      return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>` +
+        (list.length ? `<table><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead><tbody>` +
+          list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
+            <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
+            <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No leads.</p>`);
+    } catch (e) { return `<h1>Leads</h1>` + err(e); }
+  }
+
+  async function convert(id) {
+    const type = prompt("Account type (PROVIDER / PAYER / IDRE / OTHER):", "PROVIDER");
+    if (!type) return;
+    try { await Api.crm.convertLead(id, type.toUpperCase()); location.reload(); }
+    catch (e) { alert(e.message); }
+  }
+
+  // ---- Tasks ------------------------------------------------------------------------
+  async function tasks() {
+    try {
+      const list = await Api.crm.tasks(true);
+      let html = `<h1>My tasks</h1>
+        <form id="nt" class="form"><b>New task</b>
+          <input name="subject" placeholder="Subject" required />
+          <input name="case_id" placeholder="Case ID (optional)" />
+          <input name="due_date" type="date" /><button>Create</button></form>`;
+      html += list.length ? `<table><thead><tr><th>Subject</th><th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>` +
+        list.map((t) => `<tr><td>${esc(t.subject)}</td><td>${esc(t.case_id)}</td><td>${esc(t.due_date)}</td>
+          <td>${badge(t.status)}</td>
+          <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("") +
+        `</tbody></table>` : `<p class="muted">No open tasks.</p>`;
+      queueMicrotask(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = Object.fromEntries(new FormData(ev.target));
+        await Api.crm.createTask(f);
+        location.reload();
+      }));
+      return html;
+    } catch (e) { return `<h1>My tasks</h1>` + err(e); }
+  }
+
+  async function done(id) { await Api.crm.completeTask(id); location.reload(); }
+
+  // ---- Global search -------------------------------------------------------------------
+  async function search(q) {
+    if (!q) return `<h1>Search</h1><p class="muted">Type in the search box above.</p>`;
+    try {
+      const hits = await Api.crm.search(q);
+      const link = (h) => h.kind === "case" ? `#/cases/${h.id}`
+        : h.kind === "account" ? `#/crm/accounts/${h.id}` : h.kind === "lead" ? "#/crm/leads" : "#/crm/accounts";
+      return `<h1>Search: “${esc(q)}”</h1>` +
+        (hits.length ? `<table><tbody>` + hits.map((h) =>
+          `<tr class="click" onclick="location.hash='${link(h)}'"><td>${badge(h.kind)}</td>
+           <td>${esc(h.label)}</td><td class="muted">${esc(h.detail)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No matches.</p>`);
+    } catch (e) { return err(e); }
+  }
+
+  return { pipeline, accounts, account360, accountNew, leads, convert, tasks, done, search };
+})();

@@ -28,6 +28,11 @@ button.danger { background: #b31b1b; }
 .form label { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
 input, select { padding: .45rem; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
 pre { background: #101828; color: #d6e2ff; padding: .8rem; border-radius: 8px; overflow: auto; font-size: .8rem; }
+.kanban { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: .8rem; align-items: start; }
+.kanban-col { background: #eceff4; border-radius: 8px; padding: .6rem; min-height: 120px; }
+.kanban-col h3 { margin: .1rem 0 .6rem; font-size: .9rem; }
+.kanban-card { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: .5rem .6rem; margin-bottom: .5rem; cursor: pointer; font-size: .85rem; }
+.kanban-card:hover { border-color: var(--blue); }
 @media (max-width: 640px) {
   #topbar { flex-wrap: wrap; } table { font-size: .8rem; }
   th, td { padding: .35rem; }

@@ -268,6 +268,19 @@ func main() {
 		r.Get("/voice/logs", s.listVoiceLogs)
 		r.Post("/voice/outbound", s.outboundCall)          // trigger outbound calls
 		r.Get("/cases/{caseId}/activities", s.listActivities) // CRM record timeline
+
+		// CRM core: accounts, contacts, leads, tasks, notes, search.
+		r.Get("/accounts", s.listAccounts)
+		r.Post("/accounts", s.createAccount)
+		r.Get("/accounts/{accountId}/360", s.account360)
+		r.Post("/contacts", s.createContact)
+		r.Get("/leads", s.listLeads)
+		r.Post("/leads/{leadId}/convert", s.convertLead)
+		r.Get("/tasks", s.listTasks)
+		r.Post("/tasks", s.createTask)
+		r.Post("/tasks/{taskId}/complete", s.completeTask)
+		r.Post("/notes", s.addNote)
+		r.Get("/search", s.globalSearch)
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
 	})
@@ -610,6 +623,11 @@ func (s *server) voiceIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	// CRM lead capture: every voice intake becomes a lead automatically.
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.leads (tenant, source, name, organization, phone, summary, voice_intake_id)
+		VALUES ($1,'VOICE',$2,$3,$4,$5,$6)`,
+		tenant, in.CallerName, in.Organization, in.CallerPhone, in.Summary, id)
 	s.publish(r.Context(), tenant, "voice", map[string]any{
 		"type": "voice.intake", "intake_id": id, "caller": in.CallerName, "org": in.Organization,
 	})

@@ -57,5 +57,18 @@ const Api = (() => {
       sla: () => req("GET", `${t()}/reports/sla`),
       summary: () => req("GET", `${t()}/reports/summary`),
     },
+    crm: {
+      accounts: (type) => req("GET", `${t()}/accounts${type ? `?type=${type}` : ""}`),
+      createAccount: (p) => req("POST", `${t()}/accounts`, p),
+      account360: (id) => req("GET", `${t()}/accounts/${id}/360`),
+      createContact: (p) => req("POST", `${t()}/contacts`, p),
+      leads: () => req("GET", `${t()}/leads`),
+      convertLead: (id, type) => req("POST", `${t()}/leads/${id}/convert`, { type }),
+      tasks: (mine) => req("GET", `${t()}/tasks${mine ? "?mine=true" : ""}`),
+      createTask: (p) => req("POST", `${t()}/tasks`, p),
+      completeTask: (id) => req("POST", `${t()}/tasks/${id}/complete`),
+      addNote: (p) => req("POST", `${t()}/notes`, p),
+      search: (q) => req("GET", `${t()}/search?q=${encodeURIComponent(q)}`),
+    },
   };
 })();
