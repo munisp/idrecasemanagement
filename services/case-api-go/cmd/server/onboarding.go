@@ -129,6 +129,10 @@ func (s *server) decideApplication(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return
 	}
+	// Case-management integration: broadcast the decision to the tenant's staff.
+	s.notify(r, tenant, "*", "ONBOARDING_"+in.Decision,
+		fmt.Sprintf("Onboarding application %s (%s) %s — %s", appID, appType, in.Decision, truncate(in.Reason, 200)),
+		"#/onboarding")
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "decision signaled"})
 }
 

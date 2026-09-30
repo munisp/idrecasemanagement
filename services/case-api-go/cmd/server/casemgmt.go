@@ -25,6 +25,15 @@ func (s *server) notify(r *http.Request, tenant, userSub, typ, body, link string
 		VALUES ($1,$2,$3,$4,$5)`, tenant, userSub, typ, body, link)
 }
 
+// logActivity appends to the unified CRM/case timeline used by caseDetail,
+// account 360 and voice. Every subsystem (intake, documents, signals, notes,
+// email, voice) writes through here so there is ONE activity stream per case.
+func (s *server) logActivity(ctx context.Context, tenant, caseID, typ, body string) {
+	_, _ = s.db.Exec(ctx, `
+		INSERT INTO public.case_activities (tenant, case_id, type, body)
+		VALUES ($1,$2,$3,$4)`, tenant, caseID, typ, truncate(body, 2000))
+}
+
 func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)

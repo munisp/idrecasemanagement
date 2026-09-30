@@ -113,6 +113,11 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		"doc_id": docID, "object_key": objectKey, "content_type": hdr.Header.Get("Content-Type"),
 		"sealed": sealedDoc, "at": time.Now().UTC(),
 	})
+
+	// 5. Unified timeline entry (visible in caseDetail + account 360 + voice).
+	s.logActivity(r.Context(), tenant, caseID, "DOCUMENT_UPLOADED",
+		fmt.Sprintf("%s uploaded %q (%d bytes, sealed=%v) by %s — analysis queued",
+			hdr.Filename, hdr.Filename, len(raw), sealedDoc, p.Subject))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"doc_id": docID, "version": version, "bytes": len(raw),
 		"analysis": "QUEUED", // doc-intel consumes doc.uploaded

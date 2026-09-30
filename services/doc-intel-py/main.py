@@ -80,6 +80,20 @@ def persist(evt: dict, ctx: dict) -> None:
             "extracted": ctx.get("extracted", {}),
         },
     )
+    # Unified timeline: analysis result appears on the case activity stream
+    # (same table case-api writes DOCUMENT_UPLOADED / signals / voice / notes to).
+    findings = ctx.get("findings", [])
+    summary = f"Document analysis {ctx['status']}: type={ctx.get('doc_type', '?')}"
+    if ctx.get("seal_detected"):
+        summary += ", seal/stamp detected"
+    if findings:
+        summary += f", {len(findings)} finding(s): " + "; ".join(map(str, findings[:3]))
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute(
+            """INSERT INTO public.case_activities (tenant, case_id, type, body)
+               VALUES (%s,%s,'ANALYSIS_COMPLETE',%s)""",
+            (evt["tenant"], evt["case_id"], summary[:2000]),
+        )
 
 
 def process(evt: dict) -> None:

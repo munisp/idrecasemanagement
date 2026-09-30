@@ -49,3 +49,25 @@ ships out of the box.
 - Drag-and-drop report builder (today: OpenSearch dashboards + SQL)
 - Saved views/list views per user (today: filters via API params)
 - Kanban drag-to-change-status (view is read-only; status changes stay workflow-gated by design)
+
+## Unified timeline integration (post case-management audit)
+
+Every subsystem writes to ONE activity stream (`public.case_activities`) and one
+notification hub (`public.notifications`), so nothing lives in a silo:
+
+| Source | Timeline entry | Notification |
+|---|---|---|
+| Case initiation (case-api) | `CASE_INITIATED` (case #, service line, QPA, workflow id) | — |
+| Workflow signals (case-api) | `RESPONSE_FILED` / `OFFER_SUBMITTED` / `FEES_PAID` … with payload | — |
+| Document upload (case-api) | `DOCUMENT_UPLOADED` (filename, size, sealed flag) | — |
+| Doc-intel pipeline (Python) | `ANALYSIS_COMPLETE` (doc type, seal/stamp, findings) | — |
+| Voice platform | call transcripts, `INTAKE` auto-link | — |
+| Email gateway | `EMAIL` (to case or lead) | — |
+| Notes on a case | `NOTE` | — |
+| Onboarding decision | — | broadcast `ONBOARDING_APPROVE/REJECT` |
+| Assignment / escalation / breach | activity + task | targeted + `*` broadcast |
+
+No Kimi dependencies: all services are Go/Rust/Python, all endpoints are
+self-hosted (Keycloak, vLLM, MinIO, Temporal, Kafka, Postgres). The only
+external calls are NPPES (public registry, with cache fallback) and the
+tenant-configured voice platform webhook.

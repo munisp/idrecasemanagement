@@ -393,8 +393,11 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"workflow start failed"}`, http.StatusBadGateway)
 		return
 	}
-	// Case-management enrichment: stage checklists + duplicate detection.
+	// Case-management enrichment: stage checklists + duplicate detection + timeline.
 	s.ensureChecklist(tenant, caseID)
+	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
+		fmt.Sprintf("Dispute %s initiated — %s / %s, QPA $%d.%02d, workflow %s",
+			req.CaseNumber, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "workflow_id": wfID,
@@ -461,6 +464,9 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return
 	}
+	detail, _ := json.Marshal(body.Data)
+	s.logActivity(r.Context(), tenant, id, body.Signal,
+		fmt.Sprintf("Workflow signal %s delivered to %s — %s", body.Signal, wfID, truncate(string(detail), 500)))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
 }
 
