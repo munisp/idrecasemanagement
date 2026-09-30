@@ -25,6 +25,20 @@ Sedona · Wazuh · OpenCTI · Kubecost.
 | Document intelligence: IBM Docling (primary parser) + PaddleOCR fallback + PP-StructureV3 seals + VLM extraction (composable pipeline) | Python | `services/doc-intel-py` |
 | Lakehouse jobs (Spark/Delta, Flink, DataFusion, Ray, Sedona) | Python | `services/analytics-py` |
 
+## Toolchain persistence (survives sandbox/server restarts)
+
+Go 1.23.4 + Rust 1.98.1 and their dependency caches live in `/mnt/agents/toolchains`
+(the only persistent storage; large files are stored as reassembled tar chunks).
+After any restart — **no reinstall, no network**:
+
+```bash
+bash scripts/restore-toolchains.sh   # extracts toolchains + caches, runs offline build smoke tests
+source scripts/env.sh                # PATH/GOPATH/CARGO_HOME + registry mirrors
+```
+
+Verified: restore into a clean home, then `GOPROXY=off go build` and
+`CARGO_NET_OFFLINE=true cargo check` both pass offline.
+
 ## Quick start (local)
 
 ```bash
