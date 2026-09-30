@@ -25,17 +25,48 @@ async def set_application_status(app_id: str, status: str, reason: str = "") -> 
 
 @activity.defn
 async def check_ein_npi(ein: str, npi: str) -> bool:
-    """EIN format check + NPPES NPI registry lookup (free public API)."""
+    """EIN format check + NPPES NPI registry lookup with OFFLINE FALLBACK:
+    live NPPES first (5s timeout); on any outage, consult the local
+    public.npi_cache (refreshed on every successful live lookup, seedable
+    from the weekly NPPES bulk file) and mark the verification degraded
+    in the audit trail instead of blocking onboarding."""
     if ein and len(ein.replace("-", "")) != 9:
         return False
     if not npi:
         return True  # NPI only required for provider orgs (checked upstream)
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            "https://npiregistry.cms.hhs.gov/api/",
-            params={"version": "2.1", "number": npi},
+
+    # 1) live NPPES
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://npiregistry.cms.hhs.gov/api/",
+                params={"version": "2.1", "number": npi},
+            )
+            ok = resp.status_code == 200 and resp.json().get("result_count", 0) >= 1
+            with psycopg.connect(DSN, autocommit=True) as c:
+                c.execute(
+                    "INSERT INTO public.npi_cache (npi, valid, checked_at)"
+                    " VALUES (%s,%s,now())"
+                    " ON CONFLICT (npi) DO UPDATE SET valid=EXCLUDED.valid,"
+                    " checked_at=now(), source='live'",
+                    (npi, ok),
+                )
+            return ok
+    except (httpx.HTTPError, OSError):
+        pass  # fall through to cache
+
+    # 2) offline fallback: cache hit decides; cache miss = soft-pass + flag
+    with psycopg.connect(DSN, autocommit=True) as c:
+        row = c.execute(
+            "SELECT valid FROM public.npi_cache WHERE npi=%s", (npi,)
+        ).fetchone()
+        degraded_ok = bool(row[0]) if row else True   # unknown NPI: don't block
+        c.execute(
+            "INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash)"
+            " VALUES ('platform', %s, 'NPI_VERIFICATION_DEGRADED', %s, '', %s)",
+            (npi, f"cache_hit={row is not None}", f"npi-degraded:{npi}"),
         )
-        return resp.status_code == 200 and resp.json().get("result_count", 0) >= 1
+    return degraded_ok
 
 
 @activity.defn

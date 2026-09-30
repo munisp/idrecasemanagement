@@ -360,3 +360,29 @@ Key mechanics:
 - **Auto-provisioning** on approval: Keycloak user with correct role + `/tenant/<state>` group, TigerBeetle settlement accounts for IDREs (Mojaloop participant model), invite email — all as compensated, retryable activities.
 - **Rejection/expiry paths** are first-class statuses (`REJECTED_AUTO`, `EXPIRED`, `REJECTED`) with reasons, not silent drops.
 - **Tenant-level onboarding** (`TenantOnboardingWorkflow`) durably brings a whole state live: schema → ledger → topics → Keycloak group → config → smoke checks, auditable step by step.
+
+
+---
+
+## 18. Frontend: PWA + native mobile (`portal/`)
+
+One framework-free codebase covers every backend surface (coverage matrix in
+`docs/STAKEHOLDERS.md` §3):
+
+- **PWA**: manifest + service worker — installable on iOS/Android/desktop; app shell
+  cached offline; API GETs are network-first with cached fallback and an explicit
+  offline indicator; mutations never fire offline. Served by nginx in compose
+  (proxies `/v1` to APISIX); in k8s it deploys as a static Deployment behind the gateway.
+- **Native mobile**: Capacitor wraps the same web assets into iOS/Android shells
+  (`capacitor.config.json`, `cap sync`, store builds via Xcode/Android Studio).
+  Push notifications register with the same notifier service Temporal activities use.
+- **Auth**: Keycloak OIDC + PKCE (S256) implemented without libraries; silent refresh;
+  roles and tenant groups drive navigation and per-screen actions.
+- **Role-aware screens**: parties get sealed-offer submission and fee actions;
+  arbitrators get the determination form; case managers get onboarding approvals and
+  the voice console; federal admins/auditors get compliance reports and SLA breaches.
+
+Also closed in this pass: **NPPES offline fallback** — `check_ein_npi` uses live NPPES
+with a 5s timeout, falls back to the `public.npi_cache` (refreshed on every live hit,
+seedable from the NPPES weekly bulk file), and records `NPI_VERIFICATION_DEGRADED`
+in the audit trail instead of blocking onboarding during registry outages.

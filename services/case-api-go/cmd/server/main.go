@@ -262,6 +262,12 @@ func main() {
 		r.Post("/onboarding/applications", s.submitApplication)
 		r.Get("/onboarding/applications", s.listApplications)
 		r.Post("/onboarding/applications/{appId}/decision", s.decideApplication)
+
+		// Voice console + compliance reports (JWT-authenticated reads).
+		r.Get("/voice/intake", s.listVoiceIntake)
+		r.Get("/voice/logs", s.listVoiceLogs)
+		r.Get("/reports/sla", s.slaReport)
+		r.Get("/reports/summary", s.summaryReport)
 	})
 
 	// Voice-AI surface (API-key auth, not OIDC).

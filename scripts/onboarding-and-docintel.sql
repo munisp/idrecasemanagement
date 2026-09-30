@@ -44,3 +44,12 @@ CREATE TABLE IF NOT EXISTS public.idre_directory (
     states_served text[] NOT NULL DEFAULT '{}',
     created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- NPPES offline fallback cache (seedable from the weekly NPPES bulk file;
+-- refreshed on every successful live lookup).
+CREATE TABLE IF NOT EXISTS public.npi_cache (
+    npi        text PRIMARY KEY,
+    valid      boolean NOT NULL,
+    source     text NOT NULL DEFAULT 'live',   -- live | bulk_seed
+    checked_at timestamptz NOT NULL DEFAULT now()
+);
