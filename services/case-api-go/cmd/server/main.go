@@ -332,6 +332,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // Case initiation: DB row (tenant schema) + Temporal workflow + outbox event
 // ---------------------------------------------------------------------------
 
+// businessDaysBetween counts business days (Mon–Fri) from a (exclusive) to b (inclusive).
+func businessDaysBetween(a, b time.Time) int {
+	days := 0
+	for d := a.AddDate(0, 0, 1); !d.After(b); d = d.AddDate(0, 0, 1) {
+		if wd := d.Weekday(); wd != time.Saturday && wd != time.Sunday {
+			days++
+		}
+	}
+	return days
+}
+
+// initiationWindowBD is the federal 4-business-day window to initiate IDR after
+// the open negotiation period ends (45 CFR 149.510(b)(2)).
+const initiationWindowBD = 4
+
 func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var req InitiateRequest
@@ -352,12 +367,21 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Negotiation window: if the 30bd open negotiation period is still running,
+	// the case is tracked now and the workflow auto-opens the dispute when it ends.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	negEnd, _ := time.Parse("2006-01-02", req.OpenNegotiationEnd)
+	initialStatus := "INITIATED"
+	if negEnd.After(today) {
+		initialStatus = "NEGOTIATION_TRACKED"
+	}
+
 	var caseID string
 	err = tx.QueryRow(r.Context(), `
 		INSERT INTO cases (case_number, status, service_line, plan_type, qpa_cents,
 		                   provider_id, payer_id, open_negotiation_end)
-		VALUES ($1,'INITIATED',$2,$3,$4,$5,$6,$7) RETURNING id`,
-		req.CaseNumber, req.ServiceLine, req.PlanType, req.QPACents,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+		req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents,
 		req.ProviderID, req.PayerID, req.OpenNegotiationEnd).Scan(&caseID)
 	if err != nil {
 		http.Error(w, `{"error":"insert"}`, http.StatusInternalServerError)
@@ -396,12 +420,32 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	// Case-management enrichment: stage checklists + duplicate detection + timeline.
 	s.ensureChecklist(tenant, caseID)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
-		fmt.Sprintf("Dispute %s initiated — %s / %s, QPA $%d.%02d, workflow %s",
-			req.CaseNumber, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
+		fmt.Sprintf("Dispute %s initiated (%s) — %s / %s, QPA $%d.%02d, workflow %s",
+			req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
+
+	// Federal 4-business-day initiation window (45 CFR 149.510(b)(2)):
+	// late filings are allowed but flagged for compliance review.
+	var lateInitiation bool
+	if !negEnd.After(today) {
+		if bd := businessDaysBetween(negEnd, today); bd > initiationWindowBD {
+			lateInitiation = true
+			detail := fmt.Sprintf("initiated %d business days after open negotiation ended %s (statutory window: %d bd)",
+				bd, req.OpenNegotiationEnd, initiationWindowBD)
+			_, _ = s.db.Exec(r.Context(), `
+				INSERT INTO public.sla_breaches (tenant, case_id, clock, detail)
+				VALUES ($1,$2,'INITIATION_4BD',$3)`, tenant, caseID, detail)
+			s.logActivity(r.Context(), tenant, caseID, "LATE_INITIATION_FLAGGED", detail)
+			s.notify(r, tenant, "*", "LATE_INITIATION",
+				fmt.Sprintf("Case %s %s — flagged for compliance review", req.CaseNumber, detail),
+				fmt.Sprintf("#/cases/%s", caseID))
+		}
+	}
+
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"case_id": caseID, "workflow_id": wfID,
-		"possible_duplicates": dups, // non-blocking warning, triage via /cases/relate
+		"case_id": caseID, "workflow_id": wfID, "status": initialStatus,
+		"late_initiation_flagged": lateInitiation,
+		"possible_duplicates":    dups, // non-blocking warning, triage via /cases/relate
 	})
 }
 
@@ -454,10 +498,18 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	var wfID string
+	var wfID, status string
 	if err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT workflow_id FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&wfID); err != nil {
+		fmt.Sprintf(`SELECT workflow_id, status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&wfID, &status); err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	// Statutory offer window (45 CFR 149.520(b)(2)): sealed offers are only
+	// accepted while the 10-business-day window is open — no late offers.
+	if body.Signal == "OFFER_SUBMITTED" && status != "OFFER_WINDOW_OPEN" {
+		s.logActivity(r.Context(), tenant, id, "LATE_OFFER_REJECTED",
+			fmt.Sprintf("Offer rejected: case status is %s, offer window is not open", status))
+		http.Error(w, `{"error":"offer window is not open — late offers are not accepted"}`, http.StatusConflict)
 		return
 	}
 	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", body.Signal, body.Data); err != nil {
