@@ -8,7 +8,7 @@ activities; this module must stay deterministic (replay-safe).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 
 from temporalio import workflow
 
@@ -85,10 +85,38 @@ class IdrCaseWorkflow:
         tenant = inp.tenant
         case = inp.case_id
 
-        await workflow.execute_activity(
-            set_case_status, args=[tenant, case, "INITIATED", "IDR initiated"],
-            start_to_close_timeout=timedelta(seconds=30),
-        )
+        # --- Pre-phase: open negotiation still running ------------------------
+        # The dispute may be registered before the 30bd negotiation period ends.
+        # The workflow then waits durably and OPENS THE DISPUTE AUTOMATICALLY
+        # the moment the negotiation window expires — no manual step, no lapse.
+        neg_end = date.fromisoformat(inp.open_negotiation_end)
+        today = workflow.now().date()
+        if neg_end > today:
+            await workflow.execute_activity(
+                set_case_status, args=[tenant, case, "NEGOTIATION_TRACKED",
+                                       "Registered; awaiting end of open negotiation"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            remaining = (neg_end - today).days + 1
+            try:
+                await workflow.wait_condition(
+                    lambda: self.settled_or_withdrawn,
+                    timeout=timedelta(days=remaining),
+                )
+            except TimeoutError:
+                pass  # negotiation window expired → auto-open below
+            if self.settled_or_withdrawn:
+                return await self._close_early(tenant, case, "SETTLED_IN_NEGOTIATION")
+            await workflow.execute_activity(
+                set_case_status, args=[tenant, case, "INITIATED",
+                                       "Open negotiation ended — dispute auto-opened by statutory timer"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+        else:
+            await workflow.execute_activity(
+                set_case_status, args=[tenant, case, "INITIATED", "IDR initiated"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
 
         # --- 3 business days: non-initiating party response ------------------
         try:
