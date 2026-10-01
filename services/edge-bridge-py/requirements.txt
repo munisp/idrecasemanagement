@@ -1,0 +1,2 @@
+confluent-kafka>=2.5
+# fluvio>=0.16  # optional: install on the edge deployment only

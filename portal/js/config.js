@@ -4,4 +4,5 @@ window.IDRE_CONFIG = {
   realm: "idre",
   clientId: "case-portal",
   apiBase: "",                            // same-origin; nginx proxies /v1 -> APISIX
+  geoMapUrl: "",                          // GeoLibre saved-project URL (deploy/geolibre/README.md)
 };

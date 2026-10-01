@@ -1,0 +1,42 @@
+// Permify ReBAC schema — fine-grained authorization layered under Keycloak RBAC.
+//
+// Keycloak answers "who are you and what realm roles do you carry?"
+// Permify answers "may THIS user touch THIS case/ledger/vault object right now?"
+// — e.g. an arbitrator may reveal offers only on cases assigned to them,
+// a finance officer may post ledger entries only in their tenant's ledger,
+// a state auditor may read but never write.
+
+entity user {}
+
+entity tenant {
+    relation admin      @user   // PLATFORM_ADMIN / FEDERAL_ADMIN for the tenant
+    relation case_mgr   @user
+    relation arbitrator @user
+    relation finance    @user
+    relation auditor    @user
+    relation party      @user
+}
+
+entity dispute_case {
+    relation tenant     @tenant
+    relation assignee   @user   // workload-balanced assignment writes this tuple
+    relation party      @user   // provider/payer contact on the case
+
+    // read: anyone anchored to the case or with a staff role in the tenant
+    permission read    = tenant.admin or tenant.case_mgr or tenant.auditor
+                         or assignee or party
+    // write (signals, documents, notes): staff or the parties themselves
+    permission write   = tenant.admin or tenant.case_mgr or assignee or party
+    // lawful reveal: only the assigned arbitrator (vault double-checks this)
+    permission reveal  = assignee and tenant.arbitrator
+    // escrow ledger movements: finance role in the owning tenant only
+    permission ledger  = tenant.finance or tenant.admin
+    // escalation: staff roles
+    permission escalate = tenant.admin or tenant.case_mgr
+}
+
+entity ledger {
+    relation tenant @tenant
+    permission transact = tenant.finance or tenant.admin
+    permission read     = transact or tenant.auditor
+}

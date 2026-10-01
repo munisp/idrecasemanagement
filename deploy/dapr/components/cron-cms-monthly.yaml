@@ -1,0 +1,15 @@
+# Dapr cron binding — fires the federal CMS monthly report for every tenant.
+# Dapr invokes POST /cms-monthly on the workflow worker (worker.py listens on
+# DAPR_APP_PORT, default 9100) on the 1st of each month at 06:00 UTC.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: cms-monthly
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "0 6 1 * *"
+scopes:
+  - idre-workflows

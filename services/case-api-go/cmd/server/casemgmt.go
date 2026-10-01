@@ -124,6 +124,10 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 func (s *server) escalateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	// ReBAC: escalation is a staff-only object-level permission.
+	if !s.requirePerm(w, r, "dispute_case", caseID, "escalate") {
+		return
+	}
 	var in struct {
 		Clock  string `json:"clock"`
 		Detail string `json:"detail"`

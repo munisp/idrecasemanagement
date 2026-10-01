@@ -143,6 +143,10 @@ func (s *server) downloadDocument(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"document sealed until lawful offer reveal"}`, http.StatusLocked)
 			return
 		}
+		// ReBAC second gate: only the assigned arbitrator may open revealed offers.
+		if !s.requirePerm(w, r, "dispute_case", chi.URLParam(r, "caseId"), "reveal") {
+			return
+		}
 	}
 	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
 	if err != nil {

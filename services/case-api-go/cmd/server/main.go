@@ -194,11 +194,13 @@ func tenancy(next http.Handler) http.Handler {
 // ---------------------------------------------------------------------------
 
 type server struct {
-	cfg  Config
-	db   *pgxpool.Pool
-	tc   temporalclient.Client
-	tb   tb.Client
-	docs *docStore
+	cfg     Config
+	db      *pgxpool.Pool
+	tc      temporalclient.Client
+	tb      tb.Client
+	docs    *docStore
+	rds     *redisClient // cache + idempotency (fail-open)
+	permify string       // Permify base URL ("" = ReBAC check disabled, dev mode)
 }
 
 func envOr(k, d string) string {
@@ -227,8 +229,21 @@ func main() {
 	must(err)
 	defer tbc.Close()
 
-	keys, err := jwk.Fetch(ctx, cfg.KeycloakJWKS)
-	must(err)
+	rds := newRedis(envOr("REDIS_ADDR", ""))
+
+	// JWKS via Redis: all replicas share one cache; Keycloak key rotation
+	// propagates within the TTL instead of hammering the certs endpoint.
+	var keys jwk.Set
+	if raw := rds.get("idre:jwks"); raw != "" {
+		keys, err = jwk.ParseString(raw)
+	}
+	if keys == nil {
+		keys, err = jwk.Fetch(ctx, cfg.KeycloakJWKS)
+		must(err)
+		if buf, merr := json.Marshal(keys); merr == nil {
+			rds.setex("idre:jwks", 300, string(buf))
+		}
+	}
 	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer}
 
 	docs, err := newDocStore(
@@ -236,7 +251,8 @@ func main() {
 		envOr("MINIO_USER", "idre"), envOr("MINIO_PASSWORD", "idre-secret"))
 	must(err)
 
-	s := &server{cfg: cfg, db: pool, tc: tc, tb: tbc, docs: docs}
+	s := &server{cfg: cfg, db: pool, tc: tc, tb: tbc, docs: docs, rds: rds,
+		permify: envOr("PERMIFY_URL", "")}
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID, chimw.RealIP, chimw.Logger, chimw.Recoverer)
@@ -349,6 +365,23 @@ const initiationWindowBD = 4
 
 func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+
+	// Idempotency (Redis): mobile/PWA retries replay the same key and get the
+	// original case back instead of a duplicate dispute.
+	if key := r.Header.Get("Idempotency-Key"); key != "" {
+		rkey := fmt.Sprintf("idre:%s:idem:%s", tenant, key)
+		if existing := s.rds.get(rkey); existing != "" {
+			writeJSON(w, http.StatusOK, map[string]any{"case_id": existing, "idempotent_replay": true})
+			return
+		}
+		if !s.rds.setnx(rkey, 86400, "PENDING") {
+			// Another replica is mid-create with this key; ask the client to retry.
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, `{"error":"request in progress — retry"}`, http.StatusConflict)
+			return
+		}
+	}
+
 	var req InitiateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
@@ -442,6 +475,9 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
+	if key := r.Header.Get("Idempotency-Key"); key != "" {
+		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "workflow_id": wfID, "status": initialStatus,
 		"late_initiation_flagged": lateInitiation,
@@ -551,6 +587,10 @@ func acctID(tenant string, code uint32, party string) tb_types.Uint128 {
 
 func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// ReBAC: object-level permit on this tenant's ledger (fail-closed).
+	if !s.requirePerm(w, r, "ledger", tenant, "transact") {
+		return
+	}
 	var req FeeTransfer
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Amount == 0 {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
