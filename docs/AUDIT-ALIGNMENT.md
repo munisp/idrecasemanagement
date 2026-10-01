@@ -151,3 +151,14 @@ doc_analysis, stakeholder_applications, idre_directory, npi_cache).
 - compose: falkordb, ollama, graph-intel services + lakehouse volume.
 - [ASSUMPTION] "ART" = OpenPipe ART: logs are produced in its schema; no RL training
   loop is run (documented in docs/GRAPH-INTELLIGENCE.md).
+
+## 8. Round 4 — cross-tenant access model
+
+- **Tenancy middleware** now implements the full matrix: PLATFORM_ADMIN /
+  FEDERAL_ADMIN read+write in all 50 state tenants; STATE_AUDITOR read-only
+  (GET/HEAD/OPTIONS) in all 50 — writes rejected even in the auditor's home
+  tenant (`isAuditorOnly`); everyone else limited to `/tenant/<st>` group claims.
+- **Portal tenant switcher**: cross-tenant roles get a 50-state (+DC) dropdown in
+  the topbar chip; pure auditors additionally see a "read-only audit" badge.
+  Tenant choice persists in localStorage; write actions stay hidden for auditors
+  because every write button is gated on operational roles.

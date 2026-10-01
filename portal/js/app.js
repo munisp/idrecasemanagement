@@ -30,10 +30,34 @@
     localStorage.setItem("idre.theme", dark ? "dark" : "light");
   };
 
-  // Tenant identity chip (always visible, non-removable)
-  const tenant = Api.getTenant();
-  document.getElementById("t-avatar").textContent = tenant.slice(0, 2).toUpperCase();
-  document.getElementById("t-name").textContent = `${tenant.toUpperCase()} IDRE`;
+  // Tenant identity chip (always visible, non-removable). Cross-tenant users
+  // (PLATFORM_ADMIN / FEDERAL_ADMIN read+write; STATE_AUDITOR read-only) get a
+  // switcher; everyone else sees a fixed chip.
+  const STATES = ["al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","in","ia","ks","ky","la","me","md","ma","mi","mn","ms","mo","mt","ne","nv","nh","nj","nm","ny","nc","nd","oh","ok","or","pa","ri","sc","sd","tn","tx","ut","vt","va","wa","wv","wi","wy","dc"];
+  const crossTenant = me.roles.includes("PLATFORM_ADMIN") || me.roles.includes("FEDERAL_ADMIN");
+  const auditorOnly = me.roles.includes("STATE_AUDITOR") &&
+    !["CASE_MANAGER", "ARBITRATOR", "FINANCE", "PARTY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].some((r) => me.roles.includes(r));
+  const chip = document.getElementById("tenant-chip");
+  const paintChip = () => {
+    const cur = Api.getTenant();
+    document.getElementById("t-avatar").textContent = cur.slice(0, 2).toUpperCase();
+    if (crossTenant || auditorOnly) {
+      document.getElementById("t-name").innerHTML =
+        `<select id="t-switch" class="t-select" aria-label="Switch state tenant">` +
+        STATES.map((s) => `<option value="${s}"${s === cur ? " selected" : ""}>${s.toUpperCase()} IDRE</option>`).join("") +
+        `</select>${auditorOnly ? '<span class="badge s-audit">read-only audit</span>' : ""}`;
+      document.getElementById("t-switch").addEventListener("change", (e) => {
+        Api.setTenant(e.target.value);
+        UI.toast(`Switched to ${e.target.value.toUpperCase()} tenant${auditorOnly ? " (read-only)" : ""}`);
+        paintChip();
+        location.hash = "#/dashboard";
+        location.reload();
+      });
+    } else {
+      document.getElementById("t-name").textContent = `${cur.toUpperCase()} IDRE`;
+    }
+  };
+  paintChip();
 
   // Demo-mode banner (only when the backend is stubbed)
   if (window.IDRE_DEMO) {

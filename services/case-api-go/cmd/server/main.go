@@ -163,7 +163,14 @@ type ctxPrincipal struct{}
 type ctxTenant struct{}
 
 // tenancy resolves the state tenant from the path and enforces it against the
-// token's tenant group claim. Platform/federal admins bypass the group check.
+// token's tenant group claim. Access matrix:
+//   - PLATFORM_ADMIN / FEDERAL_ADMIN: read+write in every state tenant.
+//   - STATE_AUDITOR: read-only (GET/HEAD/OPTIONS) in every state tenant;
+//     writes are rejected even in the auditor's home tenant — audit is
+//     observation, not operation. An auditor who also holds an operational
+//     role (e.g. CASE_MANAGER) can still write in tenants where they are a
+//     group member.
+//   - everyone else: only tenants present in the /tenant/<st> group claim.
 func tenancy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -172,14 +179,18 @@ func tenancy(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"tenant required"}`, http.StatusBadRequest)
 			return
 		}
+		readOnly := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
 		allowed := false
 		for _, role := range p.Roles {
 			if role == "PLATFORM_ADMIN" || role == "FEDERAL_ADMIN" {
 				allowed = true
 			}
+			if role == "STATE_AUDITOR" && readOnly {
+				allowed = true
+			}
 		}
 		for _, t := range p.Tenants {
-			if t == tenant {
+			if t == tenant && (readOnly || !isAuditorOnly(p)) {
 				allowed = true
 			}
 		}
@@ -189,6 +200,23 @@ func tenancy(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant{}, tenant)))
 	})
+}
+
+// isAuditorOnly reports whether the principal's only elevated role is
+// STATE_AUDITOR (pure auditors never write, anywhere).
+func isAuditorOnly(p principal) bool {
+	for _, r := range p.Roles {
+		switch r {
+		case "CASE_MANAGER", "ARBITRATOR", "FINANCE", "PARTY", "FEDERAL_ADMIN", "PLATFORM_ADMIN":
+			return false
+		}
+	}
+	for _, r := range p.Roles {
+		if r == "STATE_AUDITOR" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

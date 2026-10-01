@@ -12,7 +12,7 @@ roles; tenancy is the Keycloak `/tenant/<state>` group claim.
 |---|---|---|---|---|
 | 1 | **Platform Operator** (us / host org) | `PLATFORM_ADMIN` | all 50 | internal sponsorship |
 | 2 | **CMS / Federal Admin** | `FEDERAL_ADMIN` | all 50 | `ADMIN_STAFF` application, approved by existing FEDERAL_ADMIN |
-| 3 | **State Auditor** (state DOI staff) | `STATE_AUDITOR` | their state | `STATE_AUDITOR_ORG` + state credential letter |
+| 3 | **State Auditor** (state DOI staff) | `STATE_AUDITOR` | read-only, all 50 states (writes rejected even in home tenant; see tenancy middleware) | `STATE_AUDITOR_ORG` + state credential letter |
 | 4 | **Case Manager** (operations staff) | `CASE_MANAGER` | assigned state(s) | `ADMIN_STAFF` + sponsoring manager |
 | 5 | **IDRE Entity** (certified dispute entity) + its **Arbitrators** | `ARBITRATOR` | states it serves | `IDRE_ENTITY` — CMS cert #, fee schedule, COI, banking; FEDERAL_ADMIN approval |
 | 6 | **Provider / Facility / Air-ambulance org** + billing staff | `PARTY` (provider) | state(s) of service | `PROVIDER_ORG` — NPI (NPPES-verified), TIN, W-9, state license |
