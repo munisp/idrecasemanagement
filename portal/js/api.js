@@ -84,5 +84,11 @@ const Api = (() => {
       saveView: (p) => req("POST", `${t()}/views`, p),
       letter: (caseId, template, qs) => req("POST", `${t()}/cases/${caseId}/letters/${template}${qs || ""}`),
     },
+    fees: {
+      transfer: (p) => req("POST", `${t()}/fees/transfer`, p),
+    },
+    geo: {
+      mapUrl: () => `${config.caseApiBase}/geo/map`,
+    },
   };
 })();

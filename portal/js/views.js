@@ -46,6 +46,43 @@ const Views = (() => {
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
+  async function escalate(caseId) {
+    const clock = prompt("Statutory clock (e.g. DETERMINATION_30BD, OFFER_WINDOW_10BD):", "DETERMINATION_30BD");
+    if (!clock) return;
+    const detail = prompt("Escalation reason:") || "";
+    await Api.cm.escalate(caseId, clock, detail);
+    alert("Escalated — supervisors and federal administrators have been notified.");
+    location.reload();
+  }
+
+  async function relate(caseId) {
+    const related = prompt("Related case ID (UUID):");
+    if (!related) return;
+    const type = prompt("Relationship: BATCH | PARENT_CHILD | DUPLICATE", "BATCH");
+    if (!type) return;
+    await Api.cm.relate({ case_id: caseId, related_case_id: related, rel_type: type.toUpperCase() });
+    location.reload();
+  }
+
+  async function feeTransfer(caseId) {
+    const kind = prompt("Transfer kind: ADMIN_FEE | IDRE_FEE_RESERVE | REFUND | SETTLEMENT", "ADMIN_FEE");
+    if (!kind) return;
+    const party = prompt("Party ID (provider/payer account code):", "party");
+    if (party === null) return;
+    const amount = prompt("Amount in USD:", "15.00");
+    if (!amount) return;
+    const postKind = prompt("Posting: PENDING | POST | VOID", "PENDING");
+    if (!postKind) return;
+    try {
+      await Api.fees.transfer({
+        case_id: caseId, kind: kind.toUpperCase(), party_id: party,
+        amount_cents: Math.round(parseFloat(amount) * 100), post_kind: postKind.toUpperCase(),
+      });
+      alert("Ledger transfer created (double-entry, idempotent).");
+      location.reload();
+    } catch (e) { alert("Ledger rejected the transfer: " + e.message); }
+  }
+
   async function saveCurrentView() {
     const name = prompt("View name:");
     if (!name) return;
@@ -74,6 +111,14 @@ const Views = (() => {
         acts.push(["Issue determination", () => determinationForm(id)]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
+        acts.push(["Escalate", () => Views.escalate(id)]);
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
+        acts.push(["Link related case", () => Views.relate(id)]);
+      if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status))
+        acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
+      if (can("FINANCE"))
+        acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
       if (acts.length)
         html += `<div class="actions">` + acts.map((a, i) =>
           `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
@@ -310,7 +355,10 @@ const Views = (() => {
   async function reports() {
     try {
       const [sla, summary] = await Promise.all([Api.reports.sla(), Api.reports.summary()]);
-      return `<h1>Compliance reports</h1><h2>Case status rollup</h2>` +
+      const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
+        ? `<p><a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>
+           <span class="muted"> jurisdiction checks + coverage gaps from the lakehouse gold zone</span></p>` : "";
+      return `<h1>Compliance reports</h1>${geoLink}<h2>Case status rollup</h2>` +
         `<table><thead><tr><th>Status</th><th>Count</th><th>Avg QPA</th></tr></thead><tbody>` +
         summary.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${s.avg_qpa_usd.toFixed(0)}</td></tr>`).join("") +
         `</tbody></table><h2>Statutory SLA breaches (${sla.length})</h2>` +
@@ -320,5 +368,5 @@ const Views = (() => {
     } catch (e) { return `<h1>Compliance reports</h1>` + err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView };
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer };
 })();

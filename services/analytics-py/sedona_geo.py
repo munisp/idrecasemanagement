@@ -56,7 +56,18 @@ def main() -> None:
     """).filter("in_network_providers = 0") \
        .write.format("delta").mode("overwrite").save(f"{MINIO}/gold/geo_coverage_gaps")
 
-    print("geo analytics written to gold zone")
+    # GeoLibre handoff: export gold-zone results as cloud-native GeoParquet so
+    # the GeoLibre map workspace (browser/desktop/mobile, DuckDB-WASM Spatial)
+    # can open them straight from MinIO — no server-side tile service needed.
+    # Portal "Geospatial audit" links here (S3 HTTPS endpoint, bucket gold-geo).
+    for name in ("geo_jurisdiction_check", "geo_coverage_gaps"):
+        (
+            spark.read.format("delta").load(f"{MINIO}/gold/{name}")
+            .write.mode("overwrite").format("geoparquet")
+            .save(f"{MINIO}/gold-geo/{name}.parquet")
+        )
+
+    print("geo analytics written to gold zone (+ GeoParquet for GeoLibre)")
 
 
 if __name__ == "__main__":

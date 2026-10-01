@@ -130,8 +130,10 @@ services:
       TEMPORAL_HOST: temporal:7233
       TIGERBEETLE_ADDRESSES: tigerbeetle:3000
       VAULT_URL: http://vault:8081
+      REDIS_ADDR: redis:6379            # JWKS cache + initiate idempotency
+      PERMIFY_URL: http://permify:3476  # ReBAC object-level authorization (unset = dev bypass)
     ports: ["8080:8080"]
-    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault]
+    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify]
 
   vault:
     build: ./services/vault-rs
@@ -148,6 +150,8 @@ services:
       TEMPORAL_HOST: temporal:7233
       CASE_API_URL: http://case-api:8080
       VAULT_URL: http://vault:8081
+      DAPR_APP_PORT: "9100"  # Dapr cron binding invokes POST /cms-monthly here
+    ports: ["9100:9100"]
     depends_on: [temporal, case-api]
 
   doc-intel:  # PaddleOCR + VLM document analysis; GPU optional (auto-detect)
@@ -162,6 +166,35 @@ services:
       VLM_ENDPOINT: ${VLM_ENDPOINT:-http://vllm:8000/v1}
       VLM_MODEL: ${VLM_MODEL:-paddleocr-vl}
     depends_on: [kafka, minio, vault, opensearch]
+
+  outbox-relay:  # Postgres outbox -> Kafka; without it the event backbone is silent
+    build: ./services/outbox-relay-py
+    environment:
+      PG_DSN: postgresql://idre:idre@postgres:5432/idre
+      KAFKA_BROKERS: kafka:9092
+    depends_on: [postgres, kafka]
+
+  permify:  # ReBAC authorization (schema: deploy/permify/schema.perm)
+    image: ghcr.io/permify/permify:v1.4.8
+    command: ["serve", "--database-engine=postgres",
+              "--database-uri=postgres://idre:idre@postgres:5432/idre?sslmode=disable",
+              "--database-max-open-connections=20"]
+    ports: ["3476:3476"]
+    depends_on: [postgres]
+
+  fluvio:  # edge streaming (voice/portal events at the edge); sc daemon for local
+    image: infinyon/fluvio:stable
+    profiles: ["edge"]
+    ports: ["9003:9003"]
+
+  edge-bridge:  # Fluvio edge topics -> Kafka core topics (tenant routing preserved)
+    build: ./services/edge-bridge-py
+    profiles: ["edge"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      FLUVIO_ENDPOINT: fluvio:9003
+      TENANTS: ${TENANTS:-tx,ca,ny}
+    depends_on: [kafka, fluvio]
 
   vllm:  # optional: VLM serving (PaddleOCR-VL / Qwen2.5-VL); disable to use external endpoint
     image: vllm/vllm-openai:latest
