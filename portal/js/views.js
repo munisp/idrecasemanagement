@@ -1,103 +1,304 @@
 // views.js — one render function per screen; role-aware actions.
+// Meridian upgrade: statutory-clock projections, L4 peek panel, bulk bar,
+// density toggle, modal+toast everywhere (no prompt/alert), sealed-offer flow.
 const Views = (() => {
   const $ = (sel) => document.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
-  const err = (e) => `<p class="error">${esc(e.message)}</p>`;
+  const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="location.reload()">Retry</button></div>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
   const can = (...rs) => rs.some(role);
+
+  // ---- Statutory clock helpers -------------------------------------------------
+  const clockChip = (c) => {
+    const txt = c.remaining >= 0 ? `${c.remaining} ${c.basis === "business" ? "bd" : "cd"} left` : `Breached ${Math.abs(c.remaining)}d ago`;
+    return `<span class="sla ${c.state}" title="${esc(c.label)} · ${esc(c.cite)} · basis: ${esc(c.basis_note)}">◷ ${txt}</span>`;
+  };
+  const nearestClock = (clocks) => clocks && clocks.length
+    ? clocks.reduce((a, b) => (a.remaining < b.remaining ? a : b)) : null;
+
+  async function clockMap() {
+    try {
+      const all = await Api.cm.allClocks();
+      return Object.fromEntries(all.map((x) => [x.case_id, x.clocks]));
+    } catch { return {}; }
+  }
 
   // ---- Dashboard -----------------------------------------------------------
   async function dashboard() {
     const me = Auth.claims();
-    let html = `<h1>Dashboard</h1><p class="muted">${esc(me.name)} · tenant <b>${esc(Api.getTenant())}</b> · ${me.roles.map(esc).join(", ")}</p>`;
+    let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
+      <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
     try {
-      const [cases, summary] = await Promise.all([Api.cases.list(), Api.reports.summary()]);
+      const [cases, summary, clocks] = await Promise.all([Api.cases.list(), Api.reports.summary(), clockMap()]);
       html += `<div class="cards">` + summary.map((s) =>
         `<div class="card"><div class="num">${s.count}</div><div class="lbl">${badge(s.status)}</div>
          <div class="muted">avg QPA $${s.avg_qpa_usd.toFixed(0)}</div></div>`).join("") + `</div>`;
       const open = cases.filter((c) => !String(c.status).startsWith("CLOSED"));
-      html += `<h2>Open disputes (${open.length})</h2>` + caseTable(open);
+      const attention = open.filter((c) => clocks[c.id] && clocks[c.id].length)
+        .sort((a, b) => nearestClock(clocks[a.id]).remaining - nearestClock(clocks[b.id].remaining));
+      html += `<h2>Needs your attention (${attention.length})</h2>`;
+      html += attention.length
+        ? `<div class="panel">` + attention.slice(0, 8).map((c) => {
+            const cl = nearestClock(clocks[c.id]);
+            return `<div class="att-item" onclick="location.hash='#/cases/${c.id}'">
+              <span class="att-id">${esc(c.case_number)}</span>
+              <span class="att-title">${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()}</span>
+              ${badge(c.status)} ${clockChip(cl)}</div>`;
+          }).join("") + `</div>`
+        : `<p class="muted">Nothing needs you right now. New assignments and deadline risk appear here.</p>`;
+      html += `<h2>Open disputes (${open.length})</h2>` + caseTable(open, clocks);
     } catch (e) { html += err(e); }
     return html;
   }
 
-  const caseTable = (rows) => rows.length ? `<table><thead><tr>
-      <th>Case #</th><th>Status</th><th>Service</th><th>QPA</th><th>Opened</th></tr></thead><tbody>` +
-      rows.map((c) => `<tr onclick="location.hash='#/cases/${c.id}'" class="click">
-        <td>${esc(c.case_number)}</td><td>${badge(c.status)}</td><td>${esc(c.service_line)}</td>
-        <td>$${(c.qpa_cents / 100).toLocaleString()}</td><td>${fmtDate(c.opened_at)}</td></tr>`).join("") +
-      `</tbody></table>` : `<p class="muted">No disputes.</p>`;
+  // ---- Disputes grid: clocks, selection, peek, density ------------------------
+  let selection = new Set();
+  const caseTable = (rows, clocks = {}) => rows.length ? `
+    <div class="dg-wrap">
+      <table class="dg"><thead><tr>
+        <th class="selcol"><input type="checkbox" id="sel-all" aria-label="Select all"></th>
+        <th>Case #</th><th>Status</th><th>Service</th><th>QPA</th><th>Statutory clock</th><th>Opened</th><th></th></tr></thead><tbody>` +
+      rows.map((c) => `<tr class="click" data-case="${c.id}">
+        <td class="selcol"><input type="checkbox" class="sel-one" data-id="${c.id}" ${selection.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.case_number)}"></td>
+        <td class="mono">${esc(c.case_number)}</td><td>${badge(c.status)}</td><td>${esc(c.service_line)}</td>
+        <td class="num">$${(c.qpa_cents / 100).toLocaleString()}</td>
+        <td>${clocks[c.id] && clocks[c.id].length ? clockChip(nearestClock(clocks[c.id])) : '<span class="muted">—</span>'}</td>
+        <td class="muted">${fmtDate(c.opened_at)}</td>
+        <td><button class="mini peek" data-id="${c.id}" title="Peek without losing your place">▸</button></td></tr>`).join("") +
+      `</tbody></table></div>` : `<p class="muted">No disputes.</p>`;
 
-  // ---- Case list / detail ----------------------------------------------------
+  function bindGrid(rows) {
+    $("#sel-all")?.addEventListener("change", (e) => {
+      selection = e.target.checked ? new Set(rows.map((c) => c.id)) : new Set();
+      document.querySelectorAll(".sel-one").forEach((cb) => (cb.checked = e.target.checked));
+      paintBulkBar();
+    });
+    document.querySelectorAll(".sel-one").forEach((cb) =>
+      cb.addEventListener("change", () => { cb.checked ? selection.add(cb.dataset.id) : selection.delete(cb.dataset.id); paintBulkBar(); }));
+    document.querySelectorAll("tr.click").forEach((tr) =>
+      tr.addEventListener("click", (e) => {
+        if (e.target.closest("input,button")) return;
+        location.hash = `#/cases/${tr.dataset.case}`;
+      }));
+    document.querySelectorAll(".peek").forEach((b) => b.addEventListener("click", () => peek(b.dataset.id)));
+  }
+
+  function paintBulkBar() {
+    document.querySelector(".bulk-bar")?.remove();
+    if (!selection.size) return;
+    const bar = document.createElement("div");
+    bar.className = "bulk-bar";
+    bar.setAttribute("aria-live", "polite");
+    bar.innerHTML = `<b>${selection.size} selected</b>
+      <button class="mini" id="bk-assign">Assign to me</button>
+      <button class="mini" id="bk-status">Set status…</button>
+      <button class="mini" id="bk-clear">Clear</button>`;
+    document.body.appendChild(bar);
+    $("#bk-clear").onclick = () => { selection.clear(); document.querySelectorAll(".sel-one,#sel-all").forEach((cb) => (cb.checked = false)); paintBulkBar(); };
+    $("#bk-assign").onclick = async () => {
+      const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection] });
+      const ok = r.results.filter((x) => x.ok).length;
+      UI.toast(`Assigned ${ok} of ${r.results.length} disputes to you`);
+      selection.clear(); location.reload();
+    };
+    $("#bk-status").onclick = async () => {
+      const v = await UI.modal({ title: `Set status for ${selection.size} disputes`, fields: [
+        { name: "status", label: "New status", options: [["INITIATED", "Initiated"], ["OFFER_WINDOW_OPEN", "Offer window open"], ["IN_REVIEW", "In review"], ["DETERMINED", "Determined"], ["PAYMENT_PENDING", "Payment pending"], ["CLOSED_DISMISSED", "Closed — dismissed"]], required: true },
+      ], submitLabel: "Apply to selection" });
+      if (!v) return;
+      const r = await Api.cm.bulk({ action: "status", status: v.status, case_ids: [...selection] });
+      const ok = r.results.filter((x) => x.ok).length;
+      UI.toast(`Status updated on ${ok} of ${r.results.length} disputes`);
+      selection.clear(); location.reload();
+    };
+  }
+
+  // L4 peek panel — preview a case without losing list position
+  async function peek(id) {
+    document.querySelector(".peek-panel")?.remove();
+    const p = document.createElement("aside");
+    p.className = "peek-panel";
+    p.setAttribute("role", "complementary");
+    p.setAttribute("aria-label", "Case preview");
+    p.innerHTML = `<div class="peek-h"><b>Preview</b><button class="icon-btn" aria-label="Close preview">✕</button></div>
+      <div class="peek-b"><p class="muted">Loading…</p></div>`;
+    document.body.appendChild(p);
+    p.querySelector(".icon-btn").onclick = () => p.remove();
+    p.addEventListener("keydown", (e) => { if (e.key === "Escape") p.remove(); });
+    try {
+      const [c, clocks] = await Promise.all([Api.cases.get(id), Api.cm.clocks(id).catch(() => [])]);
+      p.querySelector(".peek-b").innerHTML = `
+        <div class="mono muted">${esc(c.case_number)}</div>
+        <h3>${esc(c.service_line)} · $${(c.qpa_cents / 100).toLocaleString()}</h3>
+        <p>${badge(c.status)}</p>
+        ${clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}">${clockChip(cl)}</span>
+          <span class="muted" style="font-size:11px">${esc(cl.label)} · ${esc(cl.cite)}</span></div>`).join("")}
+        <p style="margin-top:14px"><button class="mini" onclick="location.hash='#/cases/${c.id}'">Open workspace →</button></p>`;
+    } catch (e) { p.querySelector(".peek-b").innerHTML = err(e); }
+  }
+
+  // ---- Disputes list -----------------------------------------------------------
   async function cases() {
     try {
-      const [list, saved] = await Promise.all([Api.cases.list(), Api.cm.views().catch(() => [])]);
+      const [list, saved, clocks] = await Promise.all([Api.cases.list(), Api.cm.views().catch(() => []), clockMap()]);
       const v = new URLSearchParams(location.hash.split("?")[1] || "").get("view");
       const sv = saved.find((s) => s.id === v);
       const rows = sv && sv.filters && sv.filters.status ? list.filter((c) => c.status === sv.filters.status) : list;
-      const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${esc(s.name)}</option>`).join("");
-      const bar = `<p class="viewbar">
-        <select onchange="location.hash='#/cases?view='+this.value"><option value="">All disputes</option>${opts}</select>
-        <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
-        ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>`;
-      return `<h1>Disputes</h1>` + bar + caseTable(rows);
+      const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${s.pinned ? "★ " : ""}${esc(s.name)}</option>`).join("");
+      const density = localStorage.getItem("idre.density") || "comfortable";
+      document.body.classList.toggle("density-compact", density === "compact");
+      queueMicrotask(() => {
+        bindGrid(rows);
+        $("#density").onclick = () => {
+          const next = (localStorage.getItem("idre.density") || "comfortable") === "comfortable" ? "compact" : "comfortable";
+          localStorage.setItem("idre.density", next);
+          document.body.classList.toggle("density-compact", next === "compact");
+          UI.toast(`Density: ${next}`);
+        };
+        $("#grab").onclick = async () => {
+          const r = await Api.cm.grabNext();
+          if (r.claimed) { UI.toast(`Claimed ${r.case_number} from the queue`); location.hash = `#/cases/${r.case_id}`; }
+          else UI.toast(r.message, { kind: "warn" });
+        };
+      });
+      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${rows.length} shown</span>
+        <span style="flex:1"></span>
+        <button class="mini" id="grab">⇪ Grab next</button>
+        <button class="mini" id="density">Density: ${density}</button></div>
+        <p class="viewbar">
+          <select onchange="location.hash='#/cases?view='+this.value" aria-label="Saved views">
+            <option value="">All disputes</option>${opts}</select>
+          <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
+          ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` + caseTable(rows, clocks);
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
+  // ---- Actions (all modal-based now) ----------------------------------------------
   async function escalate(caseId) {
-    const clock = prompt("Statutory clock (e.g. DETERMINATION_30BD, OFFER_WINDOW_10BD):", "DETERMINATION_30BD");
-    if (!clock) return;
-    const detail = prompt("Escalation reason:") || "";
-    await Api.cm.escalate(caseId, clock, detail);
-    alert("Escalated — supervisors and federal administrators have been notified.");
+    const v = await UI.modal({ title: "Escalate case", danger: true, submitLabel: "Escalate",
+      body: "Supervisors and federal administrators are notified immediately. This is logged to the audit trail.",
+      fields: [
+        { name: "clock", label: "Statutory clock", options: [["DETERMINATION_30BD", "Determination (30bd)"], ["OFFER_WINDOW_10BD", "Offer window (10bd)"], ["PAYMENT_30CD", "Payment (30cd)"], ["NEGOTIATION_30BD", "Negotiation (30bd)"], ["INITIATION_4BD", "Initiation (4bd)"]], required: true },
+        { name: "detail", label: "Reason", type: "textarea", placeholder: "Why does this need supervisory attention?", required: true },
+      ] });
+    if (!v) return;
+    await Api.cm.escalate(caseId, v.clock, v.detail);
+    UI.toast("Escalated — supervisors and federal administrators notified");
     location.reload();
   }
 
   async function relate(caseId) {
-    const related = prompt("Related case ID (UUID):");
-    if (!related) return;
-    const type = prompt("Relationship: BATCH | PARENT_CHILD | DUPLICATE", "BATCH");
-    if (!type) return;
-    await Api.cm.relate({ case_id: caseId, related_case_id: related, rel_type: type.toUpperCase() });
+    const v = await UI.modal({ title: "Link related case", fields: [
+      { name: "related", label: "Related case ID", placeholder: "UUID", required: true },
+      { name: "type", label: "Relationship", options: [["BATCH", "Batch"], ["PARENT_CHILD", "Parent / child"], ["DUPLICATE", "Duplicate"]], required: true },
+    ] });
+    if (!v) return;
+    await Api.cm.relate({ case_id: caseId, related_case_id: v.related, rel_type: v.type });
+    UI.toast("Cases linked");
     location.reload();
   }
 
   async function feeTransfer(caseId) {
-    const kind = prompt("Transfer kind: ADMIN_FEE | IDRE_FEE_RESERVE | REFUND | SETTLEMENT", "ADMIN_FEE");
-    if (!kind) return;
-    const party = prompt("Party ID (provider/payer account code):", "party");
-    if (party === null) return;
-    const amount = prompt("Amount in USD:", "15.00");
-    if (!amount) return;
-    const postKind = prompt("Posting: PENDING | POST | VOID", "PENDING");
-    if (!postKind) return;
+    const v = await UI.modal({ title: "Post fee transfer", submitLabel: "Post to ledger",
+      body: "Double-entry transfer on the tenant's TigerBeetle ledger. Idempotent; subject to the Permify ledger permission.",
+      fields: [
+        { name: "kind", label: "Transfer kind", options: [["ADMIN_FEE", "Admin fee ($15)"], ["IDRE_FEE_RESERVE", "IDRE fee reserve"], ["REFUND", "Refund"], ["SETTLEMENT", "Settlement"]], required: true },
+        { name: "party", label: "Party ID", value: "party", required: true },
+        { name: "amount", label: "Amount (USD)", type: "number", step: "0.01", value: "15.00", required: true },
+        { name: "post", label: "Posting", options: [["PENDING", "Pending (two-phase)"], ["POST", "Post immediately"], ["VOID", "Void pending"]], required: true },
+      ] });
+    if (!v) return;
     try {
-      await Api.fees.transfer({
-        case_id: caseId, kind: kind.toUpperCase(), party_id: party,
-        amount_cents: Math.round(parseFloat(amount) * 100), post_kind: postKind.toUpperCase(),
-      });
-      alert("Ledger transfer created (double-entry, idempotent).");
+      await Api.fees.transfer({ case_id: caseId, kind: v.kind, party_id: v.party,
+        amount_cents: Math.round(parseFloat(v.amount) * 100), post_kind: v.post });
+      UI.toast("Ledger transfer created (double-entry, idempotent)");
       location.reload();
-    } catch (e) { alert("Ledger rejected the transfer: " + e.message); }
+    } catch (e) { UI.toast("Ledger rejected the transfer: " + e.message, { kind: "warn", duration: 9000 }); }
   }
 
   async function saveCurrentView() {
-    const name = prompt("View name:");
-    if (!name) return;
-    const status = prompt("Filter by status (leave blank for all):");
-    await Api.cm.saveView({ name, filters: status ? { status } : {} });
+    const v = await UI.modal({ title: "Save current view", fields: [
+      { name: "name", label: "View name", required: true },
+      { name: "status", label: "Filter by status", placeholder: "leave blank for all" },
+    ], submitLabel: "Save view" });
+    if (!v) return;
+    await Api.cm.saveView({ object: "CASES", name: v.name, filters: v.status ? { status: v.status } : {} });
+    UI.toast("View saved");
     location.reload();
   }
 
+  async function assign(caseId) {
+    const v = await UI.modal({ title: "Assign / route", fields: [
+      { name: "role", label: "Assign as", options: [["CASE_MANAGER", "Case manager"], ["ARBITRATOR", "Arbitrator"]], required: true },
+      { name: "assignee", label: "Assignee", placeholder: "blank = workload-balanced auto" },
+    ] });
+    if (!v) return;
+    try {
+      const r = await Api.cm.assign(caseId, v.role, v.assignee || "");
+      UI.toast(`Assigned to ${r.assigned_to}`);
+      location.reload();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function letter(caseId, template) {
+    let qs = "";
+    if (template === "determination_letter") {
+      const v = await UI.modal({ title: "Determination letter", fields: [
+        { name: "winning", label: "Winning party", required: true },
+        { name: "rationale", label: "Rationale", type: "textarea", required: true },
+      ], submitLabel: "Generate letter" });
+      if (!v) return;
+      qs = `?winning_party=${encodeURIComponent(v.winning)}&rationale=${encodeURIComponent(v.rationale)}`;
+    }
+    try { await Api.cm.letter(caseId, template, qs); UI.toast("Letter generated — see Documents"); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // Sealed offer — value goes only to the vault via the signal; never rendered back.
+  async function offerForm(caseId) {
+    const v = await UI.modal({ title: "Submit sealed offer", submitLabel: "Seal and submit",
+      body: "Your offer is encrypted in the vault the moment you submit. It is visible to no one — including arbitrators — until the offer window closes and the lawful-reveal gate passes.",
+      fields: [{ name: "amount", label: "Offer amount (USD)", type: "number", step: "0.01", required: true }] });
+    if (!v) return;
+    await Api.cases.signal(caseId, "OFFER_SUBMITTED", { party_id: Auth.claims().sub, amount_cents: Math.round(parseFloat(v.amount) * 100) });
+    UI.toast("Offer received and sealed — receipt logged");
+    location.reload();
+  }
+
+  async function determinationForm(caseId) {
+    const v = await UI.modal({ title: "Issue determination", submitLabel: "Issue determination", danger: true,
+      body: "This selects the prevailing offer under 45 CFR 149.510(c)(4) and starts the 30-calendar-day payment clock. It cannot be undone.",
+      fields: [
+        { name: "winning", label: "Winning offer (party id)", required: true },
+        { name: "rationale", label: "Determination rationale", type: "textarea", required: true,
+          hint: "Required — becomes part of the certified determination letter." },
+      ] });
+    if (!v) return;
+    await Api.cases.signal(caseId, "DETERMINATION_ISSUED", { winning_offer_party: v.winning, rationale: v.rationale });
+    UI.toast("Determination issued — payment clock started");
+    location.reload();
+  }
+
+  // ---- Case detail workspace -------------------------------------------------
   async function caseDetail(id) {
     try {
-      const [c, docs, activities, checklist, rels] = await Promise.all([
+      const [c, docs, activities, checklist, rels, clocks] = await Promise.all([
         Api.cases.get(id), Api.cases.documents(id), Api.cases.activities(id),
-        Api.cm.checklist(id), Api.cm.relationships(id),
+        Api.cm.checklist(id), Api.cm.relationships(id), Api.cm.clocks(id).catch(() => []),
       ]);
-      let html = `<h1>${esc(c.case_number)}</h1><p>${badge(c.status)} · ${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
+      Palette.remember("case", c.id, c.case_number);
+      let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>
+        ${badge(c.status)}</div>
+        <p class="muted">${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
+
+      // Statutory clock cluster (server-projected)
+      if (clocks.length)
+        html += `<div class="sla-cluster">` + clocks.map((cl) => `
+          <div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
+            <span class="lbl">${esc(cl.label)}</span>
+            <span class="cite">${esc(cl.cite)} · due ${esc(cl.due)} · ${esc(cl.basis_note)}</span></div>`).join("") + `</div>`;
 
       // Workflow actions by role + status
       const acts = [];
@@ -125,22 +326,21 @@ const Views = (() => {
 
       // Documents + analysis
       html += `<h2>Documents</h2>
-        <form id="up" class="upload"><input type="file" name="file" required />
-        <label><input type="checkbox" name="sealed" /> sealed (offer justification)</label>
+        <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
+        <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
         <button>Upload</button></form>`;
       html += docs.length ? `<table><thead><tr><th>Type</th><th>Size</th><th>Sealed</th><th>Analysis</th><th></th></tr></thead><tbody>` +
         docs.map((d) => `<tr><td>${esc(d.content_type)}</td><td>${(d.size_bytes / 1024).toFixed(0)} KB</td>
-          <td>${d.sealed ? "🔒" : "—"}</td>
+          <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
           <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
           <td><a href="${Api.cases.downloadUrl(id, d.doc_id)}" target="_blank">download</a>
-          ${!d.sealed ? ` · <a href="javascript:void 0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}</td></tr>`).join("") +
+          ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}</td></tr>`).join("") +
         `</tbody></table>` : `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
 
-      // Case-management panels: relationships, checklist, letters
       if (rels.length)
         html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
-          `<tr><td>${badge(r.rel_type)}</td><td>${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
+          `<tr><td>${badge(r.rel_type)}</td><td class="mono">${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
       const stages = {};
       checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
       html += `<h2>Stage checklists</h2>` + Object.entries(stages).map(([stage, items]) =>
@@ -156,7 +356,6 @@ const Views = (() => {
           <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
         </div>`;
 
-      // CRM activity timeline (voice calls auto-attached, milestones, notes)
       html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
         activities.map((a) => `<tr><td>${badge(a.type)}</td><td>${esc(a.body)}</td>
           <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
@@ -165,13 +364,13 @@ const Views = (() => {
       queueMicrotask(() => {
         acts.forEach((a, i) =>
           document.querySelector(`[data-act="${i}"]`)?.addEventListener("click", async () => {
-            try { await a[1](); location.reload(); } catch (e) { alert(e.message); }
+            try { await a[1](); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
           }));
         $("#up").addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = ev.target.file.files[0];
-          try { await Api.cases.upload(id, f, ev.target.sealed.checked); location.reload(); }
-          catch (e) { alert(e.message); }
+          try { await Api.cases.upload(id, f, ev.target.sealed.checked); UI.toast("Document uploaded"); location.reload(); }
+          catch (e) { UI.toast(e.message, { kind: "warn" }); }
         });
       });
       return html;
@@ -191,44 +390,7 @@ const Views = (() => {
     } catch (e) { box.innerHTML = err(e); }
   }
 
-  async function check(itemId) { await Api.cm.checkItem(itemId); location.reload(); }
-
-  async function assign(caseId) {
-    const role = prompt("Assign as (CASE_MANAGER / ARBITRATOR):", "CASE_MANAGER");
-    if (!role) return;
-    const assignee = prompt("Assignee sub (blank = workload-balanced auto):", "") || "";
-    try {
-      const r = await Api.cm.assign(caseId, role.toUpperCase(), assignee);
-      alert(`Assigned to ${r.assigned_to}`);
-      location.reload();
-    } catch (e) { alert(e.message); }
-  }
-
-  async function letter(caseId, template) {
-    let qs = "";
-    if (template === "determination_letter") {
-      const winning = prompt("Winning party:"); if (!winning) return;
-      const rationale = prompt("Rationale:") || "";
-      qs = `?winning_party=${encodeURIComponent(winning)}&rationale=${encodeURIComponent(rationale)}`;
-    }
-    try { await Api.cm.letter(caseId, template, qs); alert("Letter generated — see Documents."); location.reload(); }
-    catch (e) { alert(e.message); }
-  }
-
-  function offerForm(caseId) {
-    const amount = prompt("Sealed offer amount (USD):");
-    if (!amount) return Promise.resolve();
-    const cents = Math.round(parseFloat(amount) * 100);
-    return Api.cases.signal(caseId, "OFFER_SUBMITTED", { party_id: Auth.claims().sub, amount_cents: cents });
-  }
-
-  function determinationForm(caseId) {
-    const winning = prompt("Winning offer (party id of prevailing offer):");
-    if (!winning) return Promise.resolve();
-    const rationale = prompt("Determination rationale (required):") || "";
-    if (!rationale.trim()) { alert("Rationale is required."); return Promise.resolve(); }
-    return Api.cases.signal(caseId, "DETERMINATION_ISSUED", { winning_offer_party: winning, rationale });
-  }
+  async function check(itemId) { await Api.cm.checkItem(itemId); UI.toast("Checklist item completed"); location.reload(); }
 
   // ---- New dispute -------------------------------------------------------------
   function newDispute() {
@@ -241,8 +403,9 @@ const Views = (() => {
           qpa_cents: Math.round(parseFloat(f.qpa) * 100), provider_id: f.provider_id,
           payer_id: f.payer_id, open_negotiation_end: f.one_end,
         });
+        UI.toast("Dispute initiated — statutory clocks started");
         location.hash = `#/cases/${r.case_id}`;
-      } catch (e) { alert(e.message); }
+      } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
     }));
     return `<h1>New dispute</h1><form id="nd" class="form">
       <label>CMS case number <input name="case_number" required placeholder="CMS-TX-2026-00002" /></label>
@@ -287,8 +450,9 @@ const Views = (() => {
           type: f.type, legal_name: f.legal_name, ein: f.ein, npi: f.npi || undefined,
           payload: { ...payload, contact_email: f.contact_email },
         });
+        UI.toast("Application submitted for verification");
         location.hash = "#/onboarding";
-      } catch (e) { alert(e.message); }
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     }));
     return `<h1>Organization application</h1><form id="ob" class="form">
       <label>Organization type <select name="type">
@@ -306,9 +470,16 @@ const Views = (() => {
   }
 
   async function decide(id, decision) {
-    const reason = decision === "REJECT" ? prompt("Rejection reason:") || "" : "";
-    try { await Api.onboarding.decide(id, decision, reason); location.reload(); }
-    catch (e) { alert(e.message); }
+    let reason = "";
+    if (decision === "REJECT") {
+      const v = await UI.modal({ title: "Reject application", danger: true, submitLabel: "Reject",
+        fields: [{ name: "reason", label: "Rejection reason", type: "textarea", required: true,
+          hint: "Sent to the applicant and recorded in the audit trail." }] });
+      if (!v) return;
+      reason = v.reason;
+    } else if (!(await UI.confirm("Approve application?", "The organization is provisioned into its tenant and notified.", "Approve"))) return;
+    try { await Api.onboarding.decide(id, decision, reason); UI.toast(`Application ${decision.toLowerCase()}d`); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ---- Voice console -------------------------------------------------------------
@@ -320,9 +491,9 @@ const Views = (() => {
         const f = Object.fromEntries(new FormData(ev.target));
         try {
           const r = await Api.voice.outbound(f.to, f.case_number, f.script);
-          alert(`Outbound call ${r.status}`);
+          UI.toast(`Outbound call ${r.status}`);
           location.reload();
-        } catch (e) { alert(e.message); }
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       return `<h1>Voice console</h1>
         <h2>Outbound call</h2>
@@ -363,10 +534,10 @@ const Views = (() => {
         summary.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${s.avg_qpa_usd.toFixed(0)}</td></tr>`).join("") +
         `</tbody></table><h2>Statutory SLA breaches (${sla.length})</h2>` +
         (sla.length ? `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
-          sla.map((b) => `<tr><td>${esc(b.case_id)}</td><td>${badge(b.clock)}</td><td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") +
+          sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td><td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No breaches recorded.</p>`);
     } catch (e) { return `<h1>Compliance reports</h1>` + err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer };
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek };
 })();

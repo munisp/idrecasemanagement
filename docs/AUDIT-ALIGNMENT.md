@@ -98,3 +98,33 @@ doc_analysis, stakeholder_applications, idre_directory, npi_cache).
 - **Go** — case-api (control plane, auth, CRUD, ledger client, Redis, Permify)
 - **Rust** — vault (seal/reveal cryptography)
 - **Python** — Temporal workflows, doc-intel, outbox relay, edge bridge, analytics (Spark/Flink/DataFusion/Ray/Sedona)
+
+---
+
+## 6. Round 2 — engine enhancements (2026-10-01)
+
+**Backend (case-api, `engines.go`):**
+
+| Route | Capability | UI trigger |
+|---|---|---|
+| GET /cases/clocks | Batch statutory-clock projection (all open cases): remaining business/calendar days, state (ok/watch/risk/breach), CFR cite, basis provenance | Disputes grid "Statutory clock" column, dashboard attention sort |
+| GET /cases/{id}/clocks | Per-case projection | Case workspace SLA cluster |
+| POST /cases/bulk | Bulk assign/status, ≤200 items, per-item results, activity + outbox events | Grid selection bulk bar |
+| POST /queues/grab-next | Atomic queue claim (FOR UPDATE SKIP LOCKED) | "Grab next" button + ⌘K action |
+| saved_views.pinned | Pinned views sort first (DDL + save/list) | ★ in saved-views dropdown |
+| account360.health | Relationship health score (100 − 8×open − 20×breaches) with band + formula | Account 360 health card |
+
+**Frontend (portal):**
+- `js/ui.js` — modal dialogs (focus-trapped, Esc, required-field inline validation) +
+  toasts with undo and aria-live. **All `prompt()`/`alert()` removed** (anti-pattern #13):
+  escalate, relate, fee transfer, assign, letters, save view, lead convert, onboarding
+  decide, sealed offer, determination.
+- `js/palette.js` — ⌘K command palette: navigation, actions (incl. grab-next), fuzzy
+  record search, recent records.
+- Disputes grid: SLA clock column, row selection + bulk action bar, density toggle
+  (comfortable/compact, persisted), L4 peek panel (preview without losing list position).
+- Case workspace: server-projected SLA cluster with CFR citations in the header.
+- Dashboard: "Needs your attention" sorted by nearest statutory clock.
+- Account 360: relationship-health card with formula disclosure.
+
+`demo.js` fixtures extended for every new endpoint; `go build`/`go vet` clean; all JS syntax-checked.

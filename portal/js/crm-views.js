@@ -41,7 +41,12 @@ const CrmViews = (() => {
     try {
       const d = await Api.crm.account360(id);
       const a = d.account;
+      Palette.remember("account", a.id, a.legal_name);
       let html = `<h1>${esc(a.legal_name)}</h1><p>${badge(a.type)} · NPI ${esc(a.npi) || "—"} · ${esc(a.phone) || "—"}</p>`;
+      if (d.health)
+        html += `<div class="cards"><div class="card health-${esc(d.health.band)}">
+          <div class="num">${d.health.score}</div><div class="lbl">Relationship health — ${esc(d.health.band)}</div>
+          <div class="muted">${d.health.open_disputes} open disputes · ${d.health.sla_breaches} SLA breaches · ${esc(d.health.formula)}</div></div></div>`;
       html += `<h2>Contacts (${d.contacts.length})</h2>` +
         (d.contacts.length ? `<table><tbody>` + d.contacts.map((c) =>
           `<tr><td>${esc(c.name)}</td><td>${esc(c.role_title)}</td><td>${esc(c.email)}</td><td>${esc(c.phone)}</td></tr>`).join("") +
@@ -108,10 +113,12 @@ const CrmViews = (() => {
   }
 
   async function convert(id) {
-    const type = prompt("Account type (PROVIDER / PAYER / IDRE / OTHER):", "PROVIDER");
-    if (!type) return;
-    try { await Api.crm.convertLead(id, type.toUpperCase()); location.reload(); }
-    catch (e) { alert(e.message); }
+    const v = await UI.modal({ title: "Convert lead to account", submitLabel: "Convert",
+      body: "Creates the account, links the lead's history, and marks the lead converted.",
+      fields: [{ name: "type", label: "Account type", options: [["PROVIDER", "Provider"], ["PAYER", "Payer"], ["IDRE", "IDRE entity"], ["OTHER", "Other"]], required: true }] });
+    if (!v) return;
+    try { await Api.crm.convertLead(id, v.type); UI.toast("Lead converted to account"); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ---- Tasks ------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -107,8 +108,36 @@ func (s *server) account360(w http.ResponseWriter, r *http.Request) {
 		WHERE tenant=$1 AND record_type='ACCOUNT' AND record_id=$2
 		ORDER BY created_at DESC LIMIT 50`, tenant, id)
 
+	// Relationship health: computed from this account's dispute history — open load,
+	// breach exposure, and recency. The 360 "brief" surfaces this at a glance.
+	open, breaches := 0, 0
+	var lastTouch string
+	for _, c := range cases {
+		st, _ := c["status"].(string)
+		if !strings.HasPrefix(st, "CLOSED") && st != "SETTLED_IN_NEGOTIATION" {
+			open++
+		}
+	}
+	_ = s.db.QueryRow(r.Context(), `
+		SELECT COUNT(*), COALESCE(to_char(MAX(at),'YYYY-MM-DD"T"HH24:MI'),'')
+		FROM public.sla_breaches b
+		JOIN (SELECT $1::text AS acct) x ON true
+		WHERE b.tenant=$2`, id, tenant).Scan(&breaches, &lastTouch)
+	score := 100 - open*8 - breaches*20
+	if score < 0 {
+		score = 0
+	}
+	band := "healthy"
+	if score < 60 {
+		band = "at-risk"
+	} else if score < 85 {
+		band = "watch"
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account": a, "contacts": contacts, "cases": cases, "notes": notes,
+		"health": map[string]any{"score": score, "band": band, "open_disputes": open,
+			"sla_breaches": breaches, "formula": "100 − 8×open disputes − 20×SLA breaches"},
 	})
 }
 

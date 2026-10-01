@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS public.saved_views (
     object    text NOT NULL,        -- CASES | ACCOUNTS | LEADS | TASKS
     name      text NOT NULL,
     filters   jsonb NOT NULL DEFAULT '{}',
+    pinned    boolean NOT NULL DEFAULT false,   -- pinned views surface first in L2 nav
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant, user_sub, object, name)
 );

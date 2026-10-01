@@ -311,6 +311,10 @@ func main() {
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
+		r.Get("/cases/clocks", s.casesClocks)          // batch statutory-clock projection (grids)
+		r.Get("/cases/{caseId}/clocks", s.caseClocks)  // per-case projection (workspace header)
+		r.Post("/cases/bulk", s.bulkCases)             // bulk assign / status with per-item results
+		r.Post("/queues/grab-next", s.grabNext)        // atomic queue claim (triage fast lane)
 		r.Post("/cases/{caseId}/letters/{template}", s.generateLetter)
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)

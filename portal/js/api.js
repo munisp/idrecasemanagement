@@ -82,6 +82,10 @@ const Api = (() => {
       readNotif: (id) => req("POST", `${t()}/notifications/${id}/read`),
       views: () => req("GET", `${t()}/views`),
       saveView: (p) => req("POST", `${t()}/views`, p),
+      clocks: (id) => req("GET", `${t()}/cases/${id}/clocks`),
+      allClocks: () => req("GET", `${t()}/cases/clocks`),
+      bulk: (p) => req("POST", `${t()}/cases/bulk`, p),
+      grabNext: () => req("POST", `${t()}/queues/grab-next`),
       letter: (caseId, template, qs) => req("POST", `${t()}/cases/${caseId}/letters/${template}${qs || ""}`),
     },
     fees: {

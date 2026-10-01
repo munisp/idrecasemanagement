@@ -88,7 +88,19 @@
     { id: "n2", type: "ONBOARDING_DECISION", message: "Alamo Imaging Partners approved — account created", read_at: null, created_at: d(9) },
     { id: "n3", type: "ASSIGNMENT", message: "You were assigned CMS-TX-2026-01479", read_at: d(30), created_at: d(30) },
   ];
-  const VIEWS = [{ id: "v1", name: "In review (arbiter queue)", filters: { status: "IN_REVIEW" } }];
+  const VIEWS = [
+    { id: "v1", name: "In review (arbiter queue)", filters: { status: "IN_REVIEW" }, pinned: true },
+    { id: "v2", name: "Payment pending", filters: { status: "PAYMENT_PENDING" }, pinned: false },
+  ];
+  // Statutory-clock fixtures (mirror GET /cases/clocks projection shape)
+  const CLOCKS = {
+    c1: [{ clock: "DETERMINATION_30BD", label: "Determination due (30bd)", basis: "business", total_days: 30, remaining: 2, due: "2026-10-03", state: "risk", cite: "45 CFR 149.510(c)(4)(ii)(B)", basis_note: "offer-window close" }],
+    c2: [{ clock: "OFFER_WINDOW_10BD", label: "Offer window (10bd)", basis: "business", total_days: 10, remaining: 6, due: "2026-10-07", state: "ok", cite: "45 CFR 149.510(b)(2)(ii)(B)", basis_note: "set when the window opened" }],
+    c3: [{ clock: "PAYMENT_30CD", label: "Payment due (30cd)", basis: "calendar", total_days: 30, remaining: 9, due: "2026-10-10", state: "watch", cite: "45 CFR 149.510(c)(4)(vii)", basis_note: "determination timestamp (status change)" }],
+    c4: [{ clock: "NEGOTIATION_30BD", label: "Open negotiation (30bd)", basis: "business", total_days: 30, remaining: 14, due: "2026-10-15", state: "ok", cite: "45 CFR 149.510(b)(1)", basis_note: "negotiation end date supplied at initiation" }],
+    c5: [{ clock: "PAYMENT_30CD", label: "Payment due (30cd)", basis: "calendar", total_days: 30, remaining: -2, due: "2026-09-29", state: "breach", cite: "45 CFR 149.510(c)(4)(vii)", basis_note: "determination timestamp (status change)" }],
+  };
+  A360.health = { score: 62, band: "watch", open_disputes: 2, sla_breaches: 1, formula: "100 − 8×open disputes − 20×SLA breaches" };
   const APPS = [
     { id: "ob1", legal_name: "Pecos Valley ER Group", type: "PROVIDER_ORG", status: "PENDING_APPROVAL", submitted_at: d(15) },
     { id: "ob2", legal_name: "Lone Star Audit Partners", type: "STATE_AUDITOR_ORG", status: "APPROVED", submitted_at: d(200) },
@@ -117,6 +129,8 @@
     if (method === "GET") {
       if (/\/cases\/[\w-]+\/documents\/[\w-]+\/analysis$/.test(p))
         return json({ status: "ANALYZED", doc_type: "ITEMIZED_BILL", result: { seal_detected: true, table_count: 3, extracted: { cpt: "99285", billed: 18420.0, qpa: 11240.0, dos: "2026-08-14" }, findings: [] } });
+      if (/\/cases\/clocks$/.test(p)) return json(Object.entries(CLOCKS).map(([case_id, clocks]) => ({ case_id, clocks })));
+      if (/\/cases\/[\w-]+\/clocks$/.test(p)) { const id = p.split("/")[2]; return CLOCKS[id] ? json(CLOCKS[id]) : json({ error: "not found" }, 404); }
       if (/\/cases\/[\w-]+\/documents$/.test(p)) return json(DOCS);
       if (/\/cases\/[\w-]+\/activities$/.test(p)) return json(ACTS);
       if (/\/cases\/[\w-]+\/checklist$/.test(p)) return json(CHECKLIST);
@@ -141,6 +155,11 @@
     // POSTs: plausible server answers (mutations are acknowledged, views then reload fixtures)
     if (/\/cases\/initiate$/.test(p)) return json({ case_id: "c1" });
     if (/\/checklists\/[\w-]+\/check$/.test(p)) return json({ ok: true });
+    if (/\/cases\/bulk$/.test(p)) {
+      const ids = JSON.parse(opts.body || "{}").case_ids || [];
+      return json({ results: ids.map((id) => ({ case_id: id, ok: true })) });
+    }
+    if (/\/queues\/grab-next$/.test(p)) return json({ claimed: true, case_id: "c2", case_number: "CMS-TX-2026-01479", status: "OFFER_WINDOW_OPEN" });
     if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });
     if (/\/fees\/transfer$/.test(p)) return json({ transfer_id: "tb-demo-1842", posted: true });
     if (/\/voice\/outbound$/.test(p)) return json({ status: "QUEUED" });
