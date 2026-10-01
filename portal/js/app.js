@@ -21,13 +21,35 @@
     return;
   }
 
+  // Server-side user prefs: device-local localStorage is the offline cache;
+  // public.user_prefs is the cross-device source of truth (PWA/desktop/native).
+  window.Prefs = {
+    push(key, value) {
+      localStorage.setItem("idre." + key, typeof value === "string" ? value : JSON.stringify(value));
+      Api.prefs.put(key, value).catch(() => {}); // offline: server catches up next login
+    },
+  };
+  Api.prefs.all().then((sv) => {
+    if (!sv) return;
+    if (sv.theme && sv.theme !== (localStorage.getItem("idre.theme") || "")) {
+      localStorage.setItem("idre.theme", sv.theme);
+      document.documentElement.dataset.theme = sv.theme === "dark" ? "dark" : "";
+    }
+    if (sv.density) {
+      localStorage.setItem("idre.density", sv.density);
+      document.body.classList.toggle("density-compact", sv.density === "compact");
+    }
+    if (sv.recents) localStorage.setItem("idre.recents", JSON.stringify(sv.recents));
+    if (sv.last_tenant && sv.last_tenant !== Api.getTenant()) Prefs.push("last_tenant", Api.getTenant());
+  }).catch(() => {});
+
   // Theme (user preference layer; persisted locally)
   const savedTheme = localStorage.getItem("idre.theme");
   if (savedTheme === "dark") document.documentElement.dataset.theme = "dark";
   document.getElementById("theme-toggle").onclick = () => {
     const dark = document.documentElement.dataset.theme !== "dark";
     document.documentElement.dataset.theme = dark ? "dark" : "";
-    localStorage.setItem("idre.theme", dark ? "dark" : "light");
+    Prefs.push("theme", dark ? "dark" : "light");
   };
 
   // Tenant identity chip (always visible, non-removable). Cross-tenant users
@@ -48,6 +70,7 @@
         `</select>${auditorOnly ? '<span class="badge s-audit">read-only audit</span>' : ""}`;
       document.getElementById("t-switch").addEventListener("change", (e) => {
         Api.setTenant(e.target.value);
+        Prefs.push("last_tenant", e.target.value);
         UI.toast(`Switched to ${e.target.value.toUpperCase()} tenant${auditorOnly ? " (read-only)" : ""}`);
         paintChip();
         location.hash = "#/dashboard";

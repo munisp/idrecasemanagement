@@ -5,7 +5,8 @@ const Palette = (() => {
 
   function remember(kind, id, label) {
     recents = [{ kind, id, label }, ...recents.filter((r) => r.id !== id)].slice(0, 8);
-    localStorage.setItem("idre.recents", JSON.stringify(recents));
+    if (window.Prefs) Prefs.push("recents", recents);
+    else localStorage.setItem("idre.recents", JSON.stringify(recents));
   }
 
   const ACTIONS = () => ([

@@ -71,3 +71,15 @@ CREATE TABLE IF NOT EXISTS public.escalations (
     detail     text,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- User preferences: theme, density, last tenant, palette recents — the
+-- portal keeps a device-local copy for offline/instant paint, but this table
+-- is the source of truth so prefs follow the user across PWA/desktop/native.
+CREATE TABLE IF NOT EXISTS public.user_prefs (
+    tenant     text NOT NULL,
+    user_sub   text NOT NULL,
+    key        text NOT NULL,
+    value      jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, user_sub, key)
+);

@@ -96,6 +96,10 @@ const Api = (() => {
       sync: () => req("POST", `${t()}/graph/sync`),
       train: (epochs) => req("POST", `${t()}/graph/train`, epochs ? { epochs } : {}),
     },
+    prefs: {
+      all: () => req("GET", `${t()}/prefs`),
+      put: (key, value) => req("PUT", `${t()}/prefs`, { key, value }),
+    },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),
     },

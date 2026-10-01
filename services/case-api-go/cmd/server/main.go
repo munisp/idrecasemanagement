@@ -341,6 +341,8 @@ func main() {
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
+		r.Get("/prefs", s.getPrefs)   // server-side user preferences (source of truth)
+		r.Put("/prefs", s.putPref)
 		r.Get("/cases/clocks", s.casesClocks)          // batch statutory-clock projection (grids)
 		r.Get("/cases/{caseId}/clocks", s.caseClocks)  // per-case projection (workspace header)
 		r.Post("/cases/bulk", s.bulkCases)             // bulk assign / status with per-item results

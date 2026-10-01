@@ -153,7 +153,7 @@ const Views = (() => {
         bindGrid(rows);
         $("#density").onclick = () => {
           const next = (localStorage.getItem("idre.density") || "comfortable") === "comfortable" ? "compact" : "comfortable";
-          localStorage.setItem("idre.density", next);
+          (window.Prefs ? Prefs.push("density", next) : localStorage.setItem("idre.density", next));
           document.body.classList.toggle("density-compact", next === "compact");
           UI.toast(`Density: ${next}`);
         };

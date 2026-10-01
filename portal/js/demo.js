@@ -127,6 +127,7 @@
     await new Promise((r) => setTimeout(r, 120)); // realistic latency
 
     if (method === "GET") {
+      if (/\/prefs$/.test(p)) return json({});
       if (/\/cases\/[\w-]+\/documents\/[\w-]+\/analysis$/.test(p))
         return json({ status: "ANALYZED", doc_type: "ITEMIZED_BILL", result: { seal_detected: true, table_count: 3, extracted: { cpt: "99285", billed: 18420.0, qpa: 11240.0, dos: "2026-08-14" }, findings: [] } });
       if (/\/cases\/clocks$/.test(p)) return json(Object.entries(CLOCKS).map(([case_id, clocks]) => ({ case_id, clocks })));
