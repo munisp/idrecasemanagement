@@ -50,6 +50,7 @@
     ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"],
   ];
   if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
+  links.push(["#/ask", "✦", "Ask the graph"]);
   links.push(["#/calendar", "▨", "Calendar"]);
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
@@ -97,6 +98,7 @@
     [/^#\/crm\/leads$/, CrmViews.leads],
     [/^#\/crm\/tasks$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
+    [/^#\/ask$/, Views.askGraph],
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],

@@ -132,6 +132,7 @@ services:
       VAULT_URL: http://vault:8081
       REDIS_ADDR: redis:6379            # JWKS cache + initiate idempotency
       PERMIFY_URL: http://permify:3476  # ReBAC object-level authorization (unset = dev bypass)
+      GRAPH_INTEL_URL: http://graph-intel:8082  # FalkorDB + GraphSAGE + EPR-KGQA proxy target
     ports: ["8080:8080"]
     depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify]
 
@@ -206,7 +207,32 @@ services:
         reservations:
           devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
 
+  falkordb:  # dispute graph — one graph per tenant (idre_<st>), Cypher over RESP
+    image: falkordb/falkordb:latest
+    ports: ["6397:6379"]
+
+  ollama:  # local LLM for EPR-KGQA answers — no PHI ever leaves the platform
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: ["ollamadata:/root/.ollama"]
+    # first boot: docker exec <ollama> ollama pull qwen2.5:3b
+
+  graph-intel:  # FalkorDB sync + numpy GraphSAGE + EPR-KGQA + lakehouse bridge
+    build: ./services/graph-intel-py
+    environment:
+      DATABASE_URL: postgres://idre:idre@postgres:5432/idre
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      LAKEHOUSE_DIR: /lakehouse
+    volumes: ["lakehouse:/lakehouse"]
+    ports: ["8082:8082"]
+    depends_on: [postgres, falkordb, ollama]
+
 volumes:
   pgdata:
   tbdata:
   miniodata:
+  ollamadata:
+  lakehouse:

@@ -303,7 +303,9 @@ nsa-idre-platform/
 │   ├── case-api-go/                    Go control-plane API (Temporal client, TB ledger, Dapr pub)
 │   ├── vault-rs/                       Rust sealed-offer/document vault (AES-256-GCM + HKDF)
 │   ├── idre-workflows-py/              Temporal workflows (statutory lifecycle, CMS reports)
-│   └── analytics-py/                   Spark/Flink/DataFusion/Ray/Sedona jobs
+│   ├── analytics-py/                   Spark/Flink/DataFusion/Ray/Sedona jobs
+│   └── graph-intel-py/                 FalkorDB dispute graph, numpy GraphSAGE link prediction,
+│                                       EPR-KGQA over local ollama, lakehouse bridge (see docs/GRAPH-INTELLIGENCE.md)
 ├── deploy/
 │   ├── kubernetes/                     namespaces, tigerbeetle statefulset, rbac
 │   ├── helm-values/                    one values file per component

@@ -341,6 +341,22 @@ const Views = (() => {
       if (rels.length)
         html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
           `<tr><td>${badge(r.rel_type)}</td><td class="mono">${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
+
+      // GNN link-prediction panel (graph-intel; degrades gracefully offline)
+      html += `<div id="gnn-rel"></div>`;
+      Api.graph.related(id).then((g) => {
+        const box = document.getElementById("gnn-rel");
+        if (!box) return;
+        const preds = (g && g.predictions) || [];
+        box.innerHTML = `<h2>Suggested related disputes <span class="muted">· GraphSAGE ${esc(g.model_version || "")}</span></h2>` +
+          (preds.length ? `<table><thead><tr><th>Case</th><th>Link score</th><th></th></tr></thead><tbody>` +
+            preds.map((p) => `<tr><td class="mono">${esc(p.case_id.slice(0, 8))}…</td>
+              <td><span class="gnn-score" style="--s:${p.score}">${(p.score * 100).toFixed(0)}%</span></td>
+              <td><a href="#/cases/${esc(p.case_id)}">open</a> ·
+                  <a href="javascript:void(0)" onclick="Views.relate('${id}')">confirm link</a></td></tr>`).join("") +
+            `</tbody></table>` :
+            `<p class="muted">${esc(g.reason || "No link predictions yet — train the model (POST /graph/train) after a few cases exist.")}</p>`);
+      }).catch(() => { const b = document.getElementById("gnn-rel"); if (b) b.innerHTML = ""; });
       const stages = {};
       checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
       html += `<h2>Stage checklists</h2>` + Object.entries(stages).map(([stage, items]) =>
@@ -539,5 +555,69 @@ const Views = (() => {
     } catch (e) { return `<h1>Compliance reports</h1>` + err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek };
+  // ---- Ask the graph (EPR-KGQA) ------------------------------------------------
+  function askGraph() {
+    const html = `<div class="view-head"><h1>Ask the dispute graph</h1></div>
+      <p class="muted">Natural-language questions over this state's dispute graph — entity linking, path retrieval,
+      GraphSAGE ranking, and a local LLM answer. Every claim cites its graph path; nothing leaves the platform.</p>
+      <form id="kgqa" class="kgqa-bar">
+        <input name="q" required minlength="6" autocomplete="off"
+          placeholder="e.g. Which disputes share a payer with case IDR-2026-0004?" aria-label="Ask the dispute graph" />
+        <button>Ask</button>
+      </form>
+      <div id="kgqa-out" aria-live="polite"></div>
+      <h3>Try asking</h3>
+      <div class="kgqa-hints">
+        ${["Which cases are most related to IDR-2026-0004?",
+           "What connects Lone Star Imaging and BlueShield of Texas?",
+           "Which disputes involve air ambulance service lines?",
+           "Show cases related to IDR-2026-0002 and why"].map((q) =>
+          `<button class="kgqa-hint" data-q="${esc(q)}">${esc(q)}</button>`).join("")}
+      </div>`;
+    queueMicrotask(() => {
+      const out = $("#kgqa-out");
+      const run = async (q) => {
+        out.innerHTML = `<p class="muted">Linking entities, retrieving paths, ranking, generating…</p>`;
+        try {
+          const r = await Api.graph.ask(q, 5);
+          Palette.remember("kgqa", r.log_id, q.slice(0, 60));
+          out.innerHTML = `<div class="kgqa-answer">
+              <div class="kgqa-head"><b>Answer</b>
+                <span class="muted">${esc(r.generator)} · ${r.latency_ms} ms · log <span class="mono">${esc(r.log_id.slice(0, 8))}</span></span>
+                <span class="kgqa-fb">
+                  <button class="mini" data-fb="1" title="Helpful">▲ helpful</button>
+                  <button class="mini" data-fb="0" title="Not helpful">▽</button>
+                </span></div>
+              <p>${esc(r.answer).replace(/\n/g, "<br/>")}</p></div>
+            ${(r.entities || []).length ? `<h3>Entities linked</h3><div class="kgqa-ents">` +
+              r.entities.map((e) => `<span class="kgqa-ent">${e.kind === "Case"
+                ? `<a href="#/cases/${esc(e.id)}">${esc(e.label)}</a>` : esc(e.label)}
+                <span class="muted">${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""}</span></span>`).join("") + `</div>` : ""}
+            ${(r.citations || []).length ? `<h3>Evidence paths <span class="muted">· every claim traces to one of these</span></h3>
+              <ol class="kgqa-paths">` + r.citations.map((c) => `<li class="mono">${esc(c.path)}</li>`).join("") + `</ol>` : ""}
+            ${(r.gnn_ranked || []).length ? `<h3>GNN-ranked related cases</h3><table><tbody>` +
+              r.gnn_ranked.map((g) => `<tr><td class="mono"><a href="#/cases/${esc(g.case_id)}">${esc(g.case_id.slice(0, 8))}…</a></td>
+                <td><span class="gnn-score" style="--s:${g.score}">${(g.score * 100).toFixed(0)}%</span></td></tr>`).join("") +
+              `</tbody></table>` : ""}`;
+          out.querySelectorAll("[data-fb]").forEach((b) => b.addEventListener("click", async () => {
+            try {
+              const fb = await Api.graph.feedback(r.log_id, Number(b.dataset.fb));
+              UI.toast(b.dataset.fb === "1"
+                ? `Thanks — ${fb.edges_reinforced || 0} evidence edge(s) reinforced for the next GNN round`
+                : "Thanks — recorded on the interaction log");
+            } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }));
+        } catch (e) {
+          out.innerHTML = `<p class="error">${esc(e.message)}</p>
+            <p class="muted">Is graph-intel running? Admins: trigger a sync first (⌘K → “Sync dispute graph”).</p>`;
+        }
+      };
+      $("#kgqa").addEventListener("submit", (ev) => { ev.preventDefault(); run(ev.target.q.value.trim()); });
+      document.querySelectorAll(".kgqa-hint").forEach((b) =>
+        b.addEventListener("click", () => { $("#kgqa").q.value = b.dataset.q; run(b.dataset.q); }));
+    });
+    return html;
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph };
 })();

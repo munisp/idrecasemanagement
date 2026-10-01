@@ -88,6 +88,14 @@ const Api = (() => {
       grabNext: () => req("POST", `${t()}/queues/grab-next`),
       letter: (caseId, template, qs) => req("POST", `${t()}/cases/${caseId}/letters/${template}${qs || ""}`),
     },
+    graph: {
+      ask: (question, k) => req("POST", `${t()}/graph/ask`, { question, k }),
+      feedback: (logId, rating) => req("POST", `${t()}/graph/feedback`, { log_id: logId, rating }),
+      related: (caseId) => req("GET", `${t()}/cases/${caseId}/related`),
+      neighbors: (caseId) => req("GET", `${t()}/cases/${caseId}/graph-neighbors`),
+      sync: () => req("POST", `${t()}/graph/sync`),
+      train: (epochs) => req("POST", `${t()}/graph/train`, epochs ? { epochs } : {}),
+    },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),
     },

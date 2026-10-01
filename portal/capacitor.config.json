@@ -2,7 +2,7 @@
   "appId": "org.example.idre.portal",
   "appName": "Federal IDRE Portal",
   "webDir": ".",
-  "backgroundColor": "#0b3d91",
+  "backgroundColor": "#123B2F",
   "android": { "allowMixedContent": false },
   "ios": { "contentInset": "automatic" },
   "server": {

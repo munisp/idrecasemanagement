@@ -128,3 +128,26 @@ doc_analysis, stakeholder_applications, idre_directory, npi_cache).
 - Account 360: relationship-health card with formula disclosure.
 
 `demo.js` fixtures extended for every new endpoint; `go build`/`go vet` clean; all JS syntax-checked.
+
+## 7. Round 3 — graph intelligence (FalkorDB + GraphSAGE + EPR-KGQA)
+
+- **graph-intel-py** (new service, port 8082): FalkorDB dispute graph (one graph per
+  tenant), bidirectional lakehouse bridge (bronze JSONL / silver / gold parquet via
+  pyarrow), numpy GraphSAGE link predictor (residual mean-aggregator, cosine decoder,
+  manual backprop, negative sampling with positive exclusion — no torch dependency),
+  EPR-KGQA (entity linking -> path retrieval -> GNN ranking -> ollama answer, with a
+  clearly-labeled deterministic extractive composer when ollama is unreachable),
+  ART-ready kgqa_logs parquet + thumbs feedback that reinforces retrieved edges
+  (kgqa -> gnn loop).
+- **case-api graph.go** (new): authenticated tenant-scoped proxy endpoints
+  (/graph/ask, /graph/feedback, /graph/sync, /graph/to-lakehouse, /graph/train,
+  /cases/{id}/related, /cases/{id}/graph-neighbors) + best-effort graph resync nudge
+  on case initiate/signal. `GRAPH_INTEL_URL` config (compose-wired).
+- **Portal**: `#/ask` view (cited answers, entity chips, evidence paths, feedback
+  buttons), case-workspace "Suggested related disputes" GNN panel, palette actions
+  (Ask / Sync / Train), demo fixtures mirroring the service response shapes.
+  Capacitor native app ships the same assets (webDir="."); splash color aligned to
+  Meridian ink.
+- compose: falkordb, ollama, graph-intel services + lakehouse volume.
+- [ASSUMPTION] "ART" = OpenPipe ART: logs are produced in its schema; no RL training
+  loop is run (documented in docs/GRAPH-INTELLIGENCE.md).

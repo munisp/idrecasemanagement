@@ -270,3 +270,19 @@ body.density-compact td,body.density-compact th{font-size:12.5px}
 .health-healthy{border-left:4px solid var(--success-fg)}
 .health-watch{border-left:4px solid var(--attention-fg)}
 .health-at-risk{border-left:4px solid var(--danger-fg)}
+
+/* graph intelligence: KGQA ask view + GNN link scores */
+.kgqa-bar{display:flex;gap:10px;margin:14px 0}
+.kgqa-bar input{flex:1;height:44px;padding:0 16px;font-size:14.5px;border:1px solid var(--border-default);border-radius:10px;background:var(--surface-raised);color:var(--text-primary)}
+.kgqa-bar input:focus{outline:2px solid var(--accent-primary);outline-offset:1px}
+.kgqa-hints{display:flex;flex-wrap:wrap;gap:8px}
+.kgqa-hint{font-size:12.5px;padding:7px 12px;border-radius:999px;border:1px solid var(--border-subtle);background:var(--surface-raised);color:var(--text-secondary);cursor:pointer}
+.kgqa-hint:hover{border-color:var(--accent-primary);color:var(--text-primary)}
+.kgqa-answer{background:var(--surface-raised);border:1px solid var(--border-subtle);border-left:4px solid var(--accent-primary);border-radius:12px;padding:16px 18px;margin:16px 0;font-size:14px;line-height:1.55}
+.kgqa-head{display:flex;align-items:center;gap:12px;margin-bottom:8px;font-size:12.5px;color:var(--text-tertiary)}
+.kgqa-fb{margin-left:auto;display:flex;gap:6px}
+.kgqa-ents{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 16px}
+.kgqa-ent{display:inline-flex;gap:8px;align-items:baseline;padding:6px 12px;border-radius:8px;background:var(--surface-sunken);font-size:12.5px}
+.kgqa-paths{font-size:12px;line-height:1.7;color:var(--text-secondary);background:var(--surface-sunken);border-radius:10px;padding:12px 12px 12px 32px}
+.gnn-score{position:relative;display:inline-block;min-width:52px;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:650;color:var(--accent-brass-fg,var(--text-primary));background:linear-gradient(90deg,var(--surface-sunken) calc(var(--s)*100%),transparent 0);border:1px solid var(--border-subtle)}
+@media (max-width:720px){.kgqa-bar{flex-direction:column}.kgqa-bar input{height:48px}}

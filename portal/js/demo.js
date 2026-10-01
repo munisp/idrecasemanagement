@@ -160,6 +160,31 @@
       return json({ results: ids.map((id) => ({ case_id: id, ok: true })) });
     }
     if (/\/queues\/grab-next$/.test(p)) return json({ claimed: true, case_id: "c2", case_number: "CMS-TX-2026-01479", status: "OFFER_WINDOW_OPEN" });
+    // --- graph intelligence fixtures (mirror graph-intel response shapes) ---
+    if (/\/graph\/ask$/.test(p)) {
+      const q = JSON.parse(opts.body || "{}").question || "";
+      const num = (q.match(/IDR-2026-\d+|CMS-TX-2026-\d+/i) || ["CMS-TX-2026-01479"])[0];
+      return json({
+        log_id: "demo" + Math.random().toString(16).slice(2, 10), tenant: "tx", question: q,
+        answer: `Case ${num} sits in a cluster of 3 disputes between Lone Star Imaging and BlueShield of Texas, all on the same service line. The strongest connection runs through the shared payer: ${num} -[AGAINST]-> BlueShield of Texas <-[AGAINST]- CMS-TX-2026-01480. GraphSAGE link prediction ranks CMS-TX-2026-01480 (91%) and CMS-TX-2026-01502 (74%) as likely related — consistent with batching criteria in 45 CFR 149.510(c)(3).`,
+        entities: [{ kind: "Case", id: "c2", label: num, detail: "OFFER_WINDOW_OPEN" }, { kind: "Party", id: "BlueShield of Texas", label: "BlueShield of Texas", detail: "payer" }],
+        citations: [
+          { path: `${num} -[AGAINST]-> BlueShield of Texas <-[AGAINST]- CMS-TX-2026-01480` },
+          { path: `${num} -[FILED_BY]-> Lone Star Imaging <-[FILED_BY]- CMS-TX-2026-01502` },
+        ],
+        gnn_ranked: [{ case_id: "c3", score: 0.91 }, { case_id: "c5", score: 0.74 }],
+        generator: "ollama:qwen2.5:3b", latency_ms: 812,
+      });
+    }
+    if (/\/graph\/feedback$/.test(p)) return json({ log_id: JSON.parse(opts.body || "{}").log_id, rating: 1, edges_reinforced: 2 });
+    if (/\/cases\/[\w-]+\/related$/.test(p)) return json({ case_id: "c2", model_version: "graphsage-np-1.0",
+      predictions: [{ case_id: "c3", score: 0.91, model_version: "graphsage-np-1.0" }, { case_id: "c5", score: 0.74, model_version: "graphsage-np-1.0" }, { case_id: "c1", score: 0.58, model_version: "graphsage-np-1.0" }] });
+    if (/\/cases\/[\w-]+\/graph-neighbors$/.test(p)) return json({ case_id: "c2", hops: 2, nodes: [
+      { kind: "Party", id: "BlueShield of Texas", label: "BlueShield of Texas", detail: "payer" },
+      { kind: "Party", id: "Lone Star Imaging", label: "Lone Star Imaging", detail: "provider" },
+      { kind: "Case", id: "c3", label: "CMS-TX-2026-01480", detail: "OFFERS_SEALED" }] });
+    if (/\/graph\/sync$/.test(p)) return json({ tenant: "tx", cases: 6, bronze: "lakehouse/bronze/cases-tx-demo.jsonl", silver: "lakehouse/silver/cases_tx.parquet" });
+    if (/\/graph\/train$/.test(p)) return json({ tenant: "tx", trained: true, model_version: "graphsage-np-1.0", cases: 6, positive_edges: 11, epochs: 120, final_loss: 0.214, train_seconds: 0.4 });
     if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });
     if (/\/fees\/transfer$/.test(p)) return json({ transfer_id: "tb-demo-1842", posted: true });
     if (/\/voice\/outbound$/.test(p)) return json({ status: "QUEUED" });

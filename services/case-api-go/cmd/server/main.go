@@ -47,6 +47,7 @@ type Config struct {
 	TBAddresses    string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
 	DaprHTTP       string // http://localhost:3500
 	VaultURL       string // http://vault:8081 (mTLS via Dapr in k8s)
+	GraphIntelURL  string // http://graph-intel:8082 ("" = graph features disabled)
 }
 
 func configFromEnv() Config {
@@ -66,6 +67,7 @@ func configFromEnv() Config {
 		TBAddresses:    get("TIGERBEETLE_ADDRESSES", "localhost:3000"),
 		DaprHTTP:       get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
 		VaultURL:       get("VAULT_URL", "http://localhost:8081"),
+		GraphIntelURL:  get("GRAPH_INTEL_URL", "http://localhost:8082"),
 	}
 }
 
@@ -315,6 +317,15 @@ func main() {
 		r.Get("/cases/{caseId}/clocks", s.caseClocks)  // per-case projection (workspace header)
 		r.Post("/cases/bulk", s.bulkCases)             // bulk assign / status with per-item results
 		r.Post("/queues/grab-next", s.grabNext)        // atomic queue claim (triage fast lane)
+
+		// Graph intelligence (proxied to graph-intel: FalkorDB + GraphSAGE + EPR-KGQA).
+		r.Post("/graph/ask", s.graphAsk)                      // EPR-KGQA natural-language query
+		r.Post("/graph/feedback", s.graphFeedback)            // thumbs up/down -> ART-ready log
+		r.Post("/graph/sync", s.graphSyncNow)                 // Postgres -> FalkorDB -> lakehouse
+		r.Post("/graph/to-lakehouse", s.graphToLakehouse)     // FalkorDB -> gold-zone export
+		r.Post("/graph/train", s.graphTrain)                  // GraphSAGE training round
+		r.Get("/cases/{caseId}/related", s.caseRelated)       // GNN link predictions
+		r.Get("/cases/{caseId}/graph-neighbors", s.caseGraphNeighbors)
 		r.Post("/cases/{caseId}/letters/{template}", s.generateLetter)
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
@@ -482,6 +493,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
 		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
 	}
+	s.graphSync(tenant) // nudge FalkorDB + lakehouse silver (best-effort)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "workflow_id": wfID, "status": initialStatus,
 		"late_initiation_flagged": lateInitiation,
@@ -559,6 +571,7 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	detail, _ := json.Marshal(body.Data)
 	s.logActivity(r.Context(), tenant, id, body.Signal,
 		fmt.Sprintf("Workflow signal %s delivered to %s — %s", body.Signal, wfID, truncate(string(detail), 500)))
+	s.graphSync(tenant) // graph reflects status transitions (best-effort)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
 }
 

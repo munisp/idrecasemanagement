@@ -19,8 +19,19 @@ const Palette = (() => {
     { s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") },
     { s: "Action", icon: "＋", label: "New dispute", kbd: "C", run: () => go("#/new") },
     { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext },
+    { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", run: () => go("#/ask") },
+    { s: "Action", icon: "⟳", label: "Sync dispute graph (Postgres → FalkorDB → lakehouse)", run: graphSync },
+    { s: "Action", icon: "⌘", label: "Train GNN link predictor", run: graphTrain },
     { s: "Action", icon: "◐", label: "Toggle dark mode", run: () => document.getElementById("theme-toggle").click() },
   ]);
+  async function graphSync() {
+    try { const r = await Api.graph.sync(); UI.toast(`Graph synced — ${r.cases} cases mirrored to FalkorDB + lakehouse`); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function graphTrain() {
+    try { const r = await Api.graph.train(); UI.toast(r.trained ? `GNN trained: loss ${r.final_loss} over ${r.cases} cases, ${r.positive_edges} edges` : `Not trained: ${r.reason}`, { kind: r.trained ? "ok" : "warn" }); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   const go = (h) => { location.hash = h; };
   async function grabNext() {
     try {
