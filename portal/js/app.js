@@ -1,8 +1,7 @@
-// app.js — hash router + bootstrap. Role-aware navigation.
+// app.js — hash router + bootstrap. Role-aware navigation (Meridian shell).
 (async function () {
   const view = document.getElementById("view");
   const nav = document.getElementById("nav");
-  const whoami = document.getElementById("whoami");
 
   // Service worker (PWA)
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
@@ -22,18 +21,43 @@
     return;
   }
 
-  // Role-aware navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
+  // Theme (user preference layer; persisted locally)
+  const savedTheme = localStorage.getItem("idre.theme");
+  if (savedTheme === "dark") document.documentElement.dataset.theme = "dark";
+  document.getElementById("theme-toggle").onclick = () => {
+    const dark = document.documentElement.dataset.theme !== "dark";
+    document.documentElement.dataset.theme = dark ? "dark" : "";
+    localStorage.setItem("idre.theme", dark ? "dark" : "light");
+  };
+
+  // Tenant identity chip (always visible, non-removable)
+  const tenant = Api.getTenant();
+  document.getElementById("t-avatar").textContent = tenant.slice(0, 2).toUpperCase();
+  document.getElementById("t-name").textContent = `${tenant.toUpperCase()} IDRE`;
+
+  // Demo-mode banner (only when the backend is stubbed)
+  if (window.IDRE_DEMO) {
+    const bar = document.createElement("div");
+    bar.className = "demo-bar";
+    bar.innerHTML = `⚠ <b>Demo mode</b> — real portal code rendering built-in sample data; no backend connected. Set <code>demoMode:false</code> and point <code>apiBase</code>/<code>keycloakUrl</code> at your deployment for live data.`;
+    document.getElementById("body").insertBefore(bar, view);
+  }
+
+  // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
   const has = (...rs) => rs.some((r) => me.roles.includes(r));
-  const links = [["#/dashboard", "Dashboard"], ["#/pipeline", "Pipeline"], ["#/cases", "Disputes"],
-    ["#/crm/accounts", "Accounts"], ["#/crm/leads", "Leads"], ["#/crm/tasks", "Tasks"]];
-  if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "New dispute"]);
-  links.push(["#/onboarding", "Onboarding"]);
-  if (has("CASE_MANAGER")) links.push(["#/voice", "Voice console"]);
-  links.push(["#/calendar", "Calendar"]);
-  if (has("FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "Reports"]);
-  nav.innerHTML = links.map(([h, l]) => `<a href="${h}">${l}</a>`).join("") +
-    `<button id="bell" class="bell" title="Notifications">🔔<span id="bell-n" class="bell-n"></span></button>` +
-    `<input id="gq" placeholder="Search…" style="padding:.25rem .5rem;border-radius:6px;border:0" />`;
+  const links = [
+    ["#/dashboard", "▤", "Home"], ["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
+    ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"],
+  ];
+  if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
+  links.push(["#/calendar", "▨", "Calendar"]);
+  links.push(["#/onboarding", "⚑", "Onboarding"]);
+  if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
+  if (has("FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
+  nav.innerHTML = links.map(([h, i, l]) =>
+    `<a href="${h}" data-route="${h.slice(2).split("/")[0]}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
+
+  // Notifications
   document.getElementById("bell").onclick = async () => {
     const n = await Api.cm.notifications().catch(() => []);
     const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
@@ -49,9 +73,13 @@
     const n = await Api.cm.notifications().catch(() => []);
     const unread = n.filter((x) => !x.read_at).length;
     const b = document.getElementById("bell-n");
-    if (unread) { b.textContent = unread; b.style.display = "inline-block"; }
+    if (unread) { b.textContent = unread; b.style.display = "block"; }
   })();
-  whoami.innerHTML = `${me.name} · ${Api.getTenant().toUpperCase()} · <a href="javascript:void(0)" id="lo">sign out</a>`;
+
+  // Identity
+  const initials = (me.name || "?").split(/[\s._-]+/).map((s) => s[0]).join("").slice(0, 2).toUpperCase();
+  document.getElementById("whoami").innerHTML =
+    `<span class="avatar">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo">sign out</a></span>`;
   document.getElementById("gq").addEventListener("keydown", (e) => {
     if (e.key === "Enter") location.hash = `#/search/${encodeURIComponent(e.target.value)}`;
   });
@@ -78,9 +106,13 @@
 
   async function render() {
     const h = location.hash || "#/dashboard";
+    nav.querySelectorAll("a").forEach((a) => {
+      const r = a.dataset.route;
+      a.classList.toggle("active", h.startsWith("#/" + r) || (r === "cases" && h.startsWith("#/new")));
+    });
     for (const [re, fn] of routes) {
       const m = h.match(re);
-      if (m) { view.innerHTML = await fn(m); return; }
+      if (m) { view.innerHTML = await fn(m); view.focus({ preventScroll: true }); return; }
     }
     view.innerHTML = `<h1>Not found</h1>`;
   }

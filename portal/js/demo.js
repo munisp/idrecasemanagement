@@ -1,0 +1,149 @@
+// demo.js — optional disconnected demo mode.
+// When window.IDRE_CONFIG.demoMode is true, the REAL portal code (views, router, api wrapper)
+// runs against built-in fixtures: only `fetch` and the OIDC token are stubbed. Every screen,
+// error path, and render function executes exactly as in production. Set demoMode:false for live.
+(function () {
+  if (!window.IDRE_CONFIG || !window.IDRE_CONFIG.demoMode) return;
+  window.IDRE_DEMO = true;
+
+  // --- Fake OIDC session (PKCE flow bypassed; claims shape identical to Keycloak) ---
+  const b64 = (o) => btoa(JSON.stringify(o)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const tok = `${b64({ alg: "none", typ: "JWT" })}.${b64({
+    sub: "demo-maria", preferred_username: "maria.chen", exp: 1999999999,
+    realm_access: { roles: ["CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PARTY"] },
+    groups: ["/tenant/tx"],
+  })}.demo`;
+  sessionStorage.setItem("idre.token", tok);
+  Auth.login = () => location.reload();
+  Auth.logout = () => location.reload();
+
+  // --- Fixtures (shapes mirror the Go case-api responses) ---
+  const now = Date.now(), d = (h) => new Date(now - h * 36e5).toISOString();
+  const CASES = [
+    { id: "c1", case_number: "CMS-TX-2026-01482", status: "IN_REVIEW", service_line: "ER", qpa_cents: 1842000, opened_at: d(96) },
+    { id: "c2", case_number: "CMS-TX-2026-01479", status: "OFFER_WINDOW_OPEN", service_line: "RADIOLOGY", qpa_cents: 693000, opened_at: d(120) },
+    { id: "c3", case_number: "CMS-TX-2026-01471", status: "DETERMINED", service_line: "ANESTHESIA", qpa_cents: 4125000, opened_at: d(300) },
+    { id: "c4", case_number: "CMS-TX-2026-01466", status: "NEGOTIATION_TRACKED", service_line: "ER", qpa_cents: 987500, opened_at: d(50) },
+    { id: "c5", case_number: "CMS-TX-2026-01455", status: "PAYMENT_PENDING", service_line: "AIR_AMBULANCE", qpa_cents: 5240000, opened_at: d(720) },
+    { id: "c6", case_number: "CMS-TX-2026-01448", status: "CLOSED_PAID", service_line: "LAB", qpa_cents: 1276000, opened_at: d(1100) },
+  ];
+  const DOCS = [
+    { doc_id: "doc1", content_type: "application/pdf", size_bytes: 248000, sealed: false, analysis_status: "ANALYZED", doc_type: "ITEMIZED_BILL" },
+    { doc_id: "doc2", content_type: "application/pdf", size_bytes: 96000, sealed: true, analysis_status: "SEALED", doc_type: "OFFER_JUSTIFICATION" },
+    { doc_id: "doc3", content_type: "image/png", size_bytes: 412000, sealed: false, analysis_status: "QUEUED", doc_type: null },
+  ];
+  const ACTS = [
+    { type: "STATUS_CHANGE", body: "Status changed OFFERS_SEALED → IN_REVIEW", at: d(3) },
+    { type: "ANALYSIS_COMPLETE", body: "Analysis complete on itemized-bill.pdf — 14 fields extracted, 2 seals detected", at: d(6) },
+    { type: "OFFER_SEALED", body: "Payer offer received and sealed (vault, HKDF tenant key)", at: d(20) },
+    { type: "OFFER_SEALED", body: "Provider offer received and sealed", at: d(21) },
+    { type: "NOTE", body: "QPA documentation verified against remit — R. Osei", at: d(26) },
+    { type: "TIMER", body: "Dispute auto-opened by statutory timer (negotiation window expired)", at: d(70) },
+  ];
+  const CHECKLIST = [
+    { id: "k1", stage: "DETERMINATION", item: "Verify QPA methodology against remittance", done: true, done_by: "r.osei", required: true },
+    { id: "k2", stage: "DETERMINATION", item: "Confirm both offers received within 10-bd window", done: true, done_by: "system", required: true },
+    { id: "k3", stage: "DETERMINATION", item: "Review itemized bill (doc-intel extraction confirmed)", done: true, done_by: "m.chen", required: true },
+    { id: "k4", stage: "DETERMINATION", item: "Select prevailing offer", done: false, required: true },
+    { id: "k5", stage: "DETERMINATION", item: "Draft determination rationale", done: false, required: true },
+    { id: "k6", stage: "DETERMINATION", item: "Issue determination letter (tenant-branded PDF)", done: false, required: true },
+  ];
+  const RELS = [{ rel_type: "BATCH", related_case_id: "c2" }];
+  const SUMMARY = [
+    { status: "NEGOTIATION_TRACKED", count: 12, avg_qpa_usd: 9800 }, { status: "INITIATED", count: 8, avg_qpa_usd: 15200 },
+    { status: "OFFER_WINDOW_OPEN", count: 9, avg_qpa_usd: 11400 }, { status: "IN_REVIEW", count: 7, avg_qpa_usd: 19800 },
+    { status: "DETERMINED", count: 6, avg_qpa_usd: 22600 }, { status: "CLOSED_PAID", count: 21, avg_qpa_usd: 16900 },
+  ];
+  const SLAS = [
+    { case_id: "c5", clock: "PAYMENT_30CD", detail: "Payment overdue by 2 calendar days", at: d(40) },
+    { case_id: "c1", clock: "DETERMINATION_30BD", detail: "2 business days remaining", at: d(3) },
+  ];
+  const ACCOUNTS = [
+    { id: "a1", legal_name: "Riverbend Surgical Center", type: "PROVIDER", npi: "1928304756", phone: "+1 512 555 0182" },
+    { id: "a2", legal_name: "Aetna Better Health of Texas", type: "PAYER", npi: null, phone: "+1 800 555 0143" },
+    { id: "a3", legal_name: "Alamo Imaging Partners", type: "PROVIDER", npi: "8475620193", phone: "+1 210 555 0166" },
+  ];
+  const A360 = {
+    account: ACCOUNTS[0],
+    contacts: [{ name: "Dana Whitfield", role_title: "Billing lead", email: "dana@riverbend.example", phone: "+1 512 555 0183" }],
+    cases: CASES.slice(0, 3),
+    notes: [{ body: "Prefers portal messaging over phone for determination questions.", created_at: d(200) }],
+  };
+  const LEADS = [
+    { id: "l1", name: "Front Desk", organization: "Gulf Coast Radiology", source: "VOICE", summary: "Asked about joining the IDR portal as a provider org.", status: "NEW" },
+    { id: "l2", name: "J. Park", organization: "Humana", source: "WEB", summary: "Payer onboarding inquiry — batch disputes.", status: "CONVERTED" },
+  ];
+  const TASKS = [
+    { id: "t1", subject: "Call Riverbend re: missing remit page", case_id: "c1", due_date: "2026-10-01", status: "OPEN" },
+    { id: "t2", subject: "Review batch eligibility for CMS-TX-2026-01490", case_id: "", due_date: "2026-10-02", status: "OPEN" },
+    { id: "t3", subject: "Verify escrow posting for admin fee", case_id: "c3", due_date: "2026-09-29", status: "DONE" },
+  ];
+  const CAL = [
+    { type: "OFFER_WINDOW_CLOSE", title: "Offer window closes (10bd)", case_id: "c2", case_number: "CMS-TX-2026-01479", due_date: "2026-10-07" },
+    { type: "TASK", title: "Call Riverbend re: missing remit page", case_id: "c1", case_number: "CMS-TX-2026-01482", due_date: "2026-10-01" },
+    { type: "DETERMINATION_DUE", title: "Determination due (30bd)", case_id: "c1", case_number: "CMS-TX-2026-01482", due_date: "2026-10-03" },
+  ];
+  const NOTIFS = [
+    { id: "n1", type: "SLA_RISK", message: "CMS-TX-2026-01482: 2 business days left on the determination clock", read_at: null, created_at: d(2) },
+    { id: "n2", type: "ONBOARDING_DECISION", message: "Alamo Imaging Partners approved — account created", read_at: null, created_at: d(9) },
+    { id: "n3", type: "ASSIGNMENT", message: "You were assigned CMS-TX-2026-01479", read_at: d(30), created_at: d(30) },
+  ];
+  const VIEWS = [{ id: "v1", name: "In review (arbiter queue)", filters: { status: "IN_REVIEW" } }];
+  const APPS = [
+    { id: "ob1", legal_name: "Pecos Valley ER Group", type: "PROVIDER_ORG", status: "PENDING_APPROVAL", submitted_at: d(15) },
+    { id: "ob2", legal_name: "Lone Star Audit Partners", type: "STATE_AUDITOR_ORG", status: "APPROVED", submitted_at: d(200) },
+  ];
+  const INTAKE = [{ caller_name: "S. Delgado", caller_phone: "+1 956 555 0114", organization: "Rio Grande Cardiology", summary: "Wants status of dispute and how to upload a remit.", status: "NEW", created_at: d(5) }];
+  const LOGS = [
+    { direction: "OUTBOUND", tool: "window_closing", case_number: "CMS-TX-2026-01479", status: "COMPLETED", created_at: d(8) },
+    { direction: "INBOUND", tool: "intake", case_number: "", status: "LOGGED", created_at: d(5) },
+  ];
+  const HITS = (q) => [
+    { kind: "case", id: "c1", label: "CMS-TX-2026-01482", detail: `ER · IN_REVIEW — matches “${q}”` },
+    { kind: "account", id: "a1", label: "Riverbend Surgical Center", detail: "PROVIDER · NPI 1928304756" },
+  ];
+
+  // --- fetch shim: the real Api wrapper runs; only transport is simulated ---
+  const realFetch = window.fetch.bind(window);
+  window.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (!u.includes("/v1/tenants/")) return realFetch(url, opts);
+    const method = (opts.method || "GET").toUpperCase();
+    const json = (data, status = 200) =>
+      new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+    const p = u.replace(/^.*\/v1\/tenants\/[^/]+/, "");
+    await new Promise((r) => setTimeout(r, 120)); // realistic latency
+
+    if (method === "GET") {
+      if (/\/cases\/[\w-]+\/documents\/[\w-]+\/analysis$/.test(p))
+        return json({ status: "ANALYZED", doc_type: "ITEMIZED_BILL", result: { seal_detected: true, table_count: 3, extracted: { cpt: "99285", billed: 18420.0, qpa: 11240.0, dos: "2026-08-14" }, findings: [] } });
+      if (/\/cases\/[\w-]+\/documents$/.test(p)) return json(DOCS);
+      if (/\/cases\/[\w-]+\/activities$/.test(p)) return json(ACTS);
+      if (/\/cases\/[\w-]+\/checklist$/.test(p)) return json(CHECKLIST);
+      if (/\/cases\/[\w-]+\/relationships$/.test(p)) return json(RELS);
+      if (/\/cases\/[\w-]+$/.test(p)) { const id = p.split("/")[2]; return json(CASES.find((c) => c.id === id) || CASES[0]); }
+      if (/\/cases$/.test(p)) return json(CASES);
+      if (/\/reports\/sla$/.test(p)) return json(SLAS);
+      if (/\/reports\/summary$/.test(p)) return json(SUMMARY);
+      if (/\/accounts\/[\w-]+\/360$/.test(p)) return json(A360);
+      if (/\/accounts(\?|$)/.test(p)) return json(ACCOUNTS);
+      if (/\/leads$/.test(p)) return json(LEADS);
+      if (/\/tasks(\?|$)/.test(p)) return json(TASKS);
+      if (/\/search\?/.test(p)) return json(HITS(new URLSearchParams(p.split("?")[1]).get("q") || ""));
+      if (/\/calendar$/.test(p)) return json(CAL);
+      if (/\/notifications$/.test(p)) return json(NOTIFS);
+      if (/\/views$/.test(p)) return json(VIEWS);
+      if (/\/onboarding\/applications$/.test(p)) return json(APPS);
+      if (/\/voice\/intake$/.test(p)) return json(INTAKE);
+      if (/\/voice\/logs$/.test(p)) return json(LOGS);
+      return json([], 404);
+    }
+    // POSTs: plausible server answers (mutations are acknowledged, views then reload fixtures)
+    if (/\/cases\/initiate$/.test(p)) return json({ case_id: "c1" });
+    if (/\/checklists\/[\w-]+\/check$/.test(p)) return json({ ok: true });
+    if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });
+    if (/\/fees\/transfer$/.test(p)) return json({ transfer_id: "tb-demo-1842", posted: true });
+    if (/\/voice\/outbound$/.test(p)) return json({ status: "QUEUED" });
+    return json({ ok: true });
+  };
+})();
