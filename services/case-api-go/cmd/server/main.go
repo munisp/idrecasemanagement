@@ -51,6 +51,7 @@ type Config struct {
 	StripeSecret   string // sk_live_… / sk_test_… ("" = card payments disabled)
 	StripeWebhook  string // whsec_… signing secret for /api/webhooks/stripe
 	PortalBaseURL  string // https://portal.example.gov — Stripe success/cancel return
+	ClamdAddr      string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
 }
 
 func configFromEnv() Config {
@@ -74,6 +75,7 @@ func configFromEnv() Config {
 		StripeSecret:   get("STRIPE_SECRET_KEY", ""),
 		StripeWebhook:  get("STRIPE_WEBHOOK_SECRET", ""),
 		PortalBaseURL:  get("PORTAL_BASE_URL", "http://localhost:8080"),
+		ClamdAddr:      get("CLAMD_ADDR", "localhost:3310"),
 	}
 }
 
@@ -310,6 +312,7 @@ func main() {
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
 		r.Get("/cases/{caseId}/documents", s.listDocuments)
 		r.Get("/cases/{caseId}/documents/{docId}/download", s.downloadDocument)
+		r.Patch("/cases/{caseId}/documents/{docId}", s.moveDocument) // re-file to folder (staff only)
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
 
 		// Stakeholder onboarding: applications, decisions, status.
@@ -409,8 +412,17 @@ func main() {
 	// Inbound email (Mailgun/SES-style provider webhook, token-authenticated).
 	r.Post("/api/email/inbound", s.emailInbound)
 
-	// Tokenized share-link landing (no OIDC; token + expiry + use-count is the auth).
-	r.Get("/api/share/{token}", s.resolveShareLink)
+	// ShareBox (no OIDC; token + expiry + use-count is the auth):
+	// HTML landing page + real no-login upload/download endpoints.
+	r.Get("/api/share/{token}", s.shareLanding)
+	r.Head("/api/share/{token}", s.resolveShareLink)
+	r.Get("/api/share/{token}/meta", s.resolveShareLink)
+	r.Post("/api/share/{token}/upload", s.shareUpload)                        // one-shot, small files
+	r.Post("/api/share/{token}/uploads", s.shareCreateUpload)                 // resumable: create
+	r.Head("/api/share/{token}/uploads/{uploadId}", s.shareUploadOffset)      // resume probe
+	r.Patch("/api/share/{token}/uploads/{uploadId}", s.shareUploadChunk)      // next chunk
+	r.Post("/api/share/{token}/uploads/{uploadId}/complete", s.shareCompleteUpload)
+	r.Get("/api/share/{token}/download", s.shareDownload)                     // Range/resume supported
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)

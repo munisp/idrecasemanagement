@@ -244,8 +244,10 @@ func (s *server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
-		Kind    string `json:"kind"` // upload|download
-		DaysTTL int    `json:"days_ttl"`
+		Kind      string `json:"kind"` // upload|download
+		DaysTTL   int    `json:"days_ttl"`
+		MaxUses   int    `json:"max_uses"`
+		ObjectKey string `json:"object_key"` // download links: pin to one document
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if in.Kind != "upload" && in.Kind != "download" {
@@ -255,14 +257,17 @@ func (s *server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	if in.DaysTTL <= 0 {
 		in.DaysTTL = 7
 	}
+	if in.MaxUses <= 0 {
+		in.MaxUses = 1
+	}
 	buf := make([]byte, 24)
 	_, _ = rand.Read(buf)
 	token := hex.EncodeToString(buf)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	_, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.share_links (token, tenant, case_id, kind, expires_at, created_by)
-		VALUES ($1,$2,$3,$4, now() + make_interval(days => $5), $6)`,
-		token, tenant, caseID, in.Kind, in.DaysTTL, p.Subject)
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), $7, $8)`,
+		token, tenant, caseID, in.Kind, in.ObjectKey, in.DaysTTL, in.MaxUses, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

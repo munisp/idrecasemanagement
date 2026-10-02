@@ -324,18 +324,34 @@ const Views = (() => {
         html += `<div class="actions">` + acts.map((a, i) =>
           `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
 
-      // Documents + analysis
-      html += `<h2>Documents</h2>
+      // Documents — docket grouped by folder with full metadata + RBAC controls
+      const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
+      html += `<h2>Docket</h2>
         <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
+        <select name="folder" aria-label="Folder">${FOLDERS.map((f) => `<option>${f}</option>`).join("")}</select>
         <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
         <button>Upload</button></form>`;
-      html += docs.length ? `<table><thead><tr><th>Type</th><th>Size</th><th>Sealed</th><th>Analysis</th><th></th></tr></thead><tbody>` +
-        docs.map((d) => `<tr><td>${esc(d.content_type)}</td><td>${(d.size_bytes / 1024).toFixed(0)} KB</td>
-          <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
-          <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
-          <td><a href="${Api.cases.downloadUrl(id, d.doc_id)}" target="_blank">download</a>
-          ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}</td></tr>`).join("") +
-        `</tbody></table>` : `<p class="muted">No documents yet.</p>`;
+      if (docs.length) {
+        const byFolder = {};
+        docs.forEach((d) => { (byFolder[d.folder || "GENERAL"] = byFolder[d.folder || "GENERAL"] || []).push(d); });
+        html += Object.entries(byFolder).map(([folder, items]) => `
+          <h3 class="doc-folder">📁 ${esc(folder)} <span class="muted">(${items.length})</span></h3>
+          <table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Scan</th><th>Sealed</th><th>Uploaded</th><th>Analysis</th><th></th></tr></thead><tbody>` +
+          items.map((d) => `<tr>
+            <td class="mono">${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</td>
+            <td>${esc(d.content_type || "—")}</td>
+            <td>${d.size_bytes > 1048576 ? (d.size_bytes / 1048576).toFixed(1) + " MB" : (d.size_bytes / 1024).toFixed(0) + " KB"}</td>
+            <td>${d.scan_status === "CLEAN" ? '<span class="badge s-paid">✓ clean</span>' : badge(d.scan_status || "PENDING")}</td>
+            <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
+            <td class="muted">${esc(d.uploaded_by || "")} · ${fmtDate(d.uploaded_at)}</td>
+            <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
+            <td><a href="${Api.cases.downloadUrl(id, d.doc_id)}" target="_blank">download</a>
+            ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
+            ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
+              ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value)"><option value="">move…</option>
+                ${FOLDERS.filter((f) => f !== d.folder).map((f) => `<option>${f}</option>`).join("")}</select>` : ""}</td></tr>`).join("") +
+          `</tbody></table>`).join("");
+      } else html += `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
 
       // Program panels (per-state rules: eligibility, correspondence/QA,
@@ -391,12 +407,18 @@ const Views = (() => {
         $("#up").addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = ev.target.file.files[0];
-          try { await Api.cases.upload(id, f, ev.target.sealed.checked); UI.toast("Document uploaded"); location.reload(); }
+          try { await Api.cases.upload(id, f, ev.target.sealed.checked, ev.target.folder.value); UI.toast("Document uploaded"); location.reload(); }
           catch (e) { UI.toast(e.message, { kind: "warn" }); }
         });
       });
       return html;
     } catch (e) { return err(e); }
+  }
+
+  async function moveDoc(caseId, docId, folder) {
+    if (!folder) return;
+    try { await Api.cases.moveDoc(caseId, docId, folder); UI.toast(`Moved to ${folder}`); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function showAnalysis(caseId, docId) {
@@ -940,5 +962,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, finance, payInvoice };
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, finance, payInvoice, moveDoc };
 })();

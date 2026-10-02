@@ -28,9 +28,14 @@
     { id: "c6", case_number: "CMS-TX-2026-01448", status: "CLOSED_PAID", service_line: "LAB", qpa_cents: 1276000, opened_at: d(1100) },
   ];
   const DOCS = [
-    { doc_id: "doc1", content_type: "application/pdf", size_bytes: 248000, sealed: false, analysis_status: "ANALYZED", doc_type: "ITEMIZED_BILL" },
-    { doc_id: "doc2", content_type: "application/pdf", size_bytes: 96000, sealed: true, analysis_status: "SEALED", doc_type: "OFFER_JUSTIFICATION" },
-    { doc_id: "doc3", content_type: "image/png", size_bytes: 412000, sealed: false, analysis_status: "QUEUED", doc_type: null },
+    { doc_id: "doc1", content_type: "application/pdf", size_bytes: 248000, sealed: false, analysis_status: "ANALYZED", doc_type: "ITEMIZED_BILL",
+      filename: "itemized-bill.pdf", folder: "EVIDENCE", scan_status: "CLEAN", uploaded_by: "maria.chen", uploaded_at: d(20) },
+    { doc_id: "doc2", content_type: "application/pdf", size_bytes: 96000, sealed: true, analysis_status: "SEALED", doc_type: "OFFER_JUSTIFICATION",
+      filename: "offer-justification.pdf", folder: "OFFERS", scan_status: "CLEAN", uploaded_by: "provider-portal", uploaded_at: d(21) },
+    { doc_id: "doc3", content_type: "image/png", size_bytes: 412000, sealed: false, analysis_status: "QUEUED", doc_type: null,
+      filename: "eob-scan.png", folder: "INTAKE", scan_status: "CLEAN", uploaded_by: "sharebox:7f3a", uploaded_at: d(6) },
+    { doc_id: "doc4", content_type: "application/pdf", size_bytes: 8420000, sealed: false, analysis_status: "ANALYZED", doc_type: "MEDICAL_RECORD",
+      filename: "medical-records-batch1.pdf", folder: "PARTY_UPLOADS", scan_status: "CLEAN", uploaded_by: "sharebox:7f3a", uploaded_at: d(4) },
   ];
   const ACTS = [
     { type: "STATUS_CHANGE", body: "Status changed OFFERS_SEALED → IN_REVIEW", at: d(3) },
@@ -133,6 +138,7 @@
       if (/\/cases\/clocks$/.test(p)) return json(Object.entries(CLOCKS).map(([case_id, clocks]) => ({ case_id, clocks })));
       if (/\/cases\/[\w-]+\/clocks$/.test(p)) { const id = p.split("/")[2]; return CLOCKS[id] ? json(CLOCKS[id]) : json({ error: "not found" }, 404); }
       if (/\/cases\/[\w-]+\/documents$/.test(p)) return json(DOCS);
+      if (/\/cases\/[\w-]+\/documents\/[\w-]+$/.test(p) && opts.method === "PATCH") return json({ folder: JSON.parse(opts.body || "{}").folder });
       if (/\/cases\/[\w-]+\/activities$/.test(p)) return json(ACTS);
       if (/\/cases\/[\w-]+\/checklist$/.test(p)) return json(CHECKLIST);
       if (/\/cases\/[\w-]+\/relationships$/.test(p)) return json(RELS);

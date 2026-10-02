@@ -136,8 +136,15 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # sk_live_…/sk_test_…; unset = card payments disabled
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}  # whsec_… from `stripe listen` / dashboard endpoint
       PORTAL_BASE_URL: ${PORTAL_BASE_URL:-http://localhost:8080}  # Stripe success/cancel return
+      CLAMD_ADDR: clamd:3310                  # ClamAV malware scanner (uploads fail-closed if down)
     ports: ["8080:8080"]
-    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify]
+    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify, clamd]
+
+  clamd:
+    image: clamav/clamav:stable           # freshclam updates signatures on start
+    ports: ["3310:3310"]
+    volumes:
+      - clamdb:/var/lib/clamav
 
   vault:
     build: ./services/vault-rs
@@ -239,3 +246,4 @@ volumes:
   miniodata:
   ollamadata:
   lakehouse:
+  clamdb:

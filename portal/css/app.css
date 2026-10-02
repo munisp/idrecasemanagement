@@ -316,3 +316,7 @@ body.density-compact td,body.density-compact th{font-size:12.5px}
 .badge.s-paid{background:#d1fae5;color:#065f46}
 .badge.s-pending,.badge.s-open{background:#fef3c7;color:#92400e}
 .badge.s-refunded,.badge.s-void{background:#fee2e2;color:#991b1b}
+
+/* docket folders */
+.doc-folder{margin:18px 0 6px;font-size:14px}
+select.mini{padding:3px 6px;font-size:12px;border:1px solid var(--border-default);border-radius:6px;background:var(--surface-base);color:inherit}

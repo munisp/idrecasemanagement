@@ -121,6 +121,10 @@ CREATE TABLE IF NOT EXISTS public.share_links (
     expires_at timestamptz NOT NULL,
     uses       int NOT NULL DEFAULT 0,
     max_uses   int NOT NULL DEFAULT 1,
+    files_used int NOT NULL DEFAULT 0,        -- abuse budgets (ShareBox)
+    max_files  int NOT NULL DEFAULT 5,
+    bytes_used bigint NOT NULL DEFAULT 0,
+    max_bytes  bigint NOT NULL DEFAULT 524288000, -- 500MB per link
     created_by text,
     created_at timestamptz NOT NULL DEFAULT now()
 );

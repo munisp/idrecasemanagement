@@ -31,12 +31,14 @@ const Api = (() => {
       get: (id) => req("GET", `${t()}/cases/${id}`),
       initiate: (payload) => req("POST", `${t()}/cases/initiate`, payload),
       signal: (id, signal, data) => req("POST", `${t()}/cases/${id}/signal`, { signal, data }),
-      upload: (id, file, sealed) => {
+      upload: (id, file, sealed, folder) => {
         const fd = new FormData();
         fd.append("file", file);
         if (sealed) fd.append("sealed", "true");
+        if (folder) fd.append("folder", folder);
         return req("POST", `${t()}/cases/${id}/documents`, fd, true);
       },
+      moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
