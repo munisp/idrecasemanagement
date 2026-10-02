@@ -302,3 +302,17 @@ body.density-compact td,body.density-compact th{font-size:12.5px}
 .inline-form textarea{flex-basis:100%}
 .inline-form button{padding:8px 14px}
 .qa-body{white-space:pre-wrap;background:var(--surface-sunken);border-radius:8px;padding:12px;font-size:13px;margin:10px 0}
+
+/* financial dashboard */
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:14px 0}
+.kpi{border:1px solid var(--border-default);border-radius:12px;padding:14px 16px;background:var(--surface-raised)}
+.kpi-n{display:block;font-size:22px;font-weight:700}
+.kpi-l{display:block;font-size:12px;color:var(--text-secondary);margin-top:2px}
+.aging-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:10px 0}
+.aging-cell{border:1px solid var(--border-default);border-radius:12px;padding:12px 14px;background:var(--surface-raised)}
+.aging-cell.warn{border-color:#b7791f}
+.aging-cell.bad{border-color:#c53030}
+.aging-cell.bad .kpi-n{color:#c53030}
+.badge.s-paid{background:#d1fae5;color:#065f46}
+.badge.s-pending,.badge.s-open{background:#fef3c7;color:#92400e}
+.badge.s-refunded,.badge.s-void{background:#fee2e2;color:#991b1b}

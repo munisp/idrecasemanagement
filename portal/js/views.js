@@ -738,7 +738,8 @@ const Views = (() => {
         el.innerHTML = (r.invoices || []).length ? `<table><tbody>` + r.invoices.map((v) =>
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
            <td>${badge(v.status)}</td>
-           <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY')">mark paid</a> ·
+           <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.payInvoice('${v.id}')">💳 pay by card</a> ·
+             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY')">mark paid</a> ·
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND')">refund</a>` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
       }).catch(() => {});
@@ -766,6 +767,14 @@ const Views = (() => {
       });
     });
     return html;
+  }
+
+  async function payInvoice(invId) {
+    try {
+      const r = await Api.program.checkout(invId);
+      if (r.checkout_url) { location.href = r.checkout_url; return; } // Stripe-hosted checkout
+      UI.toast("Checkout session created");
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function settleInvoice(invId, action) {
@@ -866,5 +875,70 @@ const Views = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable };
+  // ---- Financial dashboard (all money movement through the platform) -------
+
+  async function finance() {
+    try {
+      const [fin, pays] = await Promise.all([
+        Api.program.financial(), Api.program.payments().catch(() => ({ payments: [] })),
+      ]);
+      const k = fin.kpi || {};
+      const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+      let html = `<div class="view-head"><h1>Financials</h1>
+        <span class="muted">every payment and transaction through the platform · tenant <b>${esc(Api.getTenant()).toUpperCase()}</b>
+        ${fin.stripe_enabled ? ' · <span class="badge s-paid">stripe live</span>' : ' · <span class="badge">stripe not configured</span>'}</span></div>
+        <div class="kpi-row">
+          <div class="kpi"><span class="kpi-n">${usd(k.collected_cents)}</span><span class="kpi-l">Collected (all time)</span></div>
+          <div class="kpi"><span class="kpi-n">${usd(k.collected_30d_cents)}</span><span class="kpi-l">Collected (30 days)</span></div>
+          <div class="kpi"><span class="kpi-n">${usd(k.refunded_cents)}</span><span class="kpi-l">Refunded</span></div>
+          <div class="kpi"><span class="kpi-n">${esc(String(k.payments_count ?? 0))}</span><span class="kpi-l">Payments settled</span></div>
+        </div>`;
+
+      // Receivables + aging
+      const rec = fin.receivables || [];
+      if (rec.length)
+        html += `<h2>Receivables by status</h2><table><thead><tr><th>Status</th><th>Party</th><th>#</th><th>Total</th></tr></thead><tbody>` +
+          rec.map((x) => `<tr><td>${badge(x.status)}</td><td>${esc(x.party)}</td><td>${x.n}</td><td>${usd(x.total_cents)}</td></tr>`).join("") +
+          `</tbody></table>`;
+      const aging = fin.aging || [];
+      if (aging.length)
+        html += `<h2>A/R aging (open invoices)</h2><div class="aging-row">` +
+          ["current", "1-30", "31-60", "60+"].map((b) => {
+            const row = aging.find((a) => a.bucket === b);
+            return `<div class="aging-cell ${b === "60+" ? "bad" : b === "current" ? "" : "warn"}">
+              <span class="kpi-n">${row ? usd(row.total_cents) : "$0"}</span>
+              <span class="kpi-l">${b === "current" ? "Current" : b + " days past due"}${row ? ` · ${row.n} inv` : ""}</span></div>`;
+          }).join("") + `</div>`;
+
+      // Payment rails
+      const bm = fin.by_method || [];
+      if (bm.length)
+        html += `<h2>Payment rails</h2><table><thead><tr><th>Provider</th><th>Status</th><th>#</th><th>Total</th></tr></thead><tbody>` +
+          bm.map((x) => `<tr><td>${esc(x.provider)}</td><td>${badge(x.status)}</td><td>${x.n}</td><td>${usd(x.total_cents)}</td></tr>`).join("") +
+          `</tbody></table>`;
+
+      // Card payments
+      const plist = pays.payments || [];
+      if (plist.length)
+        html += `<h2>Card payments</h2><table><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody>` +
+          plist.slice(0, 25).map((p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
+            <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
+            <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
+            <td class="muted">${fmtDate(p.created_at)}</td></tr>`).join("") + `</tbody></table>`;
+
+      // Unified event stream
+      const ev = fin.events || [];
+      html += `<h2>Transaction stream</h2>` +
+        (ev.length ? `<table><thead><tr><th>Event</th><th>Dir</th><th>Amount</th><th>Party</th><th>Reference</th><th>Actor</th><th>When</th></tr></thead><tbody>` +
+          ev.map((e) => `<tr><td>${badge(e.kind)}</td>
+            <td>${e.direction === "IN" ? "↓ in" : e.direction === "OUT" ? "↑ out" : "—"}</td>
+            <td>${usd(e.amount_cents)}</td><td>${esc(e.party || "—")}</td>
+            <td class="mono">${esc(e.ref || "")}</td><td>${esc(e.actor || "")}</td>
+            <td class="muted">${fmtDate(e.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No financial events yet — issue an invoice to start the stream.</p>`);
+      return html;
+    } catch (e) { return err(e); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, finance, payInvoice };
 })();

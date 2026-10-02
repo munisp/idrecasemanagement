@@ -103,6 +103,7 @@
     links.push(["#/intake", "⇥", "Intake"]);
     links.push(["#/deliverables", "⎘", "Deliverables"]);
   }
+  if (has("FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   links.push(["#/calendar", "▨", "Calendar"]);
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
@@ -154,6 +155,7 @@
     [/^#\/qa$/, Views.qaQueue],
     [/^#\/intake$/, Views.intake],
     [/^#\/deliverables$/, Views.deliverables],
+    [/^#\/finance$/, Views.finance],
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],

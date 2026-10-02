@@ -64,6 +64,7 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_ISSUED",
 		fmt.Sprintf("Invoice %s issued to %s for $%d.%02d (%s, %d-day terms) by %s",
 			caseNumber, in.Party, in.AmountCents/100, in.AmountCents%100, in.Kind, in.DueDays, p.Subject))
+	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", in.AmountCents, in.Party, caseNumber, p.Subject)
 	writeJSON(w, http.StatusOK, map[string]any{"invoice_id": invID, "invoice_no": caseNumber})
 }
 
@@ -103,18 +104,37 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"action must be PAY|REFUND|VOID"}`, http.StatusBadRequest)
 		return
 	}
+	// Card refund first when a Stripe payment exists — never mark REFUNDED
+	// without the money actually moving.
+	if in.Action == "REFUND" {
+		if err := s.refundCardPayment(r, tenant, invID); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"stripe refund failed: %s"}`, err.Error()), http.StatusBadGateway)
+			return
+		}
+	}
 	var caseID string
+	var amount int64
+	var party string
 	err := s.db.QueryRow(r.Context(), `
 		UPDATE public.invoices SET status=$3, remittance_ref=$4,
 		       paid_at = CASE WHEN $3='PAID' THEN now()::date ELSE paid_at END
-		WHERE tenant=$1 AND id=$2 AND status='OPEN' RETURNING case_id`,
-		tenant, invID, status, in.RemittanceRef).Scan(&caseID)
+		WHERE tenant=$1 AND id=$2 AND status='OPEN' RETURNING case_id, amount_cents, party`,
+		tenant, invID, status, in.RemittanceRef).Scan(&caseID, &amount, &party)
 	if err != nil {
 		http.Error(w, `{"error":"not open or not found"}`, http.StatusConflict)
 		return
 	}
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_"+status,
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
+	// unified financial stream (offline settlements: check/ACH/manual)
+	kind, dir := "INVOICE_VOIDED", "NONE"
+	if in.Action == "PAY" {
+		kind, dir = "PAYMENT_PAID", "IN"
+	} else if in.Action == "REFUND" {
+		kind, dir = "REFUND_ISSUED", "OUT"
+	}
+	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef,
+		r.Context().Value(ctxPrincipal{}).(principal).Subject)
 	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 

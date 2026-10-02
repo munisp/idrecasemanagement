@@ -247,6 +247,31 @@
       { name: "Agency recommendation letter", due_rule: "case:AGENCY_RECOMMENDATION", next_due: "event-driven" }],
       history: [{ name: "Weekly report", status: "DELIVERED", delivered_at: d(24) }] });
     if (/\/cases\/[\w-]+\/opt-out$/.test(p)) return json({ status: "recorded" });
+    if (/\/invoices\/[\w-]+\/checkout$/.test(p)) return json({ payment_id: "pay2", checkout_url: "", session_id: "cs_test_demo" });
+    if (/\/reports\/financial$/.test(p)) return json({
+      kpi: { collected_cents: 4812300, refunded_cents: 41200, collected_30d_cents: 918400, payments_count: 37 },
+      receivables: [
+        { status: "OPEN", party: "PROVIDER", n: 14, total_cents: 1730260 },
+        { status: "OPEN", party: "HEALTH_PLAN", n: 9, total_cents: 1240800 },
+        { status: "PAID", party: "PROVIDER", n: 22, total_cents: 2718980 },
+        { status: "PAID", party: "HEALTH_PLAN", n: 15, total_cents: 2093320 },
+        { status: "REFUNDED", party: "PROVIDER", n: 1, total_cents: 41200 }],
+      aging: [
+        { bucket: "current", n: 12, total_cents: 1890400 },
+        { bucket: "1-30", n: 7, total_cents: 743500 },
+        { bucket: "31-60", n: 3, total_cents: 261160 },
+        { bucket: "60+", n: 1, total_cents: 76000 }],
+      by_method: [{ provider: "stripe", status: "PAID", n: 31, total_cents: 4421100 }, { provider: "stripe", status: "PENDING", n: 3, total_cents: 247180 }],
+      events: [
+        { id: 9, case_id: "c1", kind: "PAYMENT_PAID", direction: "IN", amount_cents: 41200, party: "HEALTH_PLAN", ref: "pi_3Qf2demo1", actor: "stripe-webhook", created_at: d(4) },
+        { id: 8, case_id: "c1", kind: "PAYMENT_INITIATED", direction: "NONE", amount_cents: 41200, party: "HEALTH_PLAN", ref: "cs_test_demo1", actor: "maria.chen", created_at: d(5) },
+        { id: 7, case_id: "c2", kind: "INVOICE_ISSUED", direction: "NONE", amount_cents: 12359, party: "PROVIDER", ref: "CMS-TX-2026-01479", actor: "maria.chen", created_at: d(9) },
+        { id: 6, case_id: "c3", kind: "REFUND_ISSUED", direction: "OUT", amount_cents: 41200, party: "PROVIDER", ref: "pi_3Qe9demo7", actor: "stripe-webhook", created_at: d(12) },
+        { id: 5, case_id: "c3", kind: "PAYMENT_PAID", direction: "IN", amount_cents: 41200, party: "PROVIDER", ref: "pi_3Qe9demo7", actor: "stripe-webhook", created_at: d(30) }],
+      stripe_enabled: true });
+    if (/\/payments$/.test(p) || /\/cases\/[\w-]+\/payments$/.test(p)) return json({ payments: [
+      { id: "pay1", case_id: "c1", invoice_id: "inv3", provider: "stripe", session_id: "cs_test_demo1", payment_intent: "pi_3Qf2demo1", amount_cents: 41200, currency: "usd", payer_email: "ap@sunhealth.example", status: "PAID", created_at: d(4) },
+      { id: "pay3", case_id: "c2", invoice_id: "inv1", provider: "stripe", session_id: "cs_test_demo2", payment_intent: null, amount_cents: 12359, currency: "usd", payer_email: null, status: "PENDING", created_at: d(1) }] });
     if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });
     if (/\/fees\/transfer$/.test(p)) return json({ transfer_id: "tb-demo-1842", posted: true });
     if (/\/voice\/outbound$/.test(p)) return json({ status: "QUEUED" });

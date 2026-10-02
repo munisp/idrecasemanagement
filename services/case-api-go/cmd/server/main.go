@@ -48,6 +48,9 @@ type Config struct {
 	DaprHTTP       string // http://localhost:3500
 	VaultURL       string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL  string // http://graph-intel:8082 ("" = graph features disabled)
+	StripeSecret   string // sk_live_… / sk_test_… ("" = card payments disabled)
+	StripeWebhook  string // whsec_… signing secret for /api/webhooks/stripe
+	PortalBaseURL  string // https://portal.example.gov — Stripe success/cancel return
 }
 
 func configFromEnv() Config {
@@ -68,6 +71,9 @@ func configFromEnv() Config {
 		DaprHTTP:       get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
 		VaultURL:       get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL:  get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		StripeSecret:   get("STRIPE_SECRET_KEY", ""),
+		StripeWebhook:  get("STRIPE_WEBHOOK_SECRET", ""),
+		PortalBaseURL:  get("PORTAL_BASE_URL", "http://localhost:8080"),
 	}
 }
 
@@ -378,6 +384,10 @@ func main() {
 		r.Get("/invoices", s.listInvoices)
 		r.Post("/invoices/{invId}/settle", s.settleInvoice)           // PAY|REFUND|VOID
 		r.Get("/reports/receivables", s.receivablesReport)
+		r.Post("/invoices/{invId}/checkout", s.createCheckout) // Stripe Checkout session
+		r.Get("/payments", s.listPayments)                     // payment history (tenant)
+		r.Get("/cases/{caseId}/payments", s.listPayments)      // payment history (case)
+		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
 		r.Post("/cases/{caseId}/claims", s.importClaims)              // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
 		r.Post("/intake", s.createIntake)                             // pre-case intake (G12)
@@ -401,6 +411,9 @@ func main() {
 
 	// Tokenized share-link landing (no OIDC; token + expiry + use-count is the auth).
 	r.Get("/api/share/{token}", s.resolveShareLink)
+
+	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
+	r.Post("/api/webhooks/stripe", s.stripeWebhook)
 
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	must(http.ListenAndServe(cfg.Addr, r))

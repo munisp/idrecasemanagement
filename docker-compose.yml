@@ -133,6 +133,9 @@ services:
       REDIS_ADDR: redis:6379            # JWKS cache + initiate idempotency
       PERMIFY_URL: http://permify:3476  # ReBAC object-level authorization (unset = dev bypass)
       GRAPH_INTEL_URL: http://graph-intel:8082  # FalkorDB + GraphSAGE + EPR-KGQA proxy target
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # sk_live_…/sk_test_…; unset = card payments disabled
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}  # whsec_… from `stripe listen` / dashboard endpoint
+      PORTAL_BASE_URL: ${PORTAL_BASE_URL:-http://localhost:8080}  # Stripe success/cancel return
     ports: ["8080:8080"]
     depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify]
 
