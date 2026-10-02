@@ -98,6 +98,11 @@
   ];
   if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
   links.push(["#/ask", "✦", "Ask the graph"]);
+  if (has("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+    links.push(["#/qa", "✓", "QA gate"]);
+    links.push(["#/intake", "⇥", "Intake"]);
+    links.push(["#/deliverables", "⎘", "Deliverables"]);
+  }
   links.push(["#/calendar", "▨", "Calendar"]);
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
@@ -146,6 +151,9 @@
     [/^#\/crm\/tasks$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
     [/^#\/ask$/, Views.askGraph],
+    [/^#\/qa$/, Views.qaQueue],
+    [/^#\/intake$/, Views.intake],
+    [/^#\/deliverables$/, Views.deliverables],
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],

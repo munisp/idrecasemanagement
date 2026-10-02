@@ -338,6 +338,12 @@ const Views = (() => {
         `</tbody></table>` : `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
 
+      // Program panels (per-state rules: eligibility, correspondence/QA,
+      // invoices, claims, dual status, program dates, opt-out) — rendered
+      // only when the tenant runs a custom program.
+      html += `<div id="prog"></div>`;
+      programPanel(id).then((h) => { const b = document.getElementById("prog"); if (b) b.innerHTML = h; });
+
       if (rels.length)
         html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
           `<tr><td>${badge(r.rel_type)}</td><td class="mono">${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
@@ -619,5 +625,246 @@ const Views = (() => {
     return html;
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph };
+  // ---- Program rules UI (G1–G15 surfaces) ---------------------------------
+
+  async function programPanel(id) {
+    const prog = await Api.program.get().catch(() => null);
+    if (!prog || !prog.config) return ""; // federal NSA tenants: nothing extra
+    const cfg = prog.config;
+    const c = await Api.cases.get(id).catch(() => ({}));
+    let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
+      <details class="prog-sec" open><summary>Dual status</summary>
+      <form id="p-status" class="inline-form">
+        <select name="internal"><option value="">internal status…</option>
+          ${(cfg.statuses?.internal || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+        <select name="agency"><option value="">agency status…</option>
+          ${(cfg.statuses?.agency || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+        <button>Update status</button></form></details>
+
+      <details class="prog-sec"><summary>Program dates (clock bases)</summary>
+      <form id="p-date" class="inline-form">
+        <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
+        <input type="date" name="value" required /><button>Record date</button></form></details>
+
+      <details class="prog-sec"><summary>Eligibility review</summary>
+      <form id="p-elig" class="inline-form">
+        <input name="provider_type" placeholder="provider type (e.g. hospital_inpatient)" required />
+        <label>contracted <input type="checkbox" name="contracted" /></label>
+        <input name="amount" type="number" step="0.01" placeholder="disputed $" required />
+        <input name="fd" type="date" title="final determination date" />
+        <input name="flags" placeholder="flags (comma-separated reason codes)" />
+        <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
+
+      <details class="prog-sec"><summary>Correspondence</summary>
+      <form id="p-send" class="inline-form">
+        <select name="template">${(cfg.correspondence?.templates || []).map((tp) =>
+          `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
+        <input name="to" placeholder="to emails (comma-separated)" required />
+        <input name="cc" placeholder="cc emails" />
+        <textarea name="body" rows="3" placeholder="message body" required></textarea>
+        <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
+
+      <details class="prog-sec"><summary>Invoices & claims</summary>
+      <form id="p-inv" class="inline-form">
+        <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
+        <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
+        <input name="amount" type="number" step="0.01" placeholder="amount $" required />
+        <button>Issue invoice</button></form><div id="p-inv-list"></div>
+      <form id="p-claims" class="inline-form">
+        <textarea name="csv" rows="3" placeholder="claim_number,cpt,billed,paid per line (bulk import)"></textarea>
+        <button>Import claims</button></form><div id="p-claims-list"></div></details>
+
+      <details class="prog-sec"><summary>Share links & opt-out</summary>
+      <div class="actions">
+        <button id="p-share-up">Create upload link</button>
+        <button id="p-share-dl">Create download link</button></div><div id="p-share-out"></div>
+      <form id="p-optout" class="inline-form">
+        <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
+        <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form></details>`;
+
+    queueMicrotask(() => {
+      const money = (v) => Math.round(parseFloat(v) * 100);
+      $("#p-status")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try { await Api.program.setStatus(id, { internal_status: f.internal.value, agency_status: f.agency.value });
+          UI.toast("Status updated"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      $("#p-date")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try { await Api.program.setDate(id, f.key.value, f.value.value); UI.toast("Program date recorded — clocks re-projected"); location.reload(); }
+        catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      $("#p-elig")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try {
+          const r = await Api.program.eligibility(id, {
+            provider_type: f.provider_type.value, contracted: f.contracted.checked,
+            disputed_amount_cents: money(f.amount.value),
+            final_determination_at: f.fd.value || "",
+            flags: f.flags.value ? f.flags.value.split(",").map((x) => x.trim()).filter(Boolean) : [],
+          });
+          document.getElementById("p-elig-out").innerHTML =
+            `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""} <span class="muted">review ${esc(r.review_id)}</span></p>`;
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      $("#p-send")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        const split = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
+        try {
+          const r = await Api.program.send(id, { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value) });
+          UI.toast(r.status === "PENDING" ? "Draft submitted to QA gate" : "Sent — logged to correspondence");
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      Api.program.correspondence(id).then((r) => {
+        const el = document.getElementById("p-corr"); if (!el) return;
+        const rows = r.correspondence || [];
+        el.innerHTML = rows.length ? `<table><tbody>` + rows.slice(0, 10).map((m) =>
+          `<tr><td>${badge(m.direction)}</td><td>${esc(m.subject || "")}</td>
+           <td class="muted">${esc(m.template || "")} · ${fmtDate(m.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : "";
+      }).catch(() => {});
+      $("#p-inv")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try { await Api.program.issueInvoice(id, { party: f.party.value, kind: f.kind.value, amount_cents: money(f.amount.value) });
+          UI.toast("Invoice issued (number = case number)"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      Api.program.invoices(id).then((r) => {
+        const el = document.getElementById("p-inv-list"); if (!el) return;
+        el.innerHTML = (r.invoices || []).length ? `<table><tbody>` + r.invoices.map((v) =>
+          `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
+           <td>${badge(v.status)}</td>
+           <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY')">mark paid</a> ·
+             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND')">refund</a>` : ""}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
+      }).catch(() => {});
+      $("#p-claims")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const lines = ev.target.csv.value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+          const [claim_number, cpt, billed, paid] = l.split(",");
+          return { claim_number, cpt, billed_cents: money(billed || 0), paid_cents: money(paid || 0) };
+        });
+        try { const r = await Api.program.importClaims(id, lines); UI.toast(`${r.imported} claim lines imported`); }
+        catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      const share = async (kind) => {
+        try { const r = await Api.program.shareLink(id, kind, 7);
+          document.getElementById("p-share-out").innerHTML =
+            `<p class="mono">share link: ${esc(window.IDRE_CONFIG.apiBase)}${esc(r.path)}</p>`;
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      };
+      document.getElementById("p-share-up")?.addEventListener("click", () => share("upload"));
+      document.getElementById("p-share-dl")?.addEventListener("click", () => share("download"));
+      $("#p-optout")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        try { await Api.program.optOut(id, ev.target.eligible.checked, ev.target.rationale.value);
+          UI.toast("Opt-out decision recorded"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+    });
+    return html;
+  }
+
+  async function settleInvoice(invId, action) {
+    const ref = action === "PAY" ? (prompt("Remittance reference (RA/ERA):", "") || "") : "";
+    try { await Api.program.settleInvoice(invId, action, ref); UI.toast(`Invoice ${action === "PAY" ? "paid" : action.toLowerCase() + "ed"}`); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function qaQueue() {
+    try {
+      const r = await Api.program.qaQueue();
+      const q = r.queue || [];
+      return `<div class="view-head"><h1>QA gate</h1>
+        <span class="muted">nothing reaches a party without approval on gated templates</span></div>` +
+        (q.length ? `<table><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead><tbody>` +
+          q.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
+            <td>${esc(i.drafted_by)}</td>
+            <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">Queue empty — no drafts awaiting review.</p>`) + `<div id="qa-detail"></div>`;
+    } catch (e) { return err(e); }
+  }
+
+  async function qaReview(qaId) {
+    const box = $("#qa-detail");
+    try {
+      const d = await Api.program.qaGet(qaId);
+      const to = (d.to_recipients || []).join(", ");
+      box.innerHTML = `<div class="card"><h3>${esc(d.subject)}</h3>
+        <p class="muted">to: ${esc(to)} · channel ${esc(d.channel)}</p>
+        <pre class="qa-body">${esc(d.body)}</pre>
+        <div class="actions">
+          <button onclick="Views.qaDecide('${qaId}','APPROVE')">Approve & send</button>
+          <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT')">Reject</button></div></div>`;
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function qaDecide(qaId, decision) {
+    const note = decision === "REJECT" ? (prompt("Rejection note:", "") || "") : "";
+    try { await Api.program.qaDecision(qaId, decision, note);
+      UI.toast(decision === "APPROVE" ? "Approved — sent and logged" : "Rejected"); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function intake() {
+    try {
+      const r = await Api.program.intake();
+      const rows = r.intake || [];
+      return `<div class="view-head"><h1>Pre-case intake</h1>
+        <span class="muted">instruction requests awaiting documents and fees</span></div>
+        <form class="inline-form" onsubmit="return Views.newIntake(this)">
+          <input name="email" type="email" placeholder="requester email" required />
+          <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
+          <button>New intake request</button></form>` +
+        (rows.length ? `<table><thead><tr><th>Email</th><th>Org</th><th>Status</th><th>Outreach</th><th></th></tr></thead><tbody>` +
+          rows.map((i) => `<tr><td>${esc(i.email)}</td><td>${esc(i.org || "")}</td><td>${badge(i.status)}</td>
+            <td class="muted">${fmtDate(i.outreach_at)}</td>
+            <td>${i.status !== "CONVERTED" && i.status !== "CLOSED_REFUNDED" ?
+              `<select onchange="Views.advanceIntake('${i.id}', this.value)">
+                <option value="">advance…</option><option>DOCS_RECEIVED</option><option>PAID</option>
+                <option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No intake requests.</p>`);
+    } catch (e) { return err(e); }
+  }
+
+  async function newIntake(form) {
+    try {
+      await Api.program.createIntake({ email: form.email.value, contact_name: form.contact_name.value, org: form.org.value });
+      UI.toast("Intake request opened — submission instructions queued"); location.reload();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    return false;
+  }
+
+  async function advanceIntake(id, status) {
+    let caseId = "";
+    if (status === "CONVERTED") caseId = prompt("Case ID to link:", "") || "";
+    try { await Api.program.advanceIntake(id, status, caseId); UI.toast(`Intake → ${status}`); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function deliverables() {
+    try {
+      const r = await Api.program.deliverables();
+      const d = r.deliverables || [];
+      return `<div class="view-head"><h1>Contract deliverables</h1>
+        <span class="muted">program report schedule</span></div>` +
+        (d.length ? `<table><thead><tr><th>Deliverable</th><th>Rule</th><th>Next due</th><th></th></tr></thead><tbody>` +
+          d.map((x) => `<tr><td>${esc(x.name)}</td><td class="mono">${esc(x.due_rule)}</td><td>${esc(x.next_due)}</td>
+            <td><button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}')">mark delivered</button></td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No deliverables configured for this program.</p>`) +
+        ((r.history || []).length ? `<h2>Delivery history</h2><table><tbody>` +
+          r.history.map((h) => `<tr><td>${esc(h.name)}</td><td>${badge(h.status)}</td>
+            <td class="muted">${fmtDate(h.delivered_at)}</td></tr>`).join("") + `</tbody></table>` : "");
+    } catch (e) { return err(e); }
+  }
+
+  async function submitDeliverable(name) {
+    try { await Api.program.submitDeliverable({ name }); UI.toast("Deliverable recorded"); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable };
 })();

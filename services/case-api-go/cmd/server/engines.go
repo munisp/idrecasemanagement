@@ -147,8 +147,15 @@ func (s *server) casesClocks(w http.ResponseWriter, r *http.Request) {
 // GET /cases/{caseId}/clocks — per-case projection for the workspace header.
 func (s *server) caseClocks(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	// Tenants with program_rules run the generic program clock engine (G1);
+	// tenants without (federal NSA) keep the statutory 45 CFR projection.
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		s.caseProgramClocks(w, r, tenant, caseID, cfg)
+		return
+	}
 	today := time.Now().Truncate(24 * time.Hour)
-	rows := s.loadClockRows(r, tenant, chi.URLParam(r, "caseId"))
+	rows := s.loadClockRows(r, tenant, caseID)
 	if len(rows) == 0 {
 		http.Error(w, `{"error":"not found or no active clocks"}`, http.StatusNotFound)
 		return

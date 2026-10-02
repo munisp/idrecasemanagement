@@ -87,13 +87,15 @@ type Case struct {
 }
 
 type InitiateRequest struct {
-	CaseNumber       string `json:"case_number"`
+	CaseNumber       string `json:"case_number"`           // optional when the tenant program defines a numbering pattern
 	ServiceLine      string `json:"service_line"`
 	PlanType         string `json:"plan_type"` // FULLY_INSURED | SELF_FUNDED
 	QPACents         int64  `json:"qpa_cents"`
 	ProviderID       string `json:"provider_id"`
 	PayerID          string `json:"payer_id"`
 	OpenNegotiationEnd string `json:"open_negotiation_end"` // YYYY-MM-DD
+	DisputedAmountCents int64 `json:"disputed_amount_cents"` // program disputes: drives thresholds + escalation
+	NumClaims        int    `json:"num_claims"`
 }
 
 type FeeTransfer struct {
@@ -359,6 +361,31 @@ func main() {
 		r.Post("/cases/{caseId}/letters/{template}", s.generateLetter)
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
+
+		// Program rules (per-state customization; federal NSA is the no-config default).
+		r.Get("/program", s.getProgram)
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
+		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
+		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
+		r.Post("/cases/{caseId}/share-links", s.createShareLink)      // tokenized upload/download (G9)
+		r.Get("/qa", s.qaQueue)                                       // QA gate queue (G4)
+		r.Get("/qa/{qaId}", s.qaGet)
+		r.Post("/qa/{qaId}/decision", s.qaDecision)
+		r.Post("/cases/{caseId}/invoices", s.issueInvoice)            // dual-party receivables (G8)
+		r.Get("/cases/{caseId}/invoices", s.listInvoices)
+		r.Get("/invoices", s.listInvoices)
+		r.Post("/invoices/{invId}/settle", s.settleInvoice)           // PAY|REFUND|VOID
+		r.Get("/reports/receivables", s.receivablesReport)
+		r.Post("/cases/{caseId}/claims", s.importClaims)              // bulk claim lines (G10)
+		r.Get("/cases/{caseId}/claims", s.listClaims)
+		r.Post("/intake", s.createIntake)                             // pre-case intake (G12)
+		r.Get("/intake", s.listIntake)
+		r.Post("/intake/{intakeId}/advance", s.advanceIntake)         // refund window enforced
+		r.Get("/deliverables", s.listDeliverables)                    // contract schedule (G7)
+		r.Post("/deliverables", s.submitDeliverable)
+		r.Post("/cases/{caseId}/opt-out", s.recordOptOut)             // plan opt-out adjudication (G14)
 	})
 
 	// Voice-AI surface (API-key auth, not OIDC).
@@ -371,6 +398,9 @@ func main() {
 
 	// Inbound email (Mailgun/SES-style provider webhook, token-authenticated).
 	r.Post("/api/email/inbound", s.emailInbound)
+
+	// Tokenized share-link landing (no OIDC; token + expiry + use-count is the auth).
+	r.Get("/api/share/{token}", s.resolveShareLink)
 
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	must(http.ListenAndServe(cfg.Addr, r))
@@ -454,13 +484,23 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		initialStatus = "NEGOTIATION_TRACKED"
 	}
 
+	// Program numbering (G11): when the tenant runs a custom program with a
+	// numbering pattern and the caller leaves case_number blank, generate it
+	// (e.g. FL26-042). Explicit case numbers are still honored.
+	prog := s.loadProgram(r, tenant)
+	if req.CaseNumber == "" && prog != nil && prog.CaseNumber.Pattern != "" {
+		req.CaseNumber = s.nextCaseNumber(r, tenant, prog)
+	}
+
 	var caseID string
 	err = tx.QueryRow(r.Context(), `
 		INSERT INTO cases (case_number, status, service_line, plan_type, qpa_cents,
-		                   provider_id, payer_id, open_negotiation_end)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+		                   provider_id, payer_id, open_negotiation_end,
+		                   disputed_amount_cents, num_claims)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
 		req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents,
-		req.ProviderID, req.PayerID, req.OpenNegotiationEnd).Scan(&caseID)
+		req.ProviderID, req.PayerID, req.OpenNegotiationEnd,
+		req.DisputedAmountCents, req.NumClaims).Scan(&caseID)
 	if err != nil {
 		http.Error(w, `{"error":"insert"}`, http.StatusInternalServerError)
 		return
@@ -518,6 +558,9 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("#/cases/%s", caseID))
 		}
 	}
+
+	// Program escalation trigger (G6): auto-route over-threshold disputes.
+	s.escalationTrigger(r, tenant, caseID, req.DisputedAmountCents)
 
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
 	if key := r.Header.Get("Idempotency-Key"); key != "" {

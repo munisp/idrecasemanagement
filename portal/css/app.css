@@ -292,3 +292,13 @@ body.density-compact td,body.density-compact th{font-size:12.5px}
 .t-select:focus-visible{outline:2px solid var(--accent-primary);outline-offset:2px;border-radius:4px}
 .t-select option{color:#1a1a1a;background:#fff}
 .badge.s-audit{background:var(--surface-sunken);color:var(--text-secondary);border:1px dashed var(--border-default);font-size:10.5px;margin-left:8px}
+
+/* program rules panels (G1-G15 surfaces) */
+.prog-sec{border:1px solid var(--border-default);border-radius:10px;margin:10px 0;background:var(--surface-raised)}
+.prog-sec>summary{cursor:pointer;padding:10px 14px;font-weight:600}
+.prog-sec>summary:hover{color:var(--accent-primary)}
+.inline-form{display:flex;flex-wrap:wrap;gap:8px;padding:0 14px 14px;align-items:center}
+.inline-form input,.inline-form select,.inline-form textarea{padding:7px 10px;border:1px solid var(--border-default);border-radius:8px;background:var(--surface-base);color:inherit;font:inherit;min-width:140px}
+.inline-form textarea{flex-basis:100%}
+.inline-form button{padding:8px 14px}
+.qa-body{white-space:pre-wrap;background:var(--surface-sunken);border-radius:8px;padding:12px;font-size:13px;margin:10px 0}

@@ -186,6 +186,67 @@
       { kind: "Case", id: "c3", label: "CMS-TX-2026-01480", detail: "OFFERS_SEALED" }] });
     if (/\/graph\/sync$/.test(p)) return json({ tenant: "tx", cases: 6, bronze: "lakehouse/bronze/cases-tx-demo.jsonl", silver: "lakehouse/silver/cases_tx.parquet" });
     if (/\/graph\/train$/.test(p)) return json({ tenant: "tx", trained: true, model_version: "graphsage-np-1.0", cases: 6, positive_edges: 11, epochs: 120, final_loss: 0.214, train_seconds: 0.4 });
+
+    // --- program-rules fixtures (FL AHCA shape on the demo tenant) ---
+    if (/\/program$/.test(p)) return json({ program: "custom", config: {
+      case_number: { pattern: "FL{yy}-{seq}", seq_pad: 3 },
+      statuses: { internal: ["Pre-Case", "Initial Review", "Hold", "Full Review", "Determination", "Provider Closure Letter Issued", "Opted Out"],
+        agency: ["Submitted", "Under Review", "Eligible", "Ineligible", "Determination Issued", "Other"] },
+      clocks: [
+        { name: "AGENCY_RECOMMENDATION", label: "Agency recommendation", basis: "received_at", days: 60, day_type: "calendar", cite: "AHCA CDR contract §2.3.3", breach: "escalate_pm" },
+        { name: "PLAN_RESPONSE", label: "Plan response window", basis: "plan_notified_at", days: 15, day_type: "calendar", cite: "AHCA CDR contract", breach: "follow_up" }],
+      eligibility: { thresholds: [{ provider_type: "hospital_inpatient", contracted: true, min_cents: 2500000 }],
+        filing_window_months: 12, ineligibility_reasons: ["below_threshold", "over_12_months"] },
+      correspondence: { templates: [
+        { key: "estimate_cost", subject: "Full Review Estimate {case_number}: FL AHCA", to: ["filing_party"], cc: ["agency"] },
+        { key: "acceptance", subject: "Results of Preliminary Review {case_number}: FL AHCA", to: ["provider"], cc: ["agency", "health_plan"] },
+        { key: "dismissal", subject: "Dismissal {case_number}: FL AHCA", to: ["provider"], cc: ["agency"], qa_role: "ATTORNEY" }] },
+      deliverables: [
+        { name: "Weekly report", due_rule: "weekly:MONDAY" }, { name: "Monthly report", due_rule: "monthly:10" },
+        { name: "Agency recommendation letter", due_rule: "case:AGENCY_RECOMMENDATION" }],
+    } });
+    if (/\/cases\/[\w-]+\/program-date$/.test(p)) return json({ status: "recorded" });
+    if (/\/cases\/[\w-]+\/status$/.test(p)) return json({ status: "updated" });
+    if (/\/cases\/[\w-]+\/eligibility$/.test(p)) return json({ review_id: "er1", result: "ELIGIBLE", reason: "", evidence: { threshold_min_cents: 2500000 } });
+    if (/\/cases\/[\w-]+\/correspondence$/.test(p) && opts.method === "POST") {
+      const b = JSON.parse(opts.body || "{}");
+      return json(b.template === "dismissal"
+        ? { qa_id: "qa1", status: "PENDING", subject: "Dismissal CMS-TX-2026-01482: FL AHCA" }
+        : { qa_id: "qa2", status: "SENT", subject: "Estimate CMS-TX-2026-01482: FL AHCA" });
+    }
+    if (/\/cases\/[\w-]+\/correspondence$/.test(p)) return json({ correspondence: [
+      { id: "m1", direction: "OUT", template: "estimate_cost", subject: "Full Review Estimate CMS-TX-2026-01482: FL AHCA", recipients: { to: ["billing@provider.example"] }, sent_by: "maria.chen", created_at: d(30) },
+      { id: "m2", direction: "IN", template: null, subject: "RE: Full Review Estimate", recipients: {}, sent_by: "billing@provider.example", created_at: d(24) }] });
+    if (/\/cases\/[\w-]+\/share-links$/.test(p)) return json({ token: "demo-share-7f3a", path: "/s/demo-share-7f3a", kind: JSON.parse(opts.body || "{}").kind });
+    if (/\/cases\/[\w-]+\/invoices$/.test(p) && opts.method === "POST") return json({ invoice_id: "inv2", invoice_no: "CMS-TX-2026-01482" });
+    if (/\/cases\/[\w-]+\/invoices$/.test(p)) return json({ invoices: [
+      { id: "inv1", invoice_no: "CMS-TX-2026-01482", party: "PROVIDER", kind: "INITIAL_FEE", amount_cents: 12359, status: "OPEN", due_date: d(-20).slice(0, 10) },
+      { id: "inv3", invoice_no: "CMS-TX-2026-01482", party: "HEALTH_PLAN", kind: "FULL_REVIEW", amount_cents: 41200, status: "PAID", due_date: d(10).slice(0, 10) }] });
+    if (/\/invoices\/[\w-]+\/settle$/.test(p)) return json({ status: "PAID" });
+    if (/\/reports\/receivables$/.test(p)) return json({ receivables: [
+      { party: "PROVIDER", kind: "INITIAL_FEE", status: "OPEN", n: 14, total_cents: 1730260, overdue_cents: 247180 }] });
+    if (/\/cases\/[\w-]+\/claims$/.test(p) && opts.method === "POST") return json({ imported: (JSON.parse(opts.body || "{}").claims || []).length });
+    if (/\/cases\/[\w-]+\/claims$/.test(p)) return json({ claims: [
+      { claim_number: "CLM-1042", cpt: "99285", billed_cents: 184200, paid_cents: 91200, created_at: d(40) },
+      { claim_number: "CLM-1043", cpt: "99291", billed_cents: 226000, paid_cents: 118400, created_at: d(40) }] });
+    if (/\/qa\/[\w-]+\/decision$/.test(p)) return json({ status: JSON.parse(opts.body || "{}").decision === "APPROVE" ? "APPROVED" : "REJECTED" });
+    if (/\/qa\/[\w-]+$/.test(p)) return json({ id: "qa1", case_id: "c1", channel: "email", subject: "Dismissal CMS-TX-2026-01482: FL AHCA",
+      body: "Dear provider,\n\nFollowing preliminary review, case CMS-TX-2026-01482 does not meet the program eligibility threshold…",
+      to_recipients: ["billing@provider.example"], cc_recipients: ["cdr@ahca.example"], status: "PENDING", drafted_by: "maria.chen", created_at: d(2) });
+    if (/\/qa$/.test(p)) return json({ queue: [
+      { id: "qa1", case_id: "c1", artifact: "dismissal", channel: "email", subject: "Dismissal CMS-TX-2026-01482: FL AHCA", status: "PENDING", drafted_by: "maria.chen", created_at: d(2) }] });
+    if (/\/intake$/.test(p) && opts.method === "POST") return json({ intake_id: "in2", status: "INSTRUCTED" });
+    if (/\/intake\/[\w-]+\/advance$/.test(p)) return json({ status: JSON.parse(opts.body || "{}").status });
+    if (/\/intake$/.test(p)) return json({ intake: [
+      { id: "in1", email: "revcycle@memorial.example", org: "Memorial Regional", status: "DOCS_RECEIVED", outreach_at: d(48), created_at: d(50) },
+      { id: "in3", email: "claims@sunhealth.example", org: "Sun Health Plan", status: "PAID", outreach_at: d(120), created_at: d(122) }] });
+    if (/\/deliverables$/.test(p) && opts.method === "POST") return json({ status: "DELIVERED" });
+    if (/\/deliverables$/.test(p)) return json({ deliverables: [
+      { name: "Weekly report", due_rule: "weekly:MONDAY", next_due: d(-96).slice(0, 10) },
+      { name: "Monthly report", due_rule: "monthly:10", next_due: d(-240).slice(0, 10) },
+      { name: "Agency recommendation letter", due_rule: "case:AGENCY_RECOMMENDATION", next_due: "event-driven" }],
+      history: [{ name: "Weekly report", status: "DELIVERED", delivered_at: d(24) }] });
+    if (/\/cases\/[\w-]+\/opt-out$/.test(p)) return json({ status: "recorded" });
     if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });
     if (/\/fees\/transfer$/.test(p)) return json({ transfer_id: "tb-demo-1842", posted: true });
     if (/\/voice\/outbound$/.test(p)) return json({ status: "QUEUED" });
