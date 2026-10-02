@@ -75,9 +75,9 @@ CREATE TABLE IF NOT EXISTS public.audit_log (
 -- Per-tenant DDL template (executed once per state with search_path set):
 CREATE OR REPLACE FUNCTION public.provision_tenant(p_tenant text) RETURNS void AS $$
 BEGIN
-    EXECUTE format('CREATE SCHEMA IF NOT EXISTS tenant_%I', p_tenant);
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', 'tenant_' || p_tenant);
     EXECUTE format($ddl$
-        CREATE TABLE IF NOT EXISTS tenant_%I.cases (
+        CREATE TABLE IF NOT EXISTS %I.cases (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             workflow_id text,
             case_number text NOT NULL UNIQUE,
@@ -93,7 +93,7 @@ BEGIN
             opened_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS tenant_%I.sealed_offers (
+        CREATE TABLE IF NOT EXISTS %I.sealed_offers (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             case_id uuid NOT NULL,
             party_id text NOT NULL,
@@ -103,7 +103,7 @@ BEGIN
             revealed boolean NOT NULL DEFAULT false,
             submitted_at timestamptz NOT NULL DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS tenant_%I.documents (
+        CREATE TABLE IF NOT EXISTS %I.documents (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             case_id uuid NOT NULL,
             object_key text NOT NULL,       -- MinIO key (ciphertext object)
@@ -113,7 +113,7 @@ BEGIN
             uploaded_by text,
             created_at timestamptz NOT NULL DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS tenant_%I.outbox (
+        CREATE TABLE IF NOT EXISTS %I.outbox (
             id bigserial PRIMARY KEY,
             topic text NOT NULL,
             key text NOT NULL,
@@ -121,7 +121,7 @@ BEGIN
             published_at timestamptz,
             created_at timestamptz NOT NULL DEFAULT now()
         );
-    $ddl$, p_tenant, p_tenant, p_tenant, p_tenant);
+    $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
 END;
 $$ LANGUAGE plpgsql;
 
