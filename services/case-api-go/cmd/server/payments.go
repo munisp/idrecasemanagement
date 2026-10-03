@@ -138,6 +138,10 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 	form.Set("metadata[invoice_id]", invID)
 	form.Set("metadata[tenant]", tenant)
 	form.Set("metadata[case_id]", caseID)
+	// Field Criteria auto-fill: who paid, organization (contact email comes back
+	// as customer_email on completion). Passed by the staffer issuing checkout.
+	form.Set("metadata[payer_name]", r.URL.Query().Get("payer_name"))
+	form.Set("metadata[payer_org]", r.URL.Query().Get("payer_org"))
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
@@ -196,10 +200,12 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		tenant, invID, caseID := sess.Metadata["tenant"], sess.Metadata["invoice_id"], sess.Metadata["case_id"]
-		// mark payment PAID
+		// mark payment PAID (+ Field Criteria auto-fill: who paid, org, email)
 		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.payments SET status='PAID', payment_intent=$3, payer_email=$4, raw=$5, updated_at=now()
-			WHERE session_id=$1 AND tenant=$2`, sess.ID, tenant, sess.PaymentIntent, sess.Email, evt.Data.Object)
+			UPDATE public.payments SET status='PAID', payment_intent=$3, payer_email=$4,
+			       payer_name=$6, payer_org=$7, raw=$5, updated_at=now()
+			WHERE session_id=$1 AND tenant=$2`, sess.ID, tenant, sess.PaymentIntent, sess.Email,
+			evt.Data.Object, sess.Metadata["payer_name"], sess.Metadata["payer_org"])
 		// settle the invoice (remittance ref = Stripe payment intent)
 		var amount int64
 		var party string

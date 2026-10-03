@@ -13,7 +13,8 @@ BEGIN
             ADD COLUMN IF NOT EXISTS assigned_role text,
             ADD COLUMN IF NOT EXISTS batch_id uuid,
             ADD COLUMN IF NOT EXISTS parent_case_id uuid,
-            ADD COLUMN IF NOT EXISTS duplicate_of uuid', 'tenant_'||st);
+            ADD COLUMN IF NOT EXISTS duplicate_of uuid,
+            ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT ''{}''::jsonb', 'tenant_'||st);
         EXECUTE format('CREATE INDEX IF NOT EXISTS cases_assignee ON %I.cases (assigned_to) WHERE assigned_to IS NOT NULL', 'tenant_'||st);
     END LOOP;
 END $$;

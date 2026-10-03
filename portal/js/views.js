@@ -327,6 +327,7 @@ const Views = (() => {
       // Documents — docket grouped by folder with full metadata + RBAC controls
       const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
       html += `<h2>Docket</h2>
+        <p><a class="button" href="${Api.cases.zipUrl(id)}" target="_blank">⬇ Download all as zip (plan-notification bundle)</a></p>
         <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
         <select name="folder" aria-label="Folder">${FOLDERS.map((f) => `<option>${f}</option>`).join("")}</select>
         <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
@@ -881,7 +882,11 @@ const Views = (() => {
       const r = await Api.program.deliverables();
       const d = r.deliverables || [];
       return `<div class="view-head"><h1>Contract deliverables</h1>
-        <span class="muted">program report schedule</span></div>` +
+        <span class="muted">program report schedule</span></div>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target))">
+          <input name="name" required placeholder="Ad hoc report name" />
+          <input name="ref" placeholder="Contract ref (optional)" size="10" />
+          <button class="mini">request ad hoc (due +10 business days)</button></form>` +
         (d.length ? `<table><thead><tr><th>Deliverable</th><th>Rule</th><th>Next due</th><th></th></tr></thead><tbody>` +
           d.map((x) => `<tr><td>${esc(x.name)}</td><td class="mono">${esc(x.due_rule)}</td><td>${esc(x.next_due)}</td>
             <td><button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}')">mark delivered</button></td></tr>`).join("") +
@@ -890,6 +895,12 @@ const Views = (() => {
           r.history.map((h) => `<tr><td>${esc(h.name)}</td><td>${badge(h.status)}</td>
             <td class="muted">${fmtDate(h.delivered_at)}</td></tr>`).join("") + `</tbody></table>` : "");
     } catch (e) { return err(e); }
+  }
+
+  async function requestDeliverable(f) {
+    try { const r = await Api.program.requestDeliverable(f.get("name"), f.get("ref"));
+      UI.toast("Ad hoc report requested — due " + r.due_date); location.reload(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function submitDeliverable(name) {
@@ -962,5 +973,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, finance, payInvoice, moveDoc };
+  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc };
 })();

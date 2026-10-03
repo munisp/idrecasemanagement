@@ -67,7 +67,8 @@ type ProgramConfig struct {
 		RouteRole          string   `json:"route_role"`
 		Reasons            []string `json:"reasons"`
 	} `json:"escalation"`
-	NotesStreams []string `json:"notes_streams"`
+	NotesStreams []string            `json:"notes_streams"`
+	FieldSchema  map[string][]string `json:"field_schema"`
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.

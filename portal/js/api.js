@@ -39,6 +39,8 @@ const Api = (() => {
         return req("POST", `${t()}/cases/${id}/documents`, fd, true);
       },
       moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
+      zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
+      setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
@@ -128,6 +130,7 @@ const Api = (() => {
       advanceIntake: (id, status, caseId) => req("POST", `${t()}/intake/${id}/advance`, { status, case_id: caseId }),
       deliverables: () => req("GET", `${t()}/deliverables`),
       submitDeliverable: (p) => req("POST", `${t()}/deliverables`, p),
+      requestDeliverable: (name, contract_ref) => req("POST", `${t()}/deliverables/request`, { name, contract_ref }),
     },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),

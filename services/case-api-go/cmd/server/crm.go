@@ -104,7 +104,7 @@ func (s *server) account360(w http.ResponseWriter, r *http.Request) {
 		SELECT id, case_number, status, service_line FROM tenant_%s.cases
 		WHERE provider_id=$1 OR payer_id=$1 ORDER BY opened_at DESC LIMIT 50`, sanitizeTenant(tenant)), a.LegalName)
 	notes, _ := s.queryRows(r, `
-		SELECT body, author, created_at FROM public.notes
+		SELECT stream, body, author, created_at FROM public.notes
 		WHERE tenant=$1 AND record_type='ACCOUNT' AND record_id=$2
 		ORDER BY created_at DESC LIMIT 50`, tenant, id)
 
@@ -321,15 +321,34 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		RecordType string `json:"record_type"`
 		RecordID   string `json:"record_id"`
+		Stream     string `json:"stream"` // internal|coder|clinical|legal|external_agency
 		Body       string `json:"body"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Body == "" {
 		http.Error(w, `{"error":"body required"}`, http.StatusBadRequest)
 		return
 	}
+	// Notes streams (Field Criteria): default internal; validate against the
+	// program's notes_streams list when one is seeded.
+	if in.Stream == "" {
+		in.Stream = "internal"
+	}
+	if prog := s.loadProgram(r, tenant); prog != nil && len(prog.NotesStreams) > 0 {
+		ok := false
+		for _, st := range prog.NotesStreams {
+			if st == in.Stream {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			http.Error(w, `{"error":"stream must be one of the program notes_streams"}`, http.StatusBadRequest)
+			return
+		}
+	}
 	_, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.notes (tenant, record_type, record_id, body, author)
-		VALUES ($1,$2,$3,$4,$5)`, tenant, in.RecordType, in.RecordID, in.Body, p.Subject)
+		INSERT INTO public.notes (tenant, record_type, record_id, stream, body, author)
+		VALUES ($1,$2,$3,$4,$5,$6)`, tenant, in.RecordType, in.RecordID, in.Stream, in.Body, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

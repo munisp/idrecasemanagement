@@ -316,6 +316,9 @@ func main() {
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
 
 		// Stakeholder onboarding: applications, decisions, status.
+		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
+		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
+		r.Post("/deliverables/request", s.requestAdhocDeliverable)
 		r.Post("/onboarding/applications", s.submitApplication)
 		r.Get("/onboarding/applications", s.listApplications)
 		r.Post("/onboarding/applications/{appId}/decision", s.decideApplication)
@@ -627,16 +630,25 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	var c Case
+	var details []byte
+	var internal, agency *string
 	err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
+		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at,
+		                    internal_status, agency_status, details
 		             FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).
-		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.OpenedAt)
+		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.OpenedAt, &internal, &agency, &details)
 	if err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	c.Tenant = tenant
-	writeJSON(w, http.StatusOK, c)
+	var dj map[string]any
+	_ = json.Unmarshal(details, &dj)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": c.ID, "case_number": c.CaseNumber, "tenant": c.Tenant, "status": c.Status,
+		"service_line": c.ServiceLine, "qpa_cents": c.QPA, "opened_at": c.OpenedAt,
+		"internal_status": internal, "agency_status": agency, "details": dj,
+	})
 }
 
 // signalCase forwards business signals into the running workflow.

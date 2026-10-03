@@ -90,6 +90,7 @@ BEGIN
             payer_id text,
             open_negotiation_end date,
             offer_window_ends_at timestamptz,
+            details jsonb NOT NULL DEFAULT '{}',  -- program-specific fields (LOB, disputed issue, OON, outcome, award…)
             assigned_to text,              -- keycloak sub of assignee
             assigned_role text,            -- CASE_MANAGER | ARBITRATOR
             batch_id uuid,

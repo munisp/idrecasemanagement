@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS public.notes (
     tenant     text NOT NULL,
     record_type text NOT NULL,      -- CASE | ACCOUNT | LEAD
     record_id  text NOT NULL,
+    stream     text NOT NULL DEFAULT 'internal', -- internal|coder|clinical|legal|external_agency (program: notes_streams)
     body       text NOT NULL,
     author     text,
     created_at timestamptz NOT NULL DEFAULT now()

@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS public.payments (
     amount_cents   bigint NOT NULL,
     currency       text NOT NULL DEFAULT 'usd',
     payer_email    text,
+    payer_name     text,                     -- auto-filled from checkout (Field Criteria: who paid)
+    payer_org      text,
     status         text NOT NULL DEFAULT 'PENDING', -- PENDING|PAID|FAILED|EXPIRED|REFUNDED
     stripe_fee_cents bigint,                 -- from balance transaction (when available)
     raw            jsonb NOT NULL DEFAULT '{}',     -- last webhook payload (audit)

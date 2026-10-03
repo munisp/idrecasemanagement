@@ -233,8 +233,31 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     {"name":"Invoice per determination","contract_ref":"2.3.3","due_rule":"case:AGENCY_RECOMMENDATION"},
     {"name":"Cover letter per determination","contract_ref":"2.3.3","due_rule":"case:AGENCY_RECOMMENDATION"},
     {"name":"Case acceptance letter","contract_ref":"2.3.4","due_rule":"case:INITIAL_REVIEW"},
-    {"name":"Closure letter (withdrawal/opt-out/dismissal)","contract_ref":"2.3.5","due_rule":"case:AGENCY_RECOMMENDATION"}
-  ]
+    {"name":"Closure letter (withdrawal/opt-out/dismissal)","contract_ref":"2.3.5","due_rule":"case:AGENCY_RECOMMENDATION"},
+    {"name":"Policies & procedures: criminal background screening","contract_ref":"K.7","due_rule":"contract:execution+30d"},
+    {"name":"Disaster recovery plan","contract_ref":"11","due_rule":"contract:effective-30d"},
+    {"name":"Emergency operations plan","contract_ref":"2.2.7","due_rule":"contract:standing"},
+    {"name":"Transition: contract documentation","contract_ref":"8.2","due_rule":"contract:end+60d"},
+    {"name":"Transition cooperation agreement","contract_ref":"8.3","due_rule":"contract:end"},
+    {"name":"Final report","contract_ref":"2.4.5","due_rule":"contract:end+30bd"}
+  ],
+  "field_schema": {
+    "line_of_business": ["Medicaid","Commercial","Medicare","Medicare Advantage","Marketplace","Other"],
+    "disputed_issue": ["Medicaid Medical Necessity","Underpayment","Overpayment","Denial","Other"],
+    "out_of_network": ["Yes","No"],
+    "case_outcome": ["TBD - case in process","Withdrawn","Dismissed","Provider Default Award","Provider Full Award","Provider Partial Award","Provider No Award","Other"],
+    "party_billed": ["Health Plan","Provider","Both Parties","N/A"],
+    "withdrawal_dismissed_reason": ["Dismissed-Timeliness eligibility failed","Member plan is not regulated by Florida","Self-Funded Plan","Provider No Response","Withdrawal-Claim Resolved","Other","N/A"]
+  },
+  "volume_rules": {
+    "comment": "Capitol Bridge policy proposals (Challenges & Solutions doc) — dormant until AHCA adopts; evaluate at intake when enabled.",
+    "enabled": false,
+    "fee_tiers": [{"max_claims":100,"fee_cents":null},{"max_claims":500,"fee_cents":20000},{"max_claims":1000,"fee_cents":30000},{"max_claims":1500,"fee_cents":40000},{"per_additional":500,"add_cents":10000}],
+    "initial_review_extensions": [{"max_claims":200,"days":0},{"max_claims":3000,"days":10},{"max_claims":6000,"days":15},{"max_claims":9000,"days":20},{"per_additional":3000,"add_days":5}],
+    "medical_review_caps": {"max_claims_medical_review":150,"max_claims_no_medical":3000},
+    "submission_windows": {"medical_review_over_100_wait_days":30,"no_medical_over_1000_wait_days":15},
+    "structuring": {"single_cpt_over":500,"single_plan_affiliate_over":500}
+  }
 }
 $$::jsonb)
 ON CONFLICT (tenant) DO UPDATE SET config=EXCLUDED.config, program=EXCLUDED.program, updated_at=now();
