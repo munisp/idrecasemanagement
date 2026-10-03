@@ -1,13 +1,22 @@
 -- Case-management layer: relationships, batching, checklists, notifications,
 -- saved views, assignment state. (Applied per tenant where noted.)
 
--- Assignment state on cases (per-tenant tables): run for each tenant schema:
---   ALTER TABLE tenant_<st>.cases
---     ADD COLUMN IF NOT EXISTS assigned_to text,
---     ADD COLUMN IF NOT EXISTS assigned_role text,     -- CASE_MANAGER | ARBITRATOR
---     ADD COLUMN IF NOT EXISTS batch_id uuid,
---     ADD COLUMN IF NOT EXISTS parent_case_id uuid,
---     ADD COLUMN IF NOT EXISTS duplicate_of uuid;
+-- Assignment state on cases (per-tenant tables) — applied to every provisioned
+-- tenant schema. provision_tenant() creates cases without these columns, so this
+-- DO loop is the single source of truth for the assignment/batching columns.
+DO $$
+DECLARE st text;
+BEGIN
+    FOREACH st IN ARRAY ARRAY['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy'] LOOP
+        EXECUTE format('ALTER TABLE %I.cases
+            ADD COLUMN IF NOT EXISTS assigned_to text,
+            ADD COLUMN IF NOT EXISTS assigned_role text,
+            ADD COLUMN IF NOT EXISTS batch_id uuid,
+            ADD COLUMN IF NOT EXISTS parent_case_id uuid,
+            ADD COLUMN IF NOT EXISTS duplicate_of uuid', 'tenant_'||st);
+        EXECUTE format('CREATE INDEX IF NOT EXISTS cases_assignee ON %I.cases (assigned_to) WHERE assigned_to IS NOT NULL', 'tenant_'||st);
+    END LOOP;
+END $$;
 
 -- Related cases: batch groups, parent/child, duplicates.
 CREATE TABLE IF NOT EXISTS public.case_relationships (
