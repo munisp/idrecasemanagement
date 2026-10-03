@@ -427,6 +427,9 @@ func main() {
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
 
+	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
+	r.Post("/api/public/apply", s.publicApply)
+
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	must(http.ListenAndServe(cfg.Addr, r))
 }

@@ -14,7 +14,7 @@ const Auth = (() => {
     const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
     const params = new URLSearchParams({
       client_id: cfg.clientId, response_type: "code",
-      redirect_uri: location.origin + "/", scope: "openid profile",
+      redirect_uri: location.origin + "/app.html", scope: "openid profile",
       code_challenge: challenge, code_challenge_method: "S256",
     });
     location.href = `${base}/auth?${params}`;
@@ -28,7 +28,7 @@ const Auth = (() => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "authorization_code", client_id: cfg.clientId, code,
-        redirect_uri: location.origin + "/",
+        redirect_uri: location.origin + "/app.html",
         code_verifier: sessionStorage.getItem(K.verifier),
       }),
     });
@@ -75,7 +75,7 @@ const Auth = (() => {
 
   function logout() {
     sessionStorage.clear();
-    location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/")}`;
+    location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`;
   }
 
   return { login, logout, handleCallback, token, claims };
