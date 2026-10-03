@@ -138,9 +138,25 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # sk_live_…/sk_test_…; unset = card payments disabled
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}  # whsec_… from `stripe listen` / dashboard endpoint
       PORTAL_BASE_URL: ${PORTAL_BASE_URL:-http://localhost:8080}  # Stripe success/cancel return
-      CLAMD_ADDR: clamd:3310                  # ClamAV malware scanner (uploads fail-closed if down)
+      CLAMD_ADDR: clamd:3310
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-idre@localhost}                  # ClamAV malware scanner (uploads fail-closed if down)
     ports: ["8080:8080"]
     depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify, clamd]
+
+  lettergen:
+    build: ./services/lettergen-py
+    environment:
+      DATABASE_URL: postgres://idre:idre@postgres:5432/idre
+      KAFKA_BROKERS: kafka:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_USER: idre
+      MINIO_PASSWORD: idre-secret
+      VAULT_URL: http://vault:8081
+    depends_on: [postgres, kafka, minio, vault]
 
   clamd:
     image: clamav/clamav:stable           # freshclam updates signatures on start

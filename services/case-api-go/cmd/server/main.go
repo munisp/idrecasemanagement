@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,12 +53,25 @@ type Config struct {
 	StripeWebhook  string // whsec_… signing secret for /api/webhooks/stripe
 	PortalBaseURL  string // https://portal.example.gov — Stripe success/cancel return
 	ClamdAddr      string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
+	SMTPHost       string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
+	SMTPPort       int
+	SMTPUser       string
+	SMTPPass       string
+	SMTPFrom       string // e.g. flcdr@example.org
 }
 
 func configFromEnv() Config {
 	get := func(k, d string) string {
 		if v := os.Getenv(k); v != "" {
 			return v
+		}
+		return d
+	}
+	getInt := func(k string, d int) int {
+		if v := os.Getenv(k); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
 		}
 		return d
 	}
@@ -76,6 +90,11 @@ func configFromEnv() Config {
 		StripeWebhook:  get("STRIPE_WEBHOOK_SECRET", ""),
 		PortalBaseURL:  get("PORTAL_BASE_URL", "http://localhost:8080"),
 		ClamdAddr:      get("CLAMD_ADDR", "localhost:3310"),
+		SMTPHost:       get("SMTP_HOST", ""),
+		SMTPPort:       getInt("SMTP_PORT", 587),
+		SMTPUser:       get("SMTP_USER", ""),
+		SMTPPass:       get("SMTP_PASS", ""),
+		SMTPFrom:       get("SMTP_FROM", "idre@localhost"),
 	}
 }
 
@@ -317,6 +336,7 @@ func main() {
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
+		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
 		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
 		r.Post("/deliverables/request", s.requestAdhocDeliverable)
 		r.Post("/onboarding/applications", s.submitApplication)

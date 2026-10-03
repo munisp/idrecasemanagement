@@ -224,6 +224,19 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
       {"key":"plan_docs_notice","subject":"Additional Documentation from Health Plan – {case_number}","to":["provider"],"cc":[]}
     ]
   },
+  "letter_templates": [
+    {"key":"acceptance_letter","subject":"Results of Preliminary Review {case_number}","filename":"Acceptance Letter - Provider {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"ineligible_letter","subject":"Results of Preliminary Review {case_number}","filename":"Ineligible Dispute Letter - Provider {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"dismissal_letter","subject":"Dismissal {case_number}","filename":"Dismissal Letter - Provider {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"withdrawal_letter","subject":"Withdrawal Request {case_number}","filename":"Withdrawal Letter - Provider {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"plan_notification_letter","subject":"Notification of Claims Dispute {case_number}","filename":"Health Plan Notification {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"plan_optout_letter","subject":"Plan Opt-out {case_number}","filename":"Plan Opt-out Letter {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"rfi_letter","subject":"Request for Additional Documentation {case_number}","filename":"Request for Additional Information {case_number}.pdf","folder":"CORRESPONDENCE"},
+    {"key":"cover_letter_final_notice","subject":"Full Review Complete {case_number}","filename":"Cover Letter {case_number}.pdf","folder":"DETERMINATION"},
+    {"key":"final_order_rationale","subject":"Full Review Complete {case_number}","filename":"Review Rationale and Letter {case_number}.pdf","folder":"DETERMINATION"},
+    {"key":"default_determination","subject":"Default Determination {case_number}","filename":"Default Determination {case_number}.pdf","folder":"DETERMINATION"},
+    {"key":"fl_plan_packet","subject":"Health Plan Response Form {case_number}","filename":"FL Plan Packet {case_number}.pdf","folder":"CORRESPONDENCE"}
+  ],
   "deliverables": [
     {"name":"Weekly report","contract_ref":"2.4.2","due_rule":"weekly:MONDAY"},
     {"name":"Monthly report","contract_ref":"2.4.3","due_rule":"monthly:10"},

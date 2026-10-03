@@ -134,6 +134,14 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		s.notify(r, tenant, "*", "QA_REVIEW",
 			fmt.Sprintf("%s draft on case %s awaiting %s QA approval", tpl.Key, caseID, tpl.QARole), "#/qa")
 	} else {
+		// No QA gate on this template — deliver immediately via SMTP.
+		if err := s.sendMail(in.To, in.CC, subject, body); err != nil {
+			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
+				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
+			http.Error(w, `{"error":"smtp delivery failed — draft retained as APPROVED for retry"}`, http.StatusBadGateway)
+			return
+		}
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
 		s.logCorrespondence(r, tenant, caseID, "OUT", in.Template, subject, body, in.To, in.CC, p.Subject)
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 			fmt.Sprintf("%s sent to %d recipient(s) (cc %d) — template %s", subject, len(in.To), len(in.CC), in.Template))
@@ -203,8 +211,18 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(toJ, &to)
 	_ = json.Unmarshal(ccJ, &cc)
 	if in.Decision == "APPROVE" {
+		// The narrative's send-safety rule (drafts saved without addresses) ends
+		// here: addresses enter only at QA-approved send time, and delivery goes
+		// through the configured SMTP relay. Failure keeps status APPROVED (not
+		// SENT) so the reviewer can retry — nothing is marked sent that wasn't.
+		if err := s.sendMail(to, cc, subject, body); err != nil {
+			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
+				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
+			http.Error(w, `{"error":"smtp delivery failed — draft stays APPROVED for retry"}`, http.StatusBadGateway)
+			return
+		}
 		_, _ = s.db.Exec(r.Context(),
-			`UPDATE public.qa_reviews SET status='SENT' WHERE tenant=$1 AND id=$2`, tenant, qid)
+			`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
 		s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 			fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))

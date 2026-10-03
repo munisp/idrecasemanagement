@@ -41,6 +41,7 @@ const Api = (() => {
       moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
       zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
+      lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
