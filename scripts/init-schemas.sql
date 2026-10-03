@@ -90,9 +90,15 @@ BEGIN
             payer_id text,
             open_negotiation_end date,
             offer_window_ends_at timestamptz,
+            assigned_to text,              -- keycloak sub of assignee
+            assigned_role text,            -- CASE_MANAGER | ARBITRATOR
+            batch_id uuid,
+            parent_case_id uuid,
+            duplicate_of uuid,
             opened_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now()
         );
+        CREATE INDEX IF NOT EXISTS cases_assignee ON %I.cases (assigned_to) WHERE assigned_to IS NOT NULL;
         CREATE TABLE IF NOT EXISTS %I.sealed_offers (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             case_id uuid NOT NULL,
@@ -111,6 +117,7 @@ BEGIN
             content_type text,
             sealed boolean NOT NULL DEFAULT false,
             uploaded_by text,
+            version int NOT NULL DEFAULT 1,
             created_at timestamptz NOT NULL DEFAULT now()
         );
         CREATE TABLE IF NOT EXISTS %I.outbox (
@@ -121,7 +128,7 @@ BEGIN
             published_at timestamptz,
             created_at timestamptz NOT NULL DEFAULT now()
         );
-    $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
+    $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
 END;
 $$ LANGUAGE plpgsql;
 

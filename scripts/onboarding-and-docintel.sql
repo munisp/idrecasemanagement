@@ -5,8 +5,14 @@ ALTER TABLE public.state_config
 -- Shape: { "IDRE_ENTITY": ["cms_certification_number","fee_schedule","coi_attestation","w9"],
 --          "PROVIDER_ORG": ["npi","w9"], "PAYER_ORG": ["naic_code","w9"], ... }
 
--- documents.version: provision_tenant() stamps it for new tenants; for existing ones:
---   ALTER TABLE tenant_<state>.documents ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1;
+-- documents.version: provision_tenant() stamps it for new tenants; backfill existing ones:
+DO $$
+DECLARE st text;
+BEGIN
+    FOREACH st IN ARRAY ARRAY['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy'] LOOP
+        EXECUTE format('ALTER TABLE %I.documents ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1', 'tenant_'||st);
+    END LOOP;
+END $$;
 
 CREATE TABLE IF NOT EXISTS public.doc_analysis (
     doc_id      uuid PRIMARY KEY,
