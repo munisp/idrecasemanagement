@@ -79,3 +79,7 @@ CREATE TABLE IF NOT EXISTS public.notes (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS notes_record ON public.notes (tenant, record_type, record_id);
+-- Same class of bug as saved_views.pinned (casemgmt-core.sql): CREATE TABLE
+-- IF NOT EXISTS is a no-op against a public.notes that already existed from
+-- an earlier deploy of a schema version before `stream` was added.
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS stream text NOT NULL DEFAULT 'internal';

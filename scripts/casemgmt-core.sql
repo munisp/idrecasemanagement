@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS public.saved_views (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant, user_sub, object, name)
 );
+-- Reproduced live: on a database where public.saved_views already existed
+-- (an earlier deploy of a schema version before `pinned` was added), the
+-- CREATE TABLE above is a no-op, so listSavedViews' SELECT ... pinned ...
+-- failed with "column pinned does not exist" -- silently, since the
+-- handler discards the query error (`out, _ :=`) and serializes a nil
+-- slice as JSON null, which the portal then crashes on (`saved.find is
+-- not a function` / "Cannot read properties of null").
+ALTER TABLE public.saved_views ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
 
 -- Escalation log (SLA breach -> supervisor trail).
 CREATE TABLE IF NOT EXISTS public.escalations (
