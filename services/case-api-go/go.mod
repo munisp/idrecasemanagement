@@ -7,7 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/lestrrat-go/jwx/v2 v2.1.3
 	github.com/minio/minio-go/v7 v7.0.83
-	github.com/tigerbeetle/tigerbeetle-go v0.16.0
+	github.com/tigerbeetle/tigerbeetle-go v0.16.66
 	go.temporal.io/sdk v1.30.0
 )
 

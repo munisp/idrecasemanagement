@@ -182,6 +182,14 @@ func (s *server) downloadDocument(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"document sealed until lawful offer reveal"}`, http.StatusLocked)
 			return
 		}
+		// RBAC floor (requirePerm below allows everyone when Permify is
+		// undeployed): only staff who could plausibly need to see a
+		// revealed sealed offer, not every member of the tenant.
+		p := r.Context().Value(ctxPrincipal{}).(principal)
+		if !hasAnyRole(p, "ARBITRATOR", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+			http.Error(w, `{"error":"forbidden: requires ARBITRATOR, CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+			return
+		}
 		// ReBAC second gate: only the assigned arbitrator may open revealed offers.
 		if !s.requirePerm(w, r, "dispute_case", chi.URLParam(r, "caseId"), "reveal") {
 			return

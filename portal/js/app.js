@@ -12,9 +12,16 @@
   const me = Auth.claims();
   if (!me) { Auth.login(); return; }
 
-  // Tenant selection: first tenant group; platform/federal admins may switch later.
-  if (!Api.getTenant() || (!me.tenants.includes(Api.getTenant()) && !me.roles.includes("FEDERAL_ADMIN") && !me.roles.includes("PLATFORM_ADMIN"))) {
-    if (me.tenants.length) Api.setTenant(me.tenants[0]);
+  // Tenant selection: first tenant group for tenant-scoped users. Federal/
+  // platform admins have no group (by design -- they're not scoped to one
+  // state) and default to a starting tenant instead of hitting the dead end
+  // below, since the real switcher (painted further down) needs a starting
+  // value to render against -- reproduced live: with no default, this gate
+  // blocked federal.admin before the switcher ever had a chance to show.
+  const isCrossTenantAdmin = me.roles.includes("FEDERAL_ADMIN") || me.roles.includes("PLATFORM_ADMIN");
+  const DEFAULT_TENANT = "tx"; // the one tenant with real seed data
+  if (!Api.getTenant() || (!me.tenants.includes(Api.getTenant()) && !isCrossTenantAdmin)) {
+    Api.setTenant(me.tenants[0] || (isCrossTenantAdmin ? DEFAULT_TENANT : null));
   }
   if (!Api.getTenant()) {
     view.innerHTML = `<h1>No tenant access</h1><p class="muted">Your account is not assigned to any state tenant. Contact your case manager.</p>`;

@@ -124,6 +124,14 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 func (s *server) escalateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	// RBAC floor (requirePerm below allows everyone when Permify is
+	// undeployed). SERVICE_WORKER is the Temporal worker's own automated-
+	// escalation call (WORKER_TOKEN auth in authn.middleware).
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	// ReBAC: escalation is a staff-only object-level permission.
 	if !s.requirePerm(w, r, "dispute_case", caseID, "escalate") {
 		return

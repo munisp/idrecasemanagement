@@ -1,0 +1,6 @@
+# Go build artifacts (a plain `go build ./...` from a module root can leave
+# a binary named after the directory, e.g. services/case-api-go/server).
+/services/case-api-go/case-api
+/services/case-api-go/server
+/services/*/server
+/services/*/*.exe

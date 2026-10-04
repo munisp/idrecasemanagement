@@ -13,11 +13,15 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -26,6 +30,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -46,6 +51,7 @@ type Config struct {
 	TemporalHost   string // temporal-frontend:7233
 	TemporalNS     string // idre
 	TBAddresses    string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
+	TBClusterID    string // decimal cluster ID this TigerBeetle deployment was formatted with
 	DaprHTTP       string // http://localhost:3500
 	VaultURL       string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL  string // http://graph-intel:8082 ("" = graph features disabled)
@@ -58,6 +64,7 @@ type Config struct {
 	SMTPUser       string
 	SMTPPass       string
 	SMTPFrom       string // e.g. flcdr@example.org
+	WorkerToken    string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
 }
 
 func configFromEnv() Config {
@@ -83,6 +90,11 @@ func configFromEnv() Config {
 		TemporalHost:   get("TEMPORAL_HOST", "localhost:7233"),
 		TemporalNS:     get("TEMPORAL_NAMESPACE", "idre"),
 		TBAddresses:    get("TIGERBEETLE_ADDRESSES", "localhost:3000"),
+		// No safe default: this value is fixed by whichever `tigerbeetle format
+		// --cluster=N` created the replicas' on-disk state, and a wrong ID
+		// doesn't error -- the client just hangs forever with every connection
+		// silently rejected ("invalid header_cluster" on the replica side).
+		TBClusterID:    get("TIGERBEETLE_CLUSTER_ID", ""),
 		DaprHTTP:       get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
 		VaultURL:       get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL:  get("GRAPH_INTEL_URL", "http://localhost:8082"),
@@ -95,6 +107,9 @@ func configFromEnv() Config {
 		SMTPUser:       get("SMTP_USER", ""),
 		SMTPPass:       get("SMTP_PASS", ""),
 		SMTPFrom:       get("SMTP_FROM", "idre@localhost"),
+		// No default: an empty WorkerToken disables the service-auth path
+		// entirely rather than accepting a guessable default as a credential.
+		WorkerToken: get("WORKER_TOKEN", ""),
 	}
 }
 
@@ -144,15 +159,28 @@ type principal struct {
 }
 
 type authn struct {
-	keys   jwk.Set
-	issuer string
+	keys        jwk.Set
+	issuer      string
+	workerToken string // shared secret for service-to-service calls; "" disables this path
 }
+
+// serviceRole is the synthetic role a valid WORKER_TOKEN caller gets. Never a
+// real Keycloak realm role, so nothing issued by Keycloak can collide with
+// it. idre-workflows sends `Authorization: Bearer $WORKER_TOKEN` on its own
+// service-to-service calls (e.g. the automated SLA-breach escalate call) --
+// nothing here ever validated that token, so that path always 401'd.
+const serviceRole = "SERVICE_WORKER"
 
 func (a *authn) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if raw == "" || raw == r.Header.Get("Authorization") {
 			http.Error(w, `{"error":"missing bearer token"}`, http.StatusUnauthorized)
+			return
+		}
+		if a.workerToken != "" && subtle.ConstantTimeCompare([]byte(raw), []byte(a.workerToken)) == 1 {
+			p := principal{Subject: "service:idre-workflows", Roles: []string{serviceRole}}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxPrincipal{}, p)))
 			return
 		}
 		tok, err := jwt.ParseString(raw,
@@ -211,7 +239,7 @@ func tenancy(next http.Handler) http.Handler {
 		readOnly := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
 		allowed := false
 		for _, role := range p.Roles {
-			if role == "PLATFORM_ADMIN" || role == "FEDERAL_ADMIN" {
+			if role == "PLATFORM_ADMIN" || role == "FEDERAL_ADMIN" || role == serviceRole {
 				allowed = true
 			}
 			if role == "STATE_AUDITOR" && readOnly {
@@ -269,6 +297,42 @@ func envOr(k, d string) string {
 	return d
 }
 
+// resolveTBAddresses turns host:port entries into ip:port before the
+// TigerBeetle client is constructed. No TigerBeetle client binding resolves
+// DNS internally -- it needs raw IPs -- so entries that are StatefulSet
+// per-pod headless-service hostnames (stable across a pod reschedule, unlike
+// the pod's own IP) are resolved here instead of being frozen as IPs at
+// deploy time.
+func resolveTBAddresses(addrs []string) ([]string, error) {
+	out := make([]string, len(addrs))
+	for i, a := range addrs {
+		host, port, err := net.SplitHostPort(a)
+		if err != nil {
+			return nil, fmt.Errorf("bad tigerbeetle address %q: %w", a, err)
+		}
+		if net.ParseIP(host) != nil {
+			out[i] = a
+			continue
+		}
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return nil, fmt.Errorf("resolving tigerbeetle address %q: %w", a, err)
+		}
+		var ip net.IP
+		for _, c := range ips {
+			if v4 := c.To4(); v4 != nil {
+				ip = v4
+				break
+			}
+		}
+		if ip == nil {
+			return nil, fmt.Errorf("tigerbeetle address %q has no IPv4 record", a)
+		}
+		out[i] = net.JoinHostPort(ip.String(), port)
+	}
+	return out, nil
+}
+
 func main() {
 	cfg := configFromEnv()
 	ctx := context.Background()
@@ -284,11 +348,22 @@ func main() {
 	must(err)
 	defer tc.Close()
 
-	tbc, err := tb.NewClient(tb_types.ToUint128(0), strings.Split(cfg.TBAddresses, ","))
+	if cfg.TBClusterID == "" {
+		panic("TIGERBEETLE_CLUSTER_ID is required -- must match the decimal cluster ID " +
+			"the TigerBeetle replicas were formatted with (tigerbeetle format --cluster=N); " +
+			"a wrong value does not error, it hangs every ledger connection forever")
+	}
+	clusterID, ok := new(big.Int).SetString(cfg.TBClusterID, 10)
+	if !ok {
+		panic("TIGERBEETLE_CLUSTER_ID is not a valid decimal integer: " + cfg.TBClusterID)
+	}
+	tbAddrs, err := resolveTBAddresses(strings.Split(cfg.TBAddresses, ","))
+	must(err)
+	tbc, err := tb.NewClient(tb_types.BigIntToUint128(*clusterID), tbAddrs)
 	must(err)
 	defer tbc.Close()
 
-	rds := newRedis(envOr("REDIS_ADDR", ""))
+	rds := newRedis(envOr("REDIS_ADDR", ""), envOr("REDIS_PASSWORD", ""))
 
 	// JWKS via Redis: all replicas share one cache; Keycloak key rotation
 	// propagates within the TTL instead of hammering the certs endpoint.
@@ -303,7 +378,7 @@ func main() {
 			rds.setex("idre:jwks", 300, string(buf))
 		}
 	}
-	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer}
+	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer, workerToken: cfg.WorkerToken}
 
 	docs, err := newDocStore(
 		envOr("MINIO_ENDPOINT", "localhost:9000"),
@@ -342,6 +417,8 @@ func main() {
 		r.Post("/onboarding/applications", s.submitApplication)
 		r.Get("/onboarding/applications", s.listApplications)
 		r.Post("/onboarding/applications/{appId}/decision", s.decideApplication)
+		r.Post("/onboarding/applications/{appId}/documents", s.uploadApplicationDocument)
+		r.Post("/onboarding/applications/{appId}/signal", s.signalApplication) // doc-intel -> StakeholderOnboardingWorkflow, SERVICE_WORKER only
 
 		// Voice console + compliance reports (JWT-authenticated reads).
 		r.Get("/voice/intake", s.listVoiceIntake)
@@ -553,6 +630,15 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		req.ProviderID, req.PayerID, req.OpenNegotiationEnd,
 		req.DisputedAmountCents, req.NumClaims).Scan(&caseID)
 	if err != nil {
+		// A duplicate case_number under concurrent requests correctly hits
+		// the unique constraint (verified elsewhere: exactly 1 row survives
+		// a 10-way race) -- but that's a client error (retry won't help with
+		// the same number), not a server fault, so it gets its own status
+		// instead of an indistinguishable-from-a-real-bug 500.
+		if isUniqueViolation(err) {
+			http.Error(w, `{"error":"case_number already exists"}`, http.StatusConflict)
+			return
+		}
 		http.Error(w, `{"error":"insert"}`, http.StatusInternalServerError)
 		return
 	}
@@ -735,8 +821,50 @@ func acctID(tenant string, code uint32, party string) tb_types.Uint128 {
 	return tb_types.BytesToUint128(b)
 }
 
+func hash16(parts ...string) tb_types.Uint128 {
+	h := sha256.Sum256([]byte(strings.Join(parts, ":")))
+	var b [16]byte
+	copy(b[:], h[:16])
+	return tb_types.BytesToUint128(b)
+}
+
+// transferIDs returns (id, pendingID) for a fee-transfer request. id is this
+// transfer's own TigerBeetle ID; pendingID is what to set on the Transfer's
+// PendingID field (zero for a PENDING transfer, which doesn't reference one).
+//
+// The original code here used ONE id, hashed without postKind, for all three
+// postKind values, and never set PendingID. A POST or VOID call therefore
+// tried to create a second transfer under the SAME id as the original
+// pending one, with PendingID left at zero -- TigerBeetle requires PendingID
+// on a post/void transfer (zero -> immediate TransferPendingIDMustNotBeZero)
+// and separately rejects a second transfer at an id that already exists
+// under different flags (TransferExistsWithDifferentFlags, confirmed live
+// on the sibling deployment of this same endpoint on the main branch) --
+// every two-phase transfer was permanently stuck pending. Fix: a PENDING
+// transfer's id IS the reference other calls hash back to (unchanged);
+// POST/VOID hash postKind in too for their own distinct id and set
+// PendingID to the pending transfer's id so TigerBeetle can find it.
+func transferIDs(caseID, kind, partyID string, amount uint64, postKind string) (id, pendingID tb_types.Uint128) {
+	pendingID = hash16(caseID, kind, partyID, fmt.Sprint(amount))
+	if postKind == "POST" || postKind == "VOID" {
+		return hash16(caseID, kind, partyID, fmt.Sprint(amount), postKind), pendingID
+	}
+	return pendingID, tb_types.Uint128{}
+}
+
 func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// RBAC floor: requirePerm (below) is the real fine-grained gate, but it
+	// unconditionally allows everyone when Permify isn't deployed (permify.go:
+	// "disabled (allow) in dev when unset"). This role check is the floor
+	// that holds even with Permify absent -- confirmed on this same endpoint
+	// in the sibling deployment (main branch) that an ARBITRATOR reached
+	// TigerBeetle and posted a transfer with no role check at all in front of it.
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	// ReBAC: object-level permit on this tenant's ledger (fail-closed).
 	if !s.requirePerm(w, r, "ledger", tenant, "transact") {
 		return
@@ -757,12 +885,7 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	default: // SETTLEMENT
 		debit, credit = acctID(tenant, acctEscrowTrustHeld, req.PartyID), acctID(tenant, acctRefundPayable, "")
 	}
-	ih := sha256.Sum256([]byte(
-		fmt.Sprintf("%s:%s:%s:%d", req.CaseID, req.Kind, req.PartyID, req.Amount)))
-	var idb [16]byte
-	copy(idb[:], ih[:16])
-	id := tb_types.BytesToUint128(idb) // idempotency key
-
+	id, transferPendingID := transferIDs(req.CaseID, req.Kind, req.PartyID, req.Amount, req.PostKind)
 	var flags uint16
 	switch req.PostKind {
 	case "PENDING":
@@ -777,6 +900,7 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 		DebitAccountID:  debit,
 		CreditAccountID: credit,
 		Amount:          tb_types.ToUint128(req.Amount),
+		PendingID:       transferPendingID,
 		Ledger:          tenantLedgerID(tenant),
 		Code:            ledgerCodeIDRE,
 		Flags:           flags,
@@ -908,9 +1032,17 @@ func (s *server) voiceIntake(w http.ResponseWriter, r *http.Request) {
 
 // voiceEvents receives platform → us webhooks (call.completed etc.), HMAC-verified.
 func (s *server) voiceEvents(w http.ResponseWriter, r *http.Request) {
-	body := make([]byte, 1<<20)
-	n, _ := r.Body.Read(body)
-	body = body[:n]
+	// A single net.Conn Read() is not guaranteed to return the whole body
+	// (plain io.Reader semantics, not io.ReadAll). Confirmed on the sibling
+	// deployment of this same endpoint: a genuinely, correctly HMAC-signed
+	// ~300KB webhook (a realistic call transcript) got silently truncated
+	// here, hashed as a partial body, and rejected as "bad signature" -- a
+	// small test payload passed, which is exactly how this went unnoticed.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, `{"error":"body too large or unreadable"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
 	sig := r.Header.Get("X-Signature")
 
 	// Resolve tenant by looking up the secret per known header hint, then verify.
@@ -957,4 +1089,12 @@ func sanitizeTenant(t string) string {
 		}
 	}
 	return t
+}
+
+// isUniqueViolation reports whether err is Postgres error code 23505
+// (unique_violation) -- a client-error condition (the row already exists),
+// distinct from an actual server fault.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

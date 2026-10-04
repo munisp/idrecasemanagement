@@ -26,11 +26,25 @@ FALKOR_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKOR_PORT = int(os.environ.get("FALKORDB_PORT", "6397"))
 FALKOR_SOCKET = os.environ.get("FALKORDB_SOCKET", "")  # embedded FalkorDB Lite
 
-_db = (
-    FalkorDB(unix_socket_path=FALKOR_SOCKET)
-    if FALKOR_SOCKET
-    else FalkorDB(host=FALKOR_HOST, port=FALKOR_PORT)
-)
+# Lazy, not constructed at import time: the FalkorDB client's __init__ makes a
+# real connection and raises if it can't (reproduced locally: a plain `import
+# graphdb` with FalkorDB unreachable crashes the whole process before FastAPI
+# ever starts listening). That defeats /healthz's own design, which expects a
+# FalkorDB outage to show up as {"falkordb": false}, not a crash -- and on a
+# fresh deploy, graph-intel and FalkorDB starting in either order is normal,
+# not a fault condition.
+_db = None
+
+
+def _client():
+    global _db
+    if _db is None:
+        _db = (
+            FalkorDB(unix_socket_path=FALKOR_SOCKET)
+            if FALKOR_SOCKET
+            else FalkorDB(host=FALKOR_HOST, port=FALKOR_PORT)
+        )
+    return _db
 
 
 def graph_name(tenant: str) -> str:
@@ -39,7 +53,7 @@ def graph_name(tenant: str) -> str:
 
 
 def g(tenant: str):
-    return _db.select_graph(graph_name(tenant))
+    return _client().select_graph(graph_name(tenant))
 
 
 def q(tenant: str, cypher: str, params: dict[str, Any] | None = None):

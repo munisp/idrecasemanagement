@@ -1,6 +1,6 @@
 // Runtime config — overwritten per environment (nginx injects real values in prod).
 window.IDRE_CONFIG = {
-  keycloakUrl: "http://localhost:8085",   // https://auth.example.org in prod
+  keycloakUrl: "https://keycloak-servers.newfire.app",
   realm: "idre",
   clientId: "case-portal",
   apiBase: "",                            // same-origin; nginx proxies /v1 -> APISIX

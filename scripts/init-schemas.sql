@@ -99,6 +99,21 @@ BEGIN
             opened_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now()
         );
+        -- Reproduced live: on a database tenant_<st>.cases already existed in
+        -- (provisioned by an earlier deploy of an older schema version),
+        -- CREATE TABLE IF NOT EXISTS above is a no-op, so these columns
+        -- never actually get added -- the very next line then fails,
+        -- "column assigned_to does not exist", because casemgmt-core.sql's
+        -- own backfill for exactly this doesn't run until AFTER this file.
+        -- Self-healing fix: do the same ADD COLUMN IF NOT EXISTS here too,
+        -- so this function doesn't depend on file application order.
+        ALTER TABLE %I.cases
+            ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS assigned_to text,
+            ADD COLUMN IF NOT EXISTS assigned_role text,
+            ADD COLUMN IF NOT EXISTS batch_id uuid,
+            ADD COLUMN IF NOT EXISTS parent_case_id uuid,
+            ADD COLUMN IF NOT EXISTS duplicate_of uuid;
         CREATE INDEX IF NOT EXISTS cases_assignee ON %I.cases (assigned_to) WHERE assigned_to IS NOT NULL;
         CREATE TABLE IF NOT EXISTS %I.sealed_offers (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -129,7 +144,7 @@ BEGIN
             published_at timestamptz,
             created_at timestamptz NOT NULL DEFAULT now()
         );
-    $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
+    $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
 END;
 $$ LANGUAGE plpgsql;
 

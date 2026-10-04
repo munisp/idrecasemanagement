@@ -23,6 +23,13 @@ from pipeline import bytes_to_pages, run_pipeline
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
 TEMPORAL_SIGNAL_URL = os.environ.get("CASE_API_URL", "http://localhost:8080")
+# The signal call below sent no Authorization header at all, wrapped in a
+# silent except -- it has always 401'd (case-api's /signal routes require
+# auth like every other /v1/tenants/... route), invisibly. WORKER_TOKEN is
+# the same service credential case-api validates for idre-workflows' own
+# service-to-service calls (authn.middleware, SERVICE_WORKER role).
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+AUTH_HEADERS = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
 
 minio = Minio(
     os.environ.get("MINIO_ENDPOINT", "localhost:9000"),
@@ -55,14 +62,31 @@ def load_case(tenant: str, case_id: str) -> dict | None:
     return {"case_number": row[0], "qpa_cents": row[1]} if row else None
 
 
+def subject(evt: dict) -> tuple[str, str]:
+    """("case", id) or ("application", id) -- whichever key the event carries.
+    Checked first, before anything touches evt["case_id"] directly: an
+    application event has no case_id key at all (not an empty one), so a
+    blind evt["case_id"] raises KeyError -- which used to propagate out of
+    process(), into the bare `except Exception` in main()'s poll loop, which
+    itself called mark() with the same blind evt["case_id"] access and raised
+    AGAIN, uncaught, killing the whole consumer (every tenant's doc processing
+    stops, not just the one event) until the pod restarted."""
+    if evt.get("case_id"):
+        return "case", evt["case_id"]
+    return "application", evt["application_id"]
+
+
 def persist(evt: dict, ctx: dict) -> None:
+    kind, subj_id = subject(evt)
+    case_id = subj_id if kind == "case" else None
+    application_id = subj_id if kind == "application" else None
     with psycopg.connect(DSN, autocommit=True) as c:
         c.execute(
-            """INSERT INTO public.doc_analysis (doc_id, tenant, case_id, status, doc_type, result)
-               VALUES (%s,%s,%s,%s,%s,%s)
+            """INSERT INTO public.doc_analysis (doc_id, tenant, case_id, application_id, status, doc_type, result)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (doc_id) DO UPDATE SET status=EXCLUDED.status,
                  doc_type=EXCLUDED.doc_type, result=EXCLUDED.result, analyzed_at=now()""",
-            (evt["doc_id"], evt["tenant"], evt["case_id"],
+            (evt["doc_id"], evt["tenant"], case_id, application_id,
              ctx["status"], ctx.get("doc_type", ""),
              json.dumps({
                  "extracted": ctx.get("extracted", {}),
@@ -75,11 +99,13 @@ def persist(evt: dict, ctx: dict) -> None:
         index=f"idre-docs-{evt['tenant']}",
         id=evt["doc_id"],
         body={
-            "case_id": evt["case_id"], "doc_type": ctx.get("doc_type"),
+            "case_id": case_id, "application_id": application_id, "doc_type": ctx.get("doc_type"),
             "text": ctx.get("text", "")[:100000],
             "extracted": ctx.get("extracted", {}),
         },
     )
+    if kind != "case":
+        return  # case_activities is a case-timeline table; applications have no equivalent here
     # Unified timeline: analysis result appears on the case activity stream
     # (same table case-api writes DOCUMENT_UPLOADED / signals / voice / notes to).
     findings = ctx.get("findings", [])
@@ -92,11 +118,12 @@ def persist(evt: dict, ctx: dict) -> None:
         c.execute(
             """INSERT INTO public.case_activities (tenant, case_id, type, body)
                VALUES (%s,%s,'ANALYSIS_COMPLETE',%s)""",
-            (evt["tenant"], evt["case_id"], summary[:2000]),
+            (evt["tenant"], case_id, summary[:2000]),
         )
 
 
 def process(evt: dict) -> None:
+    kind, subj_id = subject(evt)
     if evt.get("sealed"):
         # Sealed offer documents: skip analysis until lawful reveal.
         mark(evt, "SEALED_PENDING_REVEAL")
@@ -108,28 +135,35 @@ def process(evt: dict) -> None:
         "content_type": evt.get("content_type", ""),
         "pages": bytes_to_pages(raw, evt.get("content_type", "")),  # for OCR fallback + VLM image
     }
-    ctx = run_pipeline(ctx, case=load_case(evt["tenant"], evt["case_id"]))
+    ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
     persist(evt, ctx)
-    # Signal the case workflow (e.g., onboarding doc-verification gate).
+    # Signal the workflow waiting on this analysis (case: DOC_ANALYZED: offer-
+    # window-adjacent gates; application: DOCS_VERIFIED: the PENDING_DOCS gate).
+    if kind == "case":
+        url = f"{TEMPORAL_SIGNAL_URL}/v1/tenants/{evt['tenant']}/cases/{subj_id}/signal"
+        payload = {"signal": "DOC_ANALYZED",
+                   "data": {"doc_id": evt["doc_id"], "doc_type": ctx.get("doc_type"), "status": ctx["status"]}}
+    else:
+        url = f"{TEMPORAL_SIGNAL_URL}/v1/tenants/{evt['tenant']}/onboarding/applications/{subj_id}/signal"
+        clean = ctx["status"] not in ("ERROR",) and not ctx.get("findings")
+        payload = {"signal": "DOCS_VERIFIED",
+                   "data": {"clean": clean, "findings": ctx.get("findings", [])}}
     try:
-        httpx.post(
-            f"{TEMPORAL_SIGNAL_URL}/v1/tenants/{evt['tenant']}/cases/{evt['case_id']}/signal",
-            json={"signal": "DOC_ANALYZED",
-                  "data": {"doc_id": evt["doc_id"], "doc_type": ctx.get("doc_type"),
-                           "status": ctx["status"]}},
-            timeout=10,
-        )
+        httpx.post(url, json=payload, headers=AUTH_HEADERS, timeout=10)
     except httpx.HTTPError:
         pass  # signal is best-effort; analysis is already persisted
 
 
 def mark(evt: dict, status: str) -> None:
+    kind, subj_id = subject(evt)
+    case_id = subj_id if kind == "case" else None
+    application_id = subj_id if kind == "application" else None
     with psycopg.connect(DSN, autocommit=True) as c:
         c.execute(
-            """INSERT INTO public.doc_analysis (doc_id, tenant, case_id, status, doc_type, result)
-               VALUES (%s,%s,%s,%s,'','{}')
+            """INSERT INTO public.doc_analysis (doc_id, tenant, case_id, application_id, status, doc_type, result)
+               VALUES (%s,%s,%s,%s,%s,'','{}')
                ON CONFLICT (doc_id) DO UPDATE SET status=EXCLUDED.status""",
-            (evt["doc_id"], evt["tenant"], evt["case_id"], status),
+            (evt["doc_id"], evt["tenant"], case_id, application_id, status),
         )
 
 
@@ -161,8 +195,15 @@ def main() -> None:
             consumer.commit(msg)
         except Exception as exc:  # noqa: BLE001
             print(f"doc-intel error: {exc}", file=sys.stderr, flush=True)
-            # poison message handling: park on doc_processing_errors, keep consuming
-            mark(json.loads(msg.value()), "ERROR")
+            # Poison message handling: park on doc_processing_errors, keep
+            # consuming. mark() itself must never be able to raise here -- it
+            # used to (a blind evt["case_id"] on an application event), which
+            # escaped uncaught and killed the whole consumer, not just this
+            # one message, stopping document processing for every tenant.
+            try:
+                mark(json.loads(msg.value()), "ERROR")
+            except Exception as mark_exc:  # noqa: BLE001
+                print(f"doc-intel error (while marking a previous error): {mark_exc}", file=sys.stderr, flush=True)
             consumer.commit(msg)
     consumer.close()
 
