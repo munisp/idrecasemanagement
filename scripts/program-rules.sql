@@ -110,6 +110,13 @@ CREATE TABLE IF NOT EXISTS public.intake_requests (
     notes       text,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
+-- AHCA answers 2026: intake carries the filing party type (a health plan CAN
+-- file, though rare) and the packet-complete timestamp that anchors the
+-- 10-day initial-review clock (the clock runs from COMPLETE packet receipt,
+-- not payment or submission). Backfilled for pre-existing databases.
+ALTER TABLE public.intake_requests
+    ADD COLUMN IF NOT EXISTS filing_party_type text NOT NULL DEFAULT 'PROVIDER', -- PROVIDER|HEALTH_PLAN
+    ADD COLUMN IF NOT EXISTS packet_complete_at timestamptz;                     -- null = awaiting documents
 
 -- Tokenized party document links (ShareFile replacement).
 CREATE TABLE IF NOT EXISTS public.share_links (
@@ -260,7 +267,11 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "out_of_network": ["Yes","No"],
     "case_outcome": ["TBD - case in process","Withdrawn","Dismissed","Provider Default Award","Provider Full Award","Provider Partial Award","Provider No Award","Other"],
     "party_billed": ["Health Plan","Provider","Both Parties","N/A"],
-    "withdrawal_dismissed_reason": ["Dismissed-Timeliness eligibility failed","Member plan is not regulated by Florida","Self-Funded Plan","Provider No Response","Withdrawal-Claim Resolved","Other","N/A"]
+    "withdrawal_dismissed_reason": ["Dismissed-Timeliness eligibility failed","Member plan is not regulated by Florida","Self-Funded Plan","Provider No Response","Withdrawal-Claim Resolved","Other","N/A"],
+    "internal_status_terminal": ["Plan Opt-Out","Ineligible","Dismissed","Withdrawn"],
+    "internal_status_completed": "Decided - Invoice Paid",
+    "internal_status_after_plan_notification": "Plan Notification Packet Issued",
+    "_status_note": "AHCA 2026: a case is only ever CLOSED via Plan Opt-Out, Ineligible, Dismissed, or Withdrawn. A completed case is NOT closed — it rests at 'Decided - Invoice Paid'. The 60-day Agency clock never pauses (holds/RFIs/estimate window included). The 10-day initial review runs from complete-packet receipt. RFI may ride with the acceptance letter, but documentation not received by day 13 => Ineligible."
   },
   "volume_rules": {
     "comment": "Capitol Bridge Large Volume Claims Dispute Submission Policy v01.01.2026 — ADOPTED by AHCA. Governs claims-per-dispute volume (NOT repeat filer volume — AHCA confirmed 2026). Applies to disputes with >=100 claims. Non-compliant disputes are found INELIGIBLE; resubmission permitted once the ineligibility reason is cured. Written exemptions by Capitol Bridge only.",

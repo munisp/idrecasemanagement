@@ -7,9 +7,11 @@ package main
 // case number per FL AHCA program semantics, configurable per tenant.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -126,6 +128,9 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_"+status,
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
+	if status == "PAID" {
+		s.maybeMarkDecidedInvoicePaid(r, tenant, caseID)
+	}
 	// unified financial stream (offline settlements: check/ACH/manual)
 	kind, dir := "INVOICE_VOIDED", "NONE"
 	if in.Action == "PAY" {
@@ -214,7 +219,14 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "CLAIMS_IMPORT",
 		fmt.Sprintf("%d claim lines imported ($%d.%02d billed; running total %d claims)",
 			len(in.Claims), billed/100, billed%100, len(in.Claims)))
-	writeJSON(w, http.StatusOK, map[string]any{"imported": len(in.Claims)})
+	resp := map[string]any{"imported": len(in.Claims)}
+	// Adopted Capitol Bridge large-volume policy (v01.01.2026): evaluated on
+	// every import when the tenant has it enabled; violations land on the
+	// case record + activity stream.
+	if vc := s.checkVolumeRules(r, tenant, caseID); vc != nil {
+		resp["volume_check"] = vc
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
@@ -234,29 +246,49 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 // ---- Pre-case intake (G12) ---------------------------------------------------
 
 // createIntake opens a pre-case intake request (INSTRUCTURED = packet
-// requested, awaiting docs/fee). outreach_at anchors the refund window.
+// requested, awaiting docs/fee). outreach_at anchors the refund window AND
+// the day-13 completeness gate. filing_party_type records who files —
+// AHCA 2026: almost always PROVIDER, but a health plan CAN file; the value
+// mirrors the notification flow (the NON-filing party receives the plan
+// notification packet).
 func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
-		Email       string `json:"email"`
-		ContactName string `json:"contact_name"`
-		Org         string `json:"org"`
-		Notes       string `json:"notes"`
+		Email           string `json:"email"`
+		ContactName     string `json:"contact_name"`
+		Org             string `json:"org"`
+		Notes           string `json:"notes"`
+		FilingPartyType string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
 		return
 	}
+	fpt := strings.ToUpper(strings.TrimSpace(in.FilingPartyType))
+	if fpt == "" {
+		fpt = "PROVIDER"
+	}
+	if fpt != "PROVIDER" && fpt != "HEALTH_PLAN" {
+		http.Error(w, `{"error":"filing_party_type must be PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
+		return
+	}
 	var id string
 	_ = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.intake_requests (tenant, email, contact_name, org, notes, outreach_at)
-		VALUES ($1,$2,$3,$4,$5, now()) RETURNING id`,
-		tenant, in.Email, in.ContactName, in.Org, in.Notes).Scan(&id)
-	writeJSON(w, http.StatusOK, map[string]any{"intake_id": id, "status": "INSTRUCTED"})
+		INSERT INTO public.intake_requests (tenant, email, contact_name, org, notes, outreach_at, filing_party_type)
+		VALUES ($1,$2,$3,$4,$5, now(), $6) RETURNING id`,
+		tenant, in.Email, in.ContactName, in.Org, in.Notes, fpt).Scan(&id)
+	writeJSON(w, http.StatusOK, map[string]any{"intake_id": id, "status": "INSTRUCTED", "filing_party_type": fpt})
 }
 
-// advanceIntake moves an intake through DOCS_RECEIVED → PAID → CONVERTED, or
-// closes it CLOSED_REFUNDED (enforcing the program refund window when set).
+// advanceIntake moves an intake through DOCS_RECEIVED → PACKET_COMPLETE →
+// PAID → CONVERTED, or closes it CLOSED_REFUNDED (enforcing the program
+// refund window when set) / INELIGIBLE.
+//
+// PACKET_COMPLETE is the statutory anchor (AHCA 2026): the 10-day initial
+// review runs from COMPLETE-packet receipt, so the timestamp is written
+// here and copied onto the case at CONVERTED as
+// details.initial_review_started_at — the review clock never starts from
+// payment or first submission.
 func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "intakeId")
@@ -271,6 +303,39 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 	if in.Status == "CONVERTED" && in.CaseID == "" {
 		http.Error(w, `{"error":"case_id required to convert"}`, http.StatusBadRequest)
 		return
+	}
+	if in.Status == "PACKET_COMPLETE" {
+		// Idempotent anchor: first completeness event wins; re-marks don't
+		// restart the clock.
+		if _, err := s.db.Exec(r.Context(), `
+			UPDATE public.intake_requests SET status=$3, packet_complete_at=coalesce(packet_complete_at, now())
+			WHERE tenant=$1 AND id=$2`, tenant, id, in.Status); err != nil {
+			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": in.Status})
+		return
+	}
+	if in.Status == "CONVERTED" {
+		// Carry the filing party type and the packet-complete anchor onto the
+		// case record so the review clock and notification routing follow the
+		// case, not the intake row.
+		var fpt string
+		var packetAt *time.Time
+		_ = s.db.QueryRow(r.Context(),
+			`SELECT filing_party_type, packet_complete_at FROM public.intake_requests WHERE tenant=$1 AND id=$2`,
+			tenant, id).Scan(&fpt, &packetAt)
+		var packetISO string
+		if packetAt != nil {
+			packetISO = packetAt.UTC().Format(time.RFC3339)
+		}
+		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.cases SET details = details || jsonb_build_object(
+			  'filing_party_type', $2::text, 'initial_review_started_at', $3::text), updated_at=now()
+			WHERE id=$1`, sanitizeTenant(tenant)), in.CaseID, fpt, packetISO); err != nil {
+			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+			return
+		}
 	}
 	if in.Status == "CLOSED_REFUNDED" {
 		// refund window enforcement (G12 + fees.refund_window_days)
@@ -406,9 +471,186 @@ func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1,$2,$3,$4,$5)`, tenant, caseID, in.Eligible, in.Rationale, p.Subject)
 	if in.Eligible {
 		_, _ = s.db.Exec(r.Context(),
-			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Opted Out', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
+			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Plan Opt-Out', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
 	}
 	s.logActivity(r.Context(), tenant, caseID, "OPT_OUT_DECISION",
 		fmt.Sprintf("Opt-out eligibility: %v%s (by %s)", in.Eligible, orDash(" — "+in.Rationale), p.Subject))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+}
+
+
+// ---- FL AHCA lifecycle semantics (AHCA answers, 2026) -------------------------
+
+// terminalInternalStatuses: the ONLY ways a case is closed per AHCA — Plan
+// Opt-Out, Ineligible, Dismissed, Withdrawn. A completed case is NOT closed;
+// it rests at decidedInvoicePaidStatus.
+var terminalInternalStatuses = map[string]bool{
+	"Plan Opt-Out": true, "Ineligible": true, "Dismissed": true, "Withdrawn": true,
+}
+
+const decidedInvoicePaidStatus = "Decided - Invoice Paid"
+
+// maybeMarkDecidedInvoicePaid sets the completed-case resting status when the
+// last open receivable on a decided case is paid. AHCA: closure is reserved
+// for opt-out/ineligible/dismissed/withdrawn — payment completion is its own
+// terminal-but-not-closed state.
+func (s *server) maybeMarkDecidedInvoicePaid(r *http.Request, tenant, caseID string) {
+	var open int
+	var internal string
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT count(*) FILTER (WHERE status='OPEN') FROM public.invoices
+		WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&open); err != nil || open > 0 {
+		return
+	}
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT coalesce(internal_status,'') FROM tenant_%s.cases WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&internal); err != nil {
+		return
+	}
+	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || internal == "" {
+		return // already terminal, already resting, or not yet decided
+	}
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+		`UPDATE tenant_%s.cases SET internal_status=$2, updated_at=now() WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID, decidedInvoicePaidStatus)
+	s.logActivity(r.Context(), tenant, caseID, "CASE_COMPLETED",
+		"All invoices paid — case rests at 'Decided - Invoice Paid' (completed, not closed)")
+}
+
+// sweepIntakeDay13: AHCA completeness gate — an RFI may ride with the
+// acceptance letter, but if the documentation hasn't arrived by day 13 after
+// outreach, the case is found incomplete and an ineligibility letter issues.
+// Runs daily (registered in main.go); idempotent by status transition.
+func (s *server) sweepIntakeDay13() {
+	rows, err := s.db.Query(context.Background(), `
+		UPDATE public.intake_requests
+		SET status='INELIGIBLE'
+		WHERE status IN ('INSTRUCTED','DOCS_RECEIVED')
+		  AND packet_complete_at IS NULL
+		  AND outreach_at < now() - interval '13 days'
+		RETURNING tenant, id, email`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	type hit struct{ tenant, id, email string }
+	var hits []hit
+	for rows.Next() {
+		var h hit
+		if rows.Scan(&h.tenant, &h.id, &h.email) == nil {
+			hits = append(hits, h)
+		}
+	}
+	for _, h := range hits {
+		// Staff-facing notification so the ineligibility letter is drafted and
+		// sent (letter content itself requires the program's DOCX template).
+		_, _ = s.db.Exec(context.Background(), `
+			INSERT INTO public.notifications (tenant, user_sub, type, body)
+			VALUES ($1,'*','SLA_BREACH',$2)`,
+			h.tenant, fmt.Sprintf("Intake %s (%s) found incomplete at day 13 — issue ineligibility letter", h.id, h.email))
+	}
+}
+
+// ---- Large-volume claim dispute rules (Capitol Bridge policy v01.01.2026) ----
+
+type volumeRules struct {
+	Enabled   bool `json:"enabled"`
+	Threshold int  `json:"large_volume_threshold_claims"`
+	SingleCPT bool `json:"single_cpt_per_dispute"`
+	Caps      map[string]struct {
+		PerDispute   int `json:"max_claims_per_dispute"`
+		Rolling14Day int `json:"max_claims_per_rolling_14_days"`
+	} `json:"caps"`
+}
+
+func (s *server) loadVolumeRules(r *http.Request, tenant string) *volumeRules {
+	var raw []byte
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT config->'volume_rules' FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&raw); err != nil {
+		return nil
+	}
+	var vr volumeRules
+	if json.Unmarshal(raw, &vr) != nil || !vr.Enabled || vr.Threshold <= 0 {
+		return nil
+	}
+	return &vr
+}
+
+// checkVolumeRules evaluates the adopted Capitol Bridge large-volume policy
+// against a case after a claims import. Violations are recorded on the case
+// (details.volume_violations) and the activity stream; disposition per policy
+// is INELIGIBLE with resubmission permitted, decided by staff at review.
+func (s *server) checkVolumeRules(r *http.Request, tenant, caseID string) map[string]any {
+	vr := s.loadVolumeRules(r, tenant)
+	if vr == nil {
+		return nil
+	}
+	var numClaims int
+	var providerID, medReview string
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT coalesce(num_claims,0), coalesce(provider_id,''),
+		        coalesce(details->>'requires_medical_review','')
+		 FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
+		Scan(&numClaims, &providerID, &medReview); err != nil {
+		return nil
+	}
+	if numClaims < vr.Threshold {
+		return map[string]any{"large_volume": false, "claims": numClaims}
+	}
+
+	capKey := "no_medical_review"
+	if medReview == "true" || medReview == "yes" {
+		capKey = "medical_review"
+	}
+	caps := vr.Caps[capKey]
+	var violations []string
+
+	if caps.PerDispute > 0 && numClaims > caps.PerDispute {
+		violations = append(violations, fmt.Sprintf(
+			"%d claims exceeds the %d-claim per-dispute cap (%s)", numClaims, caps.PerDispute, capKey))
+	}
+	// One CPT code per dispute (claims without a CPT don't count against).
+	if vr.SingleCPT {
+		var distinct int
+		_ = s.db.QueryRow(r.Context(), `
+			SELECT count(DISTINCT nullif(cpt,'')) FROM public.case_claims
+			WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&distinct)
+		if distinct > 1 {
+			violations = append(violations, fmt.Sprintf(
+				"%d distinct CPT codes — large-volume disputes are limited to one CPT code per dispute", distinct))
+		}
+	}
+	// Rolling 14-day submission cap across the filing party's disputes.
+	if caps.Rolling14Day > 0 && providerID != "" {
+		var rolling int
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
+			SELECT coalesce(sum(num_claims),0) FROM tenant_%s.cases
+			WHERE provider_id=$1 AND opened_at > now() - interval '14 days'`,
+			sanitizeTenant(tenant)), providerID).Scan(&rolling)
+		if rolling > caps.Rolling14Day {
+			violations = append(violations, fmt.Sprintf(
+				"%d claims submitted by this filing party in a 14-day window exceeds the %d-claim cap (%s)",
+				rolling, caps.Rolling14Day, capKey))
+		}
+	}
+
+	result := map[string]any{
+		"large_volume": true, "claims": numClaims, "review_class": capKey,
+		"violations": violations, "policy": "Capitol Bridge v01.01.2026",
+		"disposition": "INELIGIBLE (resubmission permitted once cured)",
+	}
+	vj, _ := json.Marshal(map[string]any{
+		"volume_checked_at": time.Now().UTC().Format(time.RFC3339),
+		"volume_violations": violations,
+		"volume_large":      true,
+	})
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+		`UPDATE tenant_%s.cases SET details = details || $2::jsonb, updated_at=now() WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID, string(vj))
+	if len(violations) > 0 {
+		s.logActivity(r.Context(), tenant, caseID, "VOLUME_RULE_VIOLATION",
+			fmt.Sprintf("Large-volume policy: %s — per policy the dispute is ineligible; resubmission permitted once cured",
+				strings.Join(violations, "; ")))
+	}
+	return result
 }

@@ -530,6 +530,18 @@ func main() {
 	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
 	r.Post("/api/public/apply", s.publicApply)
 
+	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
+	// intakes to INELIGIBLE and raises staff notifications for the letters.
+	// Idempotent (status-transition guarded); safe across replicas.
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		s.sweepIntakeDay13()
+		for range t.C {
+			s.sweepIntakeDay13()
+		}
+	}()
+
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	must(http.ListenAndServe(cfg.Addr, r))
 }
