@@ -5,6 +5,16 @@ shared context dict. pipeline.yaml decides which stages run, in what order, and
 under what condition (`when: <ctx-flag>`): Docling is the primary parser,
 PaddleOCR is conditionally docked for scanned pages, PP-StructureV3 handles
 seal/stamp detection, and the VLM stage does semantic extraction.
+
+Accuracy architecture (v2):
+  classify (weighted, margin-aware) -> docling -> ocr? -> layout
+    -> classify (2nd pass) -> vlm_extract (per-doc-type schema, chunked,
+       multi-page, self-repairing JSON, transport retries)
+    -> normalize (deterministic canonicalization of amounts/dates/codes)
+    -> verify (grounding check: every extracted value must literally appear
+       in the document text; per-field confidence)
+    -> validate (cross-checks vs case record + review routing)
+    -> index
 """
 
 from __future__ import annotations
@@ -13,6 +23,7 @@ import io
 import json
 import os
 import re
+import time
 from typing import Any
 
 import httpx
@@ -23,43 +34,76 @@ from PIL import Image
 # Stage implementations
 # ---------------------------------------------------------------------------
 
-# Keyword signals per doc type, scored against extracted text. Classification
-# runs twice: stage 1 (filename only, before parsing) and stage 2 (re-classify
-# with full text after Docling/OCR — a misleading filename can't win).
-TYPE_SIGNALS = {
-    "eob": ["explanation of benefits", "allowed amount", "patient responsibility",
-            "claim number", "remittance", "denial code", "coinsurance"],
-    "determination_letter": ["independent dispute resolution", "determination",
-            "prevailing party", "certified idre", "45 cfr", "dispute resolution entity",
-            "offer selected", "out-of-network rate"],
-    "idr_claim": ["cpt", "hcpcs", "billed amount", "qualifying payment amount",
-            "qpa", "service date", "place of service", "npi", "taxonomy",
-            "itemized", "ub-04", "cms-1500", "diagnosis code", "procedure code",
-            "claim", "provider", "payer", "member id"],
+# Weighted keyword signals per doc type. Strong signals (weight 3) are phrases
+# that essentially only appear in that document type; weak signals (weight 1)
+# are common billing vocabulary that needs corroboration. Classification runs
+# twice: pass 1 (filename only, before parsing) and pass 2 (full text after
+# Docling/OCR — a misleading filename can't win).
+TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
+    "eob": {
+        "strong": ["explanation of benefits", "remittance advice", "patient responsibility",
+                   "allowed amount", "adjustment amount", "claim adjustment reason"],
+        "weak": ["claim number", "denial code", "coinsurance", "copay", "deductible",
+                 "eob", "benefits", "covered", "not covered"],
+    },
+    "determination_letter": {
+        "strong": ["independent dispute resolution", "certified idre", "prevailing party",
+                   "offer selected", "45 cfr", "dispute resolution entity",
+                   "notice of idr determination", "determination of payment"],
+        "weak": ["determination", "out-of-network rate", "dispute", "arbitration",
+                 "idre", "batched", "attest"],
+    },
+    "idr_claim": {
+        "strong": ["qualifying payment amount", "ub-04", "cms-1500", "hcpcs",
+                   "place of service", "taxonomy", "itemized bill"],
+        "weak": ["cpt", "billed amount", "qpa", "service date", "npi", "diagnosis code",
+                 "procedure code", "claim", "provider", "payer", "member id", "units",
+                 "revenue code", "drg"],
+    },
 }
+WEIGHT = {"strong": 3, "weak": 1}
+
+# Minimum score to accept a classification at all, and minimum lead over the
+# runner-up to accept it without an ambiguity flag.
+CLASSIFY_MIN_SCORE = 2
+CLASSIFY_MIN_MARGIN = 2
 
 
-def classify_text(name: str, text: str) -> tuple[str, int]:
-    """Best-scoring doc type and its score; ('unrelated', 0) when nothing matches."""
-    hay = (name + " " + (text or "").lower()[:20000])
-    best, best_score = "unrelated", 0
-    for dtype, signals in TYPE_SIGNALS.items():
-        score = sum(1 for s in signals if s in hay)
-        # Filename hits count double — names are deliberate, body text noisy.
-        score += sum(1 for s in signals if s in name)
-        if score > best_score:
-            best, best_score = dtype, score
-    return best, best_score
+def classify_text(name: str, text: str) -> tuple[str, int, int]:
+    """(best_type, best_score, margin). ('unrelated', 0, 0) when no signal."""
+    body = (text or "").lower()[:20000]
+    name_l = (name or "").lower()
+    scores: dict[str, int] = {}
+    for dtype, tiers in TYPE_SIGNALS.items():
+        s = 0
+        for tier, signals in tiers.items():
+            w = WEIGHT[tier]
+            for sig in signals:
+                if sig in body:
+                    s += w
+                # Filename hits count double — names are deliberate, body noisy.
+                if sig in name_l:
+                    s += 2 * w
+        scores[dtype] = s
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best, best_score = ranked[0]
+    margin = best_score - ranked[1][1]
+    if best_score < CLASSIFY_MIN_SCORE:
+        return "unrelated", 0, 0
+    return best, best_score, margin
 
 
 def stage_classify(ctx: dict, cfg: dict) -> dict:
     """Doc-type guess: filename + (when available) extracted text. Documents
-    with no IDR signal at all are typed 'unrelated' rather than force-fit
-    into idr_claim — validate() routes those for manual review."""
-    name = (ctx.get("filename") or "").lower()
-    dtype, score = classify_text(name, ctx.get("text", ""))
+    with no IDR signal are typed 'unrelated'; a winning type with a thin
+    margin over the runner-up is kept but flagged ambiguous — validate()
+    routes ambiguous docs for a human glance instead of trusting the coin
+    flip."""
+    name = ctx.get("filename") or ""
+    dtype, score, margin = classify_text(name, ctx.get("text", ""))
     ctx["doc_type"] = dtype
     ctx["classify_score"] = score
+    ctx["classify_ambiguous"] = bool(dtype != "unrelated" and margin < CLASSIFY_MIN_MARGIN)
     return ctx
 
 
@@ -114,6 +158,9 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
         for res in result:
             texts.extend(res.get("rec_texts", []))
     ctx["text"] = "\n".join(texts)
+    # OCR recovered text for a scanned doc: markdown has no structure, but
+    # downstream stages read markdown first, so mirror it.
+    ctx["markdown"] = ctx["text"]
     return ctx
 
 
@@ -139,56 +186,326 @@ def stage_layout(ctx: dict, cfg: dict) -> dict:
     return ctx
 
 
-def stage_vlm_extract(ctx: dict, cfg: dict, schema_fields: list[str]) -> dict:
+# ---------------------------------------------------------------------------
+# VLM extraction
+# ---------------------------------------------------------------------------
+
+def _vlm_call(client: Any, model: str, content: list[dict], max_tokens: int) -> dict:
+    """One VLM round-trip with transport retries and JSON self-repair.
+
+    Retries up to 3 times on transport/5xx errors with exponential backoff.
+    If the model returns unparseable JSON, sends one repair follow-up asking
+    for the same answer as bare JSON before giving up. Raises only when all
+    attempts fail."""
+    last_exc: Exception | None = None
+    messages = [{"role": "user", "content": content}]
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=model, messages=messages,
+                max_tokens=max_tokens, temperature=0,
+            )
+            raw = resp.choices[0].message.content or ""
+            try:
+                return _parse_json_object(raw)
+            except ValueError:
+                # Self-repair: one follow-up demanding strict JSON, then fail.
+                messages = messages + [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": (
+                        "Your previous answer was not valid JSON. Reply with the "
+                        "SAME answer as a single bare JSON object only — no prose, "
+                        "no markdown fences, no explanation.")},
+                ]
+                resp2 = client.chat.completions.create(
+                    model=model, messages=messages,
+                    max_tokens=max_tokens, temperature=0,
+                )
+                return _parse_json_object(resp2.choices[0].message.content or "")
+        except (httpx.HTTPError, ConnectionError, TimeoutError) as exc:
+            last_exc = exc
+            time.sleep(0.5 * (2 ** attempt))
+    raise RuntimeError(f"VLM call failed after retries: {last_exc}")
+
+
+def _parse_json_object(raw: str) -> dict:
+    """Strict parse first; fall back to the largest {...} span; else ValueError."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(json)?\s*|\s*```$", "", raw, flags=re.S).strip()
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"\{.*\}", raw, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    raise ValueError("no parseable JSON object in VLM response")
+
+
+def _chunk_markdown(md: str, chunk_chars: int) -> list[str]:
+    """Split long markdown on paragraph boundaries so no field-bearing line is
+    cut mid-sentence; keeps every chunk under chunk_chars."""
+    if len(md) <= chunk_chars:
+        return [md]
+    chunks, buf = [], ""
+    for para in re.split(r"\n\s*\n", md):
+        if buf and len(buf) + len(para) + 2 > chunk_chars:
+            chunks.append(buf)
+            buf = para
+        else:
+            buf = (buf + "\n\n" + para) if buf else para
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def _merge_extractions(parts: list[dict], fields: list[str]) -> dict:
+    """Merge per-chunk extractions: first non-null value wins; lists are
+    unioned (order-preserving, de-duplicated)."""
+    merged: dict[str, Any] = {f: None for f in fields}
+    for f in fields:
+        for part in parts:
+            v = part.get(f)
+            if v in (None, "", [], {}):
+                continue
+            if isinstance(v, list):
+                cur = merged[f] if isinstance(merged[f], list) else []
+                merged[f] = cur + [x for x in v if x not in cur]
+            elif merged[f] in (None, "", [], {}):
+                merged[f] = v
+    return merged
+
+
+def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     """VLM semantic extraction via an OpenAI-compatible endpoint
-    (PaddleOCR-VL or Qwen2.5-VL served by vLLM; swap with one env var)."""
+    (PaddleOCR-VL or Qwen2.5-VL served by vLLM; swap with one env var).
+
+    - Schema follows the classified doc_type (a determination letter is asked
+      for prevailing_party, not CPT codes); unknown/unrelated types fall back
+      to idr_claim so mis-uploads still get probed for any billing content.
+    - Documents longer than chunk_chars are extracted per chunk and merged —
+      a 40-page itemized bill no longer loses everything past character 10k.
+    - Up to max_pages page images accompany the text for layout cues.
+    """
     from openai import OpenAI
 
     client = OpenAI(base_url=cfg["endpoint"], api_key=os.environ.get("VLM_API_KEY", "none"))
+    doc_type = ctx.get("doc_type") or "idr_claim"
+    schema_name = doc_type if doc_type in schemas else cfg.get("schema", "idr_claim")
+    ctx["schema_used"] = schema_name
+    fields = schemas[schema_name]["fields"]
+
+    md = ctx.get("markdown", ctx.get("text", ""))
     tables_hint = json.dumps(ctx.get("tables", [])[:3])[:3000]
-    prompt = (
+    pages = ctx.get("pages", [])
+    max_pages = cfg.get("max_pages", 3)
+
+    instructions = (
         "You are an IDR (No Surprises Act dispute) document analyst. "
         "FIRST decide whether this document is related to medical billing, health "
         "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
         'set "_in_domain" true or false. A resume, menu, tax form, legal contract, '
         "photograph with no document content, or any other unrelated material is "
         "false. When false, set every other field null and stop. "
-        f"Extract these fields as strict JSON (null when absent): {', '.join(schema_fields)}.\n"
+        f"This document is believed to be of type '{doc_type}'. "
+        f"Extract these fields as strict JSON (null when absent): {', '.join(fields)}.\n"
         "Only extract values that literally appear in the document — never invent "
-        "or infer identifiers or amounts.\n"
-        "Document content (markdown with layout) follows, then extracted tables.\n\n"
-        + ctx.get("markdown", ctx.get("text", ""))[:10000]
-        + "\n\nTABLES:\n" + tables_hint
+        "or infer identifiers or amounts. Preserve exact formatting of codes and "
+        "identifiers (CPT/HCPCS/NDC, claim numbers, NPIs). Amounts as numbers in "
+        "USD, dates as they appear.\n"
     )
-    # Multimodal: send first page image alongside the OCR text for layout cues.
-    img_b64 = pil_to_b64(ctx["pages"][0]) if ctx.get("pages") else None
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    if img_b64:
-        content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_b64}"}})
-    resp = client.chat.completions.create(
-        model=cfg["model"],
-        messages=[{"role": "user", "content": content}],
-        max_tokens=cfg.get("max_tokens", 2048),
-        temperature=0,
-    )
-    raw = resp.choices[0].message.content or "{}"
-    m = re.search(r"\{.*\}", raw, re.S)
-    parsed = json.loads(m.group(0)) if m else {}
-    ctx["in_domain"] = bool(parsed.pop("_in_domain", True))
+
+    chunk_chars = cfg.get("chunk_chars", 12000)
+    chunks = _chunk_markdown(md, chunk_chars)
+    parts: list[dict] = []
+    in_domain_votes: list[bool] = []
+    for i, chunk in enumerate(chunks):
+        prompt = instructions
+        if len(chunks) > 1:
+            prompt += f"This is section {i + 1} of {len(chunks)} of one document.\n"
+        prompt += "Document content (markdown with layout) follows, then extracted tables.\n\n" + chunk
+        if i == 0:
+            prompt += "\n\nTABLES:\n" + tables_hint
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        # Multimodal: page images give layout cues text alone loses.
+        for page in pages[i * max_pages:(i + 1) * max_pages] or pages[:max_pages]:
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{pil_to_b64(page)}"}})
+            break  # one page image per chunk keeps token cost bounded
+        parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+        in_domain_votes.append(bool(parsed.pop("_in_domain", True)))
+        parts.append(parsed)
+
+    ctx["in_domain"] = any(in_domain_votes) if in_domain_votes else True
     # Strict schema: only declared fields survive, all present (null-filled) —
     # the VLM can't smuggle invented keys into the record.
-    ctx["extracted"] = {f: parsed.get(f) for f in schema_fields}
+    ctx["extracted"] = _merge_extractions(parts, fields)
     return ctx
 
 
+# ---------------------------------------------------------------------------
+# Normalization + verification
+# ---------------------------------------------------------------------------
+
+_RE_AMOUNT = re.compile(r"^\$?\s*(-?[\d,]+(?:\.\d{1,2})?)$")
+_RE_DATE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})$|"                     # ISO
+    r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$|"          # US numeric
+    r"^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$"           # January 5, 2026
+)
+_MONTHS = {m.lower(): i + 1 for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"])}
+_RE_CODE = re.compile(r"^[A-Z]?\d{4}[A-Z0-9]?$")       # CPT/HCPCS/DRG-ish
+_RE_NPI = re.compile(r"^\d{10}$")
+
+
+def _norm_amount(v: Any) -> float | None:
+    if isinstance(v, (int, float)):
+        return round(float(v), 2)
+    if isinstance(v, str):
+        m = _RE_AMOUNT.match(v.strip())
+        if m:
+            return round(float(m.group(1).replace(",", "")), 2)
+    return None
+
+
+def _norm_date(v: Any) -> str | None:
+    """Canonicalize a date-ish value to ISO YYYY-MM-DD; None when unparseable."""
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    m = _RE_DATE.match(s)
+    if not m:
+        return None
+    if m.group(1):
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    if m.group(4):
+        mm, dd, yy = int(m.group(4)), int(m.group(5)), m.group(6)
+        yyyy = int(yy) if len(yy) == 4 else (2000 + int(yy) if int(yy) < 50 else 1900 + int(yy))
+        if 1 <= mm <= 12 and 1 <= dd <= 31:
+            return f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+        return None
+    mon = _MONTHS.get(m.group(7).lower())
+    if mon:
+        return f"{int(m.group(9)):04d}-{mon:02d}-{int(m.group(8)):02d}"
+    return None
+
+
+def stage_normalize(ctx: dict, cfg: dict) -> dict:
+    """Deterministic canonicalization of extracted values: amounts to floats,
+    dates to ISO, identifiers de-formatted and shape-checked. Normalized
+    copies live under ctx['normalized']; originals are never overwritten.
+    Values that fail their shape check are recorded as normalize_warnings so
+    verify()/validate() can weigh them."""
+    ex = ctx.get("extracted", {})
+    norm: dict[str, Any] = {}
+    warnings: list[dict] = []
+    for field, value in ex.items():
+        if value in (None, "", [], {}):
+            continue
+        if field.endswith("_usd") or "amount" in field or field.startswith(("qpa", "billed", "allowed", "awarded", "patient_responsibility")):
+            n = _norm_amount(value)
+            if n is None:
+                warnings.append({"field": field, "issue": f"amount not parseable: {value!r}"})
+            else:
+                norm[field] = n
+        elif "date" in field:
+            n = _norm_date(value)
+            if n is None:
+                warnings.append({"field": field, "issue": f"date not parseable: {value!r}"})
+            else:
+                norm[field] = n
+        elif field == "provider_npi":
+            digits = re.sub(r"\D", "", str(value))
+            if _RE_NPI.match(digits):
+                norm[field] = digits
+            else:
+                warnings.append({"field": field, "issue": "NPI is not 10 digits"})
+        elif field in ("cpt_hcpcs_codes", "denial_codes") and isinstance(value, list):
+            cleaned = [str(c).strip().upper() for c in value]
+            bad = [c for c in cleaned if not _RE_CODE.match(c)]
+            norm[field] = cleaned
+            if bad:
+                warnings.append({"field": field, "issue": f"implausible code(s): {', '.join(bad[:5])}"})
+    ctx["normalized"] = norm
+    ctx["normalize_warnings"] = warnings
+    return ctx
+
+
+def _flatten_values(v: Any) -> list[str]:
+    """Scalar string forms of an extracted value (lists flattened one level)."""
+    if isinstance(v, list):
+        out: list[str] = []
+        for x in v:
+            out.extend(_flatten_values(x))
+        return out
+    if isinstance(v, (int, float)):
+        return [str(v), f"{float(v):,.2f}", f"${float(v):,.2f}"]
+    return [str(v)]
+
+
+def _grounded(value_str: str, hay: str) -> bool:
+    """A value is grounded when it (or a whitespace/punctuation-tolerant form)
+    literally appears in the document text."""
+    needle = value_str.strip().lower()
+    if not needle:
+        return True
+    if needle in hay:
+        return True
+    # Tolerate OCR/typography variance: collapse non-alphanumerics on both sides.
+    squash_n = re.sub(r"[^a-z0-9]", "", needle)
+    if len(squash_n) < 3:
+        return needle in hay
+    return squash_n in re.sub(r"[^a-z0-9]", "", hay)
+
+
+def stage_verify(ctx: dict, cfg: dict) -> dict:
+    """Grounding check: every extracted scalar must literally appear in the
+    document text. Per-field confidence is recorded (high = grounded,
+    low = not found in text). Ungrounded values are the hallucination
+    signature — they become findings in validate() and are excluded from the
+    trusted normalized set."""
+    hay = (ctx.get("markdown") or ctx.get("text") or "").lower()
+    confidence: dict[str, str] = {}
+    ungrounded: list[str] = []
+    for field, value in ctx.get("extracted", {}).items():
+        if value in (None, "", [], {}):
+            continue
+        atoms = [a for a in _flatten_values(value) if a.strip()]
+        ok = all(_grounded(a, hay) for a in atoms) if atoms else False
+        confidence[field] = "high" if ok else "low"
+        if not ok:
+            ungrounded.append(field)
+    ctx["field_confidence"] = confidence
+    ctx["ungrounded_fields"] = ungrounded
+    # Trusted normalized view: drop normalized copies of ungrounded fields.
+    if ungrounded and ctx.get("normalized"):
+        ctx["normalized"] = {k: v for k, v in ctx["normalized"].items() if k not in ungrounded}
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# Validation + indexing
+# ---------------------------------------------------------------------------
+
 def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     """Cross-check extracted fields against the case record; mismatches flag."""
-    findings = []
+    findings: list[dict] = list(ctx.get("findings", []))
     ex = ctx.get("extracted", {})
+    norm = ctx.get("normalized", {})
     if case:
-        if ex.get("qpa_usd") and case.get("qpa_cents"):
-            if abs(float(ex["qpa_usd"]) * 100 - case["qpa_cents"]) > 100:
+        qpa = norm.get("qpa_usd") or (_norm_amount(ex.get("qpa_usd")) if ex.get("qpa_usd") else None)
+        if qpa and case.get("qpa_cents"):
+            if abs(qpa * 100 - case["qpa_cents"]) > 100:
                 findings.append({"field": "qpa_usd", "issue": "QPA mismatch vs case record"})
         if ex.get("claim_number") and case.get("case_number"):
             # claim vs CMS case number are different identifiers; record both
@@ -202,8 +519,32 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
         ctx["doc_type"] = "unrelated"
     elif ctx.get("classify_score", 1) == 0 and not ex_fields:
         findings.append({"field": None, "issue": "No IDR-relevant content detected — possible mis-upload; routed for manual review"})
+    # Ambiguous classification: the winning type barely beat the runner-up.
+    if ctx.get("classify_ambiguous") and ctx.get("doc_type") != "unrelated":
+        findings.append({"field": None, "issue": f"Document type '{ctx['doc_type']}' is a low-margin classification — confirm type on review"})
+    # Hallucination guard from verify().
+    for field in ctx.get("ungrounded_fields", []):
+        findings.append({"field": field, "issue": "Extracted value not found in document text — possible extraction error; verify before use"})
+    # Shape warnings from normalize().
+    for w in ctx.get("normalize_warnings", []):
+        findings.append({"field": w["field"], "issue": w["issue"]})
     ctx["findings"] = findings
     ctx["status"] = "ANALYZED" if not findings else "ANALYZED_WITH_FINDINGS"
+    return ctx
+
+
+def stage_index(ctx: dict, cfg: dict) -> dict:
+    """Build the OpenSearch document body. main.persist() performs the actual
+    index call (it owns the client); this stage decides WHAT is searchable:
+    full text, trusted normalized fields, doc type, and confidence map."""
+    ctx["index_body"] = {
+        "doc_type": ctx.get("doc_type"),
+        "text": ctx.get("text", "")[:100000],
+        "extracted": ctx.get("extracted", {}),
+        "normalized": ctx.get("normalized", {}),
+        "field_confidence": ctx.get("field_confidence", {}),
+        "status": ctx.get("status"),
+    }
     return ctx
 
 
@@ -218,7 +559,6 @@ def load_pipeline(path: str = "pipeline.yaml") -> dict:
 
 def run_pipeline(ctx: dict, case: dict | None = None) -> dict:
     spec = load_pipeline()
-    schema_name = None
     for st in spec["stages"]:
         if not st.get("enabled", True):
             continue
@@ -229,9 +569,7 @@ def run_pipeline(ctx: dict, case: dict | None = None) -> dict:
             continue
         name, cfg = st["name"], st.get("config", {})
         if name == "vlm_extract":
-            schema_name = cfg.get("schema", "idr_claim")
-            fields = spec["schemas"][schema_name]["fields"]
-            ctx = stage_vlm_extract(ctx, cfg, fields)
+            ctx = stage_vlm_extract(ctx, cfg, spec["schemas"])
         elif name == "validate":
             ctx = stage_validate(ctx, cfg, case)
         else:

@@ -90,15 +90,21 @@ def persist(evt: dict, ctx: dict) -> None:
              ctx["status"], ctx.get("doc_type", ""),
              json.dumps({
                  "extracted": ctx.get("extracted", {}),
+                 "normalized": ctx.get("normalized", {}),
+                 "field_confidence": ctx.get("field_confidence", {}),
                  "findings": ctx.get("findings", []),
                  "seal_detected": ctx.get("seal_detected", False),
                  "table_count": len(ctx.get("tables", [])),
+                 "schema_used": ctx.get("schema_used"),
              })),
         )
     search.index(
         index=f"idre-docs-{evt['tenant']}",
         id=evt["doc_id"],
-        body={
+        # stage_index builds the searchable body; fall back to raw fields if
+        # the pipeline stopped before indexing (e.g. early ERROR paths).
+        body={**ctx.get("index_body", {}), "case_id": case_id, "application_id": application_id}
+        if ctx.get("index_body") else {
             "case_id": case_id, "application_id": application_id, "doc_type": ctx.get("doc_type"),
             "text": ctx.get("text", "")[:100000],
             "extracted": ctx.get("extracted", {}),
@@ -110,8 +116,13 @@ def persist(evt: dict, ctx: dict) -> None:
     # (same table case-api writes DOCUMENT_UPLOADED / signals / voice / notes to).
     findings = ctx.get("findings", [])
     summary = f"Document analysis {ctx['status']}: type={ctx.get('doc_type', '?')}"
+    if ctx.get("schema_used"):
+        summary += f", schema={ctx['schema_used']}"
     if ctx.get("seal_detected"):
         summary += ", seal/stamp detected"
+    low_conf = [f for f, c in ctx.get("field_confidence", {}).items() if c == "low"]
+    if low_conf:
+        summary += f", unverified field(s): {', '.join(low_conf[:5])}"
     if findings:
         summary += f", {len(findings)} finding(s): " + "; ".join(map(str, findings[:3]))
     with psycopg.connect(DSN, autocommit=True) as c:
