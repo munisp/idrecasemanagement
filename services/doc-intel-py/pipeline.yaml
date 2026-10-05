@@ -32,6 +32,9 @@ stages:
       use_formula_recognition: false
       use_seal_recognition: true    # stamps/seals matter for determinations
 
+  - name: classify           # SECOND PASS: re-classify with full extracted text —
+    enabled: true            # a misleading filename can't outvote document content
+
   - name: vlm_extract        # VLM semantic extraction over Docling markdown + first page
     enabled: true
     config:

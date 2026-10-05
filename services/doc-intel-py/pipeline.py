@@ -23,15 +23,43 @@ from PIL import Image
 # Stage implementations
 # ---------------------------------------------------------------------------
 
+# Keyword signals per doc type, scored against extracted text. Classification
+# runs twice: stage 1 (filename only, before parsing) and stage 2 (re-classify
+# with full text after Docling/OCR — a misleading filename can't win).
+TYPE_SIGNALS = {
+    "eob": ["explanation of benefits", "allowed amount", "patient responsibility",
+            "claim number", "remittance", "denial code", "coinsurance"],
+    "determination_letter": ["independent dispute resolution", "determination",
+            "prevailing party", "certified idre", "45 cfr", "dispute resolution entity",
+            "offer selected", "out-of-network rate"],
+    "idr_claim": ["cpt", "hcpcs", "billed amount", "qualifying payment amount",
+            "qpa", "service date", "place of service", "npi", "taxonomy",
+            "itemized", "ub-04", "cms-1500", "diagnosis code", "procedure code",
+            "claim", "provider", "payer", "member id"],
+}
+
+
+def classify_text(name: str, text: str) -> tuple[str, int]:
+    """Best-scoring doc type and its score; ('unrelated', 0) when nothing matches."""
+    hay = (name + " " + (text or "").lower()[:20000])
+    best, best_score = "unrelated", 0
+    for dtype, signals in TYPE_SIGNALS.items():
+        score = sum(1 for s in signals if s in hay)
+        # Filename hits count double — names are deliberate, body text noisy.
+        score += sum(1 for s in signals if s in name)
+        if score > best_score:
+            best, best_score = dtype, score
+    return best, best_score
+
+
 def stage_classify(ctx: dict, cfg: dict) -> dict:
-    """Heuristic doc-type guess; VLM stage may refine it."""
+    """Doc-type guess: filename + (when available) extracted text. Documents
+    with no IDR signal at all are typed 'unrelated' rather than force-fit
+    into idr_claim — validate() routes those for manual review."""
     name = (ctx.get("filename") or "").lower()
-    if "eob" in name or "explanation" in name:
-        ctx["doc_type"] = "eob"
-    elif "determination" in name or "decision" in name:
-        ctx["doc_type"] = "determination_letter"
-    else:
-        ctx["doc_type"] = "idr_claim"
+    dtype, score = classify_text(name, ctx.get("text", ""))
+    ctx["doc_type"] = dtype
+    ctx["classify_score"] = score
     return ctx
 
 
@@ -120,7 +148,14 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schema_fields: list[str]) -> dict:
     tables_hint = json.dumps(ctx.get("tables", [])[:3])[:3000]
     prompt = (
         "You are an IDR (No Surprises Act dispute) document analyst. "
+        "FIRST decide whether this document is related to medical billing, health "
+        "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
+        'set "_in_domain" true or false. A resume, menu, tax form, legal contract, '
+        "photograph with no document content, or any other unrelated material is "
+        "false. When false, set every other field null and stop. "
         f"Extract these fields as strict JSON (null when absent): {', '.join(schema_fields)}.\n"
+        "Only extract values that literally appear in the document — never invent "
+        "or infer identifiers or amounts.\n"
         "Document content (markdown with layout) follows, then extracted tables.\n\n"
         + ctx.get("markdown", ctx.get("text", ""))[:10000]
         + "\n\nTABLES:\n" + tables_hint
@@ -139,7 +174,11 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schema_fields: list[str]) -> dict:
     )
     raw = resp.choices[0].message.content or "{}"
     m = re.search(r"\{.*\}", raw, re.S)
-    ctx["extracted"] = json.loads(m.group(0)) if m else {}
+    parsed = json.loads(m.group(0)) if m else {}
+    ctx["in_domain"] = bool(parsed.pop("_in_domain", True))
+    # Strict schema: only declared fields survive, all present (null-filled) —
+    # the VLM can't smuggle invented keys into the record.
+    ctx["extracted"] = {f: parsed.get(f) for f in schema_fields}
     return ctx
 
 
@@ -154,6 +193,15 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
         if ex.get("claim_number") and case.get("case_number"):
             # claim vs CMS case number are different identifiers; record both
             ctx["extracted"]["cms_case_number"] = case["case_number"]
+    # Out-of-domain guard: VLM verdict, zero-signal classification, or an
+    # all-null extraction each independently mean a human should look before
+    # this document is treated as case evidence.
+    ex_fields = {k: v for k, v in ex.items() if v not in (None, "", [], {})}
+    if ctx.get("in_domain") is False:
+        findings.append({"field": None, "issue": "Document is not related to medical billing or IDR — possible mis-upload; routed for manual review"})
+        ctx["doc_type"] = "unrelated"
+    elif ctx.get("classify_score", 1) == 0 and not ex_fields:
+        findings.append({"field": None, "issue": "No IDR-relevant content detected — possible mis-upload; routed for manual review"})
     ctx["findings"] = findings
     ctx["status"] = "ANALYZED" if not findings else "ANALYZED_WITH_FINDINGS"
     return ctx
