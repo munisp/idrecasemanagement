@@ -597,18 +597,54 @@ def pil_to_b64(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def pdf_to_pages(data: bytes, dpi: int = 200) -> list[Image.Image]:
-    """Rasterize PDF pages (pypdfium2 bundled with PaddleOCR toolchain)."""
+def pdf_to_pages(data: bytes, dpi: int = 200,
+                 max_pages: int | None = None) -> tuple[list[Image.Image], bool]:
+    """Rasterize PDF pages (pypdfium2 bundled with PaddleOCR toolchain).
+
+    Page-capped: each page becomes a full-resolution bitmap in worker memory,
+    so an unbounded render of a huge/hostile PDF is a memory bomb that kills
+    the consumer for every tenant. Returns (pages, truncated)."""
     import pypdfium2 as pdfium
 
+    cap = max_pages or int(os.environ.get("DOC_INTEL_MAX_PAGES", "150"))
     pdf = pdfium.PdfDocument(data)
     pages = []
-    for page in pdf:
+    truncated = False
+    for i, page in enumerate(pdf):
+        if i >= cap:
+            truncated = True
+            break
         pages.append(page.render(scale=dpi / 72).to_pil())
-    return pages
+    return pages, truncated
 
 
-def bytes_to_pages(data: bytes, content_type: str) -> list[Image.Image]:
-    if "pdf" in content_type:
+def sniff_doc_kind(data: bytes, content_type: str) -> str:
+    """Cheap magic-byte gate run BEFORE any parsing: pdf / image / office /
+    text / unknown. The API edge enforces an allowlist, but events can also
+    arrive from paths that predate it — defense in depth, and a clean
+    UNSUPPORTED_TYPE instead of an exception-marked ERROR."""
+    if data[:5] == b"%PDF-":
+        return "pdf"
+    if data[:4] == b"PK\x03\x04":
+        return "office"
+    if (data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff"
+            or data[:4] in (b"II*\x00", b"MM\x00*", b"GIF8") or data[:2] == b"BM"
+            or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")):
+        return "image"
+    sample = data[:4096]
+    if sample and b"\x00" not in sample:
+        printable = sum(1 for b in sample if b in b"\t\n\r" or 0x20 <= b < 0x7F or b >= 0x80)
+        if printable / len(sample) > 0.95:
+            return "text"
+    return "unknown"
+
+
+def bytes_to_pages(data: bytes, content_type: str,
+                   kind: str | None = None) -> tuple[list[Image.Image], bool]:
+    """(pages, truncated). kind comes from sniff_doc_kind when available."""
+    k = kind or ("pdf" if "pdf" in content_type else "image")
+    if k == "pdf":
         return pdf_to_pages(data)
-    return [Image.open(io.BytesIO(data))]
+    if k == "image":
+        return [Image.open(io.BytesIO(data))], False
+    return [], False  # office/text: Docling reads raw bytes; no raster pages

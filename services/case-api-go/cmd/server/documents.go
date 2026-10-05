@@ -27,6 +27,10 @@ const (
 	docBucket      = "idre-docs"
 	maxDocBytes    = 100 << 20 // 100 MB hard cap
 	retentionYears = 6         // federal retention mandate
+	// tenantStorageQuota bounds cumulative document bytes per tenant (25 GiB).
+	// Deployments can raise it per program; it exists to cap abuse/accident
+	// blast radius, not to constrain legitimate dockets.
+	tenantStorageQuota = 25 << 30
 )
 
 type docStore struct{ mc *minio.Client }
@@ -75,6 +79,15 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Abuse throttle: authenticated uploads were previously unlimited — a
+	// compromised or careless account could flood MinIO + the doc-intel queue
+	// (every document triggers OCR + VLM work). Per-user ceiling, fail-open
+	// only if Redis is down (authenticated surface; ShareBox stays fail-closed).
+	if n, err := s.rds.incrExpire("idre:rl:up:"+tenant+":"+p.Subject, 3600); err == nil && n > 120 {
+		http.Error(w, `{"error":"upload rate limit exceeded (120/hour) — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
 	if err := r.ParseMultipartForm(maxDocBytes); err != nil {
 		http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
@@ -105,6 +118,17 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("Upload %q rejected — ClamAV signature %s; nothing stored", hdr.Filename, sig))
 		}
 		return
+	}
+
+	// Storage quota: cumulative per-tenant cap stops a slow-bleed fill of
+	// object storage that per-request limits alone would miss.
+	var used int64
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
+		"SELECT COALESCE(SUM(size_bytes),0) FROM tenant_%s.documents", sanitizeTenant(tenant))).Scan(&used); err == nil {
+		if used+int64(len(raw)) > tenantStorageQuota {
+			http.Error(w, `{"error":"tenant document storage quota exceeded — contact your program administrator"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 	}
 
 	docID := newUUID()

@@ -24,6 +24,21 @@ type redisClient struct{ addr, password string }
 
 func newRedis(addr, password string) *redisClient { return &redisClient{addr: addr, password: password} }
 
+// incrExpire increments key and, on first increment, sets its TTL — the
+// fixed-window counter primitive behind rate limiting. Returns the count.
+func (r *redisClient) incrExpire(key string, ttlSec int) (int64, error) {
+	res, err := r.cmd("INCR", key)
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	fmt.Sscanf(res, "%d", &n)
+	if n == 1 {
+		_, _ = r.cmd("EXPIRE", key, fmt.Sprintf("%d", ttlSec))
+	}
+	return n, nil
+}
+
 func writeCmd(w io.Writer, args ...string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "*%d\r\n", len(args))

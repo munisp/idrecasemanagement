@@ -18,7 +18,7 @@ from confluent_kafka import Consumer
 from minio import Minio
 from opensearchpy import OpenSearch
 
-from pipeline import bytes_to_pages, run_pipeline
+from pipeline import bytes_to_pages, run_pipeline, sniff_doc_kind
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
@@ -140,13 +140,29 @@ def process(evt: dict) -> None:
         mark(evt, "SEALED_PENDING_REVEAL")
         return
     raw = fetch_and_decrypt(evt["tenant"], evt["object_key"])
+    # Magic-byte gate before any parsing: content the API allowlist can't
+    # process (video, archives, unknown binaries — e.g. uploaded before the
+    # edge policy existed) is refused cleanly instead of burning OCR/VLM work
+    # and landing as an exception-driven ERROR.
+    kind_of = sniff_doc_kind(raw, evt.get("content_type", ""))
+    if kind_of == "unknown":
+        mark(evt, "UNSUPPORTED_TYPE")
+        return
+    pages, truncated = bytes_to_pages(raw, evt.get("content_type", ""), kind=kind_of)
     ctx = {
         "filename": evt.get("object_key", ""),
         "raw_bytes": raw,                                   # Docling parses bytes directly
         "content_type": evt.get("content_type", ""),
-        "pages": bytes_to_pages(raw, evt.get("content_type", "")),  # for OCR fallback + VLM image
+        "pages": pages,                                     # for OCR fallback + VLM image
     }
     ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
+    if truncated:
+        # Page-capped render: analysis covers the first DOC_INTEL_MAX_PAGES
+        # pages; a human must look at the rest.
+        ctx.setdefault("findings", []).append(
+            {"field": None, "issue": f"Document exceeds page cap — analysis covers first {len(pages)} pages only; remainder needs manual review"})
+        ctx["status"] = "ANALYZED_WITH_FINDINGS"
+        ctx["result_truncated"] = True
     persist(evt, ctx)
     # Signal the workflow waiting on this analysis (case: DOC_ANALYZED: offer-
     # window-adjacent gates; application: DOCS_VERIFIED: the PENDING_DOCS gate).

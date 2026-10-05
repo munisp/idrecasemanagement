@@ -38,6 +38,12 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Same abuse ceiling as case-document uploads.
+	if n, err := s.rds.incrExpire("idre:rl:up:"+tenant+":"+p.Subject, 3600); err == nil && n > 120 {
+		http.Error(w, `{"error":"upload rate limit exceeded (120/hour) — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
 	if err := r.ParseMultipartForm(maxDocBytes); err != nil {
 		http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
@@ -52,6 +58,17 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 	raw, err := io.ReadAll(f)
 	if err != nil {
 		http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Parity with case-document uploads: content allowlist + ClamAV gate —
+	// onboarding documents used to bypass BOTH, an unfiltered path into
+	// encrypted storage and the doc-intel queue.
+	if err := contentPolicy(hdr.Filename, raw); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
+		return
+	}
+	if _, ok := s.scanOrRefuse(w, bytes.NewReader(raw), "file"); !ok {
 		return
 	}
 

@@ -126,6 +126,89 @@ func contentPolicy(filename string, head []byte) error {
 			return fmt.Errorf("script content is not accepted")
 		}
 	}
+	// Allowlist: only document/image types the platform can actually process
+	// are stored at all. Anything else — video, audio, archives, unknown
+	// binaries — is refused here, BEFORE it consumes encryption, object
+	// storage, queue capacity, or doc-intel worker time.
+	return allowedDocType(lower, head)
+}
+
+// allowedDocExts: extensions the doc-intel pipeline can parse (Docling set).
+var allowedDocExts = map[string]string{
+	".pdf": "pdf", ".docx": "office", ".xlsx": "office", ".pptx": "office",
+	".png": "image", ".jpg": "image", ".jpeg": "image", ".tif": "image",
+	".tiff": "image", ".bmp": "image", ".gif": "image", ".webp": "image",
+	".txt": "text", ".csv": "text", ".md": "text", ".html": "text", ".htm": "text",
+}
+
+// sniffKind classifies content by magic bytes: pdf / office (ZIP container) /
+// image / text / unknown. "unknown" is always rejected.
+func sniffKind(head []byte) string {
+	if len(head) >= 5 && string(head[:5]) == "%PDF-" {
+		return "pdf"
+	}
+	if len(head) >= 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4 {
+		return "office" // ZIP container — only OOXML extensions permitted
+	}
+	if len(head) >= 8 && string(head[:8]) == "\x89PNG\r\n\x1a\n" {
+		return "image"
+	}
+	if len(head) >= 3 && head[0] == 0xff && head[1] == 0xd8 && head[2] == 0xff {
+		return "image" // JPEG
+	}
+	if len(head) >= 4 && (string(head[:4]) == "II*\x00" || string(head[:4]) == "MM\x00*") {
+		return "image" // TIFF
+	}
+	if len(head) >= 2 && string(head[:2]) == "BM" {
+		return "image" // BMP
+	}
+	if len(head) >= 4 && string(head[:4]) == "GIF8" {
+		return "image"
+	}
+	if len(head) >= 12 && string(head[:4]) == "RIFF" && string(head[8:12]) == "WEBP" {
+		return "image"
+	}
+	// Text heuristic: no NUL bytes and overwhelmingly printable in the first
+	// 4 KB. Catches .txt/.csv/.md/.html which have no magic number.
+	sample := head
+	if len(sample) > 4096 {
+		sample = sample[:4096]
+	}
+	if len(sample) > 0 {
+		printable := 0
+		for _, b := range sample {
+			if b == 0 {
+				return "unknown" // NUL => binary masquerading as text
+			}
+			if b == '\t' || b == '\n' || b == '\r' || (b >= 0x20 && b < 0x7f) || b >= 0x80 {
+				printable++
+			}
+		}
+		if float64(printable)/float64(len(sample)) > 0.95 {
+			return "text"
+		}
+	}
+	return "unknown"
+}
+
+// allowedDocType enforces the allowlist: extension must be supported AND the
+// sniffed content kind must match the extension's kind (a video renamed
+// claim.pdf fails; a real PDF named scan1.pdf passes).
+func allowedDocType(lowerName string, head []byte) error {
+	kind, ok := allowedDocExts[filepath.Ext(lowerName)]
+	if !ok {
+		return fmt.Errorf("file type not accepted — upload PDF, Word/Excel/PowerPoint, image (PNG/JPEG/TIFF), or text/CSV documents")
+	}
+	if len(head) == 0 {
+		return nil // extension-only check (multipart initiation); magic verified on first chunk
+	}
+	sniffed := sniffKind(head)
+	if sniffed != kind {
+		if sniffed == "unknown" {
+			return fmt.Errorf("file content is not a recognized document type")
+		}
+		return fmt.Errorf("file content (%s) does not match its extension — possible disguised upload", sniffed)
+	}
 	return nil
 }
 
