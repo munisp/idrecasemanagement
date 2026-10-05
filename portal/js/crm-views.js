@@ -8,15 +8,24 @@ const CrmViews = (() => {
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
 
   // ---- Pipeline (kanban over case statuses) ----------------------------------
+  // Covers EVERY status a case can hold — a status missing here makes those
+  // disputes silently vanish from the board.
   const PIPELINE = [
-    ["INITIATED", "Initiated"], ["OFFER_WINDOW_OPEN", "Offer window"],
-    ["OFFERS_REVEALED", "Revealed"], ["DETERMINED", "Determined"],
-    ["CLOSED_PAID", "Closed (paid)"],
+    ["INITIATED", "Initiated"], ["NEGOTIATION_TRACKED", "Negotiation"],
+    ["OFFER_WINDOW_OPEN", "Offer window"], ["OFFERS_REVEALED", "Revealed"],
+    ["IN_REVIEW", "In review"], ["DETERMINED", "Determined"],
+    ["PAYMENT_PENDING", "Payment pending"],
+    ["CLOSED_PAID", "Closed (paid)"], ["CLOSED_DISMISSED", "Closed (dismissed)"],
   ];
   async function pipeline() {
     try {
       const cases = await Api.cases.list();
-      const cols = PIPELINE.map(([status, label]) => {
+      const known = new Set(PIPELINE.map(([s]) => s));
+      // Safety net: a status the board doesn't know yet still gets a column
+      // instead of its cases disappearing silently.
+      const extra = [...new Set(cases.filter((c) => !known.has(c.status)).map((c) => c.status))];
+      const layout = [...PIPELINE, ...extra.map((s) => [s, s.replace(/_/g, " ").toLowerCase()])];
+      const cols = layout.map(([status, label]) => {
         const items = cases.filter((c) => c.status === status);
         return `<div class="kanban-col"><h3>${label} <span class="muted">${items.length}</span></h3>` +
           items.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">

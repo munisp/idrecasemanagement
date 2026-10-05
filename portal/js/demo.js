@@ -157,9 +157,10 @@
       if (/\/onboarding\/applications$/.test(p)) return json(APPS);
       if (/\/voice\/intake$/.test(p)) return json(INTAKE);
       if (/\/voice\/logs$/.test(p)) return json(LOGS);
-      return json([], 404);
+      // No early 404 here: fixtures below are method-agnostic (POST variants
+      // are guarded with opts.method === "POST" ahead of their GET twins).
     }
-    // POSTs: plausible server answers (mutations are acknowledged, views then reload fixtures)
+    // Shared fixtures + POSTs: plausible server answers (mutations are acknowledged, views then reload fixtures)
     if (/\/cases\/initiate$/.test(p)) return json({ case_id: "c1" });
     if (/\/checklists\/[\w-]+\/check$/.test(p)) return json({ ok: true });
     if (/\/cases\/bulk$/.test(p)) {
@@ -281,6 +282,6 @@
     if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });
     if (/\/fees\/transfer$/.test(p)) return json({ transfer_id: "tb-demo-1842", posted: true });
     if (/\/voice\/outbound$/.test(p)) return json({ status: "QUEUED" });
-    return json({ ok: true });
+    return method === "GET" ? json({ error: "not found" }, 404) : json({ ok: true });
   };
 })();
