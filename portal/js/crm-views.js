@@ -1,5 +1,7 @@
 // crm-views.js — CRM screens: pipeline kanban, accounts 360, leads, tasks, search.
 const CrmViews = (() => {
+  // See views.js: bind after router innerHTML injection (macrotask, not microtask).
+  const afterRender = (fn) => setTimeout(fn, 0);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
@@ -66,7 +68,7 @@ const CrmViews = (() => {
           `<tr><td>${esc(n.body)}</td><td class="muted">${fmtDate(n.created_at)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No notes.</p>`) +
         `<form id="nn" class="form"><b>Add note</b><input name="body" required /><button>Add note</button></form>`;
-      queueMicrotask(() => {
+      afterRender(() => {
         document.querySelector("#nc")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = Object.fromEntries(new FormData(ev.target));
@@ -85,7 +87,7 @@ const CrmViews = (() => {
   }
 
   function accountNew() {
-    queueMicrotask(() => document.querySelector("#na").addEventListener("submit", async (ev) => {
+    afterRender(() => document.querySelector("#na").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
       await Api.crm.createAccount(f);
@@ -135,7 +137,7 @@ const CrmViews = (() => {
           <td>${badge(t.status)}</td>
           <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("") +
         `</tbody></table>` : `<p class="muted">No open tasks.</p>`;
-      queueMicrotask(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
+      afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
         await Api.crm.createTask(f);

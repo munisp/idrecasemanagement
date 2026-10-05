@@ -3,6 +3,10 @@
 // density toggle, modal+toast everywhere (no prompt/alert), sealed-offer flow.
 const Views = (() => {
   const $ = (sel) => document.querySelector(sel);
+  // Bind after the router injects innerHTML: queueMicrotask races ahead of the
+  // `view.innerHTML = await fn()` continuation (microtask order) and bound null;
+  // a macrotask runs strictly after it. Every form/handler binding MUST use this.
+  const afterRender = (fn) => setTimeout(fn, 0);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
@@ -149,7 +153,7 @@ const Views = (() => {
       const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${s.pinned ? "★ " : ""}${esc(s.name)}</option>`).join("");
       const density = localStorage.getItem("idre.density") || "comfortable";
       document.body.classList.toggle("density-compact", density === "compact");
-      queueMicrotask(() => {
+      afterRender(() => {
         bindGrid(rows);
         $("#density").onclick = () => {
           const next = (localStorage.getItem("idre.density") || "comfortable") === "comfortable" ? "compact" : "comfortable";
@@ -400,7 +404,7 @@ const Views = (() => {
           <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
         `</tbody></table>` : `<p class="muted">No activity yet — voice calls and milestones attach automatically.</p>`);
 
-      queueMicrotask(() => {
+      afterRender(() => {
         acts.forEach((a, i) =>
           document.querySelector(`[data-act="${i}"]`)?.addEventListener("click", async () => {
             try { await a[1](); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
@@ -432,14 +436,18 @@ const Views = (() => {
         <p class="muted">type: ${esc(a.doc_type)} · seal detected: ${r.seal_detected ? "yes" : "no"} · tables: ${r.table_count ?? 0}</p>
         <pre>${esc(JSON.stringify(r.extracted || {}, null, 2))}</pre>
         ${(r.findings || []).length ? `<p class="error">Findings: ${esc(JSON.stringify(r.findings))}</p>` : ""}`;
-    } catch (e) { box.innerHTML = err(e); }
+    } catch (e) {
+      box.innerHTML = e.status === 404
+        ? `<h3>Document analysis</h3><p class="muted">No analysis result yet — the document is still queued for the OCR/extraction pipeline (or was uploaded before doc-intel processed it). Try again shortly.</p>`
+        : err(e);
+    }
   }
 
   async function check(itemId) { await Api.cm.checkItem(itemId); UI.toast("Checklist item completed"); location.reload(); }
 
   // ---- New dispute -------------------------------------------------------------
   function newDispute() {
-    queueMicrotask(() => $("#nd").addEventListener("submit", async (ev) => {
+    afterRender(() => $("#nd").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
       try {
@@ -485,7 +493,7 @@ const Views = (() => {
   }
 
   function onboardingNew() {
-    queueMicrotask(() => $("#ob").addEventListener("submit", async (ev) => {
+    afterRender(() => $("#ob").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
       const payload = {};
@@ -531,7 +539,7 @@ const Views = (() => {
   async function voice() {
     try {
       const [intake, logs] = await Promise.all([Api.voice.intake(), Api.voice.logs()]);
-      queueMicrotask(() => $("#ob-call")?.addEventListener("submit", async (ev) => {
+      afterRender(() => $("#ob-call")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
         try {
@@ -603,7 +611,7 @@ const Views = (() => {
            "Show cases related to IDR-2026-0002 and why"].map((q) =>
           `<button class="kgqa-hint" data-q="${esc(q)}">${esc(q)}</button>`).join("")}
       </div>`;
-    queueMicrotask(() => {
+    afterRender(() => {
       const out = $("#kgqa-out");
       const run = async (q) => {
         out.innerHTML = `<p class="muted">Linking entities, retrieving paths, ranking, generating…</p>`;
@@ -705,7 +713,7 @@ const Views = (() => {
         <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
         <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form></details>`;
 
-    queueMicrotask(() => {
+    afterRender(() => {
       const money = (v) => Math.round(parseFloat(v) * 100);
       $("#p-status")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
