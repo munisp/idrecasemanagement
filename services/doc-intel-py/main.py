@@ -96,6 +96,8 @@ def persist(evt: dict, ctx: dict) -> None:
                  "seal_detected": ctx.get("seal_detected", False),
                  "table_count": len(ctx.get("tables", [])),
                  "schema_used": ctx.get("schema_used"),
+                 "scan_quality_poor": ctx.get("scan_quality_poor", False),
+                 "ocr_enhanced": ctx.get("ocr_enhanced", False),
              })),
         )
     search.index(

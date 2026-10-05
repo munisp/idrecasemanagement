@@ -142,9 +142,84 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
     return ctx
 
 
+# Scan-quality thresholds (empirical; tune against your document mix).
+_BLUR_MIN = 80.0        # Laplacian variance (denoised) below this => out of focus
+_SEPARATION_MIN = 40.0  # bg median - fg p5 below this => faint/washed-out print
+_BRIGHTNESS_LO = 60.0   # mean below => underexposed (overexposure is caught
+                        # by separation: washed-out pages have no dark ink)
+
+
+def assess_page_quality(img: Image.Image) -> dict:
+    """Objective scan-quality metrics via OpenCV (bundled with PaddleOCR):
+    - blur: Laplacian variance, measured after light denoising (raw variance
+      is inflated by sensor noise, which masquerades as sharpness)
+    - separation: background median minus foreground 5th percentile — the
+      ink-to-paper gap. Whole-page stddev is useless here: sparse crisp text
+      scores low on it, while a faint scan's defining trait is exactly that
+      its darkest pixels never get dark.
+    - exposure: mean brightness out of range.
+    Returns metrics + a poor flag. A 'valid but barely legible' document is
+    detected HERE — before OCR — so the pipeline can enhance and reviewers
+    get an accurate diagnosis instead of a generic 'no content' finding."""
+    import cv2
+    import numpy as np
+
+    gray = cv2.cvtColor(np_from_pil(img), cv2.COLOR_RGB2GRAY)
+    smooth = cv2.fastNlMeansDenoising(gray, None, 4, 7, 21)
+    blur = float(cv2.Laplacian(smooth, cv2.CV_64F).var())
+    # Separation = how much darker the ink is than the paper, measured over
+    # actual ink pixels (anything below near-white). Percentile-of-page
+    # approaches fail on sparse pages; whole-page stddev fails everywhere.
+    ink = gray[gray < 240]
+    separation = float(240 - ink.mean()) if ink.size >= 100 else 0.0
+    brightness = float(gray.mean())
+    poor = (blur < _BLUR_MIN or separation < _SEPARATION_MIN
+            or brightness < _BRIGHTNESS_LO)
+    return {"blur": round(blur, 1), "separation": round(separation, 1),
+            "brightness": round(brightness, 1), "poor": poor}
+
+
+def preprocess_for_ocr(img: Image.Image) -> Image.Image:
+    """Enhancement pass for degraded scans before OCR: grayscale, CLAHE local
+    contrast (recovers faint print), fast denoise, and 2x upscale when the
+    page is small (sub-150dpi effective resolution starves the detector)."""
+    import cv2
+
+    gray = cv2.cvtColor(np_from_pil(img), cv2.COLOR_RGB2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    enhanced = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+    h, w = enhanced.shape
+    if max(h, w) < 2000:
+        enhanced = cv2.resize(enhanced, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+    return Image.fromarray(enhanced)
+
+
 def stage_ocr(ctx: dict, cfg: dict) -> dict:
-    """PaddleOCR full-text extraction."""
+    """PaddleOCR full-text extraction, with scan-quality triage:
+    1. Assess every page (blur/contrast/exposure).
+    2. Poor-quality PDF pages are RE-RENDERED at 300dpi from the original
+       bytes (the initial 200dpi rasterization starves OCR of detail), then
+       enhanced (contrast/denoise/upscale).
+    3. OCR runs over the best available image of each page.
+    ctx['scan_quality_poor'] tells validate() to demand human verification."""
     from paddleocr import PaddleOCR
+
+    pages = ctx["pages"]
+    qualities = [assess_page_quality(p) for p in pages[:10]]  # sample bound
+    poor_pages = [i for i, q in enumerate(qualities) if q["poor"]]
+    ctx["scan_quality"] = qualities
+    if poor_pages and len(poor_pages) >= max(1, len(qualities) // 2):
+        ctx["scan_quality_poor"] = True
+        # Re-render PDF sources at higher DPI — the bytes hold more detail
+        # than the 200dpi pages we started with. Images are used as-is.
+        if sniff_doc_kind(ctx.get("raw_bytes", b""), ctx.get("content_type", "")) == "pdf":
+            hires, _ = pdf_to_pages(ctx["raw_bytes"], dpi=cfg.get("enhance_dpi", 300))
+            if hires:
+                pages = hires
+                ctx["pages"] = hires
+        pages = [preprocess_for_ocr(p) for p in pages]
+        ctx["ocr_enhanced"] = True
 
     ocr = PaddleOCR(
         lang=cfg.get("lang", "en"),
@@ -153,7 +228,7 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
         use_textline_orientation=cfg.get("use_textline_orientation", True),
     )
     texts: list[str] = []
-    for page in ctx["pages"]:  # list[PIL.Image]
+    for page in pages:  # list[PIL.Image]
         result = ocr.predict(np_from_pil(page))
         for res in result:
             texts.extend(res.get("rec_texts", []))
@@ -517,8 +592,13 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     if ctx.get("in_domain") is False:
         findings.append({"field": None, "issue": "Document is not related to medical billing or IDR — possible mis-upload; routed for manual review"})
         ctx["doc_type"] = "unrelated"
-    elif ctx.get("classify_score", 1) == 0 and not ex_fields:
+    elif ctx.get("classify_score", 1) == 0 and not ex_fields and not ctx.get("scan_quality_poor"):
         findings.append({"field": None, "issue": "No IDR-relevant content detected — possible mis-upload; routed for manual review"})
+    # Degraded scan: extraction ran on enhanced images but confidence in the
+    # underlying text is inherently limited — say so plainly. A barely legible
+    # VALID document must not be misdiagnosed as a mis-upload.
+    if ctx.get("scan_quality_poor"):
+        findings.append({"field": None, "issue": "Poor scan quality (blur/contrast/exposure) — extraction uncertain despite image enhancement; manual verification of all values required"})
     # Ambiguous classification: the winning type barely beat the runner-up.
     if ctx.get("classify_ambiguous") and ctx.get("doc_type") != "unrelated":
         findings.append({"field": None, "issue": f"Document type '{ctx['doc_type']}' is a low-margin classification — confirm type on review"})
