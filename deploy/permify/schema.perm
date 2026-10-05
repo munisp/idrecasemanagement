@@ -40,3 +40,13 @@ entity ledger {
     permission transact = tenant.finance or tenant.admin
     permission read     = transact or tenant.auditor
 }
+
+// Program rules (the configurable policy engine). Entity ID = tenant slug.
+// Only tenant/platform admins may view or edit live policy; auditors read.
+// Rule WRITES additionally happen inside a transaction that appends to
+// public.rule_changes, so Permify governs WHO and Postgres records WHAT.
+entity program_rules {
+    relation tenant @tenant
+    permission edit = tenant.admin
+    permission read = edit or tenant.auditor
+}

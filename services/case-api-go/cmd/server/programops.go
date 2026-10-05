@@ -130,6 +130,13 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
 	if status == "PAID" {
 		s.maybeMarkDecidedInvoicePaid(r, tenant, caseID)
+		// Program rules (invoice.settled) — offline settlement path
+		// (check/ACH/manual); same semantics as the Stripe webhook path.
+		s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
+			"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
+			"party": party, "method": "offline", "remittance_ref": in.RemittanceRef,
+			"tenant": tenant,
+		})
 	}
 	// unified financial stream (offline settlements: check/ACH/manual)
 	kind, dir := "INVOICE_VOIDED", "NONE"
@@ -205,6 +212,15 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf(`UPDATE tenant_%s.cases SET num_claims = coalesce(num_claims,0)+$2, disputed_amount_cents = coalesce(disputed_amount_cents,0)+$3, updated_at=now() WHERE id=$1`,
 			sanitizeTenant(tenant)), caseID, len(in.Claims), billed); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	// Program rules (claims.imported) fire BEFORE commit so block_request is a
+	// real rejection (the transaction rolls back — no partial import).
+	if blocked, msg := s.fireEventRules(r, tenant, "claims.imported", map[string]any{
+		"case_id": caseID, "line_count": len(in.Claims), "billed_cents": billed,
+		"tenant": tenant,
+	}); blocked {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusConflict)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
@@ -327,34 +343,14 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 			tenant, id).Scan(&outreach, &packetAt)
 		facts := map[string]any{
 			"status": current, "to_status": in.Status, "packet_complete": packetAt != nil,
-			"id": id, "tenant": tenant,
+			"id": id, "tenant": tenant, "case_id": in.CaseID,
 		}
 		if outreach != nil {
 			facts["days_since_outreach"] = int(time.Since(*outreach).Hours() / 24)
 		}
-		actions, _ := fireRules(s.rulesFor(r, tenant, "intake.advance"), facts)
-		for _, a := range actions {
-			switch a.Type {
-			case "block_request":
-				msg := fmt.Sprint(a.Params["message"])
-				if msg == "" {
-					msg = "transition blocked by program rule"
-				}
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, expandTemplate(msg, facts)), http.StatusConflict)
-				return
-			case "notify":
-				body := expandTemplate(fmt.Sprint(a.Params["body"]), facts)
-				kind := fmt.Sprint(a.Params["kind"])
-				if kind == "" || kind == "<nil>" {
-					kind = "MILESTONE"
-				}
-				_, _ = s.db.Exec(r.Context(), `
-					INSERT INTO public.notifications (tenant, user_sub, type, body)
-					VALUES ($1,'*',$2,$3)`, tenant, kind, body)
-			case "log_activity":
-				s.logActivity(r.Context(), tenant, in.CaseID, "RULE_INTAKE",
-					expandTemplate(fmt.Sprint(a.Params["body"]), facts))
-			}
+		if blocked, msg := s.fireEventRules(r, tenant, "intake.advance", facts); blocked {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusConflict)
+			return
 		}
 	}
 	if in.Status == "CONVERTED" && in.CaseID == "" {

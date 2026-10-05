@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sys
 
@@ -19,6 +20,85 @@ from minio import Minio
 from opensearchpy import OpenSearch
 
 from pipeline import bytes_to_pages, ooxml_safe, run_pipeline, sniff_doc_kind
+from rules_engine import expand_template, fire_rules, load_rules
+
+
+def is_blocked(evt: dict, kind: str, subj_id: str) -> bool:
+    """case-api quarantines rule-blocked uploads (analysis_status='BLOCKED')
+    AFTER publishing doc.uploaded — doc-intel must honor the quarantine and
+    never run OCR/VLM over blocked bytes."""
+    table = (f"tenant_{evt['tenant']}.documents" if kind == "case"
+             else "public.application_documents")
+    try:
+        with psycopg.connect(DSN) as c:
+            row = c.execute(
+                f"SELECT analysis_status FROM {table} WHERE id=%s",
+                (evt["doc_id"],),
+            ).fetchone()
+        return bool(row and row[0] == "BLOCKED")
+    except psycopg.Error:
+        return False  # fail open: quarantine is enforced again at read time
+
+
+def fire_doc_rules(evt: dict, kind: str, subj_id: str, ctx: dict) -> None:
+    """doc.analyzed program rules — same engine semantics as the Go side
+    (rules_engine mirrors rules.go). Facts describe the analysis outcome;
+    actions drive notifications, activity, review flags, and case detail
+    fields. Fresh rule read per document: admin edits apply immediately."""
+    low_conf = [f for f, cf in ctx.get("field_confidence", {}).items() if cf == "low"]
+    facts = {
+        "tenant": evt["tenant"], "doc_id": evt["doc_id"],
+        "case_id": subj_id if kind == "case" else "",
+        "application_id": subj_id if kind == "application" else "",
+        "doc_type": ctx.get("doc_type") or "",
+        "analysis_status": ctx.get("status", ""),
+        "ungrounded_count": len(low_conf),
+        "scan_quality_poor": bool(ctx.get("scan_quality_poor")),
+        "ambiguous": bool(ctx.get("classify_ambiguous")),
+        "truncated": bool(ctx.get("result_truncated")),
+        "findings_count": len(ctx.get("findings", [])),
+    }
+    with psycopg.connect(DSN, autocommit=True) as c:
+        rules = load_rules(c, evt["tenant"], "doc.analyzed")
+        if not rules:
+            return
+        actions, fired, suspect = fire_rules(rules, facts)
+        for name in suspect:
+            print(f"doc-intel: suspect rule {name!r} skipped on doc.analyzed",
+                  file=sys.stderr, flush=True)
+        for a in actions:
+            atype, params = a.get("type", ""), a.get("params", {}) or {}
+            if atype == "notify":
+                c.execute(
+                    """INSERT INTO public.notifications (tenant, user_sub, type, body)
+                       VALUES (%s,'*',%s,%s)""",
+                    (evt["tenant"], params.get("kind") or "MILESTONE",
+                     expand_template(str(params.get("body", "")), facts)[:2000]),
+                )
+            elif atype == "log_activity" and kind == "case":
+                c.execute(
+                    """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                       VALUES (%s,%s,'RULE_DOC_ANALYZED',%s)""",
+                    (evt["tenant"], subj_id,
+                     expand_template(str(params.get("body", "")), facts)[:2000]),
+                )
+            elif atype == "flag_review" and kind == "case":
+                c.execute(
+                    f"UPDATE tenant_{evt['tenant']}.documents SET analysis_status='NEEDS_REVIEW' WHERE id=%s",
+                    (evt["doc_id"],),
+                )
+            elif atype == "set_detail" and kind == "case":
+                key = str(params.get("key", ""))
+                if re.fullmatch(r"[a-z][a-z0-9_]{0,40}", key):
+                    c.execute(
+                        f"""UPDATE tenant_{evt['tenant']}.cases
+                            SET details = jsonb_set(details, %s, to_jsonb(%s::text), true), updated_at=now()
+                            WHERE id=%s""",
+                        ("{" + key + "}", expand_template(str(params.get("value", "")), facts), subj_id),
+                    )
+        if fired:
+            print(f"doc-intel: rules fired on doc.analyzed: {', '.join(fired)}",
+                  file=sys.stderr, flush=True)
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
@@ -141,6 +221,10 @@ def process(evt: dict) -> None:
         # Sealed offer documents: skip analysis until lawful reveal.
         mark(evt, "SEALED_PENDING_REVEAL")
         return
+    if is_blocked(evt, kind, subj_id):
+        # Quarantined by a doc.upload program rule — never analyze blocked bytes.
+        mark(evt, "BLOCKED")
+        return
     raw = fetch_and_decrypt(evt["tenant"], evt["object_key"])
     # Magic-byte gate before any parsing: content the API allowlist can't
     # process (video, archives, unknown binaries — e.g. uploaded before the
@@ -175,6 +259,12 @@ def process(evt: dict) -> None:
         ctx["status"] = "ANALYZED_WITH_FINDINGS"
         ctx["result_truncated"] = True
     persist(evt, ctx)
+    # doc.analyzed program rules (notify/flag/detail side effects, audited).
+    try:
+        fire_doc_rules(evt, kind, subj_id, ctx)
+    except Exception as exc:  # rules must never crash analysis delivery
+        print(f"doc-intel: doc.analyzed rule evaluation failed: {exc}",
+              file=sys.stderr, flush=True)
     # Signal the workflow waiting on this analysis (case: DOC_ANALYZED: offer-
     # window-adjacent gates; application: DOCS_VERIFIED: the PENDING_DOCS gate).
     if kind == "case":

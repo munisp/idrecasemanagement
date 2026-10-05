@@ -308,7 +308,15 @@
       { name: "intake-day13-incomplete", event: "sweep.intake", enabled: true,
         _basis: "AHCA 2026: documentation not received by the 13th day => incomplete, ineligibility letter issues",
         conditions: [{ field: "days_since_outreach", op: "gte", value: 13 }, { field: "status", op: "in", value: ["INSTRUCTED", "DOCS_RECEIVED"] }],
-        actions: [{ type: "set_status", params: { status: "INELIGIBLE" } }, { type: "notify", params: { kind: "SLA_BREACH", body: "Intake {{id}} ({{email}}) incomplete at day {{days}} — issue ineligibility letter" } }] }] });
+        actions: [{ type: "set_status", params: { status: "INELIGIBLE" } }, { type: "notify", params: { kind: "SLA_BREACH", body: "Intake {{id}} ({{email}}) incomplete at day {{days}} — issue ineligibility letter" } }] },
+      { name: "doc-unverified-fields-review", event: "doc.analyzed", enabled: true,
+        _basis: "Extracted fields that cannot be traced to source text must be human-verified before feeding a determination",
+        conditions: [{ field: "ungrounded_count", op: "gt", value: 0 }],
+        actions: [{ type: "flag_review", params: { reason: "{{ungrounded_count}} unverified field(s) — requires human confirmation" } }, { type: "notify", params: { kind: "MILESTONE", body: "Document {{doc_id}} flagged for review" } }] },
+      { name: "doc-poor-scan-review", event: "doc.analyzed", enabled: false,
+        _basis: "Barely-legible scans are valid evidence but extraction confidence is degraded",
+        conditions: [{ field: "scan_quality_poor", op: "eq", value: true }],
+        actions: [{ type: "flag_review", params: { reason: "Poor scan quality — verify against the original" } }] }] });
     if (/\/deliverables$/.test(p) && opts.method === "POST") return json({ status: "DELIVERED" });
     if (/\/deliverables$/.test(p)) return json({ deliverables: [
       { name: "Weekly report", due_rule: "weekly:MONDAY", next_due: d(-96).slice(0, 10) },

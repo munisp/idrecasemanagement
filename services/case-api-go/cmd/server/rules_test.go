@@ -109,3 +109,47 @@ func TestExpandTemplate(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestFireRulesNamedReportsFired(t *testing.T) {
+	enabled := true
+	rules := []Rule{
+		{
+			Name: "a", Event: "doc.upload", Enabled: &enabled,
+			Conditions: []ruleCond{{Field: "folder", Op: "eq", Value: "OFFERS"}},
+			Actions:    []ruleAction{{Type: "notify", Params: map[string]any{"body": "x"}}},
+		},
+		{
+			Name: "b", Event: "doc.upload", Enabled: &enabled,
+			Conditions: []ruleCond{{Field: "size_bytes", Op: "gt", Value: 100}},
+			Actions:    []ruleAction{{Type: "log_activity", Params: map[string]any{"body": "y"}}},
+		},
+		{
+			Name: "c", Event: "doc.upload", Enabled: &enabled,
+			Conditions: []ruleCond{{Field: "size_bytes", Op: "bogus_op", Value: 1}},
+			Actions:    []ruleAction{{Type: "block_request"}},
+		},
+	}
+	actions, fired, suspect := fireRulesNamed(rules, map[string]any{"folder": "OFFERS", "size_bytes": 50})
+	if len(actions) != 1 || actions[0].Type != "notify" {
+		t.Fatalf("expected only rule a's action, got %+v", actions)
+	}
+	if len(fired) != 1 || fired[0] != "a" {
+		t.Fatalf("fired = %v", fired)
+	}
+	if len(suspect) != 1 || suspect[0] != "c" {
+		t.Fatalf("suspect = %v — unknown op must fail closed and report", suspect)
+	}
+}
+
+func TestRuleDetailKeyAllowlist(t *testing.T) {
+	for _, ok := range []string{"review_reason", "volume_override2", "x"} {
+		if !ruleDetailKey.MatchString(ok) {
+			t.Fatalf("%q should be allowed", ok)
+		}
+	}
+	for _, bad := range []string{"Status", "a.b", "a'; DROP TABLE--", "../x", ""} {
+		if ruleDetailKey.MatchString(bad) {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+}

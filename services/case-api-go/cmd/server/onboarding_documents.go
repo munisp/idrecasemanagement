@@ -107,9 +107,23 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 		"doc_id": docID, "object_key": objectKey, "content_type": hdr.Header.Get("Content-Type"),
 		"sealed": false, "at": time.Now().UTC(),
 	})
+	// Program rules (doc.upload) — onboarding docs are pre-case, so facts carry
+	// application_id instead of case_id; block quarantines via analysis_status.
+	analysis := "QUEUED"
+	if blocked, msg := s.fireEventRules(r, tenant, "doc.upload", map[string]any{
+		"application_id": appID, "doc_id": docID, "folder": "ONBOARDING", "sealed": false,
+		"size_bytes": len(raw), "content_type": hdr.Header.Get("Content-Type"),
+		"filename": hdr.Filename, "uploaded_by": p.Subject, "tenant": tenant,
+	}); blocked {
+		analysis = "BLOCKED"
+		_, _ = s.db.Exec(r.Context(), `
+			UPDATE public.application_documents SET analysis_status='BLOCKED' WHERE id=$1`, docID)
+		s.logActivity(r.Context(), tenant, "", "RULE_BLOCKED",
+			fmt.Sprintf("Onboarding upload %q (application %s) quarantined by program rule: %s", hdr.Filename, appID, msg))
+	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"doc_id": docID, "bytes": len(raw), "analysis": "QUEUED",
+		"doc_id": docID, "bytes": len(raw), "analysis": analysis,
 	})
 }
 

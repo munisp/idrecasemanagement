@@ -177,13 +177,35 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		"sealed": sealedDoc, "at": time.Now().UTC(),
 	})
 
-	// 5. Unified timeline entry (visible in caseDetail + account 360 + voice).
+	// 5. Program rules (doc.upload). The file is already stored, so
+	// block_request enforces by QUARANTINE (analysis_status=BLOCKED, staff
+	// notified) rather than a rejected HTTP status — the bytes exist either
+	// way; what matters is whether they enter the review pipeline.
+	quarantined := false
+	if blocked, msg := s.fireEventRules(r, tenant, "doc.upload", map[string]any{
+		"case_id": caseID, "doc_id": docID, "folder": folder, "sealed": sealedDoc,
+		"size_bytes": len(raw), "content_type": hdr.Header.Get("Content-Type"),
+		"filename": hdr.Filename, "uploaded_by": p.Subject, "tenant": tenant,
+	}); blocked {
+		quarantined = true
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.documents SET analysis_status='BLOCKED'
+			WHERE id=$1`, sanitizeTenant(tenant)), docID)
+		s.logActivity(r.Context(), tenant, caseID, "RULE_BLOCKED",
+			fmt.Sprintf("Upload of %q quarantined by program rule: %s", hdr.Filename, msg))
+	}
+
+	// 6. Unified timeline entry (visible in caseDetail + account 360 + voice).
 	s.logActivity(r.Context(), tenant, caseID, "DOCUMENT_UPLOADED",
 		fmt.Sprintf("%s uploaded %q (%d bytes, sealed=%v) by %s — analysis queued",
 			hdr.Filename, hdr.Filename, len(raw), sealedDoc, p.Subject))
+	analysis := "QUEUED" // doc-intel consumes doc.uploaded
+	if quarantined {
+		analysis = "BLOCKED"
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"doc_id": docID, "version": version, "bytes": len(raw),
-		"analysis": "QUEUED", // doc-intel consumes doc.uploaded
+		"analysis": analysis,
 	})
 }
 

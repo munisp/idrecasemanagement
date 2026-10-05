@@ -18,8 +18,8 @@ import (
 )
 
 var knownRuleEvents = map[string]bool{
-	"intake.advance": true, "doc.upload": true, "claims.imported": true,
-	"invoice.settled": true, "sweep.intake": true,
+	"intake.advance": true, "doc.upload": true, "doc.analyzed": true,
+	"claims.imported": true, "invoice.settled": true, "sweep.intake": true,
 }
 var knownRuleOps = map[string]bool{
 	"eq": true, "neq": true, "in": true, "contains": true,
@@ -46,7 +46,7 @@ func validateRules(rules []Rule) error {
 		}
 		names[ru.Name] = true
 		if !knownRuleEvents[ru.Event] {
-			return fmt.Errorf("%s: unknown event %q (known: intake.advance, doc.upload, claims.imported, invoice.settled, sweep.intake)", where, ru.Event)
+			return fmt.Errorf("%s: unknown event %q (known: intake.advance, doc.upload, doc.analyzed, claims.imported, invoice.settled, sweep.intake)", where, ru.Event)
 		}
 		for _, c := range ru.Conditions {
 			if c.Field == "" || !knownRuleOps[c.Op] {
@@ -66,6 +66,15 @@ func (s *server) rulesAdminGuard(w http.ResponseWriter, r *http.Request) (princi
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"rules are admin-managed (FEDERAL_ADMIN or PLATFORM_ADMIN required)"}`, http.StatusForbidden)
+		return p, false
+	}
+	// Second layer: Permify object-level permission (program_rules.edit on the
+	// tenant entity). Fail-CLOSED when Permify is configured — an authorization
+	// outage must not become authorization for live policy edits. When Permify
+	// isn't deployed (dev), allow() returns true and Keycloak RBAC stands alone.
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	if !s.allow(r.Context(), "program_rules", tenant, "edit", p.Subject) {
+		http.Error(w, `{"error":"rules edit denied by fine-grained authorization (program_rules.edit)"}`, http.StatusForbidden)
 		return p, false
 	}
 	return p, true

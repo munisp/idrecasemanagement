@@ -131,6 +131,12 @@ CREATE TABLE IF NOT EXISTS public.rule_changes (
 );
 CREATE INDEX IF NOT EXISTS rule_changes_tenant ON public.rule_changes (tenant, id DESC);
 
+-- Rule quarantine for onboarding uploads: doc.upload rules fire on the
+-- pre-case path too, and block_request needs somewhere to land. doc-intel
+-- skips documents in this state (is_blocked pre-flight in main.py).
+ALTER TABLE public.application_documents
+    ADD COLUMN IF NOT EXISTS analysis_status text NOT NULL DEFAULT 'QUEUED'; -- QUEUED|BLOCKED|...
+
 -- Tokenized party document links (ShareFile replacement).
 CREATE TABLE IF NOT EXISTS public.share_links (
     token      text PRIMARY KEY,              -- URL-safe random
@@ -324,6 +330,31 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
       "actions": [
         {"type": "set_status", "params": {"status": "INELIGIBLE"}},
         {"type": "notify", "params": {"kind": "SLA_BREACH", "body": "Intake {{id}} ({{email}}) found incomplete at day {{days}} — issue ineligibility letter"}}
+      ]
+    },
+    {
+      "name": "doc-unverified-fields-review",
+      "event": "doc.analyzed",
+      "enabled": true,
+      "_basis": "Doc-intel grounding check: extracted fields that cannot be traced to source text must be human-verified before they feed a determination",
+      "conditions": [
+        {"field": "ungrounded_count", "op": "gt", "value": 0}
+      ],
+      "actions": [
+        {"type": "flag_review", "params": {"reason": "{{ungrounded_count}} unverified field(s) extracted from {{doc_type}} — requires human confirmation"}},
+        {"type": "notify", "params": {"kind": "MILESTONE", "body": "Document {{doc_id}} ({{doc_type}}) analyzed with {{ungrounded_count}} unverified field(s) — flagged for review"}}
+      ]
+    },
+    {
+      "name": "doc-poor-scan-review",
+      "event": "doc.analyzed",
+      "enabled": true,
+      "_basis": "Barely-legible scans are valid evidence but extraction confidence is degraded; staff should sight the original before relying on extracted values",
+      "conditions": [
+        {"field": "scan_quality_poor", "op": "eq", "value": true}
+      ],
+      "actions": [
+        {"type": "flag_review", "params": {"reason": "Poor scan quality on {{doc_id}} — verify extracted values against the original"}}
       ]
     }
   ]

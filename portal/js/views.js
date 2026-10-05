@@ -1188,7 +1188,7 @@ const Views = (() => {
       title: `Edit rule: ${r.name || ""}`, submitLabel: "Apply", wide: true,
       fields: [{ name: "json", label: "Rule definition (JSON)", type: "textarea", required: true,
         value: JSON.stringify(r, null, 2),
-        hint: "events: intake.advance | doc.upload | claims.imported | invoice.settled | sweep.intake · ops: eq neq in contains gt gte lt lte is_null not_null days_older_than · actions: set_status set_detail notify log_activity block_request flag_review" }],
+        hint: "events: intake.advance | doc.upload | doc.analyzed | claims.imported | invoice.settled | sweep.intake · ops: eq neq in contains gt gte lt lte is_null not_null days_older_than · actions: set_status set_detail notify log_activity block_request flag_review" }],
     }).then((v) => {
       if (v === null) return;
       try {

@@ -32,7 +32,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -177,6 +179,13 @@ func evalRule(ru Rule, facts map[string]any) (matched, understood bool) {
 // on security-sensitive events (doc.upload blocks) while staying open on
 // advisory ones.
 func fireRules(rules []Rule, facts map[string]any) (actions []ruleAction, suspectRules []string) {
+	actions, _, suspectRules = fireRulesNamed(rules, facts)
+	return actions, suspectRules
+}
+
+// fireRulesNamed additionally reports WHICH rules fired, so the caller can
+// emit a rule.fired audit event per rule (Kafka idre.<tenant>.rules → lakehouse).
+func fireRulesNamed(rules []Rule, facts map[string]any) (actions []ruleAction, fired, suspectRules []string) {
 	for _, ru := range rules {
 		matched, understood := evalRule(ru, facts)
 		if !understood {
@@ -185,9 +194,108 @@ func fireRules(rules []Rule, facts map[string]any) (actions []ruleAction, suspec
 		}
 		if matched {
 			actions = append(actions, ru.Actions...)
+			fired = append(fired, ru.Name)
 		}
 	}
-	return actions, suspectRules
+	return actions, fired, suspectRules
+}
+
+// ruleDetailKey matches the set_detail action's target key — conservative
+// allowlist so a rule can never overwrite system detail fields.
+var ruleDetailKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
+
+// fireEventRules is the single integration point between the rule engine and
+// every middleware-adjacent call site (upload handlers, claims import, ledger
+// settlement, intake advance). It loads the tenant's rules fresh, evaluates
+// them, executes side-effect actions, emits one rule.fired outbox event per
+// fired rule (Dapr → Kafka → lakehouse), and returns (blocked, message) —
+// block_request is the ONLY action that alters the caller's control flow.
+//
+// Error posture: evaluation is fail-closed (suspect rules never fire); action
+// side effects are fail-open (a broken notify action must not reject an
+// upload) — every failure is logged + recorded as RULE_SUSPECT activity.
+func (s *server) fireEventRules(r *http.Request, tenant, event string, facts map[string]any) (blocked bool, blockMsg string) {
+	rules := s.rulesFor(r, tenant, event)
+	if len(rules) == 0 {
+		return false, ""
+	}
+	actions, fired, suspect := fireRulesNamed(rules, facts)
+	caseID, _ := facts["case_id"].(string)
+	for _, n := range suspect {
+		slog.Warn("suspect rule skipped (unknown op/field)", "tenant", tenant, "event", event, "rule", n)
+		s.logActivity(r.Context(), tenant, caseID, "RULE_SUSPECT",
+			fmt.Sprintf("Rule %q skipped on %s: unrecognized condition — fix or disable it in the rules admin", n, event))
+	}
+	for _, a := range actions {
+		switch a.Type {
+		case "block_request":
+			if !blocked {
+				blocked = true
+				blockMsg = expandTemplate(fmt.Sprint(a.Params["message"]), facts)
+				if blockMsg == "" || blockMsg == "<nil>" {
+					blockMsg = "blocked by program rule"
+				}
+			}
+		case "notify":
+			body := expandTemplate(fmt.Sprint(a.Params["body"]), facts)
+			kind := fmt.Sprint(a.Params["kind"])
+			if kind == "" || kind == "<nil>" {
+				kind = "MILESTONE"
+			}
+			if _, err := s.db.Exec(r.Context(), `
+				INSERT INTO public.notifications (tenant, user_sub, type, body)
+				VALUES ($1,'*',$2,$3)`, tenant, kind, body); err != nil {
+				slog.Error("rule notify failed", "tenant", tenant, "event", event, "err", err)
+			}
+		case "log_activity":
+			s.logActivity(r.Context(), tenant, caseID, "RULE_"+strings.ToUpper(strings.ReplaceAll(event, ".", "_")),
+				expandTemplate(fmt.Sprint(a.Params["body"]), facts))
+		case "set_detail":
+			key := fmt.Sprint(a.Params["key"])
+			if caseID == "" || !ruleDetailKey.MatchString(key) {
+				slog.Warn("rule set_detail rejected", "tenant", tenant, "event", event, "key", key, "case", caseID)
+				continue
+			}
+			val := expandTemplate(fmt.Sprint(a.Params["value"]), facts)
+			if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
+				UPDATE tenant_%s.cases SET details = jsonb_set(details, $2, to_jsonb($3::text), true), updated_at=now()
+				WHERE id=$1`, sanitizeTenant(tenant)), caseID, "{"+key+"}", val); err != nil {
+				slog.Error("rule set_detail failed", "tenant", tenant, "event", event, "err", err)
+			}
+		case "flag_review":
+			if docID, _ := facts["doc_id"].(string); docID != "" {
+				if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
+					UPDATE tenant_%s.documents SET analysis_status='NEEDS_REVIEW'
+					WHERE id=$1`, sanitizeTenant(tenant)), docID); err != nil {
+					slog.Error("rule flag_review failed", "tenant", tenant, "doc", docID, "err", err)
+				}
+			}
+			s.logActivity(r.Context(), tenant, caseID, "RULE_FLAGGED",
+				expandTemplate(fmt.Sprint(a.Params["reason"]), facts))
+		case "set_status":
+			// Only documents may be status-set by rules on the upload path;
+			// case/intake status transitions stay owned by their handlers.
+			if event == "doc.upload" {
+				if docID, _ := facts["doc_id"].(string); docID != "" {
+					st := fmt.Sprint(a.Params["status"])
+					if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
+						UPDATE tenant_%s.documents SET analysis_status=$2
+						WHERE id=$1`, sanitizeTenant(tenant)), docID, st); err != nil {
+						slog.Error("rule set_status failed", "tenant", tenant, "doc", docID, "err", err)
+					}
+				}
+			}
+		}
+	}
+	// One audit event per fired rule — Dapr pubsub → Kafka idre.<tenant>.rules
+	// → Flink bronze → lakehouse, so rule behavior itself is analyzable.
+	for _, n := range fired {
+		s.publish(r.Context(), tenant, "rules", map[string]any{
+			"type": "rule.fired", "tenant": tenant, "event": event, "rule": n,
+			"case_id": caseID, "blocked": blocked, "at": time.Now().UTC(),
+		})
+	}
+	return blocked, blockMsg
 }
 
 // expandTemplate fills {{field}} placeholders from facts (notification text).

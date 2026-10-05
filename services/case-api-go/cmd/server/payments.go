@@ -217,6 +217,16 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 		s.postPaymentLedger(tenant, caseID, sess.PaymentIntent, party, uint64(amount), false) // clearing → escrow
 		s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED",
 			fmt.Sprintf("Card payment of $%d.%02d received via Stripe (%s) — invoice settled, ledger posted", amount/100, amount%100, sess.PaymentIntent))
+		// Program rules (invoice.settled) — settlement is already committed in
+		// Postgres + TigerBeetle, so block_request is meaningless here and is
+		// ignored (logged suspect); notify/log_activity/set_detail/flag_review
+		// drive the post-settlement workflow (e.g. late-payment escalation,
+		// remittance reconciliation alerts).
+		s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
+			"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
+			"party": party, "method": "card", "remittance_ref": sess.PaymentIntent,
+			"tenant": tenant,
+		})
 
 	case "checkout.session.expired":
 		var sess struct {

@@ -276,6 +276,19 @@ func (s *server) shareCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		"type": "doc.uploaded", "tenant": up.tenant, "case_id": up.caseID, "doc_id": docID,
 		"object_key": up.objectKey, "via": "sharebox-multipart", "at": time.Now().UTC(),
 	})
+	// Program rules (doc.upload) — block quarantines the assembled document.
+	if blocked, msg := s.fireEventRules(r, up.tenant, "doc.upload", map[string]any{
+		"case_id": up.caseID, "doc_id": docID, "folder": "PARTY_UPLOADS", "sealed": false,
+		"size_bytes": int(up.size), "content_type": "application/octet-stream",
+		"filename": up.filename, "uploaded_by": "sharebox:" + token[:8],
+		"via": "sharebox-multipart", "tenant": up.tenant,
+	}); blocked {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.documents SET analysis_status='BLOCKED'
+			WHERE id=$1`, sanitizeTenant(up.tenant)), docID)
+		s.logActivity(r.Context(), up.tenant, up.caseID, "RULE_BLOCKED",
+			fmt.Sprintf("Party upload %q quarantined by program rule: %s", up.filename, msg))
+	}
 	s.logCorrespondence(r, up.tenant, up.caseID, "IN", "sharebox_upload",
 		fmt.Sprintf("Party upload via secure link (resumable): %s", up.filename), "", nil, nil, "sharebox:"+token[:8])
 	s.logActivity(r.Context(), up.tenant, up.caseID, "DOCUMENT_UPLOADED",

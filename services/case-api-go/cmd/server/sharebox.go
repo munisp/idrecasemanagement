@@ -178,6 +178,19 @@ func (s *server) shareUpload(w http.ResponseWriter, r *http.Request) {
 		"doc_id": docID, "object_key": objectKey, "content_type": hdr.Header.Get("Content-Type"),
 		"sealed": false, "via": "sharebox", "at": time.Now().UTC(),
 	})
+	// Program rules (doc.upload) — party uploads are the highest-risk path,
+	// so rule enforcement matters most here. Block = quarantine, not delete.
+	if blocked, msg := s.fireEventRules(r, g.Tenant, "doc.upload", map[string]any{
+		"case_id": g.CaseID, "doc_id": docID, "folder": "PARTY_UPLOADS", "sealed": false,
+		"size_bytes": len(raw), "content_type": hdr.Header.Get("Content-Type"),
+		"filename": hdr.Filename, "uploaded_by": actor, "via": "sharebox", "tenant": g.Tenant,
+	}); blocked {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.documents SET analysis_status='BLOCKED'
+			WHERE id=$1`, sanitizeTenant(g.Tenant)), docID)
+		s.logActivity(r.Context(), g.Tenant, g.CaseID, "RULE_BLOCKED",
+			fmt.Sprintf("Party upload %q quarantined by program rule: %s", hdr.Filename, msg))
+	}
 	s.logCorrespondence(r, g.Tenant, g.CaseID, "IN", "sharebox_upload",
 		fmt.Sprintf("Party upload via secure link: %s", hdr.Filename), "", nil, nil, actor)
 	s.logActivity(r.Context(), g.Tenant, g.CaseID, "DOCUMENT_UPLOADED",
