@@ -10,7 +10,7 @@ const Views = (() => {
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
-  const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="location.reload()">Retry</button></div>`;
+  const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="App.rerender()">Retry</button></div>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
   const can = (...rs) => rs.some(role);
 
@@ -101,21 +101,25 @@ const Views = (() => {
       <button class="mini" id="bk-clear">Clear</button>`;
     document.body.appendChild(bar);
     $("#bk-clear").onclick = () => { selection.clear(); document.querySelectorAll(".sel-one,#sel-all").forEach((cb) => (cb.checked = false)); paintBulkBar(); };
-    $("#bk-assign").onclick = async () => {
-      const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection] });
-      const ok = r.results.filter((x) => x.ok).length;
-      UI.toast(`Assigned ${ok} of ${r.results.length} disputes to you`);
-      selection.clear(); location.reload();
+    $("#bk-assign").onclick = async (ev) => {
+      await UI.run(ev.currentTarget, async () => {
+        const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection] });
+        const ok = r.results.filter((x) => x.ok).length;
+        UI.toast(`Assigned ${ok} of ${r.results.length} disputes to you`);
+        selection.clear(); App.rerender();
+      }, "Assigning…");
     };
-    $("#bk-status").onclick = async () => {
+    $("#bk-status").onclick = async (ev) => {
       const v = await UI.modal({ title: `Set status for ${selection.size} disputes`, fields: [
         { name: "status", label: "New status", options: [["INITIATED", "Initiated"], ["OFFER_WINDOW_OPEN", "Offer window open"], ["IN_REVIEW", "In review"], ["DETERMINED", "Determined"], ["PAYMENT_PENDING", "Payment pending"], ["CLOSED_DISMISSED", "Closed — dismissed"]], required: true },
       ], submitLabel: "Apply to selection" });
       if (!v) return;
-      const r = await Api.cm.bulk({ action: "status", status: v.status, case_ids: [...selection] });
-      const ok = r.results.filter((x) => x.ok).length;
-      UI.toast(`Status updated on ${ok} of ${r.results.length} disputes`);
-      selection.clear(); location.reload();
+      await UI.run(ev.currentTarget, async () => {
+        const r = await Api.cm.bulk({ action: "status", status: v.status, case_ids: [...selection] });
+        const ok = r.results.filter((x) => x.ok).length;
+        UI.toast(`Status updated on ${ok} of ${r.results.length} disputes`);
+        selection.clear(); App.rerender();
+      }, "Applying…");
     };
   }
 
@@ -161,10 +165,12 @@ const Views = (() => {
           document.body.classList.toggle("density-compact", next === "compact");
           UI.toast(`Density: ${next}`);
         };
-        $("#grab").onclick = async () => {
-          const r = await Api.cm.grabNext();
-          if (r.claimed) { UI.toast(`Claimed ${r.case_number} from the queue`); location.hash = `#/cases/${r.case_id}`; }
-          else UI.toast(r.message, { kind: "warn" });
+        $("#grab").onclick = async (ev) => {
+          await UI.run(ev.currentTarget, async () => {
+            const r = await Api.cm.grabNext();
+            if (r.claimed) { UI.toast(`Claimed ${r.case_number} from the queue`); location.hash = `#/cases/${r.case_id}`; }
+            else UI.toast(r.message, { kind: "warn" });
+          }, "Grabbing…");
         };
       });
       return `<div class="view-head"><h1>Disputes</h1><span class="muted">${rows.length} shown</span>
@@ -188,9 +194,11 @@ const Views = (() => {
         { name: "detail", label: "Reason", type: "textarea", placeholder: "Why does this need supervisory attention?", required: true },
       ] });
     if (!v) return;
-    await Api.cm.escalate(caseId, v.clock, v.detail);
-    UI.toast("Escalated — supervisors and federal administrators notified");
-    location.reload();
+    try {
+      await Api.cm.escalate(caseId, v.clock, v.detail);
+      UI.toast("Escalated — supervisors and federal administrators notified");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function relate(caseId) {
@@ -199,9 +207,11 @@ const Views = (() => {
       { name: "type", label: "Relationship", options: [["BATCH", "Batch"], ["PARENT_CHILD", "Parent / child"], ["DUPLICATE", "Duplicate"]], required: true },
     ] });
     if (!v) return;
-    await Api.cm.relate({ case_id: caseId, related_case_id: v.related, rel_type: v.type });
-    UI.toast("Cases linked");
-    location.reload();
+    try {
+      await Api.cm.relate({ case_id: caseId, related_case_id: v.related, rel_type: v.type });
+      UI.toast("Cases linked");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function feeTransfer(caseId) {
@@ -218,7 +228,7 @@ const Views = (() => {
       await Api.fees.transfer({ case_id: caseId, kind: v.kind, party_id: v.party,
         amount_cents: Math.round(parseFloat(v.amount) * 100), post_kind: v.post });
       UI.toast("Ledger transfer created (double-entry, idempotent)");
-      location.reload();
+      App.rerender();
     } catch (e) { UI.toast("Ledger rejected the transfer: " + e.message, { kind: "warn", duration: 9000 }); }
   }
 
@@ -228,9 +238,11 @@ const Views = (() => {
       { name: "status", label: "Filter by status", placeholder: "leave blank for all" },
     ], submitLabel: "Save view" });
     if (!v) return;
-    await Api.cm.saveView({ object: "CASES", name: v.name, filters: v.status ? { status: v.status } : {} });
-    UI.toast("View saved");
-    location.reload();
+    try {
+      await Api.cm.saveView({ object: "CASES", name: v.name, filters: v.status ? { status: v.status } : {} });
+      UI.toast("View saved");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function assign(caseId) {
@@ -242,7 +254,7 @@ const Views = (() => {
     try {
       const r = await Api.cm.assign(caseId, v.role, v.assignee || "");
       UI.toast(`Assigned to ${r.assigned_to}`);
-      location.reload();
+      App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -256,7 +268,7 @@ const Views = (() => {
       if (!v) return;
       qs = `?winning_party=${encodeURIComponent(v.winning)}&rationale=${encodeURIComponent(v.rationale)}`;
     }
-    try { await Api.cm.letter(caseId, template, qs); UI.toast("Letter generated — see Documents"); location.reload(); }
+    try { await Api.cm.letter(caseId, template, qs); UI.toast("Letter generated — see Documents"); App.rerender(); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -266,9 +278,11 @@ const Views = (() => {
       body: "Your offer is encrypted in the vault the moment you submit. It is visible to no one — including arbitrators — until the offer window closes and the lawful-reveal gate passes.",
       fields: [{ name: "amount", label: "Offer amount (USD)", type: "number", step: "0.01", required: true }] });
     if (!v) return;
-    await Api.cases.signal(caseId, "OFFER_SUBMITTED", { party_id: Auth.claims().sub, amount_cents: Math.round(parseFloat(v.amount) * 100) });
-    UI.toast("Offer received and sealed — receipt logged");
-    location.reload();
+    try {
+      await Api.cases.signal(caseId, "OFFER_SUBMITTED", { party_id: Auth.claims().sub, amount_cents: Math.round(parseFloat(v.amount) * 100) });
+      UI.toast("Offer received and sealed — receipt logged");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function determinationForm(caseId) {
@@ -280,9 +294,11 @@ const Views = (() => {
           hint: "Required — becomes part of the certified determination letter." },
       ] });
     if (!v) return;
-    await Api.cases.signal(caseId, "DETERMINATION_ISSUED", { winning_offer_party: v.winning, rationale: v.rationale });
-    UI.toast("Determination issued — payment clock started");
-    location.reload();
+    try {
+      await Api.cases.signal(caseId, "DETERMINATION_ISSUED", { winning_offer_party: v.winning, rationale: v.rationale });
+      UI.toast("Determination issued — payment clock started");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ---- Case detail workspace -------------------------------------------------
@@ -353,7 +369,7 @@ const Views = (() => {
             <td><a href="${Api.cases.downloadUrl(id, d.doc_id)}" target="_blank">download</a>
             ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
             ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
-              ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value)"><option value="">move…</option>
+              ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">move…</option>
                 ${FOLDERS.filter((f) => f !== d.folder).map((f) => `<option>${f}</option>`).join("")}</select>` : ""}</td></tr>`).join("") +
           `</tbody></table>`).join("");
       } else html += `<p class="muted">No documents yet.</p>`;
@@ -412,18 +428,22 @@ const Views = (() => {
         $("#up").addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = ev.target.file.files[0];
-          try { await Api.cases.upload(id, f, ev.target.sealed.checked, ev.target.folder.value); UI.toast("Document uploaded"); location.reload(); }
-          catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          await UI.run(ev.target.querySelector("button"), async () => {
+            try { await Api.cases.upload(id, f, ev.target.sealed.checked, ev.target.folder.value); UI.toast("Document uploaded"); App.rerender(); }
+            catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Uploading…");
         });
       });
       return html;
     } catch (e) { return err(e); }
   }
 
-  async function moveDoc(caseId, docId, folder) {
+  async function moveDoc(caseId, docId, folder, sel) {
     if (!folder) return;
-    try { await Api.cases.moveDoc(caseId, docId, folder); UI.toast(`Moved to ${folder}`); location.reload(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    await UI.run(sel, async () => {
+      try { await Api.cases.moveDoc(caseId, docId, folder); UI.toast(`Moved to ${folder}`); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
   }
 
   async function showAnalysis(caseId, docId) {
@@ -443,22 +463,27 @@ const Views = (() => {
     }
   }
 
-  async function check(itemId) { await Api.cm.checkItem(itemId); UI.toast("Checklist item completed"); location.reload(); }
+  async function check(itemId) {
+    try { await Api.cm.checkItem(itemId); UI.toast("Checklist item completed"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
 
   // ---- New dispute -------------------------------------------------------------
   function newDispute() {
     afterRender(() => $("#nd").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
-      try {
-        const r = await Api.cases.initiate({
-          case_number: f.case_number, service_line: f.service_line, plan_type: f.plan_type,
-          qpa_cents: Math.round(parseFloat(f.qpa) * 100), provider_id: f.provider_id,
-          payer_id: f.payer_id, open_negotiation_end: f.one_end,
-        });
-        UI.toast("Dispute initiated — statutory clocks started");
-        location.hash = `#/cases/${r.case_id}`;
-      } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+      await UI.run(ev.target.querySelector("button"), async () => {
+        try {
+          const r = await Api.cases.initiate({
+            case_number: f.case_number, service_line: f.service_line, plan_type: f.plan_type,
+            qpa_cents: Math.round(parseFloat(f.qpa) * 100), provider_id: f.provider_id,
+            payer_id: f.payer_id, open_negotiation_end: f.one_end,
+          });
+          UI.toast("Dispute initiated — statutory clocks started");
+          location.hash = `#/cases/${r.case_id}`;
+        } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+      }, "Initiating…");
     }));
     return `<h1>New dispute</h1><form id="nd" class="form">
       <label>CMS case number <input name="case_number" required placeholder="CMS-TX-2026-00002" /></label>
@@ -531,7 +556,7 @@ const Views = (() => {
       if (!v) return;
       reason = v.reason;
     } else if (!(await UI.confirm("Approve application?", "The organization is provisioned into its tenant and notified.", "Approve"))) return;
-    try { await Api.onboarding.decide(id, decision, reason); UI.toast(`Application ${decision.toLowerCase()}d`); location.reload(); }
+    try { await Api.onboarding.decide(id, decision, reason); UI.toast(`Application ${decision.toLowerCase()}d`); App.rerender(); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -542,11 +567,13 @@ const Views = (() => {
       afterRender(() => $("#ob-call")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
-        try {
-          const r = await Api.voice.outbound(f.to, f.case_number, f.script);
-          UI.toast(`Outbound call ${r.status}`);
-          location.reload();
-        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        await UI.run(ev.target.querySelector("button"), async () => {
+          try {
+            const r = await Api.voice.outbound(f.to, f.case_number, f.script);
+            UI.toast(`Outbound call ${r.status}`);
+            App.rerender();
+          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        }, "Dialing…");
       }));
       return `<h1>Voice console</h1>
         <h2>Outbound call</h2>
@@ -724,7 +751,7 @@ const Views = (() => {
       $("#p-date")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;
-        try { await Api.program.setDate(id, f.key.value, f.value.value); UI.toast("Program date recorded — clocks re-projected"); location.reload(); }
+        try { await Api.program.setDate(id, f.key.value, f.value.value); UI.toast("Program date recorded — clocks re-projected"); App.rerender(); }
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
       $("#p-elig")?.addEventListener("submit", async (ev) => {
@@ -770,8 +797,8 @@ const Views = (() => {
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
            <td>${badge(v.status)}</td>
            <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.payInvoice('${v.id}')">💳 pay by card</a> ·
-             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY')">mark paid</a> ·
-             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND')">refund</a>` : ""}</td></tr>`).join("") +
+             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY',this)">mark paid</a> ·
+             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
       }).catch(() => {});
       $("#p-claims")?.addEventListener("submit", async (ev) => {
@@ -808,10 +835,18 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  async function settleInvoice(invId, action) {
-    const ref = action === "PAY" ? (prompt("Remittance reference (RA/ERA):", "") || "") : "";
-    try { await Api.program.settleInvoice(invId, action, ref); UI.toast(`Invoice ${action === "PAY" ? "paid" : action.toLowerCase() + "ed"}`); location.reload(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  async function settleInvoice(invId, action, el) {
+    let ref = "";
+    if (action === "PAY") {
+      const v = await UI.modal({ title: "Mark invoice paid", submitLabel: "Mark paid",
+        fields: [{ name: "ref", label: "Remittance reference (RA/ERA)", placeholder: "Optional" }] });
+      if (!v) return;
+      ref = v.ref;
+    } else if (!(await UI.confirm("Refund this invoice?", "A refund entry is posted to the ledger and the payer is notified.", "Refund", true))) return;
+    await UI.run(el, async () => {
+      try { await Api.program.settleInvoice(invId, action, ref); UI.toast(`Invoice ${action === "PAY" ? "paid" : "refunded"}`); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
   }
 
   async function qaQueue() {
@@ -837,16 +872,25 @@ const Views = (() => {
         <p class="muted">to: ${esc(to)} · channel ${esc(d.channel)}</p>
         <pre class="qa-body">${esc(d.body)}</pre>
         <div class="actions">
-          <button onclick="Views.qaDecide('${qaId}','APPROVE')">Approve & send</button>
-          <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT')">Reject</button></div></div>`;
+          <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">Approve & send</button>
+          <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Reject</button></div></div>`;
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  async function qaDecide(qaId, decision) {
-    const note = decision === "REJECT" ? (prompt("Rejection note:", "") || "") : "";
-    try { await Api.program.qaDecision(qaId, decision, note);
-      UI.toast(decision === "APPROVE" ? "Approved — sent and logged" : "Rejected"); location.reload(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  async function qaDecide(qaId, decision, el) {
+    let note = "";
+    if (decision === "REJECT") {
+      const v = await UI.modal({ title: "Reject draft", danger: true, submitLabel: "Reject",
+        fields: [{ name: "note", label: "Rejection note", type: "textarea", required: true,
+          hint: "Returned to the drafter with the draft." }] });
+      if (!v) return;
+      note = v.note;
+    } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
+    await UI.run(el, async () => {
+      try { await Api.program.qaDecision(qaId, decision, note);
+          UI.toast(decision === "APPROVE" ? "Approved — sent and logged" : "Rejected"); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
   }
 
   async function intake() {
@@ -863,7 +907,7 @@ const Views = (() => {
           rows.map((i) => `<tr><td>${esc(i.email)}</td><td>${esc(i.org || "")}</td><td>${badge(i.status)}</td>
             <td class="muted">${fmtDate(i.outreach_at)}</td>
             <td>${i.status !== "CONVERTED" && i.status !== "CLOSED_REFUNDED" ?
-              `<select onchange="Views.advanceIntake('${i.id}', this.value)">
+              `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
                 <option value="">advance…</option><option>DOCS_RECEIVED</option><option>PAID</option>
                 <option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`);
@@ -873,16 +917,24 @@ const Views = (() => {
   async function newIntake(form) {
     try {
       await Api.program.createIntake({ email: form.email.value, contact_name: form.contact_name.value, org: form.org.value });
-      UI.toast("Intake request opened — submission instructions queued"); location.reload();
+      UI.toast("Intake request opened — submission instructions queued"); App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     return false;
   }
 
-  async function advanceIntake(id, status) {
+  async function advanceIntake(id, status, sel) {
+    if (!status) return;
     let caseId = "";
-    if (status === "CONVERTED") caseId = prompt("Case ID to link:", "") || "";
-    try { await Api.program.advanceIntake(id, status, caseId); UI.toast(`Intake → ${status}`); location.reload(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    if (status === "CONVERTED") {
+      const v = await UI.modal({ title: "Convert intake to case", submitLabel: "Link case",
+        fields: [{ name: "case_id", label: "Case ID to link", required: true, placeholder: "UUID" }] });
+      if (!v) { if (sel) sel.value = ""; return; }
+      caseId = v.case_id;
+    }
+    await UI.run(sel, async () => {
+      try { await Api.program.advanceIntake(id, status, caseId); UI.toast(`Intake → ${status}`); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); if (sel) sel.value = ""; }
+    });
   }
 
   async function deliverables() {
@@ -891,13 +943,13 @@ const Views = (() => {
       const d = r.deliverables || [];
       return `<div class="view-head"><h1>Contract deliverables</h1>
         <span class="muted">program report schedule</span></div>
-        <form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target))">
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
           <input name="name" required placeholder="Ad hoc report name" />
           <input name="ref" placeholder="Contract ref (optional)" size="10" />
           <button class="mini">request ad hoc (due +10 business days)</button></form>` +
         (d.length ? `<table><thead><tr><th>Deliverable</th><th>Rule</th><th>Next due</th><th></th></tr></thead><tbody>` +
           d.map((x) => `<tr><td>${esc(x.name)}</td><td class="mono">${esc(x.due_rule)}</td><td>${esc(x.next_due)}</td>
-            <td><button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}')">mark delivered</button></td></tr>`).join("") +
+            <td><button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}', this)">mark delivered</button></td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No deliverables configured for this program.</p>`) +
         ((r.history || []).length ? `<h2>Delivery history</h2><table><tbody>` +
           r.history.map((h) => `<tr><td>${esc(h.name)}</td><td>${badge(h.status)}</td>
@@ -905,15 +957,19 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  async function requestDeliverable(f) {
-    try { const r = await Api.program.requestDeliverable(f.get("name"), f.get("ref"));
-      UI.toast("Ad hoc report requested — due " + r.due_date); location.reload(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  async function requestDeliverable(f, btn) {
+    await UI.run(btn, async () => {
+      try { const r = await Api.program.requestDeliverable(f.get("name"), f.get("ref"));
+        UI.toast("Ad hoc report requested — due " + r.due_date); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Requesting…");
   }
 
-  async function submitDeliverable(name) {
-    try { await Api.program.submitDeliverable({ name }); UI.toast("Deliverable recorded"); location.reload(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  async function submitDeliverable(name, el) {
+    await UI.run(el, async () => {
+      try { await Api.program.submitDeliverable({ name }); UI.toast("Deliverable recorded"); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
   }
 
   // ---- Financial dashboard (all money movement through the platform) -------

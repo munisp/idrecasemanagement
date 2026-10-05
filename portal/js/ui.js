@@ -1,27 +1,86 @@
-// ui.js — Meridian interaction layer: modal dialogs, toasts with undo, confirm.
-// Replaces every window.prompt / alert / confirm (anti-pattern #13) with branded,
+// ui.js — Meridian interaction layer: modal dialogs, toasts with undo, confirm,
+// busy-state runner. Replaces every window.prompt / alert / confirm with branded,
 // keyboard-complete, screen-reader-announced surfaces.
 const UI = (() => {
-  // ---- Toasts (aria-live polite; undo where offered) ----
+  // ---- Toasts -------------------------------------------------------------
+  // kinds: success (default for completed actions), info, warn, error.
+  // Iconed, animated in/out, hover-to-pause, capped stack, aria-live.
   let region;
+  const ICONS = { success: "✓", info: "ℹ", warn: "⚠", error: "✕" };
+
   function toast(message, opts = {}) {
     if (!region) {
       region = document.createElement("div");
       region.className = "toast-region";
       region.setAttribute("aria-live", "polite");
+      region.setAttribute("role", "status");
       document.body.appendChild(region);
     }
+    // Cap the stack at 4 — drop the oldest so rapid actions stay readable.
+    while (region.children.length >= 4) region.firstChild.remove();
+
+    const kind = opts.kind || "success";
     const t = document.createElement("div");
-    t.className = "toast" + (opts.kind ? " t-" + opts.kind : "");
-    t.innerHTML = `<span>${message}</span>`;
+    t.className = `toast t-${kind} toast-in`;
+    t.innerHTML = `<span class="toast-icon" aria-hidden="true">${ICONS[kind] || ICONS.info}</span><span class="toast-msg">${message}</span>`;
     if (opts.undo) {
       const b = document.createElement("button");
       b.textContent = "Undo";
-      b.onclick = () => { opts.undo(); t.remove(); };
+      b.onclick = () => { opts.undo(); dismiss(); };
       t.appendChild(b);
     }
+    const x = document.createElement("button");
+    x.className = "toast-x";
+    x.setAttribute("aria-label", "Dismiss notification");
+    x.textContent = "✕";
+    x.onclick = () => dismiss();
+    t.appendChild(x);
     region.appendChild(t);
-    setTimeout(() => t.remove(), opts.duration || 6000);
+
+    let remaining = opts.duration || (kind === "error" || kind === "warn" ? 9000 : 4500);
+    let timer = setTimeout(dismiss, remaining);
+    let started = Date.now();
+    t.addEventListener("mouseenter", () => { clearTimeout(timer); remaining -= Date.now() - started; });
+    t.addEventListener("mouseleave", () => { started = Date.now(); timer = setTimeout(dismiss, Math.max(remaining, 800)); });
+
+    let gone = false;
+    function dismiss() {
+      if (gone) return;
+      gone = true;
+      clearTimeout(timer);
+      t.classList.remove("toast-in");
+      t.classList.add("toast-out");
+      setTimeout(() => t.remove(), 220);
+    }
+    return dismiss;
+  }
+
+  // ---- Busy runner ----------------------------------------------------------
+  // UI.run(button, async fn) — disables the control, shows an inline spinner,
+  // restores it afterwards (label preserved). Prevents double-submit and gives
+  // immediate "something is happening" feedback on every async action.
+  async function run(ctrl, fn, busyLabel) {
+    if (!ctrl || ctrl.disabled) return;
+    const isBtn = /^(BUTTON|A)$/.test(ctrl.tagName);
+    const prevHTML = isBtn ? ctrl.innerHTML : null;
+    ctrl.disabled = true;
+    ctrl.classList.add("is-busy");
+    if (isBtn) ctrl.innerHTML = `<span class="spin" aria-hidden="true"></span>${busyLabel || prevHTML}`;
+    try { return await fn(); }
+    finally {
+      ctrl.disabled = false;
+      ctrl.classList.remove("is-busy");
+      if (isBtn) ctrl.innerHTML = prevHTML;
+    }
+  }
+
+  // Flash an element (row, field) to confirm a change landed.
+  function flash(el, cls = "flash-ok") {
+    if (!el) return;
+    el.classList.remove(cls);
+    void el.offsetWidth; // restart animation
+    el.classList.add(cls);
+    setTimeout(() => el.classList.remove(cls), 1400);
   }
 
   // ---- Modal (focus-trapped, Esc closes, returns a promise) ----
@@ -87,5 +146,5 @@ const UI = (() => {
   const confirm = (title, body, submitLabel = "Confirm", danger = false) =>
     modal({ title, body, submitLabel, danger }).then((v) => v !== null);
 
-  return { toast, modal, confirm };
+  return { toast, modal, confirm, run, flash };
 })();

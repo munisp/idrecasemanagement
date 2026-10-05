@@ -72,14 +72,14 @@ const CrmViews = (() => {
         document.querySelector("#nc")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = Object.fromEntries(new FormData(ev.target));
-          await Api.crm.createContact({ account_id: id, ...f });
-          location.reload();
+          try { await Api.crm.createContact({ account_id: id, ...f }); UI.toast("Contact added"); App.rerender(); }
+          catch (e) { UI.toast(e.message, { kind: "warn" }); }
         });
         document.querySelector("#nn")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = Object.fromEntries(new FormData(ev.target));
-          await Api.crm.addNote({ record_type: "ACCOUNT", record_id: id, body: f.body });
-          location.reload();
+          try { await Api.crm.addNote({ record_type: "ACCOUNT", record_id: id, body: f.body }); UI.toast("Note added"); App.rerender(); }
+          catch (e) { UI.toast(e.message, { kind: "warn" }); }
         });
       });
       return html;
@@ -90,8 +90,8 @@ const CrmViews = (() => {
     afterRender(() => document.querySelector("#na").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
-      await Api.crm.createAccount(f);
-      location.hash = "#/crm/accounts";
+      try { await Api.crm.createAccount(f); UI.toast("Account created"); location.hash = "#/crm/accounts"; }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
     }));
     return `<h1>New account</h1><form id="na" class="form">
       <label>Type <select name="type"><option>PROVIDER</option><option>PAYER</option><option>IDRE</option><option>AUDITOR</option><option>OTHER</option></select></label>
@@ -119,7 +119,7 @@ const CrmViews = (() => {
       body: "Creates the account, links the lead's history, and marks the lead converted.",
       fields: [{ name: "type", label: "Account type", options: [["PROVIDER", "Provider"], ["PAYER", "Payer"], ["IDRE", "IDRE entity"], ["OTHER", "Other"]], required: true }] });
     if (!v) return;
-    try { await Api.crm.convertLead(id, v.type); UI.toast("Lead converted to account"); location.reload(); }
+    try { await Api.crm.convertLead(id, v.type); UI.toast("Lead converted to account"); App.rerender(); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -140,14 +140,17 @@ const CrmViews = (() => {
       afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
-        await Api.crm.createTask(f);
-        location.reload();
+        try { await Api.crm.createTask(f); UI.toast("Task created"); App.rerender(); }
+        catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       return html;
     } catch (e) { return `<h1>My tasks</h1>` + err(e); }
   }
 
-  async function done(id) { await Api.crm.completeTask(id); location.reload(); }
+  async function done(id) {
+    try { await Api.crm.completeTask(id); UI.toast("Task completed"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
 
   // ---- Global search -------------------------------------------------------------------
   async function search(q) {
