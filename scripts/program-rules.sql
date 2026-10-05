@@ -263,13 +263,29 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "withdrawal_dismissed_reason": ["Dismissed-Timeliness eligibility failed","Member plan is not regulated by Florida","Self-Funded Plan","Provider No Response","Withdrawal-Claim Resolved","Other","N/A"]
   },
   "volume_rules": {
-    "comment": "Capitol Bridge policy proposals (Challenges & Solutions doc) — dormant until AHCA adopts; evaluate at intake when enabled.",
-    "enabled": false,
-    "fee_tiers": [{"max_claims":100,"fee_cents":null},{"max_claims":500,"fee_cents":20000},{"max_claims":1000,"fee_cents":30000},{"max_claims":1500,"fee_cents":40000},{"per_additional":500,"add_cents":10000}],
-    "initial_review_extensions": [{"max_claims":200,"days":0},{"max_claims":3000,"days":10},{"max_claims":6000,"days":15},{"max_claims":9000,"days":20},{"per_additional":3000,"add_days":5}],
-    "medical_review_caps": {"max_claims_medical_review":150,"max_claims_no_medical":3000},
-    "submission_windows": {"medical_review_over_100_wait_days":30,"no_medical_over_1000_wait_days":15},
-    "structuring": {"single_cpt_over":500,"single_plan_affiliate_over":500}
+    "comment": "Capitol Bridge Large Volume Claims Dispute Submission Policy v01.01.2026 — ADOPTED by AHCA. Governs claims-per-dispute volume (NOT repeat filer volume — AHCA confirmed 2026). Applies to disputes with >=100 claims. Non-compliant disputes are found INELIGIBLE; resubmission permitted once the ineligibility reason is cured. Written exemptions by Capitol Bridge only.",
+    "source_document": "Capitol Bridge Large Volume Claims Disputes Policy 1.1.2026",
+    "enabled": true,
+    "large_volume_threshold_claims": 100,
+    "single_cpt_per_dispute": true,
+    "caps": {
+      "no_medical_review": {"max_claims_per_dispute": 500, "max_claims_per_rolling_14_days": 500},
+      "medical_review":    {"max_claims_per_dispute": 100, "max_claims_per_rolling_14_days": 100}
+    },
+    "claim_listing": {
+      "format": "xlsx",
+      "required_columns": ["claim_number","patient_first_name","patient_last_name","type_of_service","denial_reason","date_of_service","amount_billed","amount_paid","amount_in_dispute","date_claim_submitted","date_of_denial","date_of_final_determination","provider_name","facility_name","evidence_location"],
+      "claim_numbers_must_match_eobs": true
+    },
+    "documentation": {
+      "searchable_required": true,
+      "filenames_must_match_contents": true,
+      "combined_pdf_categories": ["EOBs","Appeal documents","Medical documentation"],
+      "unlocked_unrestricted_required": true,
+      "disallowed_file_types": ["EDIDATA","BAK"]
+    },
+    "exemptions": "effective only with prior written approval from Capitol Bridge (flcdr@capitolbridge.com)",
+    "noncompliance": {"disposition": "INELIGIBLE", "resubmission_allowed": true}
   }
 }
 $$::jsonb)
