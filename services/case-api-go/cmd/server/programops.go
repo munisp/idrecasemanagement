@@ -300,6 +300,22 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"status required"}`, http.StatusBadRequest)
 		return
 	}
+	// Whitelist + transition guard: free-text status writes would silently
+	// corrupt the intake lifecycle (and bypass the PACKET_COMPLETE anchor).
+	if !intakeStatuses[in.Status] {
+		http.Error(w, fmt.Sprintf(`{"error":"status must be one of: %s"}`, intakeStatusList), http.StatusBadRequest)
+		return
+	}
+	var current string
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT status FROM public.intake_requests WHERE tenant=$1 AND id=$2`, tenant, id).Scan(&current); err != nil {
+		http.Error(w, `{"error":"intake not found"}`, http.StatusNotFound)
+		return
+	}
+	if intakeTerminal[current] {
+		http.Error(w, fmt.Sprintf(`{"error":"intake is %s — terminal; open a new intake request to resubmit"}`, current), http.StatusConflict)
+		return
+	}
 	if in.Status == "CONVERTED" && in.CaseID == "" {
 		http.Error(w, `{"error":"case_id required to convert"}`, http.StatusBadRequest)
 		return
@@ -482,6 +498,28 @@ func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
 
 // ---- FL AHCA lifecycle semantics (AHCA answers, 2026) -------------------------
 
+// Intake lifecycle: valid statuses and the terminal set that locks the row.
+var intakeStatuses = map[string]bool{
+	"DOCS_RECEIVED": true, "PACKET_COMPLETE": true, "PAID": true,
+	"CONVERTED": true, "INELIGIBLE": true, "CLOSED_REFUNDED": true,
+}
+var intakeTerminal = map[string]bool{"CONVERTED": true, "INELIGIBLE": true, "CLOSED_REFUNDED": true}
+
+const intakeStatusList = "DOCS_RECEIVED, PACKET_COMPLETE, PAID, CONVERTED, INELIGIBLE, CLOSED_REFUNDED"
+
+// decidedEnoughForInvoiceRest: internal statuses from which "all invoices
+// paid" may rest a case at Decided - Invoice Paid. Without this guard an
+// early fee invoice closing mid-review would prematurely mark the case
+// complete.
+func decidedEnoughForInvoiceRest(internal string) bool {
+	switch {
+	case strings.Contains(internal, "Final Order"), strings.Contains(internal, "Determination"),
+		strings.Contains(internal, "Decided"), strings.Contains(internal, "Invoice"):
+		return true
+	}
+	return false
+}
+
 // terminalInternalStatuses: the ONLY ways a case is closed per AHCA — Plan
 // Opt-Out, Ineligible, Dismissed, Withdrawn. A completed case is NOT closed;
 // it rests at decidedInvoicePaidStatus.
@@ -508,7 +546,7 @@ func (s *server) maybeMarkDecidedInvoicePaid(r *http.Request, tenant, caseID str
 		sanitizeTenant(tenant)), caseID).Scan(&internal); err != nil {
 		return
 	}
-	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || internal == "" {
+	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || !decidedEnoughForInvoiceRest(internal) {
 		return // already terminal, already resting, or not yet decided
 	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
@@ -522,7 +560,7 @@ func (s *server) maybeMarkDecidedInvoicePaid(r *http.Request, tenant, caseID str
 // acceptance letter, but if the documentation hasn't arrived by day 13 after
 // outreach, the case is found incomplete and an ineligibility letter issues.
 // Runs daily (registered in main.go); idempotent by status transition.
-func (s *server) sweepIntakeDay13() {
+func (s *server) sweepIntakeDay13() int {
 	rows, err := s.db.Query(context.Background(), `
 		UPDATE public.intake_requests
 		SET status='INELIGIBLE'
@@ -531,7 +569,7 @@ func (s *server) sweepIntakeDay13() {
 		  AND outreach_at < now() - interval '13 days'
 		RETURNING tenant, id, email`)
 	if err != nil {
-		return
+		return 0
 	}
 	defer rows.Close()
 	type hit struct{ tenant, id, email string }
@@ -550,6 +588,7 @@ func (s *server) sweepIntakeDay13() {
 			VALUES ($1,'*','SLA_BREACH',$2)`,
 			h.tenant, fmt.Sprintf("Intake %s (%s) found incomplete at day 13 — issue ineligibility letter", h.id, h.email))
 	}
+	return len(hits)
 }
 
 // ---- Large-volume claim dispute rules (Capitol Bridge policy v01.01.2026) ----

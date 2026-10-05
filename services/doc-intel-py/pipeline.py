@@ -698,6 +698,28 @@ def pdf_to_pages(data: bytes, dpi: int = 200,
     return pages, truncated
 
 
+# OOXML safety: a tiny .docx can expand to gigabytes when parsed. Before
+# Docling opens an office container, sum the UNCOMPRESSED sizes from the zip
+# central directory (no decompression needed) and reject beyond the cap.
+OOXML_MAX_EXPANDED_BYTES = 512 * 1024 * 1024   # 512 MiB expanded ceiling
+OOXML_MAX_RATIO = 200                           # compressed:expanded sanity bound
+
+
+def ooxml_safe(data: bytes) -> tuple[bool, str]:
+    """(safe, reason). Reads central directory metadata only — never inflates."""
+    import zipfile
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return False, "office container is corrupt or not a valid zip"
+    total = sum(i.file_size for i in zf.infolist())
+    if total > OOXML_MAX_EXPANDED_BYTES:
+        return False, f"expands to {total >> 20} MiB — exceeds the {OOXML_MAX_EXPANDED_BYTES >> 20} MiB safety cap"
+    if len(data) > 0 and total / len(data) > OOXML_MAX_RATIO:
+        return False, f"expansion ratio {total // max(len(data),1)}:1 — probable zip bomb"
+    return True, ""
+
+
 def sniff_doc_kind(data: bytes, content_type: str) -> str:
     """Cheap magic-byte gate run BEFORE any parsing: pdf / image / office /
     text / unknown. The API edge enforces an allowlist, but events can also

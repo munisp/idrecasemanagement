@@ -24,8 +24,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -533,17 +535,45 @@ func main() {
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
 	// intakes to INELIGIBLE and raises staff notifications for the letters.
 	// Idempotent (status-transition guarded); safe across replicas.
+	sweepStop := make(chan struct{})
 	go func() {
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
-		s.sweepIntakeDay13()
-		for range t.C {
-			s.sweepIntakeDay13()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			default:
+			}
+			if n := s.sweepIntakeDay13(); n > 0 {
+				slog.Info("day-13 sweep", "ineligible", n)
+			}
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+			}
 		}
 	}()
 
+	srv := &http.Server{Addr: cfg.Addr, Handler: r,
+		ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second}
+	// Graceful shutdown: drain in-flight requests on SIGTERM/SIGINT so a
+	// rolling deploy never truncates an upload or a payment webhook.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-quit
+		close(sweepStop)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
 	slog.Info("case-api listening", "addr", cfg.Addr)
-	must(http.ListenAndServe(cfg.Addr, r))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		must(err)
+	}
 }
 
 func must(err error) {

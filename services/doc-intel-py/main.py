@@ -18,7 +18,7 @@ from confluent_kafka import Consumer
 from minio import Minio
 from opensearchpy import OpenSearch
 
-from pipeline import bytes_to_pages, run_pipeline, sniff_doc_kind
+from pipeline import bytes_to_pages, ooxml_safe, run_pipeline, sniff_doc_kind
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
@@ -150,6 +150,15 @@ def process(evt: dict) -> None:
     if kind_of == "unknown":
         mark(evt, "UNSUPPORTED_TYPE")
         return
+    if kind_of == "office":
+        # Zip-bomb pre-flight: a hostile .docx that expands past the cap must
+        # never reach Docling's parser (worker memory = every tenant's queue).
+        safe, reason = ooxml_safe(raw)
+        if not safe:
+            mark(evt, "UNSUPPORTED_TYPE")
+            print(f"doc-intel: refused office container {evt.get('doc_id')}: {reason}",
+                  file=sys.stderr, flush=True)
+            return
     pages, truncated = bytes_to_pages(raw, evt.get("content_type", ""), kind=kind_of)
     ctx = {
         "filename": evt.get("object_key", ""),
