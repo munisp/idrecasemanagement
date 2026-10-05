@@ -108,6 +108,7 @@
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2).split("/")[0]}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
 
@@ -161,6 +162,7 @@
     [/^#\/onboarding\/new$/, Views.onboardingNew],
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
+    [/^#\/rules$/, Views.rulesAdmin],
   ];
 
   async function render() {

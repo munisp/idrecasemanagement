@@ -498,6 +498,11 @@ func main() {
 		r.Post("/intake", s.createIntake)                             // pre-case intake (G12)
 		r.Get("/intake", s.listIntake)
 		r.Post("/intake/{intakeId}/advance", s.advanceIntake)         // refund window enforced
+
+		// Rule engine administration (admin roles only; every write audited).
+		r.Get("/rules", s.listRules)
+		r.Put("/rules", s.putRules)
+		r.Get("/rules/audit", s.rulesAudit)
 		r.Get("/deliverables", s.listDeliverables)                    // contract schedule (G7)
 		r.Post("/deliverables", s.submitDeliverable)
 		r.Post("/cases/{caseId}/opt-out", s.recordOptOut)             // plan opt-out adjudication (G14)

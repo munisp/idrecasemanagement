@@ -118,6 +118,19 @@ ALTER TABLE public.intake_requests
     ADD COLUMN IF NOT EXISTS filing_party_type text NOT NULL DEFAULT 'PROVIDER', -- PROVIDER|HEALTH_PLAN
     ADD COLUMN IF NOT EXISTS packet_complete_at timestamptz;                     -- null = awaiting documents
 
+-- Rule-engine audit trail (append-only by design — no UPDATE/DELETE path).
+-- Every rules write stores the full before/after config plus actor + note.
+CREATE TABLE IF NOT EXISTS public.rule_changes (
+    id         bigserial PRIMARY KEY,
+    tenant     text NOT NULL,
+    changed_by text NOT NULL,              -- keycloak sub of the admin
+    note       text,                       -- change rationale from the UI
+    before     jsonb NOT NULL,
+    after      jsonb NOT NULL,
+    changed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rule_changes_tenant ON public.rule_changes (tenant, id DESC);
+
 -- Tokenized party document links (ShareFile replacement).
 CREATE TABLE IF NOT EXISTS public.share_links (
     token      text PRIMARY KEY,              -- URL-safe random
@@ -297,7 +310,23 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     },
     "exemptions": "effective only with prior written approval from Capitol Bridge (flcdr@capitolbridge.com)",
     "noncompliance": {"disposition": "INELIGIBLE", "resubmission_allowed": true}
-  }
+  },
+  "rules": [
+    {
+      "name": "intake-day13-incomplete",
+      "event": "sweep.intake",
+      "enabled": true,
+      "_basis": "AHCA 2026: RFI may ride with the acceptance letter, but if documentation is not received by the 13th day the case is found incomplete and an ineligibility letter issues",
+      "conditions": [
+        {"field": "days_since_outreach", "op": "gte", "value": 13},
+        {"field": "status", "op": "in", "value": ["INSTRUCTED", "DOCS_RECEIVED"]}
+      ],
+      "actions": [
+        {"type": "set_status", "params": {"status": "INELIGIBLE"}},
+        {"type": "notify", "params": {"kind": "SLA_BREACH", "body": "Intake {{id}} ({{email}}) found incomplete at day {{days}} — issue ineligibility letter"}}
+      ]
+    }
+  ]
 }
 $$::jsonb)
 ON CONFLICT (tenant) DO UPDATE SET config=EXCLUDED.config, program=EXCLUDED.program, updated_at=now();

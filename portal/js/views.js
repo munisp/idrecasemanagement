@@ -1142,5 +1142,94 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc };
+  // ---- Rules admin (FEDERAL_ADMIN / PLATFORM_ADMIN; every save audited) -----
+  let rulesDraft = null; // working copy; saved as one unit so the audit diff is meaningful
+
+  const condText = (c) => `${esc(c.field)} ${esc(c.op)} ${c.value === undefined ? "" : esc(JSON.stringify(c.value))}`;
+  const actText = (a) => `${esc(a.type)} ${Object.entries(a.params || {}).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(" ")}`;
+
+  async function rulesAdmin() {
+    try {
+      const [lr, ar] = await Promise.all([Api.program.rules(), Api.program.rulesAudit().catch(() => ({ changes: [] }))]);
+      rulesDraft = (lr.rules || []).map((r) => ({ ...r }));
+      afterRender(bindRulesAdmin);
+      const audit = ar.changes || [];
+      return `<div class="view-head"><h1>Program rules</h1>
+        <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
+        <p><button id="rule-add">＋ New rule</button>
+           <button id="rules-save" class="btn-primary">Save all changes</button></p>
+        <div id="rules-list">` +
+        (rulesDraft.length ? rulesDraft.map((r, i) => `
+          <div class="rule-card ${r.enabled === false ? "rule-off" : ""}">
+            <div class="rule-head"><b>${esc(r.name || "(unnamed)")}</b> ${badge(r.event)}
+              <label class="rule-toggle"><input type="checkbox" data-idx="${i}" class="rule-en" ${r.enabled === false ? "" : "checked"} /> enabled</label>
+              <span style="flex:1"></span>
+              <button class="mini" onclick="Views.ruleEdit(${i})">edit</button>
+              <button class="mini danger" onclick="Views.ruleDelete(${i})">delete</button></div>
+            ${r._basis ? `<p class="muted rule-basis">${esc(r._basis)}</p>` : ""}
+            <div class="rule-cols"><div><h4>When (all must hold)</h4><ul>${
+              (r.conditions || []).map((c) => `<li class="mono">${condText(c)}</li>`).join("") || "<li class='muted'>always</li>"}</ul></div>
+            <div><h4>Then</h4><ul>${
+              (r.actions || []).map((a) => `<li class="mono">${actText(a)}</li>`).join("")}</ul></div></div>
+          </div>`).join("") : `<p class="muted">No rules configured — hardcoded defaults apply.</p>`) +
+        `</div>
+        <h2>Change history <span class="muted">append-only audit trail</span></h2>` +
+        (audit.length ? `<table><thead><tr><th>When</th><th>Changed by</th><th>Note</th><th>Rules</th><th></th></tr></thead><tbody>` +
+          audit.map((c) => `<tr><td class="muted">${fmtDate(c.changed_at)}</td><td class="mono">${esc(c.changed_by.slice(0, 12))}…</td>
+            <td>${esc(c.note || "—")}</td><td>${(c.before || []).length} → ${(c.after || []).length}</td>
+            <td><details><summary class="mini">diff</summary><pre class="rule-diff">${esc(JSON.stringify(c.after, null, 1))}</pre></details></td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No changes recorded yet.</p>`);
+    } catch (e) { return err(e); }
+  }
+
+  function ruleEdit(idx) {
+    const r = rulesDraft[idx];
+    UI.modal({
+      title: `Edit rule: ${r.name || ""}`, submitLabel: "Apply", wide: true,
+      fields: [{ name: "json", label: "Rule definition (JSON)", type: "textarea", required: true,
+        value: JSON.stringify(r, null, 2),
+        hint: "events: intake.advance | doc.upload | claims.imported | invoice.settled | sweep.intake · ops: eq neq in contains gt gte lt lte is_null not_null days_older_than · actions: set_status set_detail notify log_activity block_request flag_review" }],
+    }).then((v) => {
+      if (v === null) return;
+      try {
+        const parsed = JSON.parse(v.json);
+        if (!parsed.name || !parsed.event) throw new Error("rule needs name + event");
+        rulesDraft[idx] = parsed;
+        UI.toast(`Rule "${parsed.name}" staged — Save all changes to apply`);
+        App.rerender();
+      } catch (e) { UI.toast(`Invalid rule JSON: ${e.message}`, { kind: "error" }); }
+    });
+  }
+
+  function ruleDelete(idx) {
+    UI.modal({ title: `Delete rule "${rulesDraft[idx].name}"?`, danger: true, submitLabel: "Delete",
+      body: "The deletion is staged until you Save all changes; the audit trail records it permanently." })
+      .then((ok) => { if (ok === null) return; rulesDraft.splice(idx, 1); UI.toast("Rule staged for deletion"); App.rerender(); });
+  }
+
+  async function rulesSave() {
+    const v = await UI.modal({ title: "Save program rules", submitLabel: "Save & audit", fields: [
+      { name: "note", label: "Change note (audit trail)", required: true, placeholder: "e.g. AHCA memo 2026-03: day-13 gate" }] });
+    if (!v) return;
+    try {
+      const r = await Api.program.saveRules(rulesDraft, v.note);
+      UI.toast(`${r.saved} rule(s) saved — change recorded in the audit trail`);
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  function bindRulesAdmin() {
+    document.querySelectorAll(".rule-en").forEach((cb) => cb.addEventListener("change", () => {
+      rulesDraft[+cb.dataset.idx].enabled = cb.checked;
+      UI.flash(cb.closest(".rule-card"));
+    }));
+    document.getElementById("rule-add")?.addEventListener("click", () => {
+      rulesDraft.push({ name: "new-rule", event: "intake.advance", enabled: false, conditions: [], actions: [] });
+      App.rerender();
+      ruleEdit(rulesDraft.length - 1);
+    });
+    document.getElementById("rules-save")?.addEventListener("click", () => UI.run(document.getElementById("rules-save"), rulesSave, "Saving…"));
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin };
 })();

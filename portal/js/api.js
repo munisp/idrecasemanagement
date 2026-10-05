@@ -126,6 +126,9 @@ const Api = (() => {
     },
     program: {
       get: () => req("GET", `${t()}/program`),
+      rules: () => req("GET", `${t()}/rules`),
+      saveRules: (rules, note) => req("PUT", `${t()}/rules`, { rules, note }),
+      rulesAudit: () => req("GET", `${t()}/rules/audit`),
       setDate: (caseId, key, value) => req("POST", `${t()}/cases/${caseId}/program-date`, { key, value }),
       setStatus: (caseId, p) => req("POST", `${t()}/cases/${caseId}/status`, p),
       eligibility: (caseId, p) => req("POST", `${t()}/cases/${caseId}/eligibility`, p),

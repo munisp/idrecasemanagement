@@ -297,6 +297,18 @@
       { id: "in1", email: "revcycle@memorial.example", org: "Memorial Regional", status: "DOCS_RECEIVED", outreach_at: d(48), created_at: d(50), filing_party_type: "PROVIDER", packet_complete_at: null },
       { id: "in4", email: "disputes@bayfront.example", org: "Bayfront Medical", status: "PACKET_COMPLETE", outreach_at: d(200), created_at: d(202), filing_party_type: "PROVIDER", packet_complete_at: d(100) },
       { id: "in3", email: "claims@sunhealth.example", org: "Sun Health Plan", status: "PAID", outreach_at: d(120), created_at: d(122), filing_party_type: "HEALTH_PLAN", packet_complete_at: null }] });
+    if (/\/rules\/audit$/.test(p)) return json({ changes: [
+      { id: 2, changed_by: "f3a1c9e2-admin-4b7d", note: "AHCA memo: day-13 completeness gate", before: [], after: [{ name: "intake-day13-incomplete" }], changed_at: d(72) },
+      { id: 1, changed_by: "f3a1c9e2-admin-4b7d", note: "Initial rule set", before: [], after: [], changed_at: d(200) }] });
+    if (/\/rules$/.test(p) && opts.method === "PUT") {
+      const body = JSON.parse(opts.body || "{}");
+      return json({ rules: body.rules || [], saved: (body.rules || []).length });
+    }
+    if (/\/rules$/.test(p)) return json({ rules: [
+      { name: "intake-day13-incomplete", event: "sweep.intake", enabled: true,
+        _basis: "AHCA 2026: documentation not received by the 13th day => incomplete, ineligibility letter issues",
+        conditions: [{ field: "days_since_outreach", op: "gte", value: 13 }, { field: "status", op: "in", value: ["INSTRUCTED", "DOCS_RECEIVED"] }],
+        actions: [{ type: "set_status", params: { status: "INELIGIBLE" } }, { type: "notify", params: { kind: "SLA_BREACH", body: "Intake {{id}} ({{email}}) incomplete at day {{days}} — issue ineligibility letter" } }] }] });
     if (/\/deliverables$/.test(p) && opts.method === "POST") return json({ status: "DELIVERED" });
     if (/\/deliverables$/.test(p)) return json({ deliverables: [
       { name: "Weekly report", due_rule: "weekly:MONDAY", next_due: d(-96).slice(0, 10) },

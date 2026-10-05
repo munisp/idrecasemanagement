@@ -316,6 +316,47 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":"intake is %s — terminal; open a new intake request to resubmit"}`, current), http.StatusConflict)
 		return
 	}
+	// Rule engine: tenant-configured intake.advance rules can block a
+	// transition (block_request) or attach notifications/activity. Facts are
+	// the intake row plus the requested transition.
+	{
+		var outreach *time.Time
+		var packetAt *time.Time
+		_ = s.db.QueryRow(r.Context(),
+			`SELECT outreach_at, packet_complete_at FROM public.intake_requests WHERE tenant=$1 AND id=$2`,
+			tenant, id).Scan(&outreach, &packetAt)
+		facts := map[string]any{
+			"status": current, "to_status": in.Status, "packet_complete": packetAt != nil,
+			"id": id, "tenant": tenant,
+		}
+		if outreach != nil {
+			facts["days_since_outreach"] = int(time.Since(*outreach).Hours() / 24)
+		}
+		actions, _ := fireRules(s.rulesFor(r, tenant, "intake.advance"), facts)
+		for _, a := range actions {
+			switch a.Type {
+			case "block_request":
+				msg := fmt.Sprint(a.Params["message"])
+				if msg == "" {
+					msg = "transition blocked by program rule"
+				}
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, expandTemplate(msg, facts)), http.StatusConflict)
+				return
+			case "notify":
+				body := expandTemplate(fmt.Sprint(a.Params["body"]), facts)
+				kind := fmt.Sprint(a.Params["kind"])
+				if kind == "" || kind == "<nil>" {
+					kind = "MILESTONE"
+				}
+				_, _ = s.db.Exec(r.Context(), `
+					INSERT INTO public.notifications (tenant, user_sub, type, body)
+					VALUES ($1,'*',$2,$3)`, tenant, kind, body)
+			case "log_activity":
+				s.logActivity(r.Context(), tenant, in.CaseID, "RULE_INTAKE",
+					expandTemplate(fmt.Sprint(a.Params["body"]), facts))
+			}
+		}
+	}
 	if in.Status == "CONVERTED" && in.CaseID == "" {
 		http.Error(w, `{"error":"case_id required to convert"}`, http.StatusBadRequest)
 		return
@@ -557,38 +598,121 @@ func (s *server) maybeMarkDecidedInvoicePaid(r *http.Request, tenant, caseID str
 }
 
 // sweepIntakeDay13: AHCA completeness gate — an RFI may ride with the
-// acceptance letter, but if the documentation hasn't arrived by day 13 after
-// outreach, the case is found incomplete and an ineligibility letter issues.
-// Runs daily (registered in main.go); idempotent by status transition.
+// acceptance letter, but if the documentation hasn't arrived by the
+// configured day after outreach, the case is found incomplete and an
+// ineligibility letter is requested. Runs hourly (main.go); idempotent.
+//
+// RULE-ENGINE DRIVEN: the threshold day, source statuses, target status, and
+// notification template come from the tenant's config (rules[] with event
+// "sweep.intake"); the constants below are only the fallback when no rule
+// is configured. Changing the gate from 13 days to anything else is a config
+// edit, not a deploy.
 func (s *server) sweepIntakeDay13() int {
-	rows, err := s.db.Query(context.Background(), `
-		UPDATE public.intake_requests
-		SET status='INELIGIBLE'
-		WHERE status IN ('INSTRUCTED','DOCS_RECEIVED')
-		  AND packet_complete_at IS NULL
-		  AND outreach_at < now() - interval '13 days'
-		RETURNING tenant, id, email`)
+	// Defaults (AHCA 2026) — overridable per tenant via rules config.
+	thresholdDays, sourceStatuses := 13, []string{"INSTRUCTED", "DOCS_RECEIVED"}
+	targetStatus, notifyBody := "INELIGIBLE",
+		"Intake {{id}} ({{email}}) found incomplete at day {{days}} — issue ineligibility letter"
+
+	// Tenants with no program config (federal NSA) have no intake gate at all.
+	var tenantRules []struct {
+		tenant string
+		rule   Rule
+	}
+	rows0, err := s.db.Query(context.Background(),
+		`SELECT tenant, config FROM public.program_rules WHERE config->'rules' IS NOT NULL`)
 	if err != nil {
 		return 0
 	}
-	defer rows.Close()
-	type hit struct{ tenant, id, email string }
-	var hits []hit
-	for rows.Next() {
-		var h hit
-		if rows.Scan(&h.tenant, &h.id, &h.email) == nil {
-			hits = append(hits, h)
+	type ruleCfg struct {
+		days     int
+		sources  []string
+		target   string
+		template string
+	}
+	perTenant := map[string]ruleCfg{}
+	for rows0.Next() {
+		var tn string
+		var raw []byte
+		if rows0.Scan(&tn, &raw) != nil {
+			continue
+		}
+		var cfg struct {
+			Rules []Rule `json:"rules"`
+		}
+		if json.Unmarshal(raw, &cfg) != nil {
+			continue
+		}
+		for _, ru := range cfg.Rules {
+			if ru.Event != "sweep.intake" || !ru.active() {
+				continue
+			}
+			rc := ruleCfg{days: thresholdDays, sources: sourceStatuses, target: targetStatus, template: notifyBody}
+			for _, c := range ru.Conditions {
+				if c.Field == "days_since_outreach" {
+					if f, ok := toFloat(c.Value); ok {
+						rc.days = int(f)
+					}
+				}
+				if c.Field == "status" && c.Op == "in" {
+					if list, ok := c.Value.([]any); ok {
+						rc.sources = rc.sources[:0]
+						for _, it := range list {
+							rc.sources = append(rc.sources, fmt.Sprint(it))
+						}
+					}
+				}
+			}
+			for _, a := range ru.Actions {
+				if a.Type == "set_status" && a.Params["status"] != nil {
+					rc.target = fmt.Sprint(a.Params["status"])
+				}
+				if a.Type == "notify" && a.Params["body"] != nil {
+					rc.template = fmt.Sprint(a.Params["body"])
+				}
+			}
+			perTenant[tn] = rc
+			tenantRules = append(tenantRules, struct {
+				tenant string
+				rule   Rule
+			}{tn, ru})
 		}
 	}
-	for _, h := range hits {
-		// Staff-facing notification so the ineligibility letter is drafted and
-		// sent (letter content itself requires the program's DOCX template).
-		_, _ = s.db.Exec(context.Background(), `
-			INSERT INTO public.notifications (tenant, user_sub, type, body)
-			VALUES ($1,'*','SLA_BREACH',$2)`,
-			h.tenant, fmt.Sprintf("Intake %s (%s) found incomplete at day 13 — issue ineligibility letter", h.id, h.email))
+	rows0.Close()
+	_ = tenantRules
+
+	total := 0
+	for tenant, rc := range perTenant {
+		rows, err := s.db.Query(context.Background(), fmt.Sprintf(`
+			UPDATE public.intake_requests
+			SET status=$3
+			WHERE tenant=$1 AND status = ANY($4)
+			  AND packet_complete_at IS NULL
+			  AND outreach_at < now() - ($2 || ' days')::interval
+			RETURNING id, email`), tenant, fmt.Sprint(rc.days), rc.target, rc.sources)
+		if err != nil {
+			continue
+		}
+		type hit struct{ id, email string }
+		var hits []hit
+		for rows.Next() {
+			var h hit
+			if rows.Scan(&h.id, &h.email) == nil {
+				hits = append(hits, h)
+			}
+		}
+		rows.Close()
+		for _, h := range hits {
+			body := expandTemplate(rc.template, map[string]any{
+				"id": h.id, "email": h.email, "days": rc.days, "tenant": tenant})
+			// Staff-facing notification so the ineligibility letter is drafted
+			// and sent (letter content needs the program's DOCX template).
+			_, _ = s.db.Exec(context.Background(), `
+				INSERT INTO public.notifications (tenant, user_sub, type, body)
+				VALUES ($1,'*','SLA_BREACH',$2)`, tenant, body)
+		}
+		total += len(hits)
 	}
-	return len(hits)
+	return total
 }
 
 // ---- Large-volume claim dispute rules (Capitol Bridge policy v01.01.2026) ----
