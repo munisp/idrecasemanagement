@@ -180,7 +180,7 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
 {
   "case_number": {"pattern": "FL{yy}-{seq}", "seq_pad": 3},
   "statuses": {
-    "internal": ["Initial Review Pending","QA Initial Review","Provider Acceptance Letter Issued","Provider Closure Letter Issued","RFI Pending Provider Response","QA Letter","Plan Notification Packet Issued","Review In Progress","RFI Pending Plan Response","Plan - No Response","Plan Opt-Out","Provider - Withdrawal","Hold","QA Final Determination","Determination sent to FL","Final Order Issued","Invoice Paid","Dismissed"],
+    "internal": ["Initial Review Pending","QA Initial Review","Provider Acceptance Letter Issued","Provider Closure Letter Issued","RFI Pending Provider Response","QA Letter","Plan Notification Packet Issued","Review In Progress","RFI Pending Plan Response","Plan - No Response","Plan Opt-Out","Provider - Withdrawal","Hold","QA Final Determination","Determination sent to FL","Final Order Issued","Decided - Invoice Paid","Dismissed","Withdrawn","Ineligible"],
     "agency": ["Pending Initial Review","Awaiting Provider Response","Awaiting Plan Response","Under Review","Decided","Closed","Other"]
   },
   "clocks": [

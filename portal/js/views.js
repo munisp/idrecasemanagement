@@ -743,7 +743,18 @@ const Views = (() => {
     if (!prog || !prog.config) return ""; // federal NSA tenants: nothing extra
     const cfg = prog.config;
     const c = await Api.cases.get(id).catch(() => ({}));
+    const det = c.details || {};
+    const facts = [];
+    if (det.filing_party_type) facts.push(`<span class="chip">Filed by: ${det.filing_party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"}</span>`);
+    if (det.packet_complete_at) facts.push(`<span class="chip">Packet complete: ${fmtDate(det.packet_complete_at)} (10-day review clock basis)</span>`);
+    if (det.volume_large) {
+      const vv = det.volume_violations || [];
+      facts.push(vv.length
+        ? `<span class="badge warn" title="${esc(vv.join("; "))}">⚠ Large-volume policy: ${vv.length} violation(s) — ineligible per Capitol Bridge policy, resubmission permitted</span>`
+        : `<span class="chip">Large-volume dispute — policy compliant</span>`);
+    }
     let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
+      ${facts.length ? `<p class="fact-row">${facts.join(" ")}</p>` : ""}
       <details class="prog-sec" open><summary>Dual status</summary>
       <form id="p-status" class="inline-form">
         <select name="internal"><option value="">internal status…</option>
@@ -860,7 +871,18 @@ const Views = (() => {
           const [claim_number, cpt, billed, paid] = l.split(",");
           return { claim_number, cpt, billed_cents: money(billed || 0), paid_cents: money(paid || 0) };
         });
-        try { const r = await Api.program.importClaims(id, lines); UI.toast(`${r.imported} claim lines imported`); }
+        try {
+          const r = await Api.program.importClaims(id, lines);
+          const vc = r.volume_check;
+          if (vc && vc.large_volume && (vc.violations || []).length) {
+            UI.toast(`⚠ ${r.imported} imported — large-volume policy violation(s): ${vc.violations.join("; ")}`, { kind: "warn", sticky: true });
+          } else if (vc && vc.large_volume) {
+            UI.toast(`${r.imported} claim lines imported — large-volume dispute, policy compliant`, { kind: "info" });
+          } else {
+            UI.toast(`${r.imported} claim lines imported`);
+          }
+          App.rerender();
+        }
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
       const share = async (kind) => {
@@ -946,31 +968,51 @@ const Views = (() => {
     });
   }
 
+  // Intake statuses that end the lifecycle — no further advancement.
+  const INTAKE_TERMINAL = ["CONVERTED", "CLOSED_REFUNDED", "INELIGIBLE"];
+  // Day-13 completeness gate (AHCA): docs not received within 13 days of
+  // outreach => case found incomplete, ineligible letter issues. The backend
+  // sweep enforces it; this countdown makes it visible before it bites.
+  function day13Countdown(i) {
+    if (i.packet_complete_at || INTAKE_TERMINAL.includes(i.status) || !i.outreach_at) return "";
+    const left = 13 - Math.floor((Date.now() - new Date(i.outreach_at)) / 864e5);
+    if (left < 0) return `<span class="badge warn">past day 13</span>`;
+    return `<span class="${left <= 3 ? "badge warn" : "muted"}">day 13 in ${left}d</span>`;
+  }
+
   async function intake() {
     try {
       const r = await Api.program.intake();
       const rows = r.intake || [];
       return `<div class="view-head"><h1>Pre-case intake</h1>
-        <span class="muted">instruction requests awaiting documents and fees</span></div>
+        <span class="muted">instruction requests awaiting documents and fees — the 10-day initial review starts at PACKET_COMPLETE</span></div>
         <form class="inline-form" onsubmit="return Views.newIntake(this)">
           <input name="email" type="email" placeholder="requester email" required />
           <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
+          <select name="filing_party_type" title="filing party">
+            <option value="PROVIDER">Provider files</option>
+            <option value="HEALTH_PLAN">Health plan files</option></select>
           <button>New intake request</button></form>` +
-        (rows.length ? `<table><thead><tr><th>Email</th><th>Org</th><th>Status</th><th>Outreach</th><th></th></tr></thead><tbody>` +
-          rows.map((i) => `<tr><td>${esc(i.email)}</td><td>${esc(i.org || "")}</td><td>${badge(i.status)}</td>
+        (rows.length ? `<table><thead><tr><th>Email</th><th>Org</th><th>Filing party</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
+          rows.map((i) => `<tr><td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
+            <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
+            <td>${badge(i.status)} ${day13Countdown(i)}</td>
             <td class="muted">${fmtDate(i.outreach_at)}</td>
-            <td>${i.status !== "CONVERTED" && i.status !== "CLOSED_REFUNDED" ?
+            <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
+            <td>${!INTAKE_TERMINAL.includes(i.status) ?
               `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
-                <option value="">advance…</option><option>DOCS_RECEIVED</option><option>PAID</option>
-                <option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("") +
+                <option value="">advance…</option><option>DOCS_RECEIVED</option>
+                <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
+                <option>PAID</option><option>CONVERTED</option>
+                <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`);
     } catch (e) { return err(e); }
   }
 
   async function newIntake(form) {
     try {
-      await Api.program.createIntake({ email: form.email.value, contact_name: form.contact_name.value, org: form.org.value });
-      UI.toast("Intake request opened — submission instructions queued"); App.rerender();
+      await Api.program.createIntake({ email: form.email.value, contact_name: form.contact_name.value, org: form.org.value, filing_party_type: form.filing_party_type.value });
+      UI.toast(`Intake request opened (${form.filing_party_type.value === "HEALTH_PLAN" ? "health plan" : "provider"} filing) — submission instructions queued`); App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     return false;
   }
@@ -978,6 +1020,16 @@ const Views = (() => {
   async function advanceIntake(id, status, sel) {
     if (!status) return;
     let caseId = "";
+    if (status === "PACKET_COMPLETE") {
+      const ok = await UI.modal({ title: "Mark packet complete", submitLabel: "Start the 10-day clock",
+        body: "The 10-day initial-review clock starts NOW (complete-packet receipt). This first mark is permanent — it cannot be restarted." });
+      if (ok === null) { if (sel) sel.value = ""; return; }
+    }
+    if (status === "INELIGIBLE") {
+      const ok = await UI.modal({ title: "Find intake ineligible", submitLabel: "Mark ineligible", danger: true,
+        body: "The party may resubmit once the ineligibility reason is cured. Staff must issue the ineligibility letter." });
+      if (ok === null) { if (sel) sel.value = ""; return; }
+    }
     if (status === "CONVERTED") {
       const v = await UI.modal({ title: "Convert intake to case", submitLabel: "Link case",
         fields: [{ name: "case_id", label: "Case ID to link", required: true, placeholder: "UUID" }] });

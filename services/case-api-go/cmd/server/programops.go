@@ -286,9 +286,9 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 //
 // PACKET_COMPLETE is the statutory anchor (AHCA 2026): the 10-day initial
 // review runs from COMPLETE-packet receipt, so the timestamp is written
-// here and copied onto the case at CONVERTED as
-// details.initial_review_started_at — the review clock never starts from
-// payment or first submission.
+// here and copied onto the case at CONVERTED as details.packet_complete_at —
+// the basis the program's INITIAL_REVIEW clock config already references.
+// The review clock never starts from payment or first submission.
 func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "intakeId")
@@ -331,7 +331,7 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 			UPDATE tenant_%s.cases SET details = details || jsonb_build_object(
-			  'filing_party_type', $2::text, 'initial_review_started_at', $3::text), updated_at=now()
+			  'filing_party_type', $2::text, 'packet_complete_at', $3::text), updated_at=now()
 			WHERE id=$1`, sanitizeTenant(tenant)), in.CaseID, fpt, packetISO); err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
@@ -363,7 +363,8 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.queryRows(r, `
-		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at
+		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at,
+		       filing_party_type, packet_complete_at
 		FROM public.intake_requests WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)

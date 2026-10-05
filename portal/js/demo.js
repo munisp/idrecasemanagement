@@ -238,7 +238,7 @@
     // --- program-rules fixtures (FL AHCA shape on the demo tenant) ---
     if (/\/program$/.test(p)) return json({ program: "custom", config: {
       case_number: { pattern: "FL{yy}-{seq}", seq_pad: 3 },
-      statuses: { internal: ["Pre-Case", "Initial Review", "Hold", "Full Review", "Determination", "Provider Closure Letter Issued", "Opted Out"],
+      statuses: { internal: ["Pre-Case", "Initial Review", "Hold", "Full Review", "Determination", "Plan Notification Packet Issued", "Provider Closure Letter Issued", "Final Order Issued", "Decided - Invoice Paid", "Plan Opt-Out", "Ineligible", "Dismissed", "Withdrawn"],
         agency: ["Submitted", "Under Review", "Eligible", "Ineligible", "Determination Issued", "Other"] },
       clocks: [
         { name: "AGENCY_RECOMMENDATION", label: "Agency recommendation", basis: "received_at", days: 60, day_type: "calendar", cite: "AHCA CDR contract §2.3.3", breach: "escalate_pm" },
@@ -273,7 +273,15 @@
     if (/\/invoices\/[\w-]+\/settle$/.test(p)) return json({ status: "PAID" });
     if (/\/reports\/receivables$/.test(p)) return json({ receivables: [
       { party: "PROVIDER", kind: "INITIAL_FEE", status: "OPEN", n: 14, total_cents: 1730260, overdue_cents: 247180 }] });
-    if (/\/cases\/[\w-]+\/claims$/.test(p) && opts.method === "POST") return json({ imported: (JSON.parse(opts.body || "{}").claims || []).length });
+    if (/\/cases\/[\w-]+\/claims$/.test(p) && opts.method === "POST") {
+      const n = (JSON.parse(opts.body || "{}").claims || []).length;
+      // Demo: imports of >=100 claims exercise the large-volume policy path.
+      return json(n >= 100
+        ? { imported: n, volume_check: { large_volume: true, claims: n, review_class: "no_medical_review",
+            violations: n > 500 ? [`${n} claims exceeds the 500-claim per-dispute cap (no_medical_review)`] : [],
+            disposition: "INELIGIBLE (resubmission permitted once cured)" } }
+        : { imported: n });
+    }
     if (/\/cases\/[\w-]+\/claims$/.test(p)) return json({ claims: [
       { claim_number: "CLM-1042", cpt: "99285", billed_cents: 184200, paid_cents: 91200, created_at: d(40) },
       { claim_number: "CLM-1043", cpt: "99291", billed_cents: 226000, paid_cents: 118400, created_at: d(40) }] });
@@ -286,8 +294,9 @@
     if (/\/intake$/.test(p) && opts.method === "POST") return json({ intake_id: "in2", status: "INSTRUCTED" });
     if (/\/intake\/[\w-]+\/advance$/.test(p)) return json({ status: JSON.parse(opts.body || "{}").status });
     if (/\/intake$/.test(p)) return json({ intake: [
-      { id: "in1", email: "revcycle@memorial.example", org: "Memorial Regional", status: "DOCS_RECEIVED", outreach_at: d(48), created_at: d(50) },
-      { id: "in3", email: "claims@sunhealth.example", org: "Sun Health Plan", status: "PAID", outreach_at: d(120), created_at: d(122) }] });
+      { id: "in1", email: "revcycle@memorial.example", org: "Memorial Regional", status: "DOCS_RECEIVED", outreach_at: d(48), created_at: d(50), filing_party_type: "PROVIDER", packet_complete_at: null },
+      { id: "in4", email: "disputes@bayfront.example", org: "Bayfront Medical", status: "PACKET_COMPLETE", outreach_at: d(200), created_at: d(202), filing_party_type: "PROVIDER", packet_complete_at: d(100) },
+      { id: "in3", email: "claims@sunhealth.example", org: "Sun Health Plan", status: "PAID", outreach_at: d(120), created_at: d(122), filing_party_type: "HEALTH_PLAN", packet_complete_at: null }] });
     if (/\/deliverables$/.test(p) && opts.method === "POST") return json({ status: "DELIVERED" });
     if (/\/deliverables$/.test(p)) return json({ deliverables: [
       { name: "Weekly report", due_rule: "weekly:MONDAY", next_due: d(-96).slice(0, 10) },

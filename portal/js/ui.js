@@ -37,11 +37,16 @@ const UI = (() => {
     t.appendChild(x);
     region.appendChild(t);
 
+    // sticky: no auto-dismiss — reserved for findings the user MUST see
+    // (e.g. policy violations); dismissal is via the ✕ button only.
+    const sticky = !!opts.sticky;
     let remaining = opts.duration || (kind === "error" || kind === "warn" ? 9000 : 4500);
-    let timer = setTimeout(dismiss, remaining);
+    let timer = sticky ? null : setTimeout(dismiss, remaining);
     let started = Date.now();
-    t.addEventListener("mouseenter", () => { clearTimeout(timer); remaining -= Date.now() - started; });
-    t.addEventListener("mouseleave", () => { started = Date.now(); timer = setTimeout(dismiss, Math.max(remaining, 800)); });
+    if (!sticky) {
+      t.addEventListener("mouseenter", () => { clearTimeout(timer); remaining -= Date.now() - started; });
+      t.addEventListener("mouseleave", () => { started = Date.now(); timer = setTimeout(dismiss, Math.max(remaining, 800)); });
+    }
 
     let gone = false;
     function dismiss() {

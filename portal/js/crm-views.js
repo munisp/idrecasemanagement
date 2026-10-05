@@ -36,6 +36,12 @@ const CrmViews = (() => {
     ["IN_REVIEW", "In review"], ["DETERMINED", "Determined"],
     ["PAYMENT_PENDING", "Payment pending"],
     ["CLOSED_PAID", "Closed (paid)"], ["CLOSED_DISMISSED", "Closed (dismissed)"],
+    // FL AHCA vocabulary (2026): completed cases REST at Decided - Invoice
+    // Paid; only these four states are true closures.
+    ["Decided - Invoice Paid", "Decided — invoice paid"],
+    ["Plan Opt-Out", "Plan opt-out"], ["Ineligible", "Ineligible"],
+    ["Dismissed", "Dismissed"], ["Withdrawn", "Withdrawn"],
+    ["Plan Notification Packet Issued", "Plan notified"],
   ];
   async function pipeline() {
     try {
