@@ -142,7 +142,7 @@
   const routes = [
     [/^#\/dashboard$/, Views.dashboard],
     [/^#\/pipeline$/, CrmViews.pipeline],
-    [/^#\/cases$/, Views.cases],
+    [/^#\/cases(\?.*)?$/, Views.cases],
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/new$/, Views.newDispute],
     [/^#\/crm\/accounts$/, CrmViews.accounts],

@@ -19,7 +19,7 @@ const CrmViews = (() => {
   ];
   async function pipeline() {
     try {
-      const cases = await Api.cases.list();
+      const { cases } = await Api.cases.list({ limit: 200 });
       const known = new Set(PIPELINE.map(([s]) => s));
       // Safety net: a status the board doesn't know yet still gets a column
       // instead of its cases disappearing silently.

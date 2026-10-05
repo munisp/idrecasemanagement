@@ -711,11 +711,53 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// listCases: keyset-paginated dispute list. Enterprise tenants hold thousands
+// of disputes (FL alone projects ~3k/yr), so a hard LIMIT 200 silently hid
+// cases once a tenant outgrew it. Params:
+//   ?limit=N      page size, default 50, max 200
+//   ?cursor=ts|id keyset position from a previous page's next_cursor
+//   ?status=S     exact status filter (saved views push filtering server-side
+//                 so a filter never applies to a partial page)
+//   ?q=text       case_number ILIKE search
+// Response: {"cases": [...], "next_cursor": "...", "total": N}
 func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	q := r.URL.Query()
+	limit := 50
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+		limit = min(n, 200)
+	}
+	where, args := "", []any{}
+	add := func(clause string, v any) {
+		args = append(args, v)
+		where += fmt.Sprintf(" AND "+clause, len(args))
+	}
+	if st := q.Get("status"); st != "" {
+		add("status = $%d", st)
+	}
+	if qs := q.Get("q"); qs != "" {
+		add("case_number ILIKE '%%' || $%d || '%%'", qs)
+	}
+	if cur := q.Get("cursor"); cur != "" {
+		parts := strings.SplitN(cur, "|", 2)
+		if len(parts) == 2 {
+			if ts, err := time.Parse(time.RFC3339Nano, parts[0]); err == nil {
+				args = append(args, ts, parts[1])
+				where += fmt.Sprintf(" AND (opened_at, id) < ($%d, $%d::uuid)", len(args)-1, len(args))
+			}
+		}
+	}
+	tbl := sanitizeTenant(tenant)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT count(*) FROM tenant_%s.cases WHERE true%s`, tbl, where), args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
 	rows, err := s.db.Query(r.Context(),
 		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
-		             FROM tenant_%s.cases ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))
+		             FROM tenant_%s.cases WHERE true%s
+		             ORDER BY opened_at DESC, id DESC LIMIT %d`, tbl, where, limit+1), args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -729,7 +771,13 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 			out = append(out, c)
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = last.OpenedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cases": out, "next_cursor": next, "total": total})
 }
 
 func (s *server) getCase(w http.ResponseWriter, r *http.Request) {

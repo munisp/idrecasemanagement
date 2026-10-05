@@ -35,7 +35,7 @@ const Views = (() => {
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
     try {
-      const [cases, summary, clocks] = await Promise.all([Api.cases.list(), Api.reports.summary(), clockMap()]);
+      const [{ cases }, summary, clocks] = await Promise.all([Api.cases.list({ limit: 200 }), Api.reports.summary(), clockMap()]);
       html += `<div class="cards">` + summary.map((s) =>
         `<div class="card"><div class="num">${s.count}</div><div class="lbl">${badge(s.status)}</div>
          <div class="muted">avg QPA $${s.avg_qpa_usd.toFixed(0)}</div></div>`).join("") + `</div>`;
@@ -148,17 +148,30 @@ const Views = (() => {
   }
 
   // ---- Disputes list -----------------------------------------------------------
+  // Server-side keyset pagination: page size 50, "Load more" appends the next
+  // page; saved-view status filters are pushed to the server so a filter never
+  // applies to a partial page. Counts come from the server total, not the page.
+  const PAGE_SIZE = 50;
   async function cases() {
     try {
-      const [list, saved, clocks] = await Promise.all([Api.cases.list(), Api.cm.views().catch(() => []), clockMap()]);
       const v = new URLSearchParams(location.hash.split("?")[1] || "").get("view");
+      const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
-      const rows = sv && sv.filters && sv.filters.status ? list.filter((c) => c.status === sv.filters.status) : list;
+      const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
+      const [page, clocks] = await Promise.all([
+        Api.cases.list(status ? { status, limit: PAGE_SIZE } : { limit: PAGE_SIZE }),
+        clockMap(),
+      ]);
+      let loaded = page.cases.slice();   // accumulated rows across pages
+      let cursor = page.next_cursor;     // "" when no more pages
+      const total = page.total;
       const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${s.pinned ? "★ " : ""}${esc(s.name)}</option>`).join("");
       const density = localStorage.getItem("idre.density") || "comfortable";
       document.body.classList.toggle("density-compact", density === "compact");
+      const pager = () => `<p class="pager"><span class="muted">Showing ${loaded.length} of ${total}</span>
+        ${cursor ? `<button class="mini" id="more">Load more (${Math.min(PAGE_SIZE, total - loaded.length)} of ${total - loaded.length} remaining)</button>` : ""}</p>`;
       afterRender(() => {
-        bindGrid(rows);
+        bindGrid(loaded);
         $("#density").onclick = () => {
           const next = (localStorage.getItem("idre.density") || "comfortable") === "comfortable" ? "compact" : "comfortable";
           (window.Prefs ? Prefs.push("density", next) : localStorage.setItem("idre.density", next));
@@ -172,8 +185,23 @@ const Views = (() => {
             else UI.toast(r.message, { kind: "warn" });
           }, "Grabbing…");
         };
+        const loadMore = async (ev) => {
+          await UI.run(ev.currentTarget, async () => {
+            try {
+              const next = await Api.cases.list({ limit: PAGE_SIZE, cursor, ...(status ? { status } : {}) });
+              loaded = loaded.concat(next.cases);
+              cursor = next.next_cursor;
+              document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks);
+              $("#pg").innerHTML = pager();
+              bindGrid(loaded);
+              $("#more")?.addEventListener("click", loadMore);
+              UI.toast(`Showing ${loaded.length} of ${total}`, { kind: "info" });
+            } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Loading…");
+        };
+        $("#more")?.addEventListener("click", loadMore);
       });
-      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${rows.length} shown</span>
+      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
         <span style="flex:1"></span>
         <button class="mini" id="grab">⇪ Grab next</button>
         <button class="mini" id="density">Density: ${density}</button></div>
@@ -181,7 +209,8 @@ const Views = (() => {
           <select onchange="location.hash='#/cases?view='+this.value" aria-label="Saved views">
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
-          ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` + caseTable(rows, clocks);
+          ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` +
+        caseTable(loaded, clocks) + `<div id="pg">${pager()}</div>`;
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 

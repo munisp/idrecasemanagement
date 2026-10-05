@@ -120,6 +120,12 @@
     { kind: "account", id: "a1", label: "Riverbend Surgical Center", detail: "PROVIDER · NPI 1928304756" },
   ];
 
+  // Pad the dispute set to 126 rows so pagination is real in demo (pages of 50).
+  for (let i = 7; i <= 126; i++) {
+    CASES.push({ id: "cx" + i, case_number: "CMS-TX-2026-" + String(10000 + i), status: ["INITIATED", "IN_REVIEW", "OFFER_WINDOW_OPEN", "DETERMINED", "PAYMENT_PENDING"][i % 5],
+      service_line: ["ER", "RADIOLOGY", "LAB", "ANESTHESIA"][i % 4], qpa_cents: 500000 + i * 1377, opened_at: d(i) });
+  }
+
   // --- fetch shim: the real Api wrapper runs; only transport is simulated ---
   const realFetch = window.fetch.bind(window);
   window.fetch = async (url, opts = {}) => {
@@ -143,7 +149,21 @@
       if (/\/cases\/[\w-]+\/checklist$/.test(p)) return json(CHECKLIST);
       if (/\/cases\/[\w-]+\/relationships$/.test(p)) return json(RELS);
       if (/\/cases\/[\w-]+$/.test(p)) { const id = p.split("/")[2]; return json(CASES.find((c) => c.id === id) || CASES[0]); }
-      if (/\/cases$/.test(p)) return json(CASES);
+      if (/\/cases(\?|$)/.test(p)) {
+        // Mirror the backend's keyset pagination over the fixture set.
+        const qs = new URLSearchParams(p.split("?")[1] || "");
+        const limit = Math.min(parseInt(qs.get("limit") || "50", 10), 200);
+        const status = qs.get("status") || "";
+        let rows = CASES.slice().sort((a, b) => (a.opened_at < b.opened_at ? 1 : -1));
+        if (status) rows = rows.filter((c) => c.status === status);
+        const total = rows.length;
+        const cur = qs.get("cursor");
+        if (cur) { const cid = cur.split("|")[1]; const i = rows.findIndex((c) => c.id === cid); if (i >= 0) rows = rows.slice(i + 1); }
+        const pageRows = rows.slice(0, limit);
+        const next = rows.length > limit && pageRows.length
+          ? pageRows[pageRows.length - 1].opened_at + "|" + pageRows[pageRows.length - 1].id : "";
+        return json({ cases: pageRows, next_cursor: next, total });
+      }
       if (/\/reports\/sla$/.test(p)) return json(SLAS);
       if (/\/reports\/summary$/.test(p)) return json(SUMMARY);
       if (/\/accounts\/[\w-]+\/360$/.test(p)) return json(A360);

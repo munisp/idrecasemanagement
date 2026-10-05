@@ -27,7 +27,13 @@ const Api = (() => {
   return {
     setTenant, getTenant,
     cases: {
-      list: () => req("GET", `${t()}/cases`),
+      // Keyset-paginated: {cases, next_cursor, total}. Legacy bare-array
+      // responses are normalized so older backends still work.
+      list: (params = {}) => {
+        const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
+        return req("GET", `${t()}/cases${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { cases: r, next_cursor: "", total: r.length } : r));
+      },
       get: (id) => req("GET", `${t()}/cases/${id}`),
       initiate: (payload) => req("POST", `${t()}/cases/initiate`, payload),
       signal: (id, signal, data) => req("POST", `${t()}/cases/${id}/signal`, { signal, data }),
