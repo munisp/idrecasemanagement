@@ -6,6 +6,26 @@ const CrmViews = (() => {
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
+  const CRM_PAGE = 100;
+  // Offset pager shared by accounts/leads/tasks: footer markup + a binder that
+  // appends the next page's rows in place (busy state on the button).
+  const pagerHtml = (id, shown, total, nextOffset) =>
+    `<p class="pager" id="${id}-pg"><span class="muted">Showing ${shown} of ${total}</span>
+      ${nextOffset >= 0 ? `<button class="mini" id="${id}-more">Load more (${Math.min(CRM_PAGE, total - shown)} remaining)</button>` : ""}</p>`;
+  function bindPager(id, tbodySel, state, fetchPage, rowsHtml) {
+    document.getElementById(id + "-more")?.addEventListener("click", async (ev) => {
+      await UI.run(ev.currentTarget, async () => {
+        try {
+          const r = await fetchPage(state.next);
+          state.loaded = state.loaded.concat(r.rows);
+          state.next = r.next;
+          document.querySelector(tbodySel).insertAdjacentHTML("beforeend", rowsHtml(r.rows));
+          document.getElementById(id + "-pg").outerHTML = pagerHtml(id, state.loaded.length, state.total, state.next);
+          bindPager(id, tbodySel, state, fetchPage, rowsHtml);
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      }, "Loading…");
+    });
+  }
 
   // ---- Pipeline (kanban over case statuses) ----------------------------------
   // Covers EVERY status a case can hold — a status missing here makes those
@@ -39,12 +59,19 @@ const CrmViews = (() => {
   // ---- Accounts ---------------------------------------------------------------
   async function accounts() {
     try {
-      const list = await Api.crm.accounts();
-      return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>` +
-        (list.length ? `<table><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead><tbody>` +
-          list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
-            <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No accounts yet — convert leads or create one.</p>`);
+      const page = await Api.crm.accounts(null, { limit: CRM_PAGE });
+      const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
+      const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
+            <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
+      if (!state.loaded.length)
+        return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>
+          <p class="muted">No accounts yet — convert leads or create one.</p>`;
+      afterRender(() => bindPager("acc", "#acc-tb tbody", state,
+        (off) => Api.crm.accounts(null, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.accounts, next: r.next_offset })),
+        rowsHtml));
+      return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>
+        <table id="acc-tb"><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc", state.loaded.length, state.total, state.next);
     } catch (e) { return `<h1>Accounts</h1>` + err(e); }
   }
 
@@ -113,13 +140,19 @@ const CrmViews = (() => {
   // ---- Leads ---------------------------------------------------------------------
   async function leads() {
     try {
-      const list = await Api.crm.leads();
-      return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>` +
-        (list.length ? `<table><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead><tbody>` +
-          list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
+      const page = await Api.crm.leads({ limit: CRM_PAGE });
+      const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
+      const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
             <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
-            <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No leads.</p>`);
+            <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
+      if (!state.loaded.length)
+        return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p><p class="muted">No leads.</p>`;
+      afterRender(() => bindPager("lead", "#lead-tb tbody", state,
+        (off) => Api.crm.leads({ limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.leads, next: r.next_offset })),
+        rowsHtml));
+      return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
+        <table id="lead-tb"><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead", state.loaded.length, state.total, state.next);
     } catch (e) { return `<h1>Leads</h1>` + err(e); }
   }
 
@@ -135,17 +168,22 @@ const CrmViews = (() => {
   // ---- Tasks ------------------------------------------------------------------------
   async function tasks() {
     try {
-      const list = await Api.crm.tasks(true);
+      const page = await Api.crm.tasks(true, { limit: CRM_PAGE });
+      const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
       let html = `<h1>My tasks</h1>
         <form id="nt" class="form"><b>New task</b>
           <input name="subject" placeholder="Subject" required />
           <input name="case_id" placeholder="Case ID (optional)" />
           <input name="due_date" type="date" /><button>Create</button></form>`;
-      html += list.length ? `<table><thead><tr><th>Subject</th><th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>` +
-        list.map((t) => `<tr><td>${esc(t.subject)}</td><td>${esc(t.case_id)}</td><td>${esc(t.due_date)}</td>
+      const rowsHtml = (list) => list.map((t) => `<tr><td>${esc(t.subject)}</td><td>${esc(t.case_id)}</td><td>${esc(t.due_date)}</td>
           <td>${badge(t.status)}</td>
-          <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("") +
-        `</tbody></table>` : `<p class="muted">No open tasks.</p>`;
+          <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
+      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Subject</th><th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task", state.loaded.length, state.total, state.next)
+        : `<p class="muted">No open tasks.</p>`;
+      afterRender(() => bindPager("task", "#task-tb tbody", state,
+        (off) => Api.crm.tasks(true, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.tasks, next: r.next_offset })),
+        rowsHtml));
       afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));

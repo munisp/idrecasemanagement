@@ -59,11 +59,33 @@ const Views = (() => {
 
   // ---- Disputes grid: clocks, selection, peek, density ------------------------
   let selection = new Set();
-  const caseTable = (rows, clocks = {}) => rows.length ? `
+
+  // Server-driven column sort, stored in the hash so it survives refresh and
+  // is shareable: '#/cases?sort=-qpa_cents' (prefix '-' = descending).
+  const SORTABLE = new Set(["case_number", "status", "service_line", "qpa_cents", "opened_at"]);
+  function sortableTh(col, label, cur) {
+    if (!cur && cur !== "") return `<th>${label}</th>`;
+    const active = cur === col || cur === "-" + col;
+    const arrow = cur === col ? " ↑" : cur === "-" + col ? " ↓" : "";
+    return `<th class="sortable${active ? " sorted" : ""}" onclick="Views.sortCases('${col}')">${label}${arrow}</th>`;
+  }
+  function sortCases(col) {
+    if (!SORTABLE.has(col)) return;
+    const q = new URLSearchParams(location.hash.split("?")[1] || "");
+    const cur = q.get("sort") || "";
+    // Cycle: none -> asc -> desc -> none
+    const next = cur === col ? "-" + col : cur === "-" + col ? "" : col;
+    next ? q.set("sort", next) : q.delete("sort");
+    const s = q.toString();
+    location.hash = "#/cases" + (s ? "?" + s : "");
+  }
+  const caseTable = (rows, clocks = {}, sort = "") => rows.length ? `
     <div class="dg-wrap">
       <table class="dg"><thead><tr>
         <th class="selcol"><input type="checkbox" id="sel-all" aria-label="Select all"></th>
-        <th>Case #</th><th>Status</th><th>Service</th><th>QPA</th><th>Statutory clock</th><th>Opened</th><th></th></tr></thead><tbody>` +
+        ${[["case_number", "Case #"], ["status", "Status"], ["service_line", "Service"], ["qpa_cents", "QPA"]]
+          .map(([c, l]) => sortableTh(c, l, sort)).join("")}
+        <th>Statutory clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
       rows.map((c) => `<tr class="click" data-case="${c.id}">
         <td class="selcol"><input type="checkbox" class="sel-one" data-id="${c.id}" ${selection.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.case_number)}"></td>
         <td class="mono">${esc(c.case_number)}</td><td>${badge(c.status)}</td><td>${esc(c.service_line)}</td>
@@ -154,14 +176,14 @@ const Views = (() => {
   const PAGE_SIZE = 50;
   async function cases() {
     try {
-      const v = new URLSearchParams(location.hash.split("?")[1] || "").get("view");
+      const hq = new URLSearchParams(location.hash.split("?")[1] || "");
+      const v = hq.get("view");
+      const sort = hq.get("sort") || "";
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
-      const [page, clocks] = await Promise.all([
-        Api.cases.list(status ? { status, limit: PAGE_SIZE } : { limit: PAGE_SIZE }),
-        clockMap(),
-      ]);
+      const reqParams = { limit: PAGE_SIZE, ...(status ? { status } : {}), ...(sort ? { sort } : {}) };
+      const [page, clocks] = await Promise.all([Api.cases.list(reqParams), clockMap()]);
       let loaded = page.cases.slice();   // accumulated rows across pages
       let cursor = page.next_cursor;     // "" when no more pages
       const total = page.total;
@@ -188,10 +210,12 @@ const Views = (() => {
         const loadMore = async (ev) => {
           await UI.run(ev.currentTarget, async () => {
             try {
-              const next = await Api.cases.list({ limit: PAGE_SIZE, cursor, ...(status ? { status } : {}) });
+              const more = { limit: PAGE_SIZE, ...(status ? { status } : {}), ...(sort ? { sort } : {}) };
+              if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else more.cursor = cursor;
+              const next = await Api.cases.list(more);
               loaded = loaded.concat(next.cases);
               cursor = next.next_cursor;
-              document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks);
+              document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks, sort || "opened_at");
               $("#pg").innerHTML = pager();
               bindGrid(loaded);
               $("#more")?.addEventListener("click", loadMore);
@@ -210,7 +234,7 @@ const Views = (() => {
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
           ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` +
-        caseTable(loaded, clocks) + `<div id="pg">${pager()}</div>`;
+        caseTable(loaded, clocks, sort || "opened_at") + `<div id="pg">${pager()}</div>`;
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
@@ -1066,5 +1090,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc };
 })();

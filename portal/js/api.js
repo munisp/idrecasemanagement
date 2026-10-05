@@ -69,13 +69,26 @@ const Api = (() => {
       summary: () => req("GET", `${t()}/reports/summary`),
     },
     crm: {
-      accounts: (type) => req("GET", `${t()}/accounts${type ? `?type=${type}` : ""}`),
+      // Offset-paginated: {accounts, total, next_offset} (next_offset = -1 at end).
+      accounts: (type, params = {}) => {
+        const qs = new URLSearchParams({ ...(type ? { type } : {}), ...params }).toString();
+        return req("GET", `${t()}/accounts${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { accounts: r, total: r.length, next_offset: -1 } : r));
+      },
       createAccount: (p) => req("POST", `${t()}/accounts`, p),
       account360: (id) => req("GET", `${t()}/accounts/${id}/360`),
       createContact: (p) => req("POST", `${t()}/contacts`, p),
-      leads: () => req("GET", `${t()}/leads`),
+      leads: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return req("GET", `${t()}/leads${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { leads: r, total: r.length, next_offset: -1 } : r));
+      },
       convertLead: (id, type) => req("POST", `${t()}/leads/${id}/convert`, { type }),
-      tasks: (mine) => req("GET", `${t()}/tasks${mine ? "?mine=true" : ""}`),
+      tasks: (mine, params = {}) => {
+        const qs = new URLSearchParams({ ...(mine ? { mine: "true" } : {}), ...params }).toString();
+        return req("GET", `${t()}/tasks${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { tasks: r, total: r.length, next_offset: -1 } : r));
+      },
       createTask: (p) => req("POST", `${t()}/tasks`, p),
       completeTask: (id) => req("POST", `${t()}/tasks/${id}/complete`),
       addNote: (p) => req("POST", `${t()}/notes`, p),

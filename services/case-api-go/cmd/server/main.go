@@ -738,7 +738,27 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	if qs := q.Get("q"); qs != "" {
 		add("case_number ILIKE '%%' || $%d || '%%'", qs)
 	}
-	if cur := q.Get("cursor"); cur != "" {
+	// Sort: default opened_at DESC uses keyset pagination; any explicit column
+	// sort switches to offset mode (keyset over arbitrary columns isn't stable).
+	sortCol, sortDir := "opened_at", "DESC"
+	if s := q.Get("sort"); s != "" {
+		whitelist := map[string]string{"opened_at": "opened_at", "case_number": "case_number",
+			"status": "status", "qpa_cents": "qpa_cents", "service_line": "service_line"}
+		col, dir := s, "ASC"
+		if strings.HasPrefix(s, "-") {
+			col, dir = strings.TrimPrefix(s, "-"), "DESC"
+		}
+		if c, ok := whitelist[col]; ok {
+			sortCol, sortDir = c, dir
+		}
+	}
+	offsetMode := sortCol != "opened_at" || sortDir != "DESC"
+	offset := 0
+	if offsetMode {
+		if n, err := strconv.Atoi(q.Get("offset")); err == nil && n >= 0 {
+			offset = n
+		}
+	} else if cur := q.Get("cursor"); cur != "" {
 		parts := strings.SplitN(cur, "|", 2)
 		if len(parts) == 2 {
 			if ts, err := time.Parse(time.RFC3339Nano, parts[0]); err == nil {
@@ -754,10 +774,13 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	rows, err := s.db.Query(r.Context(),
-		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
+	query := fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
 		             FROM tenant_%s.cases WHERE true%s
-		             ORDER BY opened_at DESC, id DESC LIMIT %d`, tbl, where, limit+1), args...)
+		             ORDER BY %s %s, id DESC LIMIT %d`, tbl, where, sortCol, sortDir, limit+1)
+	if offsetMode {
+		query += fmt.Sprintf(" OFFSET %d", offset)
+	}
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -774,8 +797,12 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	next := ""
 	if len(out) > limit {
 		out = out[:limit]
-		last := out[len(out)-1]
-		next = last.OpenedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID
+		if offsetMode {
+			next = fmt.Sprintf("offset:%d", offset+limit)
+		} else {
+			last := out[len(out)-1]
+			next = last.OpenedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cases": out, "next_cursor": next, "total": total})
 }

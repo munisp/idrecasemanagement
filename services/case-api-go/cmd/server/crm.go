@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"net/http"
 	"strings"
 	"time"
@@ -26,6 +27,27 @@ type Account struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
+// pageParams: offset-based paging for the bounded CRM lists (accounts, tasks,
+// leads — thousands of rows at most, where OFFSET is cheap and sort orders
+// aren't keyset-friendly). Disputes use keyset pagination (listCases) instead.
+func pageParams(r *http.Request, def, max int) (limit, offset int) {
+	limit = def
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = min(n, max)
+	}
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n >= 0 {
+		offset = n
+	}
+	return limit, offset
+}
+
+func nextOffset(offset, limit, total int) int {
+	if offset+limit < total {
+		return offset + limit
+	}
+	return -1
+}
+
 func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	typ := r.URL.Query().Get("type")
@@ -36,7 +58,15 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		q += ` AND type=$2`
 		args = append(args, typ)
 	}
-	q += ` ORDER BY legal_name LIMIT 500`
+	limit, offset := pageParams(r, 100, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		strings.Replace(q, `SELECT id, tenant, type, legal_name, COALESCE(npi,''), COALESCE(phone,''),
+	             custom, created_at`, `SELECT count(*)`, 1), args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	q += fmt.Sprintf(` ORDER BY legal_name, id LIMIT %d OFFSET %d`, limit, offset)
 	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -52,7 +82,8 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 			out = append(out, a)
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accounts": out, "total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
@@ -172,10 +203,17 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(), `
+	limit, offset := pageParams(r, 100, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT count(*) FROM public.leads WHERE tenant=$1`, tenant).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, source, COALESCE(name,''), COALESCE(organization,''),
 		       COALESCE(phone,''), COALESCE(summary,''), status, created_at
-		FROM public.leads WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
+		FROM public.leads WHERE tenant=$1 ORDER BY created_at DESC, id LIMIT %d OFFSET %d`, limit, offset), tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -192,7 +230,8 @@ func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"leads": out, "total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 // convertLead: lead -> account (+ contact), marks lead CONVERTED.
@@ -257,7 +296,15 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 		q += ` AND assignee=$2`
 		args = append(args, p.Subject)
 	}
-	q += ` ORDER BY status, due_date NULLS LAST LIMIT 200`
+	limit, offset := pageParams(r, 100, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		strings.Replace(q, `SELECT id, subject, COALESCE(case_id,''), COALESCE(assignee,''),
+	             COALESCE(to_char(due_date,'YYYY-MM-DD'),''), status, created_at`, `SELECT count(*)`, 1), args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	q += fmt.Sprintf(` ORDER BY status, due_date NULLS LAST, id LIMIT %d OFFSET %d`, limit, offset)
 	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -275,7 +322,8 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks": out, "total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 func (s *server) createTask(w http.ResponseWriter, r *http.Request) {

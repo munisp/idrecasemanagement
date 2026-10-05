@@ -157,6 +157,15 @@
         let rows = CASES.slice().sort((a, b) => (a.opened_at < b.opened_at ? 1 : -1));
         if (status) rows = rows.filter((c) => c.status === status);
         const total = rows.length;
+        const sort = qs.get("sort") || "";
+        if (sort) {
+          const col = sort.replace(/^-/, ""), dir = sort.startsWith("-") ? -1 : 1;
+          rows.sort((a, b) => (a[col] > b[col] ? 1 : a[col] < b[col] ? -1 : 0) * dir);
+          const off = parseInt(qs.get("offset") || "0", 10);
+          const pageRows = rows.slice(off, off + limit);
+          const next = off + limit < rows.length ? "offset:" + (off + limit) : "";
+          return json({ cases: pageRows, next_cursor: next, total });
+        }
         const cur = qs.get("cursor");
         if (cur) { const cid = cur.split("|")[1]; const i = rows.findIndex((c) => c.id === cid); if (i >= 0) rows = rows.slice(i + 1); }
         const pageRows = rows.slice(0, limit);
@@ -167,9 +176,21 @@
       if (/\/reports\/sla$/.test(p)) return json(SLAS);
       if (/\/reports\/summary$/.test(p)) return json(SUMMARY);
       if (/\/accounts\/[\w-]+\/360$/.test(p)) return json(A360);
-      if (/\/accounts(\?|$)/.test(p)) return json(ACCOUNTS);
-      if (/\/leads$/.test(p)) return json(LEADS);
-      if (/\/tasks(\?|$)/.test(p)) return json(TASKS);
+      if (/\/accounts(\?|$)/.test(p)) {
+        const qs = new URLSearchParams(p.split("?")[1] || "");
+        const off = parseInt(qs.get("offset") || "0", 10), lim = parseInt(qs.get("limit") || "100", 10);
+        return json({ accounts: ACCOUNTS.slice(off, off + lim), total: ACCOUNTS.length, next_offset: off + lim < ACCOUNTS.length ? off + lim : -1 });
+      }
+      if (/\/leads(\?|$)/.test(p)) {
+        const qs = new URLSearchParams(p.split("?")[1] || "");
+        const off = parseInt(qs.get("offset") || "0", 10), lim = parseInt(qs.get("limit") || "100", 10);
+        return json({ leads: LEADS.slice(off, off + lim), total: LEADS.length, next_offset: off + lim < LEADS.length ? off + lim : -1 });
+      }
+      if (/\/tasks(\?|$)/.test(p)) {
+        const qs = new URLSearchParams(p.split("?")[1] || "");
+        const off = parseInt(qs.get("offset") || "0", 10), lim = parseInt(qs.get("limit") || "100", 10);
+        return json({ tasks: TASKS.slice(off, off + lim), total: TASKS.length, next_offset: off + lim < TASKS.length ? off + lim : -1 });
+      }
       if (/\/search\?/.test(p)) return json(HITS(new URLSearchParams(p.split("?")[1]).get("q") || ""));
       if (/\/calendar$/.test(p)) return json(CAL);
       if (/\/notifications$/.test(p)) return json(NOTIFS);
