@@ -21,19 +21,66 @@
     return;
   }
 
+  // Server-side user prefs: device-local localStorage is the offline cache;
+  // public.user_prefs is the cross-device source of truth (PWA/desktop/native).
+  window.Prefs = {
+    push(key, value) {
+      localStorage.setItem("idre." + key, typeof value === "string" ? value : JSON.stringify(value));
+      Api.prefs.put(key, value).catch(() => {}); // offline: server catches up next login
+    },
+  };
+  Api.prefs.all().then((sv) => {
+    if (!sv) return;
+    if (sv.theme && sv.theme !== (localStorage.getItem("idre.theme") || "")) {
+      localStorage.setItem("idre.theme", sv.theme);
+      document.documentElement.dataset.theme = sv.theme === "dark" ? "dark" : "";
+    }
+    if (sv.density) {
+      localStorage.setItem("idre.density", sv.density);
+      document.body.classList.toggle("density-compact", sv.density === "compact");
+    }
+    if (sv.recents) localStorage.setItem("idre.recents", JSON.stringify(sv.recents));
+    if (sv.last_tenant && sv.last_tenant !== Api.getTenant()) Prefs.push("last_tenant", Api.getTenant());
+  }).catch(() => {});
+
   // Theme (user preference layer; persisted locally)
   const savedTheme = localStorage.getItem("idre.theme");
   if (savedTheme === "dark") document.documentElement.dataset.theme = "dark";
   document.getElementById("theme-toggle").onclick = () => {
     const dark = document.documentElement.dataset.theme !== "dark";
     document.documentElement.dataset.theme = dark ? "dark" : "";
-    localStorage.setItem("idre.theme", dark ? "dark" : "light");
+    Prefs.push("theme", dark ? "dark" : "light");
   };
 
-  // Tenant identity chip (always visible, non-removable)
-  const tenant = Api.getTenant();
-  document.getElementById("t-avatar").textContent = tenant.slice(0, 2).toUpperCase();
-  document.getElementById("t-name").textContent = `${tenant.toUpperCase()} IDRE`;
+  // Tenant identity chip (always visible, non-removable). Cross-tenant users
+  // (PLATFORM_ADMIN / FEDERAL_ADMIN read+write; STATE_AUDITOR read-only) get a
+  // switcher; everyone else sees a fixed chip.
+  const STATES = ["al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","in","ia","ks","ky","la","me","md","ma","mi","mn","ms","mo","mt","ne","nv","nh","nj","nm","ny","nc","nd","oh","ok","or","pa","ri","sc","sd","tn","tx","ut","vt","va","wa","wv","wi","wy","dc"];
+  const crossTenant = me.roles.includes("PLATFORM_ADMIN") || me.roles.includes("FEDERAL_ADMIN");
+  const auditorOnly = me.roles.includes("STATE_AUDITOR") &&
+    !["CASE_MANAGER", "ARBITRATOR", "FINANCE", "PARTY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].some((r) => me.roles.includes(r));
+  const chip = document.getElementById("tenant-chip");
+  const paintChip = () => {
+    const cur = Api.getTenant();
+    document.getElementById("t-avatar").textContent = cur.slice(0, 2).toUpperCase();
+    if (crossTenant || auditorOnly) {
+      document.getElementById("t-name").innerHTML =
+        `<select id="t-switch" class="t-select" aria-label="Switch state tenant">` +
+        STATES.map((s) => `<option value="${s}"${s === cur ? " selected" : ""}>${s.toUpperCase()} IDRE</option>`).join("") +
+        `</select>${auditorOnly ? '<span class="badge s-audit">read-only audit</span>' : ""}`;
+      document.getElementById("t-switch").addEventListener("change", (e) => {
+        Api.setTenant(e.target.value);
+        Prefs.push("last_tenant", e.target.value);
+        UI.toast(`Switched to ${e.target.value.toUpperCase()} tenant${auditorOnly ? " (read-only)" : ""}`);
+        paintChip();
+        location.hash = "#/dashboard";
+        location.reload();
+      });
+    } else {
+      document.getElementById("t-name").textContent = `${cur.toUpperCase()} IDRE`;
+    }
+  };
+  paintChip();
 
   // Demo-mode banner (only when the backend is stubbed)
   if (window.IDRE_DEMO) {
@@ -50,10 +97,18 @@
     ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"],
   ];
   if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
+  links.push(["#/ask", "✦", "Ask the graph"]);
+  if (has("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+    links.push(["#/qa", "✓", "QA gate"]);
+    links.push(["#/intake", "⇥", "Intake"]);
+    links.push(["#/deliverables", "⎘", "Deliverables"]);
+  }
+  if (has("FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   links.push(["#/calendar", "▨", "Calendar"]);
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2).split("/")[0]}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
 
@@ -88,7 +143,7 @@
   const routes = [
     [/^#\/dashboard$/, Views.dashboard],
     [/^#\/pipeline$/, CrmViews.pipeline],
-    [/^#\/cases$/, Views.cases],
+    [/^#\/cases(\?.*)?$/, Views.cases],
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/new$/, Views.newDispute],
     [/^#\/crm\/accounts$/, CrmViews.accounts],
@@ -97,11 +152,17 @@
     [/^#\/crm\/leads$/, CrmViews.leads],
     [/^#\/crm\/tasks$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
+    [/^#\/ask$/, Views.askGraph],
+    [/^#\/qa$/, Views.qaQueue],
+    [/^#\/intake$/, Views.intake],
+    [/^#\/deliverables$/, Views.deliverables],
+    [/^#\/finance$/, Views.finance],
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
+    [/^#\/rules$/, Views.rulesAdmin],
   ];
 
   async function render() {
@@ -112,10 +173,31 @@
     });
     for (const [re, fn] of routes) {
       const m = h.match(re);
-      if (m) { view.innerHTML = await fn(m); view.focus({ preventScroll: true }); return; }
+      if (m) {
+        view.innerHTML = await fn(m);
+        view.classList.remove("view-in");
+        void view.offsetWidth; // restart the enter animation on every render
+        view.classList.add("view-in");
+        view.focus({ preventScroll: true });
+        return;
+      }
     }
     view.innerHTML = `<h1>Not found</h1>`;
   }
+  // Soft refresh: re-render the current route without a full page reload
+  // (no Keycloak round-trip, no shell flash, preserves rail/scroll context).
+  window.App = { rerender: render };
+  // Last-resort feedback net: any async handler that still throws without its
+  // own try/catch surfaces as an error toast instead of failing silently.
+  addEventListener("unhandledrejection", (e) => {
+    UI.toast(e.reason?.message || "Unexpected error", { kind: "error" });
+  });
+  // Immediate feedback when any compact select changes, before the async
+  // handler's own toast lands — the control flashes so the user sees the
+  // change registered even on slow networks.
+  document.addEventListener("change", (e) => {
+    if (e.target.matches?.("select.mini")) UI.flash(e.target);
+  });
   addEventListener("hashchange", render);
   if (!location.hash) location.hash = "#/dashboard";
   render();

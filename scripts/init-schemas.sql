@@ -75,9 +75,9 @@ CREATE TABLE IF NOT EXISTS public.audit_log (
 -- Per-tenant DDL template (executed once per state with search_path set):
 CREATE OR REPLACE FUNCTION public.provision_tenant(p_tenant text) RETURNS void AS $$
 BEGIN
-    EXECUTE format('CREATE SCHEMA IF NOT EXISTS tenant_%I', p_tenant);
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', 'tenant_' || p_tenant);
     EXECUTE format($ddl$
-        CREATE TABLE IF NOT EXISTS tenant_%I.cases (
+        CREATE TABLE IF NOT EXISTS %I.cases (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             workflow_id text,
             case_number text NOT NULL UNIQUE,
@@ -90,10 +90,32 @@ BEGIN
             payer_id text,
             open_negotiation_end date,
             offer_window_ends_at timestamptz,
+            details jsonb NOT NULL DEFAULT '{}',  -- program-specific fields (LOB, disputed issue, OON, outcome, award…)
+            assigned_to text,              -- keycloak sub of assignee
+            assigned_role text,            -- CASE_MANAGER | ARBITRATOR
+            batch_id uuid,
+            parent_case_id uuid,
+            duplicate_of uuid,
             opened_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS tenant_%I.sealed_offers (
+        -- Reproduced live: on a database tenant_<st>.cases already existed in
+        -- (provisioned by an earlier deploy of an older schema version),
+        -- CREATE TABLE IF NOT EXISTS above is a no-op, so these columns
+        -- never actually get added -- the very next line then fails,
+        -- "column assigned_to does not exist", because casemgmt-core.sql's
+        -- own backfill for exactly this doesn't run until AFTER this file.
+        -- Self-healing fix: do the same ADD COLUMN IF NOT EXISTS here too,
+        -- so this function doesn't depend on file application order.
+        ALTER TABLE %I.cases
+            ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS assigned_to text,
+            ADD COLUMN IF NOT EXISTS assigned_role text,
+            ADD COLUMN IF NOT EXISTS batch_id uuid,
+            ADD COLUMN IF NOT EXISTS parent_case_id uuid,
+            ADD COLUMN IF NOT EXISTS duplicate_of uuid;
+        CREATE INDEX IF NOT EXISTS cases_assignee ON %I.cases (assigned_to) WHERE assigned_to IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS %I.sealed_offers (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             case_id uuid NOT NULL,
             party_id text NOT NULL,
@@ -103,7 +125,7 @@ BEGIN
             revealed boolean NOT NULL DEFAULT false,
             submitted_at timestamptz NOT NULL DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS tenant_%I.documents (
+        CREATE TABLE IF NOT EXISTS %I.documents (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             case_id uuid NOT NULL,
             object_key text NOT NULL,       -- MinIO key (ciphertext object)
@@ -111,9 +133,10 @@ BEGIN
             content_type text,
             sealed boolean NOT NULL DEFAULT false,
             uploaded_by text,
+            version int NOT NULL DEFAULT 1,
             created_at timestamptz NOT NULL DEFAULT now()
         );
-        CREATE TABLE IF NOT EXISTS tenant_%I.outbox (
+        CREATE TABLE IF NOT EXISTS %I.outbox (
             id bigserial PRIMARY KEY,
             topic text NOT NULL,
             key text NOT NULL,
@@ -121,7 +144,7 @@ BEGIN
             published_at timestamptz,
             created_at timestamptz NOT NULL DEFAULT now()
         );
-    $ddl$, p_tenant, p_tenant, p_tenant, p_tenant);
+    $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
 END;
 $$ LANGUAGE plpgsql;
 

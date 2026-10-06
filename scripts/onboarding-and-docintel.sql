@@ -5,8 +5,14 @@ ALTER TABLE public.state_config
 -- Shape: { "IDRE_ENTITY": ["cms_certification_number","fee_schedule","coi_attestation","w9"],
 --          "PROVIDER_ORG": ["npi","w9"], "PAYER_ORG": ["naic_code","w9"], ... }
 
--- documents.version: provision_tenant() stamps it for new tenants; for existing ones:
---   ALTER TABLE tenant_<state>.documents ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1;
+-- documents.version: provision_tenant() stamps it for new tenants; backfill existing ones:
+DO $$
+DECLARE st text;
+BEGIN
+    FOREACH st IN ARRAY ARRAY['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy'] LOOP
+        EXECUTE format('ALTER TABLE %I.documents ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1', 'tenant_'||st);
+    END LOOP;
+END $$;
 
 CREATE TABLE IF NOT EXISTS public.doc_analysis (
     doc_id      uuid PRIMARY KEY,
@@ -19,6 +25,17 @@ CREATE TABLE IF NOT EXISTS public.doc_analysis (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS doc_analysis_tenant_case ON public.doc_analysis (tenant, case_id);
+
+-- PENDING_DOCS had no way to ever clear: StakeholderOnboardingWorkflow waits
+-- on a DOCS_VERIFIED signal fed by doc-intel, but there was no document-
+-- upload endpoint for an application (only /cases/{caseId}/documents did),
+-- so every application requiring docs sat in PENDING_DOCS until the 10-day
+-- SLA silently expired it. application_id is nullable for the same reason
+-- case_id already is: one doc_analysis table serves both document kinds,
+-- never both at once. The FK to stakeholder_applications is added after
+-- that table below (forward reference).
+ALTER TABLE public.doc_analysis ADD COLUMN IF NOT EXISTS application_id uuid;
+CREATE INDEX IF NOT EXISTS doc_analysis_tenant_application ON public.doc_analysis (tenant, application_id);
 
 CREATE TABLE IF NOT EXISTS public.stakeholder_applications (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -34,6 +51,29 @@ CREATE TABLE IF NOT EXISTS public.stakeholder_applications (
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS apps_tenant_status ON public.stakeholder_applications (tenant, status);
+
+-- ADD CONSTRAINT has no IF NOT EXISTS form in Postgres (unlike ADD COLUMN) --
+-- this script is run repeatedly, so a plain ADD CONSTRAINT would fail on
+-- every run after the first.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'doc_analysis_application_id_fkey') THEN
+        ALTER TABLE public.doc_analysis
+            ADD CONSTRAINT doc_analysis_application_id_fkey
+            FOREIGN KEY (application_id) REFERENCES public.stakeholder_applications(id);
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.application_documents (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant        text NOT NULL,
+    application_id uuid NOT NULL REFERENCES public.stakeholder_applications(id),
+    object_key    text NOT NULL,
+    size_bytes    int,
+    content_type  text,
+    uploaded_by   text,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS application_documents_app ON public.application_documents (tenant, application_id);
 
 CREATE TABLE IF NOT EXISTS public.idre_directory (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

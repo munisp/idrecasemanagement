@@ -61,7 +61,9 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: admin
       KC_HTTP_PORT: 8080
     ports: ["8085:8080"]
-    volumes: ["./deploy/keycloak/realm-idre.json:/opt/keycloak/data/import/realm-idre.json"]
+    volumes:
+      - "./deploy/keycloak/realm-idre.json:/opt/keycloak/data/import/realm-idre.json"
+      - "./deploy/keycloak/themes/idre:/opt/keycloak/themes/idre:ro"
 
   apisix:
     image: apache/apisix:3.11.0-debian
@@ -132,8 +134,35 @@ services:
       VAULT_URL: http://vault:8081
       REDIS_ADDR: redis:6379            # JWKS cache + initiate idempotency
       PERMIFY_URL: http://permify:3476  # ReBAC object-level authorization (unset = dev bypass)
+      GRAPH_INTEL_URL: http://graph-intel:8082  # FalkorDB + GraphSAGE + EPR-KGQA proxy target
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}    # sk_live_…/sk_test_…; unset = card payments disabled
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}  # whsec_… from `stripe listen` / dashboard endpoint
+      PORTAL_BASE_URL: ${PORTAL_BASE_URL:-http://localhost:8080}  # Stripe success/cancel return
+      CLAMD_ADDR: clamd:3310
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-idre@localhost}                  # ClamAV malware scanner (uploads fail-closed if down)
     ports: ["8080:8080"]
-    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify]
+    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify, clamd]
+
+  lettergen:
+    build: ./services/lettergen-py
+    environment:
+      DATABASE_URL: postgres://idre:idre@postgres:5432/idre
+      KAFKA_BROKERS: kafka:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_USER: idre
+      MINIO_PASSWORD: idre-secret
+      VAULT_URL: http://vault:8081
+    depends_on: [postgres, kafka, minio, vault]
+
+  clamd:
+    image: clamav/clamav:stable           # freshclam updates signatures on start
+    ports: ["3310:3310"]
+    volumes:
+      - clamdb:/var/lib/clamav
 
   vault:
     build: ./services/vault-rs
@@ -206,7 +235,33 @@ services:
         reservations:
           devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
 
+  falkordb:  # dispute graph — one graph per tenant (idre_<st>), Cypher over RESP
+    image: falkordb/falkordb:latest
+    ports: ["6397:6379"]
+
+  ollama:  # local LLM for EPR-KGQA answers — no PHI ever leaves the platform
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: ["ollamadata:/root/.ollama"]
+    # first boot: docker exec <ollama> ollama pull qwen2.5:3b
+
+  graph-intel:  # FalkorDB sync + numpy GraphSAGE + EPR-KGQA + lakehouse bridge
+    build: ./services/graph-intel-py
+    environment:
+      DATABASE_URL: postgres://idre:idre@postgres:5432/idre
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      LAKEHOUSE_DIR: /lakehouse
+    volumes: ["lakehouse:/lakehouse"]
+    ports: ["8082:8082"]
+    depends_on: [postgres, falkordb, ollama]
+
 volumes:
   pgdata:
   tbdata:
   miniodata:
+  ollamadata:
+  lakehouse:
+  clamdb:

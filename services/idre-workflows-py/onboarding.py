@@ -18,8 +18,8 @@ from datetime import timedelta
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from activities import set_application_status  # noqa: F401  (see onboarding_activities)
     from onboarding_activities import (
+        set_application_status,
         check_ein_npi,
         check_idre_certification,
         check_state_requirements,

@@ -1,20 +1,57 @@
 // crm-views.js — CRM screens: pipeline kanban, accounts 360, leads, tasks, search.
 const CrmViews = (() => {
+  // See views.js: bind after router innerHTML injection (macrotask, not microtask).
+  const afterRender = (fn) => setTimeout(fn, 0);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
+  const CRM_PAGE = 100;
+  // Offset pager shared by accounts/leads/tasks: footer markup + a binder that
+  // appends the next page's rows in place (busy state on the button).
+  const pagerHtml = (id, shown, total, nextOffset) =>
+    `<p class="pager" id="${id}-pg"><span class="muted">Showing ${shown} of ${total}</span>
+      ${nextOffset >= 0 ? `<button class="mini" id="${id}-more">Load more (${Math.min(CRM_PAGE, total - shown)} remaining)</button>` : ""}</p>`;
+  function bindPager(id, tbodySel, state, fetchPage, rowsHtml) {
+    document.getElementById(id + "-more")?.addEventListener("click", async (ev) => {
+      await UI.run(ev.currentTarget, async () => {
+        try {
+          const r = await fetchPage(state.next);
+          state.loaded = state.loaded.concat(r.rows);
+          state.next = r.next;
+          document.querySelector(tbodySel).insertAdjacentHTML("beforeend", rowsHtml(r.rows));
+          document.getElementById(id + "-pg").outerHTML = pagerHtml(id, state.loaded.length, state.total, state.next);
+          bindPager(id, tbodySel, state, fetchPage, rowsHtml);
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      }, "Loading…");
+    });
+  }
 
   // ---- Pipeline (kanban over case statuses) ----------------------------------
+  // Covers EVERY status a case can hold — a status missing here makes those
+  // disputes silently vanish from the board.
   const PIPELINE = [
-    ["INITIATED", "Initiated"], ["OFFER_WINDOW_OPEN", "Offer window"],
-    ["OFFERS_REVEALED", "Revealed"], ["DETERMINED", "Determined"],
-    ["CLOSED_PAID", "Closed (paid)"],
+    ["INITIATED", "Initiated"], ["NEGOTIATION_TRACKED", "Negotiation"],
+    ["OFFER_WINDOW_OPEN", "Offer window"], ["OFFERS_REVEALED", "Revealed"],
+    ["IN_REVIEW", "In review"], ["DETERMINED", "Determined"],
+    ["PAYMENT_PENDING", "Payment pending"],
+    ["CLOSED_PAID", "Closed (paid)"], ["CLOSED_DISMISSED", "Closed (dismissed)"],
+    // FL AHCA vocabulary (2026): completed cases REST at Decided - Invoice
+    // Paid; only these four states are true closures.
+    ["Decided - Invoice Paid", "Decided — invoice paid"],
+    ["Plan Opt-Out", "Plan opt-out"], ["Ineligible", "Ineligible"],
+    ["Dismissed", "Dismissed"], ["Withdrawn", "Withdrawn"],
+    ["Plan Notification Packet Issued", "Plan notified"],
   ];
   async function pipeline() {
     try {
-      const cases = await Api.cases.list();
-      const cols = PIPELINE.map(([status, label]) => {
+      const { cases } = await Api.cases.list({ limit: 200 });
+      const known = new Set(PIPELINE.map(([s]) => s));
+      // Safety net: a status the board doesn't know yet still gets a column
+      // instead of its cases disappearing silently.
+      const extra = [...new Set(cases.filter((c) => !known.has(c.status)).map((c) => c.status))];
+      const layout = [...PIPELINE, ...extra.map((s) => [s, s.replace(/_/g, " ").toLowerCase()])];
+      const cols = layout.map(([status, label]) => {
         const items = cases.filter((c) => c.status === status);
         return `<div class="kanban-col"><h3>${label} <span class="muted">${items.length}</span></h3>` +
           items.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
@@ -28,12 +65,19 @@ const CrmViews = (() => {
   // ---- Accounts ---------------------------------------------------------------
   async function accounts() {
     try {
-      const list = await Api.crm.accounts();
-      return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>` +
-        (list.length ? `<table><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead><tbody>` +
-          list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
-            <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No accounts yet — convert leads or create one.</p>`);
+      const page = await Api.crm.accounts(null, { limit: CRM_PAGE });
+      const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
+      const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
+            <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
+      if (!state.loaded.length)
+        return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>
+          <p class="muted">No accounts yet — convert leads or create one.</p>`;
+      afterRender(() => bindPager("acc", "#acc-tb tbody", state,
+        (off) => Api.crm.accounts(null, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.accounts, next: r.next_offset })),
+        rowsHtml));
+      return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>
+        <table id="acc-tb"><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc", state.loaded.length, state.total, state.next);
     } catch (e) { return `<h1>Accounts</h1>` + err(e); }
   }
 
@@ -41,7 +85,12 @@ const CrmViews = (() => {
     try {
       const d = await Api.crm.account360(id);
       const a = d.account;
+      Palette.remember("account", a.id, a.legal_name);
       let html = `<h1>${esc(a.legal_name)}</h1><p>${badge(a.type)} · NPI ${esc(a.npi) || "—"} · ${esc(a.phone) || "—"}</p>`;
+      if (d.health)
+        html += `<div class="cards"><div class="card health-${esc(d.health.band)}">
+          <div class="num">${d.health.score}</div><div class="lbl">Relationship health — ${esc(d.health.band)}</div>
+          <div class="muted">${d.health.open_disputes} open disputes · ${d.health.sla_breaches} SLA breaches · ${esc(d.health.formula)}</div></div></div>`;
       html += `<h2>Contacts (${d.contacts.length})</h2>` +
         (d.contacts.length ? `<table><tbody>` + d.contacts.map((c) =>
           `<tr><td>${esc(c.name)}</td><td>${esc(c.role_title)}</td><td>${esc(c.email)}</td><td>${esc(c.phone)}</td></tr>`).join("") +
@@ -61,18 +110,18 @@ const CrmViews = (() => {
           `<tr><td>${esc(n.body)}</td><td class="muted">${fmtDate(n.created_at)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No notes.</p>`) +
         `<form id="nn" class="form"><b>Add note</b><input name="body" required /><button>Add note</button></form>`;
-      queueMicrotask(() => {
+      afterRender(() => {
         document.querySelector("#nc")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = Object.fromEntries(new FormData(ev.target));
-          await Api.crm.createContact({ account_id: id, ...f });
-          location.reload();
+          try { await Api.crm.createContact({ account_id: id, ...f }); UI.toast("Contact added"); App.rerender(); }
+          catch (e) { UI.toast(e.message, { kind: "warn" }); }
         });
         document.querySelector("#nn")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = Object.fromEntries(new FormData(ev.target));
-          await Api.crm.addNote({ record_type: "ACCOUNT", record_id: id, body: f.body });
-          location.reload();
+          try { await Api.crm.addNote({ record_type: "ACCOUNT", record_id: id, body: f.body }); UI.toast("Note added"); App.rerender(); }
+          catch (e) { UI.toast(e.message, { kind: "warn" }); }
         });
       });
       return html;
@@ -80,11 +129,11 @@ const CrmViews = (() => {
   }
 
   function accountNew() {
-    queueMicrotask(() => document.querySelector("#na").addEventListener("submit", async (ev) => {
+    afterRender(() => document.querySelector("#na").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
-      await Api.crm.createAccount(f);
-      location.hash = "#/crm/accounts";
+      try { await Api.crm.createAccount(f); UI.toast("Account created"); location.hash = "#/crm/accounts"; }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
     }));
     return `<h1>New account</h1><form id="na" class="form">
       <label>Type <select name="type"><option>PROVIDER</option><option>PAYER</option><option>IDRE</option><option>AUDITOR</option><option>OTHER</option></select></label>
@@ -97,48 +146,64 @@ const CrmViews = (() => {
   // ---- Leads ---------------------------------------------------------------------
   async function leads() {
     try {
-      const list = await Api.crm.leads();
-      return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>` +
-        (list.length ? `<table><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead><tbody>` +
-          list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
+      const page = await Api.crm.leads({ limit: CRM_PAGE });
+      const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
+      const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
             <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
-            <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No leads.</p>`);
+            <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
+      if (!state.loaded.length)
+        return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p><p class="muted">No leads.</p>`;
+      afterRender(() => bindPager("lead", "#lead-tb tbody", state,
+        (off) => Api.crm.leads({ limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.leads, next: r.next_offset })),
+        rowsHtml));
+      return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
+        <table id="lead-tb"><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead", state.loaded.length, state.total, state.next);
     } catch (e) { return `<h1>Leads</h1>` + err(e); }
   }
 
   async function convert(id) {
-    const type = prompt("Account type (PROVIDER / PAYER / IDRE / OTHER):", "PROVIDER");
-    if (!type) return;
-    try { await Api.crm.convertLead(id, type.toUpperCase()); location.reload(); }
-    catch (e) { alert(e.message); }
+    const v = await UI.modal({ title: "Convert lead to account", submitLabel: "Convert",
+      body: "Creates the account, links the lead's history, and marks the lead converted.",
+      fields: [{ name: "type", label: "Account type", options: [["PROVIDER", "Provider"], ["PAYER", "Payer"], ["IDRE", "IDRE entity"], ["OTHER", "Other"]], required: true }] });
+    if (!v) return;
+    try { await Api.crm.convertLead(id, v.type); UI.toast("Lead converted to account"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ---- Tasks ------------------------------------------------------------------------
   async function tasks() {
     try {
-      const list = await Api.crm.tasks(true);
+      const page = await Api.crm.tasks(true, { limit: CRM_PAGE });
+      const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
       let html = `<h1>My tasks</h1>
         <form id="nt" class="form"><b>New task</b>
           <input name="subject" placeholder="Subject" required />
           <input name="case_id" placeholder="Case ID (optional)" />
           <input name="due_date" type="date" /><button>Create</button></form>`;
-      html += list.length ? `<table><thead><tr><th>Subject</th><th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>` +
-        list.map((t) => `<tr><td>${esc(t.subject)}</td><td>${esc(t.case_id)}</td><td>${esc(t.due_date)}</td>
+      const rowsHtml = (list) => list.map((t) => `<tr><td>${esc(t.subject)}</td><td>${esc(t.case_id)}</td><td>${esc(t.due_date)}</td>
           <td>${badge(t.status)}</td>
-          <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("") +
-        `</tbody></table>` : `<p class="muted">No open tasks.</p>`;
-      queueMicrotask(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
+          <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
+      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Subject</th><th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task", state.loaded.length, state.total, state.next)
+        : `<p class="muted">No open tasks.</p>`;
+      afterRender(() => bindPager("task", "#task-tb tbody", state,
+        (off) => Api.crm.tasks(true, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.tasks, next: r.next_offset })),
+        rowsHtml));
+      afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
-        await Api.crm.createTask(f);
-        location.reload();
+        try { await Api.crm.createTask(f); UI.toast("Task created"); App.rerender(); }
+        catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       return html;
     } catch (e) { return `<h1>My tasks</h1>` + err(e); }
   }
 
-  async function done(id) { await Api.crm.completeTask(id); location.reload(); }
+  async function done(id) {
+    try { await Api.crm.completeTask(id); UI.toast("Task completed"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
 
   // ---- Global search -------------------------------------------------------------------
   async function search(q) {

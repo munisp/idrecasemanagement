@@ -1,13 +1,23 @@
 -- Case-management layer: relationships, batching, checklists, notifications,
 -- saved views, assignment state. (Applied per tenant where noted.)
 
--- Assignment state on cases (per-tenant tables): run for each tenant schema:
---   ALTER TABLE tenant_<st>.cases
---     ADD COLUMN IF NOT EXISTS assigned_to text,
---     ADD COLUMN IF NOT EXISTS assigned_role text,     -- CASE_MANAGER | ARBITRATOR
---     ADD COLUMN IF NOT EXISTS batch_id uuid,
---     ADD COLUMN IF NOT EXISTS parent_case_id uuid,
---     ADD COLUMN IF NOT EXISTS duplicate_of uuid;
+-- Assignment state on cases (per-tenant tables) — applied to every provisioned
+-- tenant schema. provision_tenant() creates cases without these columns, so this
+-- DO loop is the single source of truth for the assignment/batching columns.
+DO $$
+DECLARE st text;
+BEGIN
+    FOREACH st IN ARRAY ARRAY['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv','wi','wy'] LOOP
+        EXECUTE format('ALTER TABLE %I.cases
+            ADD COLUMN IF NOT EXISTS assigned_to text,
+            ADD COLUMN IF NOT EXISTS assigned_role text,
+            ADD COLUMN IF NOT EXISTS batch_id uuid,
+            ADD COLUMN IF NOT EXISTS parent_case_id uuid,
+            ADD COLUMN IF NOT EXISTS duplicate_of uuid,
+            ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT ''{}''::jsonb', 'tenant_'||st);
+        EXECUTE format('CREATE INDEX IF NOT EXISTS cases_assignee ON %I.cases (assigned_to) WHERE assigned_to IS NOT NULL', 'tenant_'||st);
+    END LOOP;
+END $$;
 
 -- Related cases: batch groups, parent/child, duplicates.
 CREATE TABLE IF NOT EXISTS public.case_relationships (
@@ -55,9 +65,18 @@ CREATE TABLE IF NOT EXISTS public.saved_views (
     object    text NOT NULL,        -- CASES | ACCOUNTS | LEADS | TASKS
     name      text NOT NULL,
     filters   jsonb NOT NULL DEFAULT '{}',
+    pinned    boolean NOT NULL DEFAULT false,   -- pinned views surface first in L2 nav
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant, user_sub, object, name)
 );
+-- Reproduced live: on a database where public.saved_views already existed
+-- (an earlier deploy of a schema version before `pinned` was added), the
+-- CREATE TABLE above is a no-op, so listSavedViews' SELECT ... pinned ...
+-- failed with "column pinned does not exist" -- silently, since the
+-- handler discards the query error (`out, _ :=`) and serializes a nil
+-- slice as JSON null, which the portal then crashes on (`saved.find is
+-- not a function` / "Cannot read properties of null").
+ALTER TABLE public.saved_views ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
 
 -- Escalation log (SLA breach -> supervisor trail).
 CREATE TABLE IF NOT EXISTS public.escalations (
@@ -69,4 +88,16 @@ CREATE TABLE IF NOT EXISTS public.escalations (
     escalated_to text,              -- role or sub
     detail     text,
     created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- User preferences: theme, density, last tenant, palette recents — the
+-- portal keeps a device-local copy for offline/instant paint, but this table
+-- is the source of truth so prefs follow the user across PWA/desktop/native.
+CREATE TABLE IF NOT EXISTS public.user_prefs (
+    tenant     text NOT NULL,
+    user_sub   text NOT NULL,
+    key        text NOT NULL,
+    value      jsonb NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, user_sub, key)
 );

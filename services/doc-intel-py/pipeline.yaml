@@ -32,13 +32,25 @@ stages:
       use_formula_recognition: false
       use_seal_recognition: true    # stamps/seals matter for determinations
 
-  - name: vlm_extract        # VLM semantic extraction over Docling markdown + first page
+  - name: classify           # SECOND PASS: re-classify with full extracted text —
+    enabled: true            # a misleading filename can't outvote document content
+
+  - name: vlm_extract        # VLM semantic extraction over Docling markdown + page images
     enabled: true
     config:
       endpoint: ${VLM_ENDPOINT:-http://vllm:8000/v1}
       model: ${VLM_MODEL:-paddleocr-vl}   # or Qwen2.5-VL-72B-Instruct etc.
       max_tokens: 2048
-      schema: idr_claim                 # extraction schema (see SCHEMAS below)
+      max_pages: 3           # page images per chunk for layout cues
+      chunk_chars: 12000     # long docs are extracted per chunk and merged
+      schema: idr_claim      # FALLBACK schema — the classified doc_type's
+                             # schema is preferred automatically (see schemas:)
+
+  - name: normalize          # deterministic canonicalization: amounts -> floats,
+    enabled: true            # dates -> ISO, NPI/code shape checks (never overwrites raw)
+
+  - name: verify             # grounding check: every extracted value must literally
+    enabled: true            # appear in document text; per-field confidence map
 
   - name: validate           # cross-check extracted fields against the case record
     enabled: true

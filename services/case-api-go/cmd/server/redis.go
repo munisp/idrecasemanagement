@@ -13,36 +13,43 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 )
 
-type redisClient struct{ addr string }
+type redisClient struct{ addr, password string }
 
-func newRedis(addr string) *redisClient { return &redisClient{addr: addr} }
+func newRedis(addr, password string) *redisClient { return &redisClient{addr: addr, password: password} }
 
-func (rc *redisClient) cmd(args ...string) (string, error) {
-	if rc.addr == "" {
-		return "", errors.New("redis disabled")
-	}
-	conn, err := net.DialTimeout("tcp", rc.addr, 2*time.Second)
+// incrExpire increments key and, on first increment, sets its TTL — the
+// fixed-window counter primitive behind rate limiting. Returns the count.
+func (r *redisClient) incrExpire(key string, ttlSec int) (int64, error) {
+	res, err := r.cmd("INCR", key)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	var n int64
+	fmt.Sscanf(res, "%d", &n)
+	if n == 1 {
+		_, _ = r.cmd("EXPIRE", key, fmt.Sprintf("%d", ttlSec))
+	}
+	return n, nil
+}
 
+func writeCmd(w io.Writer, args ...string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "*%d\r\n", len(args))
 	for _, a := range args {
 		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
 	}
-	if _, err := conn.Write([]byte(b.String())); err != nil {
-		return "", err
-	}
-	r := bufio.NewReader(conn)
+	_, err := w.Write([]byte(b.String()))
+	return err
+}
+
+func readReply(r *bufio.Reader) (string, error) {
 	line, err := r.ReadString('\n')
 	if err != nil {
 		return "", err
@@ -70,6 +77,38 @@ func (rc *redisClient) cmd(args ...string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported reply type %q", line[0])
 	}
+}
+
+// cmd opens one connection per call and, when a password is configured,
+// AUTHs on that same connection before the real command. The shared cluster
+// Redis requires AUTH (confirmed live against the same cluster this app
+// also deploys to: unauthenticated SET/GET get "NOAUTH Authentication
+// required"); this client never sent one before, so every command silently
+// failed -- see setnx's fail-open comment below for what that broke.
+func (rc *redisClient) cmd(args ...string) (string, error) {
+	if rc.addr == "" {
+		return "", errors.New("redis disabled")
+	}
+	conn, err := net.DialTimeout("tcp", rc.addr, 2*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	r := bufio.NewReader(conn)
+
+	if rc.password != "" {
+		if err := writeCmd(conn, "AUTH", rc.password); err != nil {
+			return "", err
+		}
+		if _, err := readReply(r); err != nil {
+			return "", fmt.Errorf("redis auth: %w", err)
+		}
+	}
+	if err := writeCmd(conn, args...); err != nil {
+		return "", err
+	}
+	return readReply(r)
 }
 
 var errRedisNil = errors.New("redis: nil")
@@ -101,9 +140,18 @@ func (rc *redisClient) setex(key string, ttlSeconds int, value string) {
 	_, _ = rc.cmd("SET", key, value, "EX", strconv.Itoa(ttlSeconds))
 }
 
-// setnx is an atomic set-if-not-exists; returns true when this caller won.
-// Used for idempotency: the first request with a given key wins; replays lose.
+// setnx is an atomic set-if-not-exists; returns true when this caller won --
+// INCLUDING when Redis itself errored (down, auth failure, timeout). Fail
+// open, matching get/setex's documented philosophy: only a genuine NX
+// conflict (SET..NX's nil bulk reply) means someone else is really
+// mid-create and should return false/409.
 func (rc *redisClient) setnx(key string, ttlSeconds int, value string) bool {
-	v, err := rc.cmd("SET", key, value, "EX", strconv.Itoa(ttlSeconds), "NX")
-	return err == nil && v == "OK"
+	_, err := rc.cmd("SET", key, value, "EX", strconv.Itoa(ttlSeconds), "NX")
+	if err == nil {
+		return true // "OK": we won
+	}
+	if errors.Is(err, errRedisNil) {
+		return false // genuine conflict: key already exists
+	}
+	return true // redis unreachable/erroring: fail open
 }

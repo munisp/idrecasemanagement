@@ -2,41 +2,119 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#123B2F" />
-  <title>Federal IDRE Portal</title>
-  <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="/css/app.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Federal IDRE Platform — No Surprises Act Dispute Resolution</title>
+  <meta name="description" content="Independent Dispute Resolution case management for the No Surprises Act — 45 CFR Part 149, serving state programs across all 50 states." />
+  <link rel="stylesheet" href="/css/site.css" />
 </head>
 <body>
-  <div id="app">
-    <!-- L1 global rail (Meridian shell) -->
-    <nav id="rail" aria-label="Primary">
-      <div class="rail-brand"><span class="rail-mark">ID</span><span class="rail-word">Federal IDRE</span></div>
-      <nav id="nav"></nav>
-      <div class="rail-foot">Meridian UI · 45 CFR Part 149</div>
-    </nav>
-
-    <div id="body">
-      <header id="topbar">
-        <span id="tenant-chip"><span class="t-avatar" id="t-avatar">—</span><span class="t-name" id="t-name">…</span></span>
-        <input id="gq" type="search" placeholder="Search disputes, accounts, contacts…  (⌘K)" aria-label="Global search" />
-        <span class="spacer"></span>
-        <button id="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode">☾</button>
-        <button id="bell" class="bell" title="Notifications" aria-label="Notifications">🔔<span id="bell-n" class="bell-n"></span></button>
-        <span id="whoami"></span>
-      </header>
-      <main id="view" tabindex="-1"><p class="muted">Loading…</p></main>
+  <header class="site-nav">
+    <div class="wrap nav-row">
+      <span class="brand"><span class="brand-mark">ID</span> Federal IDRE Platform</span>
+      <nav class="nav-links">
+        <a href="#how">How it works</a>
+        <a href="#states">State programs</a>
+        <a href="#stakeholders">Who applies</a>
+        <a class="btn ghost" href="/apply.html">Apply</a>
+        <a class="btn solid" href="/app.html">Log in</a>
+      </nav>
     </div>
-  </div>
-  <script src="/js/config.js"></script>
-  <script src="/js/auth.js"></script>
-  <script src="/js/demo.js"></script>
-  <script src="/js/api.js"></script>
-  <script src="/js/views.js"></script>
-  <script src="/js/crm-views.js"></script>
-  <script src="/js/app.js"></script>
+  </header>
+
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">45 CFR Part 149 · No Surprises Act IDR</p>
+      <h1>Independent dispute resolution,<br />run like infrastructure.</h1>
+      <p class="lede">A multi-tenant case management platform for Federal IDR and state
+        dispute-resolution programs — intake through determination to payment, with
+        sealed offers, statutory clocks, and a complete audit trail. Every state is an
+        isolated tenant; every program's rules are configurable.</p>
+      <div class="hero-cta">
+        <a class="btn solid lg" href="/apply.html">Start an application</a>
+        <a class="btn ghost lg" href="/app.html">Sign in to the portal</a>
+      </div>
+      <dl class="hero-stats">
+        <div><dt>50</dt><dd>state tenants, fully isolated</dd></div>
+        <div><dt>30&nbsp;days</dt><dd>statutory determination clock, tracked per case</dd></div>
+        <div><dt>Double-blind</dt><dd>sealed offers, revealed only when the window closes</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section id="how" class="band">
+    <div class="wrap">
+      <h2>How a dispute moves through the platform</h2>
+      <ol class="steps">
+        <li><strong>Intake &amp; eligibility.</strong> Disputes arrive via portal, bulk CSV import
+          (up to 5,000 claims per batch), or API. Eligibility is checked against the program's
+          configurable rules; case numbers follow the program's numbering pattern.</li>
+        <li><strong>Assignment.</strong> Cases route to case managers manually, by
+          workload-balanced auto-assignment, or self-service grab-next — with atomic queue
+          claims so no case is ever double-assigned or lost.</li>
+        <li><strong>Offers under seal.</strong> Parties submit offers encrypted by the vault;
+          the database never sees plaintext. Offers reveal simultaneously when the
+          submission window closes.</li>
+        <li><strong>Determination.</strong> Arbitrators work from configurable stage
+          checklists; statutory clocks are computed per program (calendar or business
+          days) and breaches escalate automatically.</li>
+        <li><strong>Payment &amp; reporting.</strong> Invoicing, card collection via Stripe,
+          double-entry ledger postings, refunds, receivables aging, and program
+          deliverables (weekly/monthly reports) are built in.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="stakeholders" class="band alt">
+    <div class="wrap">
+      <h2>Who uses the platform</h2>
+      <div class="cards">
+        <div class="card"><h3>IDRE entities</h3><p>Certified dispute-resolution entities
+          manage caseloads, arbitrators, determinations, and CMS deliverables.</p></div>
+        <div class="card"><h3>Providers &amp; facilities</h3><p>Initiate disputes, upload
+          evidence, submit sealed offers, and track determinations and payments.</p></div>
+        <div class="card"><h3>Plans &amp; payers</h3><p>Respond to disputes, submit offers,
+          settle invoices, and monitor exposure across service lines.</p></div>
+        <div class="card"><h3>State programs &amp; auditors</h3><p>Run a state program
+          (like Florida's AHCA CDR) with your own clocks, thresholds, fees, templates and
+          deliverables — with read-only auditor access for oversight.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="states" class="band">
+    <div class="wrap">
+      <h2>State programs</h2>
+      <p class="muted">Select your state when you apply. Programs without a custom rule
+        set operate under the federal NSA default; states with their own programs
+        (FL, TX, NY…) run on their own configured rules within their isolated tenant.</p>
+      <div id="state-grid" class="state-grid"></div>
+    </div>
+  </section>
+
+  <section class="band alt cta-band">
+    <div class="wrap">
+      <h2>Ready to participate?</h2>
+      <p>Submit an onboarding application — the state's review team is notified
+        immediately and the approval workflow provisions your account.</p>
+      <a class="btn solid lg" href="/apply.html">Apply now</a>
+    </div>
+  </section>
+
+  <footer class="site-foot">
+    <div class="wrap">
+      <span>Federal IDRE Platform · 45 CFR Part 149 compliance infrastructure</span>
+      <span><a href="/app.html">Portal login</a> · <a href="/apply.html">Apply</a></span>
+    </div>
+  </footer>
+
+  <script>
+    // Render the 50-state selector from a static list (public page — no API calls).
+    const STATES = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"];
+    const NAMES = {AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
+    const CUSTOM = {FL:"FL AHCA CDR"};
+    document.getElementById("state-grid").innerHTML = STATES.map(st =>
+      `<a class="state-chip" href="/apply.html?state=${st}"><strong>${st}</strong> ${NAMES[st]}${CUSTOM[st] ? `<em>${CUSTOM[st]}</em>` : ""}</a>`
+    ).join("");
+  </script>
 </body>
 </html>

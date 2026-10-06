@@ -13,18 +13,26 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -45,14 +53,34 @@ type Config struct {
 	TemporalHost   string // temporal-frontend:7233
 	TemporalNS     string // idre
 	TBAddresses    string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
+	TBClusterID    string // decimal cluster ID this TigerBeetle deployment was formatted with
 	DaprHTTP       string // http://localhost:3500
 	VaultURL       string // http://vault:8081 (mTLS via Dapr in k8s)
+	GraphIntelURL  string // http://graph-intel:8082 ("" = graph features disabled)
+	StripeSecret   string // sk_live_… / sk_test_… ("" = card payments disabled)
+	StripeWebhook  string // whsec_… signing secret for /api/webhooks/stripe
+	PortalBaseURL  string // https://portal.example.gov — Stripe success/cancel return
+	ClamdAddr      string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
+	SMTPHost       string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
+	SMTPPort       int
+	SMTPUser       string
+	SMTPPass       string
+	SMTPFrom       string // e.g. flcdr@example.org
+	WorkerToken    string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
 }
 
 func configFromEnv() Config {
 	get := func(k, d string) string {
 		if v := os.Getenv(k); v != "" {
 			return v
+		}
+		return d
+	}
+	getInt := func(k string, d int) int {
+		if v := os.Getenv(k); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
 		}
 		return d
 	}
@@ -64,8 +92,26 @@ func configFromEnv() Config {
 		TemporalHost:   get("TEMPORAL_HOST", "localhost:7233"),
 		TemporalNS:     get("TEMPORAL_NAMESPACE", "idre"),
 		TBAddresses:    get("TIGERBEETLE_ADDRESSES", "localhost:3000"),
+		// No safe default: this value is fixed by whichever `tigerbeetle format
+		// --cluster=N` created the replicas' on-disk state, and a wrong ID
+		// doesn't error -- the client just hangs forever with every connection
+		// silently rejected ("invalid header_cluster" on the replica side).
+		TBClusterID:    get("TIGERBEETLE_CLUSTER_ID", ""),
 		DaprHTTP:       get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
 		VaultURL:       get("VAULT_URL", "http://localhost:8081"),
+		GraphIntelURL:  get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		StripeSecret:   get("STRIPE_SECRET_KEY", ""),
+		StripeWebhook:  get("STRIPE_WEBHOOK_SECRET", ""),
+		PortalBaseURL:  get("PORTAL_BASE_URL", "http://localhost:8080"),
+		ClamdAddr:      get("CLAMD_ADDR", "localhost:3310"),
+		SMTPHost:       get("SMTP_HOST", ""),
+		SMTPPort:       getInt("SMTP_PORT", 587),
+		SMTPUser:       get("SMTP_USER", ""),
+		SMTPPass:       get("SMTP_PASS", ""),
+		SMTPFrom:       get("SMTP_FROM", "idre@localhost"),
+		// No default: an empty WorkerToken disables the service-auth path
+		// entirely rather than accepting a guessable default as a credential.
+		WorkerToken: get("WORKER_TOKEN", ""),
 	}
 }
 
@@ -85,13 +131,15 @@ type Case struct {
 }
 
 type InitiateRequest struct {
-	CaseNumber       string `json:"case_number"`
+	CaseNumber       string `json:"case_number"`           // optional when the tenant program defines a numbering pattern
 	ServiceLine      string `json:"service_line"`
 	PlanType         string `json:"plan_type"` // FULLY_INSURED | SELF_FUNDED
 	QPACents         int64  `json:"qpa_cents"`
 	ProviderID       string `json:"provider_id"`
 	PayerID          string `json:"payer_id"`
 	OpenNegotiationEnd string `json:"open_negotiation_end"` // YYYY-MM-DD
+	DisputedAmountCents int64 `json:"disputed_amount_cents"` // program disputes: drives thresholds + escalation
+	NumClaims        int    `json:"num_claims"`
 }
 
 type FeeTransfer struct {
@@ -113,15 +161,28 @@ type principal struct {
 }
 
 type authn struct {
-	keys   jwk.Set
-	issuer string
+	keys        jwk.Set
+	issuer      string
+	workerToken string // shared secret for service-to-service calls; "" disables this path
 }
+
+// serviceRole is the synthetic role a valid WORKER_TOKEN caller gets. Never a
+// real Keycloak realm role, so nothing issued by Keycloak can collide with
+// it. idre-workflows sends `Authorization: Bearer $WORKER_TOKEN` on its own
+// service-to-service calls (e.g. the automated SLA-breach escalate call) --
+// nothing here ever validated that token, so that path always 401'd.
+const serviceRole = "SERVICE_WORKER"
 
 func (a *authn) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if raw == "" || raw == r.Header.Get("Authorization") {
 			http.Error(w, `{"error":"missing bearer token"}`, http.StatusUnauthorized)
+			return
+		}
+		if a.workerToken != "" && subtle.ConstantTimeCompare([]byte(raw), []byte(a.workerToken)) == 1 {
+			p := principal{Subject: "service:idre-workflows", Roles: []string{serviceRole}}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxPrincipal{}, p)))
 			return
 		}
 		tok, err := jwt.ParseString(raw,
@@ -161,7 +222,14 @@ type ctxPrincipal struct{}
 type ctxTenant struct{}
 
 // tenancy resolves the state tenant from the path and enforces it against the
-// token's tenant group claim. Platform/federal admins bypass the group check.
+// token's tenant group claim. Access matrix:
+//   - PLATFORM_ADMIN / FEDERAL_ADMIN: read+write in every state tenant.
+//   - STATE_AUDITOR: read-only (GET/HEAD/OPTIONS) in every state tenant;
+//     writes are rejected even in the auditor's home tenant — audit is
+//     observation, not operation. An auditor who also holds an operational
+//     role (e.g. CASE_MANAGER) can still write in tenants where they are a
+//     group member.
+//   - everyone else: only tenants present in the /tenant/<st> group claim.
 func tenancy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -170,14 +238,18 @@ func tenancy(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"tenant required"}`, http.StatusBadRequest)
 			return
 		}
+		readOnly := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
 		allowed := false
 		for _, role := range p.Roles {
-			if role == "PLATFORM_ADMIN" || role == "FEDERAL_ADMIN" {
+			if role == "PLATFORM_ADMIN" || role == "FEDERAL_ADMIN" || role == serviceRole {
+				allowed = true
+			}
+			if role == "STATE_AUDITOR" && readOnly {
 				allowed = true
 			}
 		}
 		for _, t := range p.Tenants {
-			if t == tenant {
+			if t == tenant && (readOnly || !isAuditorOnly(p)) {
 				allowed = true
 			}
 		}
@@ -187,6 +259,23 @@ func tenancy(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxTenant{}, tenant)))
 	})
+}
+
+// isAuditorOnly reports whether the principal's only elevated role is
+// STATE_AUDITOR (pure auditors never write, anywhere).
+func isAuditorOnly(p principal) bool {
+	for _, r := range p.Roles {
+		switch r {
+		case "CASE_MANAGER", "ARBITRATOR", "FINANCE", "PARTY", "FEDERAL_ADMIN", "PLATFORM_ADMIN":
+			return false
+		}
+	}
+	for _, r := range p.Roles {
+		if r == "STATE_AUDITOR" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +299,42 @@ func envOr(k, d string) string {
 	return d
 }
 
+// resolveTBAddresses turns host:port entries into ip:port before the
+// TigerBeetle client is constructed. No TigerBeetle client binding resolves
+// DNS internally -- it needs raw IPs -- so entries that are StatefulSet
+// per-pod headless-service hostnames (stable across a pod reschedule, unlike
+// the pod's own IP) are resolved here instead of being frozen as IPs at
+// deploy time.
+func resolveTBAddresses(addrs []string) ([]string, error) {
+	out := make([]string, len(addrs))
+	for i, a := range addrs {
+		host, port, err := net.SplitHostPort(a)
+		if err != nil {
+			return nil, fmt.Errorf("bad tigerbeetle address %q: %w", a, err)
+		}
+		if net.ParseIP(host) != nil {
+			out[i] = a
+			continue
+		}
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return nil, fmt.Errorf("resolving tigerbeetle address %q: %w", a, err)
+		}
+		var ip net.IP
+		for _, c := range ips {
+			if v4 := c.To4(); v4 != nil {
+				ip = v4
+				break
+			}
+		}
+		if ip == nil {
+			return nil, fmt.Errorf("tigerbeetle address %q has no IPv4 record", a)
+		}
+		out[i] = net.JoinHostPort(ip.String(), port)
+	}
+	return out, nil
+}
+
 func main() {
 	cfg := configFromEnv()
 	ctx := context.Background()
@@ -225,11 +350,22 @@ func main() {
 	must(err)
 	defer tc.Close()
 
-	tbc, err := tb.NewClient(tb_types.ToUint128(0), strings.Split(cfg.TBAddresses, ","))
+	if cfg.TBClusterID == "" {
+		panic("TIGERBEETLE_CLUSTER_ID is required -- must match the decimal cluster ID " +
+			"the TigerBeetle replicas were formatted with (tigerbeetle format --cluster=N); " +
+			"a wrong value does not error, it hangs every ledger connection forever")
+	}
+	clusterID, ok := new(big.Int).SetString(cfg.TBClusterID, 10)
+	if !ok {
+		panic("TIGERBEETLE_CLUSTER_ID is not a valid decimal integer: " + cfg.TBClusterID)
+	}
+	tbAddrs, err := resolveTBAddresses(strings.Split(cfg.TBAddresses, ","))
+	must(err)
+	tbc, err := tb.NewClient(tb_types.BigIntToUint128(*clusterID), tbAddrs)
 	must(err)
 	defer tbc.Close()
 
-	rds := newRedis(envOr("REDIS_ADDR", ""))
+	rds := newRedis(envOr("REDIS_ADDR", ""), envOr("REDIS_PASSWORD", ""))
 
 	// JWKS via Redis: all replicas share one cache; Keycloak key rotation
 	// propagates within the TTL instead of hammering the certs endpoint.
@@ -244,7 +380,7 @@ func main() {
 			rds.setex("idre:jwks", 300, string(buf))
 		}
 	}
-	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer}
+	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer, workerToken: cfg.WorkerToken}
 
 	docs, err := newDocStore(
 		envOr("MINIO_ENDPOINT", "localhost:9000"),
@@ -272,12 +408,19 @@ func main() {
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
 		r.Get("/cases/{caseId}/documents", s.listDocuments)
 		r.Get("/cases/{caseId}/documents/{docId}/download", s.downloadDocument)
+		r.Patch("/cases/{caseId}/documents/{docId}", s.moveDocument) // re-file to folder (staff only)
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
 
 		// Stakeholder onboarding: applications, decisions, status.
+		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
+		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
+		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
+		r.Post("/deliverables/request", s.requestAdhocDeliverable)
 		r.Post("/onboarding/applications", s.submitApplication)
 		r.Get("/onboarding/applications", s.listApplications)
 		r.Post("/onboarding/applications/{appId}/decision", s.decideApplication)
+		r.Post("/onboarding/applications/{appId}/documents", s.uploadApplicationDocument)
+		r.Post("/onboarding/applications/{appId}/signal", s.signalApplication) // doc-intel -> StakeholderOnboardingWorkflow, SERVICE_WORKER only
 
 		// Voice console + compliance reports (JWT-authenticated reads).
 		r.Get("/voice/intake", s.listVoiceIntake)
@@ -311,9 +454,58 @@ func main() {
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
+		r.Get("/prefs", s.getPrefs)   // server-side user preferences (source of truth)
+		r.Put("/prefs", s.putPref)
+		r.Get("/cases/clocks", s.casesClocks)          // batch statutory-clock projection (grids)
+		r.Get("/cases/{caseId}/clocks", s.caseClocks)  // per-case projection (workspace header)
+		r.Post("/cases/bulk", s.bulkCases)             // bulk assign / status with per-item results
+		r.Post("/queues/grab-next", s.grabNext)        // atomic queue claim (triage fast lane)
+
+		// Graph intelligence (proxied to graph-intel: FalkorDB + GraphSAGE + EPR-KGQA).
+		r.Post("/graph/ask", s.graphAsk)                      // EPR-KGQA natural-language query
+		r.Post("/graph/feedback", s.graphFeedback)            // thumbs up/down -> ART-ready log
+		r.Post("/graph/sync", s.graphSyncNow)                 // Postgres -> FalkorDB -> lakehouse
+		r.Post("/graph/to-lakehouse", s.graphToLakehouse)     // FalkorDB -> gold-zone export
+		r.Post("/graph/train", s.graphTrain)                  // GraphSAGE training round
+		r.Get("/cases/{caseId}/related", s.caseRelated)       // GNN link predictions
+		r.Get("/cases/{caseId}/graph-neighbors", s.caseGraphNeighbors)
 		r.Post("/cases/{caseId}/letters/{template}", s.generateLetter)
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
+
+		// Program rules (per-state customization; federal NSA is the no-config default).
+		r.Get("/program", s.getProgram)
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
+		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
+		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
+		r.Post("/cases/{caseId}/share-links", s.createShareLink)      // tokenized upload/download (G9)
+		r.Get("/qa", s.qaQueue)                                       // QA gate queue (G4)
+		r.Get("/qa/{qaId}", s.qaGet)
+		r.Post("/qa/{qaId}/decision", s.qaDecision)
+		r.Post("/cases/{caseId}/invoices", s.issueInvoice)            // dual-party receivables (G8)
+		r.Get("/cases/{caseId}/invoices", s.listInvoices)
+		r.Get("/invoices", s.listInvoices)
+		r.Post("/invoices/{invId}/settle", s.settleInvoice)           // PAY|REFUND|VOID
+		r.Get("/reports/receivables", s.receivablesReport)
+		r.Post("/invoices/{invId}/checkout", s.createCheckout) // Stripe Checkout session
+		r.Get("/payments", s.listPayments)                     // payment history (tenant)
+		r.Get("/cases/{caseId}/payments", s.listPayments)      // payment history (case)
+		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
+		r.Post("/cases/{caseId}/claims", s.importClaims)              // bulk claim lines (G10)
+		r.Get("/cases/{caseId}/claims", s.listClaims)
+		r.Post("/intake", s.createIntake)                             // pre-case intake (G12)
+		r.Get("/intake", s.listIntake)
+		r.Post("/intake/{intakeId}/advance", s.advanceIntake)         // refund window enforced
+
+		// Rule engine administration (admin roles only; every write audited).
+		r.Get("/rules", s.listRules)
+		r.Put("/rules", s.putRules)
+		r.Get("/rules/audit", s.rulesAudit)
+		r.Get("/deliverables", s.listDeliverables)                    // contract schedule (G7)
+		r.Post("/deliverables", s.submitDeliverable)
+		r.Post("/cases/{caseId}/opt-out", s.recordOptOut)             // plan opt-out adjudication (G14)
 	})
 
 	// Voice-AI surface (API-key auth, not OIDC).
@@ -327,8 +519,66 @@ func main() {
 	// Inbound email (Mailgun/SES-style provider webhook, token-authenticated).
 	r.Post("/api/email/inbound", s.emailInbound)
 
+	// ShareBox (no OIDC; token + expiry + use-count is the auth):
+	// HTML landing page + real no-login upload/download endpoints.
+	r.Get("/api/share/{token}", s.shareLanding)
+	r.Head("/api/share/{token}", s.resolveShareLink)
+	r.Get("/api/share/{token}/meta", s.resolveShareLink)
+	r.Post("/api/share/{token}/upload", s.shareUpload)                        // one-shot, small files
+	r.Post("/api/share/{token}/uploads", s.shareCreateUpload)                 // resumable: create
+	r.Head("/api/share/{token}/uploads/{uploadId}", s.shareUploadOffset)      // resume probe
+	r.Patch("/api/share/{token}/uploads/{uploadId}", s.shareUploadChunk)      // next chunk
+	r.Post("/api/share/{token}/uploads/{uploadId}/complete", s.shareCompleteUpload)
+	r.Get("/api/share/{token}/download", s.shareDownload)                     // Range/resume supported
+
+	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
+	r.Post("/api/webhooks/stripe", s.stripeWebhook)
+
+	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
+	r.Post("/api/public/apply", s.publicApply)
+
+	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
+	// intakes to INELIGIBLE and raises staff notifications for the letters.
+	// Idempotent (status-transition guarded); safe across replicas.
+	sweepStop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			default:
+			}
+			if n := s.sweepIntakeDay13(); n > 0 {
+				slog.Info("day-13 sweep", "ineligible", n)
+			}
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+			}
+		}
+	}()
+
+	srv := &http.Server{Addr: cfg.Addr, Handler: r,
+		ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second}
+	// Graceful shutdown: drain in-flight requests on SIGTERM/SIGINT so a
+	// rolling deploy never truncates an upload or a payment webhook.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-quit
+		close(sweepStop)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
 	slog.Info("case-api listening", "addr", cfg.Addr)
-	must(http.ListenAndServe(cfg.Addr, r))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		must(err)
+	}
 }
 
 func must(err error) {
@@ -409,14 +659,33 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		initialStatus = "NEGOTIATION_TRACKED"
 	}
 
+	// Program numbering (G11): when the tenant runs a custom program with a
+	// numbering pattern and the caller leaves case_number blank, generate it
+	// (e.g. FL26-042). Explicit case numbers are still honored.
+	prog := s.loadProgram(r, tenant)
+	if req.CaseNumber == "" && prog != nil && prog.CaseNumber.Pattern != "" {
+		req.CaseNumber = s.nextCaseNumber(r, tenant, prog)
+	}
+
 	var caseID string
 	err = tx.QueryRow(r.Context(), `
 		INSERT INTO cases (case_number, status, service_line, plan_type, qpa_cents,
-		                   provider_id, payer_id, open_negotiation_end)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+		                   provider_id, payer_id, open_negotiation_end,
+		                   disputed_amount_cents, num_claims)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
 		req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents,
-		req.ProviderID, req.PayerID, req.OpenNegotiationEnd).Scan(&caseID)
+		req.ProviderID, req.PayerID, req.OpenNegotiationEnd,
+		req.DisputedAmountCents, req.NumClaims).Scan(&caseID)
 	if err != nil {
+		// A duplicate case_number under concurrent requests correctly hits
+		// the unique constraint (verified elsewhere: exactly 1 row survives
+		// a 10-way race) -- but that's a client error (retry won't help with
+		// the same number), not a server fault, so it gets its own status
+		// instead of an indistinguishable-from-a-real-bug 500.
+		if isUniqueViolation(err) {
+			http.Error(w, `{"error":"case_number already exists"}`, http.StatusConflict)
+			return
+		}
 		http.Error(w, `{"error":"insert"}`, http.StatusInternalServerError)
 		return
 	}
@@ -474,10 +743,14 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Program escalation trigger (G6): auto-route over-threshold disputes.
+	s.escalationTrigger(r, tenant, caseID, req.DisputedAmountCents)
+
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
 		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
 	}
+	s.graphSync(tenant) // nudge FalkorDB + lakehouse silver (best-effort)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "workflow_id": wfID, "status": initialStatus,
 		"late_initiation_flagged": lateInitiation,
@@ -485,11 +758,76 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// listCases: keyset-paginated dispute list. Enterprise tenants hold thousands
+// of disputes (FL alone projects ~3k/yr), so a hard LIMIT 200 silently hid
+// cases once a tenant outgrew it. Params:
+//   ?limit=N      page size, default 50, max 200
+//   ?cursor=ts|id keyset position from a previous page's next_cursor
+//   ?status=S     exact status filter (saved views push filtering server-side
+//                 so a filter never applies to a partial page)
+//   ?q=text       case_number ILIKE search
+// Response: {"cases": [...], "next_cursor": "...", "total": N}
 func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(),
-		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
-		             FROM tenant_%s.cases ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))
+	q := r.URL.Query()
+	limit := 50
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+		limit = min(n, 200)
+	}
+	where, args := "", []any{}
+	add := func(clause string, v any) {
+		args = append(args, v)
+		where += fmt.Sprintf(" AND "+clause, len(args))
+	}
+	if st := q.Get("status"); st != "" {
+		add("status = $%d", st)
+	}
+	if qs := q.Get("q"); qs != "" {
+		add("case_number ILIKE '%%' || $%d || '%%'", qs)
+	}
+	// Sort: default opened_at DESC uses keyset pagination; any explicit column
+	// sort switches to offset mode (keyset over arbitrary columns isn't stable).
+	sortCol, sortDir := "opened_at", "DESC"
+	if s := q.Get("sort"); s != "" {
+		whitelist := map[string]string{"opened_at": "opened_at", "case_number": "case_number",
+			"status": "status", "qpa_cents": "qpa_cents", "service_line": "service_line"}
+		col, dir := s, "ASC"
+		if strings.HasPrefix(s, "-") {
+			col, dir = strings.TrimPrefix(s, "-"), "DESC"
+		}
+		if c, ok := whitelist[col]; ok {
+			sortCol, sortDir = c, dir
+		}
+	}
+	offsetMode := sortCol != "opened_at" || sortDir != "DESC"
+	offset := 0
+	if offsetMode {
+		if n, err := strconv.Atoi(q.Get("offset")); err == nil && n >= 0 {
+			offset = n
+		}
+	} else if cur := q.Get("cursor"); cur != "" {
+		parts := strings.SplitN(cur, "|", 2)
+		if len(parts) == 2 {
+			if ts, err := time.Parse(time.RFC3339Nano, parts[0]); err == nil {
+				args = append(args, ts, parts[1])
+				where += fmt.Sprintf(" AND (opened_at, id) < ($%d, $%d::uuid)", len(args)-1, len(args))
+			}
+		}
+	}
+	tbl := sanitizeTenant(tenant)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT count(*) FROM tenant_%s.cases WHERE true%s`, tbl, where), args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	query := fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
+		             FROM tenant_%s.cases WHERE true%s
+		             ORDER BY %s %s, id DESC LIMIT %d`, tbl, where, sortCol, sortDir, limit+1)
+	if offsetMode {
+		query += fmt.Sprintf(" OFFSET %d", offset)
+	}
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -503,23 +841,42 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 			out = append(out, c)
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		if offsetMode {
+			next = fmt.Sprintf("offset:%d", offset+limit)
+		} else {
+			last := out[len(out)-1]
+			next = last.OpenedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cases": out, "next_cursor": next, "total": total})
 }
 
 func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	var c Case
+	var details []byte
+	var internal, agency *string
 	err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
+		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at,
+		                    internal_status, agency_status, details
 		             FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).
-		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.OpenedAt)
+		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.OpenedAt, &internal, &agency, &details)
 	if err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	c.Tenant = tenant
-	writeJSON(w, http.StatusOK, c)
+	var dj map[string]any
+	_ = json.Unmarshal(details, &dj)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": c.ID, "case_number": c.CaseNumber, "tenant": c.Tenant, "status": c.Status,
+		"service_line": c.ServiceLine, "qpa_cents": c.QPA, "opened_at": c.OpenedAt,
+		"internal_status": internal, "agency_status": agency, "details": dj,
+	})
 }
 
 // signalCase forwards business signals into the running workflow.
@@ -555,6 +912,7 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	detail, _ := json.Marshal(body.Data)
 	s.logActivity(r.Context(), tenant, id, body.Signal,
 		fmt.Sprintf("Workflow signal %s delivered to %s — %s", body.Signal, wfID, truncate(string(detail), 500)))
+	s.graphSync(tenant) // graph reflects status transitions (best-effort)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
 }
 
@@ -585,8 +943,50 @@ func acctID(tenant string, code uint32, party string) tb_types.Uint128 {
 	return tb_types.BytesToUint128(b)
 }
 
+func hash16(parts ...string) tb_types.Uint128 {
+	h := sha256.Sum256([]byte(strings.Join(parts, ":")))
+	var b [16]byte
+	copy(b[:], h[:16])
+	return tb_types.BytesToUint128(b)
+}
+
+// transferIDs returns (id, pendingID) for a fee-transfer request. id is this
+// transfer's own TigerBeetle ID; pendingID is what to set on the Transfer's
+// PendingID field (zero for a PENDING transfer, which doesn't reference one).
+//
+// The original code here used ONE id, hashed without postKind, for all three
+// postKind values, and never set PendingID. A POST or VOID call therefore
+// tried to create a second transfer under the SAME id as the original
+// pending one, with PendingID left at zero -- TigerBeetle requires PendingID
+// on a post/void transfer (zero -> immediate TransferPendingIDMustNotBeZero)
+// and separately rejects a second transfer at an id that already exists
+// under different flags (TransferExistsWithDifferentFlags, confirmed live
+// on the sibling deployment of this same endpoint on the main branch) --
+// every two-phase transfer was permanently stuck pending. Fix: a PENDING
+// transfer's id IS the reference other calls hash back to (unchanged);
+// POST/VOID hash postKind in too for their own distinct id and set
+// PendingID to the pending transfer's id so TigerBeetle can find it.
+func transferIDs(caseID, kind, partyID string, amount uint64, postKind string) (id, pendingID tb_types.Uint128) {
+	pendingID = hash16(caseID, kind, partyID, fmt.Sprint(amount))
+	if postKind == "POST" || postKind == "VOID" {
+		return hash16(caseID, kind, partyID, fmt.Sprint(amount), postKind), pendingID
+	}
+	return pendingID, tb_types.Uint128{}
+}
+
 func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// RBAC floor: requirePerm (below) is the real fine-grained gate, but it
+	// unconditionally allows everyone when Permify isn't deployed (permify.go:
+	// "disabled (allow) in dev when unset"). This role check is the floor
+	// that holds even with Permify absent -- confirmed on this same endpoint
+	// in the sibling deployment (main branch) that an ARBITRATOR reached
+	// TigerBeetle and posted a transfer with no role check at all in front of it.
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	// ReBAC: object-level permit on this tenant's ledger (fail-closed).
 	if !s.requirePerm(w, r, "ledger", tenant, "transact") {
 		return
@@ -607,12 +1007,7 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	default: // SETTLEMENT
 		debit, credit = acctID(tenant, acctEscrowTrustHeld, req.PartyID), acctID(tenant, acctRefundPayable, "")
 	}
-	ih := sha256.Sum256([]byte(
-		fmt.Sprintf("%s:%s:%s:%d", req.CaseID, req.Kind, req.PartyID, req.Amount)))
-	var idb [16]byte
-	copy(idb[:], ih[:16])
-	id := tb_types.BytesToUint128(idb) // idempotency key
-
+	id, transferPendingID := transferIDs(req.CaseID, req.Kind, req.PartyID, req.Amount, req.PostKind)
 	var flags uint16
 	switch req.PostKind {
 	case "PENDING":
@@ -627,6 +1022,7 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 		DebitAccountID:  debit,
 		CreditAccountID: credit,
 		Amount:          tb_types.ToUint128(req.Amount),
+		PendingID:       transferPendingID,
 		Ledger:          tenantLedgerID(tenant),
 		Code:            ledgerCodeIDRE,
 		Flags:           flags,
@@ -758,9 +1154,17 @@ func (s *server) voiceIntake(w http.ResponseWriter, r *http.Request) {
 
 // voiceEvents receives platform → us webhooks (call.completed etc.), HMAC-verified.
 func (s *server) voiceEvents(w http.ResponseWriter, r *http.Request) {
-	body := make([]byte, 1<<20)
-	n, _ := r.Body.Read(body)
-	body = body[:n]
+	// A single net.Conn Read() is not guaranteed to return the whole body
+	// (plain io.Reader semantics, not io.ReadAll). Confirmed on the sibling
+	// deployment of this same endpoint: a genuinely, correctly HMAC-signed
+	// ~300KB webhook (a realistic call transcript) got silently truncated
+	// here, hashed as a partial body, and rejected as "bad signature" -- a
+	// small test payload passed, which is exactly how this went unnoticed.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, `{"error":"body too large or unreadable"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
 	sig := r.Header.Get("X-Signature")
 
 	// Resolve tenant by looking up the secret per known header hint, then verify.
@@ -807,4 +1211,12 @@ func sanitizeTenant(t string) string {
 		}
 	}
 	return t
+}
+
+// isUniqueViolation reports whether err is Postgres error code 23505
+// (unique_violation) -- a client-error condition (the row already exists),
+// distinct from an actual server fault.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

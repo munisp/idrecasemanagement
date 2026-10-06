@@ -98,3 +98,67 @@ doc_analysis, stakeholder_applications, idre_directory, npi_cache).
 - **Go** — case-api (control plane, auth, CRUD, ledger client, Redis, Permify)
 - **Rust** — vault (seal/reveal cryptography)
 - **Python** — Temporal workflows, doc-intel, outbox relay, edge bridge, analytics (Spark/Flink/DataFusion/Ray/Sedona)
+
+---
+
+## 6. Round 2 — engine enhancements (2026-10-01)
+
+**Backend (case-api, `engines.go`):**
+
+| Route | Capability | UI trigger |
+|---|---|---|
+| GET /cases/clocks | Batch statutory-clock projection (all open cases): remaining business/calendar days, state (ok/watch/risk/breach), CFR cite, basis provenance | Disputes grid "Statutory clock" column, dashboard attention sort |
+| GET /cases/{id}/clocks | Per-case projection | Case workspace SLA cluster |
+| POST /cases/bulk | Bulk assign/status, ≤200 items, per-item results, activity + outbox events | Grid selection bulk bar |
+| POST /queues/grab-next | Atomic queue claim (FOR UPDATE SKIP LOCKED) | "Grab next" button + ⌘K action |
+| saved_views.pinned | Pinned views sort first (DDL + save/list) | ★ in saved-views dropdown |
+| account360.health | Relationship health score (100 − 8×open − 20×breaches) with band + formula | Account 360 health card |
+
+**Frontend (portal):**
+- `js/ui.js` — modal dialogs (focus-trapped, Esc, required-field inline validation) +
+  toasts with undo and aria-live. **All `prompt()`/`alert()` removed** (anti-pattern #13):
+  escalate, relate, fee transfer, assign, letters, save view, lead convert, onboarding
+  decide, sealed offer, determination.
+- `js/palette.js` — ⌘K command palette: navigation, actions (incl. grab-next), fuzzy
+  record search, recent records.
+- Disputes grid: SLA clock column, row selection + bulk action bar, density toggle
+  (comfortable/compact, persisted), L4 peek panel (preview without losing list position).
+- Case workspace: server-projected SLA cluster with CFR citations in the header.
+- Dashboard: "Needs your attention" sorted by nearest statutory clock.
+- Account 360: relationship-health card with formula disclosure.
+
+`demo.js` fixtures extended for every new endpoint; `go build`/`go vet` clean; all JS syntax-checked.
+
+## 7. Round 3 — graph intelligence (FalkorDB + GraphSAGE + EPR-KGQA)
+
+- **graph-intel-py** (new service, port 8082): FalkorDB dispute graph (one graph per
+  tenant), bidirectional lakehouse bridge (bronze JSONL / silver / gold parquet via
+  pyarrow), numpy GraphSAGE link predictor (residual mean-aggregator, cosine decoder,
+  manual backprop, negative sampling with positive exclusion — no torch dependency),
+  EPR-KGQA (entity linking -> path retrieval -> GNN ranking -> ollama answer, with a
+  clearly-labeled deterministic extractive composer when ollama is unreachable),
+  ART-ready kgqa_logs parquet + thumbs feedback that reinforces retrieved edges
+  (kgqa -> gnn loop).
+- **case-api graph.go** (new): authenticated tenant-scoped proxy endpoints
+  (/graph/ask, /graph/feedback, /graph/sync, /graph/to-lakehouse, /graph/train,
+  /cases/{id}/related, /cases/{id}/graph-neighbors) + best-effort graph resync nudge
+  on case initiate/signal. `GRAPH_INTEL_URL` config (compose-wired).
+- **Portal**: `#/ask` view (cited answers, entity chips, evidence paths, feedback
+  buttons), case-workspace "Suggested related disputes" GNN panel, palette actions
+  (Ask / Sync / Train), demo fixtures mirroring the service response shapes.
+  Capacitor native app ships the same assets (webDir="."); splash color aligned to
+  Meridian ink.
+- compose: falkordb, ollama, graph-intel services + lakehouse volume.
+- [ASSUMPTION] "ART" = OpenPipe ART: logs are produced in its schema; no RL training
+  loop is run (documented in docs/GRAPH-INTELLIGENCE.md).
+
+## 8. Round 4 — cross-tenant access model
+
+- **Tenancy middleware** now implements the full matrix: PLATFORM_ADMIN /
+  FEDERAL_ADMIN read+write in all 50 state tenants; STATE_AUDITOR read-only
+  (GET/HEAD/OPTIONS) in all 50 — writes rejected even in the auditor's home
+  tenant (`isAuditorOnly`); everyone else limited to `/tenant/<st>` group claims.
+- **Portal tenant switcher**: cross-tenant roles get a 50-state (+DC) dropdown in
+  the topbar chip; pure auditors additionally see a "read-only audit" badge.
+  Tenant choice persists in localStorage; write actions stay hidden for auditors
+  because every write button is gated on operational roles.

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NSA IDRE Platform — Feature ↔ Service ↔ Data Map</title>
+<style>
+:root{--ink:#0f1f1a;--mut:#5b6b64;--line:#d8e0dc;--card:#fff;--bg:#f4f7f5;--acc:#123B2F;--hl:#f59e0b;--ok:#047857}
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:28px;line-height:1.45}
+h1{font-size:22px;margin:0}h2{font-size:15px;margin:26px 0 8px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.sub{color:var(--mut);font-size:13px;margin-top:4px}
+.layer{margin:14px 0}
+.layer>.lt{font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+.n{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 11px;font-size:12.5px;cursor:default;position:relative}
+.n b{display:block;font-size:12.5px}.n small{color:var(--mut);display:block;font-size:11px}
+.n[data-f]{cursor:pointer}.n[data-f]:hover{border-color:var(--acc)}
+.n.hit{border-color:var(--hl);background:#fffbeb;box-shadow:0 0 0 2px var(--hl)}
+.n.store{border-left:4px solid var(--acc)}
+.n.ext{border-left:4px solid #7c3aed}
+.n.mw{border-left:4px solid #0369a1}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--mut);margin:10px 0}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.chip{border:1px solid var(--acc);color:var(--acc);background:#fff;border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer}
+.chip:hover{background:var(--acc);color:#fff}
+.trace{margin-top:8px;font-size:13px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:none}
+.trace.on{display:block}
+.trace .step{margin:4px 0;font-size:12.5px}
+.trace .step b{color:var(--acc)}
+.arrow{color:var(--mut);margin:0 4px}
+table{border-collapse:collapse;width:100%;background:#fff;font-size:12.5px}th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}th{background:#eef3f0;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+code{background:#eef3f0;padding:1px 5px;border-radius:4px;font-size:11.5px}
+.guarantee{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;padding:12px 14px;font-size:13px;margin:8px 0}
+</style>
+</head>
+<body>
+<h1>NSA IDRE Platform — Feature ↔ Service ↔ Data Map</h1>
+<p class="sub">Auto-verified: 77/77 frontend API calls resolve to Go routes; every route maps to its tables/services below. Click a feature chip to trace its full data path. Green = data-loss guarantee.</p>
+
+<div class="legend">
+  <span><i style="background:#123B2F"></i>data store</span>
+  <span><i style="background:#0369a1"></i>middleware</span>
+  <span><i style="background:#7c3aed"></i>external service</span>
+  <span><i style="background:#f59e0b"></i>traced path (click a feature)</span>
+</div>
+
+<div class="chips" id="chips"></div>
+<div class="trace" id="trace"></div>
+
+<h2>1 · Channels (frontend surfaces)</h2>
+<div class="layer row" id="L1"></div>
+
+<h2>2 · Middleware chain (every request)</h2>
+<div class="layer row" id="L2"></div>
+
+<h2>3 · case-api-go route groups (101 routes)</h2>
+<div class="layer row" id="L3"></div>
+
+<h2>4 · Backend services</h2>
+<div class="layer row" id="L4"></div>
+
+<h2>5 · Data stores</h2>
+<div class="layer row" id="L5"></div>
+
+<h2>6 · Route → table ledger (verified from source)</h2>
+<div id="tablewrap"></div>
+
+<h2>7 · Data-loss guarantees</h2>
+<div class="guarantee"><b>Writes:</b> multi-step writes run in Postgres transactions (case initiate = row + outbox event in ONE tx; bulk claims = tx with rollback). External events go through the <b>transactional outbox</b> (<code>tenant_*.outbox</code> → relay → Kafka) — an event can never be lost after the row commits. Idempotency keys (Redis) make mobile/PWA retries replay instead of duplicate.</div>
+<div class="guarantee"><b>Documents:</b> files are vault-sealed before MinIO; metadata row + doc-intel event + timeline entry + correspondence log written together; ShareBox consumes link uses atomically (<code>UPDATE … WHERE uses &lt; max_uses RETURNING</code>) so concurrent use can't double-spend.</div>
+<div class="guarantee"><b>Money:</b> Stripe webhook settles invoice + writes <code>payments</code> + <code>financial_events</code> + TigerBeetle double-entry leg (deterministic id = sha256(payment_intent) — webhook retries idempotent). QA-gated email: nothing leaves <code>qa_reviews</code> as SENT without approval + <code>correspondence_log</code> entry.</div>
+<div class="guarantee"><b>Reads:</b> clocks are projections re-computed per request — no stale materialized state to lose. KGQA answers persist to <code>kgqa_logs</code> parquet (gold zone) regardless of ollama availability.</div>
+
+<script>
+const N = {
+L1:[["PWA Portal","vanilla JS · hash router · 17 views"],["Native Mobile","Capacitor — same assets"],["ShareBox landing","no-login public page"],["Voice/IVR","API-key tools surface"],["Email inbound","provider webhook"],["Stripe webhook","HMAC-signed"]],
+L2:[["OIDC JWT","Keycloak JWKS verify"],["Tenancy guard","schema pin · tenant group claim"],["ReBAC","Permify object-level"],["Read-only auditor","GET/HEAD only · 50 states"],["Rate limit","Redis per-IP / per-token"],["Idempotency","Redis Idempotency-Key"],["Malware scan","ClamAV INSTREAM · fail-closed"],["Content policy","magic bytes · ext blocklist"],["Audit/activity","case_activities timeline"]],
+L3:[["Cases /cases/*","initiate·signal·bulk·clocks"],["CRM /accounts|leads|tasks|notes","+360 +search"],["Docs /documents*","upload·download·analysis"],["Program /program|eligibility|status","rules engine"],["Correspondence /correspondence|/qa","QA gate"],["Money /invoices|payments|checkout","Stripe + ledger"],["Claims /claims","bulk 5k batches"],["Share /share-links","token minting"],["Graph /graph/*","KGQA·GNN proxy"],["Reports /reports/*","sla·summary·financial"],["Onboarding /onboarding/*","IDRE directory"],["Prefs/Views /prefs|/views","server-side state"]],
+L4:[["Temporal","durable case workflow timers"],["doc-intel","OCR+VLM pipeline"],["graph-intel","FalkorDB·GraphSAGE·EPR-KGQA"],["vault (Rust)","seal/open · HKDF tenant keys"],["outbox relay","PG → Kafka"],["analytics","lakehouse bronze→gold"],["voice bridge","call webhooks"]],
+L5:[["Postgres public.*","33 shared tables"],["Postgres tenant_*.*","schema per state ×50"],["TigerBeetle","double-entry ledger"],["MinIO","encrypted objects · WORM"],["Redis","cache·rate·idempotency"],["FalkorDB","graph per tenant idre_<st>"],["Lakehouse parquet","bronze/silver/gold"],["Kafka","domain events"],["Stripe","card collection (ext)"],["ClamAV","signatures (ext)"],["Keycloak","identity (ext)"]],
+};
+
+const TABLES = [
+["Cases lifecycle","tenant_*.cases, tenant_*.outbox, public.sla_breaches, public.case_activities","Temporal workflow; graph sync nudge"],
+["Documents & docket","tenant_*.documents (+filename,folder,parts,scan_status), public.doc_analysis","vault→MinIO; Kafka doc.uploaded; ClamAV"],
+["CRM","public.accounts, contacts, leads, tasks, notes, case_activities","—"],
+["Queues & assignment","tenant_*.cases (assigned_to/role), public.tasks, notifications","FOR UPDATE SKIP LOCKED"],
+["Program rules","public.program_rules, eligibility_reviews, opt_out_decisions","program_dates jsonb on cases"],
+["Correspondence & QA","public.qa_reviews, correspondence_log, share_links","outbound adapter (pending provider choice)"],
+["ShareBox","public.share_links, share_uploads, tenant_*.documents","vault→MinIO multipart; ClamAV"],
+["Money","public.invoices, payments, financial_events","Stripe API/webhook; TigerBeetle legs"],
+["Claims","public.case_claims, tenant_*.cases","escalation trigger >$1M"],
+["Intake","public.intake_requests","refund window from program_rules"],
+["Deliverables","public.deliverables + program_rules schedule","—"],
+["Graph intel","FalkorDB idre_<st>; lakehouse parquet; kgqa_logs","graph-intel service"],
+["Reports","sla_breaches, cases, invoices, payments, financial_events","read models"],
+["Notifications & prefs","public.notifications, saved_views, user_prefs","—"],
+["Onboarding","public.stakeholder_applications, idre_directory","—"],
+["Voice","public.voice_call_logs, voice_intake_requests, voice_configs","voice bridge"],
+["Email inbound","public.case_activities, leads, tenant_*.cases","provider webhook"],
+];
+
+const FLOWS = {
+"Initiate a dispute": ["PWA: form → POST /cases/initiate (+Idempotency-Key)","OIDC+tenancy+ReBAC","tx: tenant_<st>.cases INSERT + outbox event (atomic)","Temporal IdrCaseWorkflow starts statutory timers","graph-intel sync nudge → FalkorDB + lakehouse silver","outbox relay → Kafka idre.<st>.cases"],
+"Party uploads evidence (ShareBox)": ["Public link → GET /api/share/{token} landing","throttle: IP+token rate limits, link budgets","chunk PATCH: content policy → ClamAV → vault seal part → MinIO part","complete: assembled rescan → documents row (PARTY_UPLOADS) → use consumed atomically","Kafka doc.uploaded → doc-intel OCR","activity + correspondence_log + staff notify"],
+"Case payment by card": ["Portal: pay-by-card → POST /invoices/{id}/checkout","Stripe Checkout Session; payments row PENDING","webhook (HMAC verified): payment PAID","invoice PAID (remittance=payment_intent) + financial_events IN","TigerBeetle: STRIPE_CLEARING → ESCROW(party)","activity PAYMENT_RECEIVED"],
+"Ask the graph (KGQA)": ["PWA ✦ Ask → POST /graph/ask","tenancy injects idre_<st> graph","graph-intel: entity link → path retrieve → GNN rank → ollama answer","kgqa_logs parquet (ART-ready) + activity log","feedback thumbs → RELATED_TO edge reinforcement"],
+"Eligibility review (FL)": ["Case detail → POST /cases/{id}/eligibility","program_rules: threshold matrix + 12-mo window + flags","eligibility_reviews row with evidence","HOLD_AOR → attorney notify; INELIGIBLE → closure status","activity + dual-status update"],
+"QA-gated dismissal letter": ["Correspondence panel → template dismissal (qa_role ATTORNEY)","qa_reviews PENDING — nothing sent","QA gate view: approve → SENT + correspondence_log OUT","reject → REJECTED + note in timeline"],
+"Bulk claim import (21k)": ["POST /cases/{id}/claims (≤5000/batch, idempotent per claim_number)","tx: case_claims upsert + running totals on case","disputed_amount ≥ $1M → auto-escalation + PM notify"],
+};
+
+for (const [k, items] of Object.entries(N)) {
+  document.getElementById(k).innerHTML = items.map(([t,d]) =>
+    `<div class="n ${k==='L5'?'store':k==='L2'?'mw':''}"><b>${t}</b><small>${d}</small></div>`).join("");
+}
+document.getElementById("tablewrap").innerHTML =
+  `<table><thead><tr><th>Feature group</th><th>Tables / stores</th><th>Adjacent services</th></tr></thead><tbody>` +
+  TABLES.map(r=>`<tr><td>${r[0]}</td><td><code>${r[1]}</code></td><td>${r[2]}</td></tr>`).join("") + `</tbody></table>`;
+document.getElementById("chips").innerHTML = Object.keys(FLOWS).map(f=>`<span class="chip">${f}</span>`).join("");
+document.querySelectorAll(".chip").forEach(c => c.onclick = () => {
+  const t = document.getElementById("trace");
+  t.classList.add("on");
+  t.innerHTML = `<b>${c.textContent}</b>` + FLOWS[c.textContent].map((s,i)=>`<div class="step">${i+1}. <b>${s.split(" → ")[0].split(":")[0]}</b>${s.includes("→")||s.includes(":")?" — "+s.substring(s.indexOf(" ")+1):""}</div>`).join("");
+  t.scrollIntoView({behavior:"smooth", block:"nearest"});
+});
+</script>
+</body>
+</html>

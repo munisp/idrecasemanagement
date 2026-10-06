@@ -124,6 +124,14 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 func (s *server) escalateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	// RBAC floor (requirePerm below allows everyone when Permify is
+	// undeployed). SERVICE_WORKER is the Temporal worker's own automated-
+	// escalation call (WORKER_TOKEN auth in authn.middleware).
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	// ReBAC: escalation is a staff-only object-level permission.
 	if !s.requirePerm(w, r, "dispute_case", caseID, "escalate") {
 		return
@@ -287,8 +295,8 @@ func (s *server) listSavedViews(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	out, _ := s.queryRows(r, `
-		SELECT id, object, name, filters FROM public.saved_views
-		WHERE tenant=$1 AND user_sub=$2 ORDER BY name`, tenant, p.Subject)
+		SELECT id, object, name, filters, pinned FROM public.saved_views
+		WHERE tenant=$1 AND user_sub=$2 ORDER BY pinned DESC, name`, tenant, p.Subject)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -299,6 +307,7 @@ func (s *server) saveView(w http.ResponseWriter, r *http.Request) {
 		Object  string         `json:"object"`
 		Name    string         `json:"name"`
 		Filters map[string]any `json:"filters"`
+		Pinned  bool           `json:"pinned"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" || in.Object == "" {
 		http.Error(w, `{"error":"object and name required"}`, http.StatusBadRequest)
@@ -306,10 +315,10 @@ func (s *server) saveView(w http.ResponseWriter, r *http.Request) {
 	}
 	filters, _ := json.Marshal(in.Filters)
 	_, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.saved_views (tenant, user_sub, object, name, filters)
-		VALUES ($1,$2,$3,$4,$5)
-		ON CONFLICT (tenant, user_sub, object, name) DO UPDATE SET filters=$5`,
-		tenant, p.Subject, in.Object, in.Name, filters)
+		INSERT INTO public.saved_views (tenant, user_sub, object, name, filters, pinned)
+		VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT (tenant, user_sub, object, name) DO UPDATE SET filters=$5, pinned=$6`,
+		tenant, p.Subject, in.Object, in.Name, filters, in.Pinned)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

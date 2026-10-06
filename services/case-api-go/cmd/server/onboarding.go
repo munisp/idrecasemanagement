@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +28,31 @@ type OnboardingApplication struct {
 	SubmittedAt time.Time      `json:"submitted_at"`
 }
 
+// createApplication inserts the application row and starts the durable
+// onboarding workflow. Shared by the authenticated and public front doors.
+func (s *server) createApplication(r *http.Request, tenant string, in OnboardingApplication) (appID, wfID string, err error) {
+	payload, _ := json.Marshal(in.Payload)
+	err = s.db.QueryRow(r.Context(), `
+		INSERT INTO public.stakeholder_applications
+		  (tenant, type, legal_name, ein_masked, npi, payload, status)
+		VALUES ($1,$2,$3,$4,$5,$6,'SUBMITTED') RETURNING id`,
+		tenant, in.Type, in.LegalName, maskEIN(in.EIN), in.NPI, payload).Scan(&appID)
+	if err != nil {
+		return "", "", err
+	}
+	wfID = fmt.Sprintf("ONB-%s-%s", tenant, appID)
+	_, err = s.tc.ExecuteWorkflow(r.Context(), temporalclient.StartWorkflowOptions{
+		ID: wfID, TaskQueue: "idre-onboarding",
+	}, "StakeholderOnboardingWorkflow", map[string]any{
+		"tenant": tenant, "application_id": appID, "type": in.Type,
+		"legal_name": in.LegalName, "ein": in.EIN, "npi": in.NPI, "payload": in.Payload,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return appID, wfID, nil
+}
+
 // submitApplication: POST /v1/tenants/{tenant}/onboarding/applications
 // Creates the application row and starts the durable onboarding workflow.
 func (s *server) submitApplication(w http.ResponseWriter, r *http.Request) {
@@ -36,28 +62,66 @@ func (s *server) submitApplication(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"legal_name and type required"}`, http.StatusBadRequest)
 		return
 	}
-	payload, _ := json.Marshal(in.Payload)
-	var appID string
-	err := s.db.QueryRow(r.Context(), `
-		INSERT INTO public.stakeholder_applications
-		  (tenant, type, legal_name, ein_masked, npi, payload, status)
-		VALUES ($1,$2,$3,$4,$5,$6,'SUBMITTED') RETURNING id`,
-		tenant, in.Type, in.LegalName, maskEIN(in.EIN), in.NPI, payload).Scan(&appID)
-	if err != nil {
-		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-		return
-	}
-	wfID := fmt.Sprintf("ONB-%s-%s", tenant, appID)
-	_, err = s.tc.ExecuteWorkflow(r.Context(), temporalclient.StartWorkflowOptions{
-		ID: wfID, TaskQueue: "idre-onboarding",
-	}, "StakeholderOnboardingWorkflow", map[string]any{
-		"tenant": tenant, "application_id": appID, "type": in.Type,
-		"legal_name": in.LegalName, "ein": in.EIN, "npi": in.NPI, "payload": in.Payload,
-	})
+	appID, wfID, err := s.createApplication(r, tenant, in)
 	if err != nil {
 		http.Error(w, `{"error":"workflow start failed"}`, http.StatusBadGateway)
 		return
 	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"application_id": appID, "workflow_id": wfID, "status": "SUBMITTED",
+	})
+}
+
+// publicApply: POST /api/public/apply — the no-login front door for external
+// stakeholders (provider orgs, payer orgs, IDRE entities, auditors) from the
+// landing site. Abuse controls: strict per-IP throttle (10/hour), tenant
+// validated against state_config, type whitelist, body size cap. ADMIN_STAFF is
+// deliberately NOT accepted here — staff are provisioned by admins, never by
+// self-service. Applicant contact details ride in payload.
+func (s *server) publicApply(w http.ResponseWriter, r *http.Request) {
+	ip := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.Split(fwd, ",")[0]
+	}
+	if !s.rateLimit("apply:"+ip, 10, 3600) {
+		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var in OnboardingApplication
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.LegalName == "" || in.Type == "" || in.Tenant == "" {
+		http.Error(w, `{"error":"tenant, type and legal_name required"}`, http.StatusBadRequest)
+		return
+	}
+	switch in.Type {
+	case "IDRE_ENTITY", "PROVIDER_ORG", "PAYER_ORG", "STATE_AUDITOR_ORG":
+	default:
+		http.Error(w, `{"error":"unsupported organization type"}`, http.StatusBadRequest)
+		return
+	}
+	tenant := strings.ToLower(strings.TrimSpace(in.Tenant))
+	var exists bool
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM public.state_config WHERE tenant=$1)`, tenant).Scan(&exists); err != nil || !exists {
+		http.Error(w, `{"error":"unknown state program"}`, http.StatusBadRequest)
+		return
+	}
+	if in.Payload == nil {
+		in.Payload = map[string]any{}
+	}
+	email, _ := in.Payload["contact_email"].(string)
+	if email == "" || !strings.Contains(email, "@") {
+		http.Error(w, `{"error":"contact_email required"}`, http.StatusBadRequest)
+		return
+	}
+	in.Payload["source"] = "PUBLIC_LANDING"
+	appID, wfID, err := s.createApplication(r, tenant, in)
+	if err != nil {
+		http.Error(w, `{"error":"submission failed"}`, http.StatusBadGateway)
+		return
+	}
+	s.notify(r, tenant, "*", "ONBOARDING",
+		fmt.Sprintf("New public %s application: %s", in.Type, in.LegalName), "#/onboarding")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"application_id": appID, "workflow_id": wfID, "status": "SUBMITTED",
 	})

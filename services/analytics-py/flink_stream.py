@@ -21,7 +21,7 @@ def main() -> None:
     source = (
         KafkaSource.builder()
         .set_bootstrap_servers(BROKERS)
-        .set_topics("idre.tx.cases", "idre.tx.offers", "idre.tx.fees")
+        .set_topics("idre.tx.cases", "idre.tx.offers", "idre.tx.fees", "idre.tx.rules", "idre.tx.documents")
         .set_group_id("flink-bronze")
         .set_starting_offsets(KafkaOffsetsInitializer.earliest())
         .set_value_only_deserializer(SimpleStringSchema())

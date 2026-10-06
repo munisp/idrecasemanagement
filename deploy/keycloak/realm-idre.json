@@ -3,77 +3,211 @@
   "enabled": true,
   "sslRequired": "external",
   "registrationAllowed": false,
-  "attributes": { "business-unit": "cms-federal-idr" },
+  "attributes": {
+    "business-unit": "cms-federal-idr"
+  },
   "clients": [
     {
       "clientId": "case-portal",
       "publicClient": true,
-      "directAccessGrantsEnabled": false,
+      "directAccessGrantsEnabled": true,
       "standardFlowEnabled": true,
-      "redirectUris": ["https://portal.example.org/*", "http://localhost:5173/*"],
-      "webOrigins": ["https://portal.example.org", "http://localhost:5173"],
-      "attributes": { "pkce.code.challenge.method": "S256" }
+      "redirectUris": [
+        "https://idre.newfire.app/*",
+        "https://portal.example.org/*",
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": [
+        "https://idre.newfire.app",
+        "https://portal.example.org",
+        "http://localhost:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "true",
+            "claim.name": "groups",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "case-api",
       "bearerOnly": true,
       "publicClient": false,
-      "secret": "change-me-in-production"
+      "secret": "change-me-in-production",
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "true",
+            "claim.name": "groups",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "voice-integration",
       "serviceAccountsEnabled": true,
       "publicClient": false,
-      "secret": "change-me-in-production"
+      "secret": "change-me-in-production",
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "true",
+            "claim.name": "groups",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "roles": {
     "realm": [
-      { "name": "PLATFORM_ADMIN" },
-      { "name": "FEDERAL_ADMIN" },
-      { "name": "CASE_MANAGER" },
-      { "name": "ARBITRATOR" },
-      { "name": "STATE_AUDITOR" },
-      { "name": "FINANCE" },
-      { "name": "PARTY" }
+      {
+        "name": "PLATFORM_ADMIN"
+      },
+      {
+        "name": "FEDERAL_ADMIN"
+      },
+      {
+        "name": "CASE_MANAGER"
+      },
+      {
+        "name": "ARBITRATOR"
+      },
+      {
+        "name": "STATE_AUDITOR"
+      },
+      {
+        "name": "FINANCE"
+      },
+      {
+        "name": "PARTY"
+      }
     ]
   },
   "groups": [
-    { "name": "tenant/tx", "path": "/tenant/tx" },
-    { "name": "tenant/ny", "path": "/tenant/ny" },
-    { "name": "tenant/ca", "path": "/tenant/ca" }
-  ],
-  "protocolMappers": [
     {
-      "name": "groups",
-      "protocol": "openid-connect",
-      "protocolMapper": "oidc-group-membership-mapper",
-      "config": { "full.path": "true", "claim.name": "groups", "access.token.claim": "true" }
+      "name": "tenant/tx",
+      "path": "/tenant/tx"
+    },
+    {
+      "name": "tenant/ny",
+      "path": "/tenant/ny"
+    },
+    {
+      "name": "tenant/ca",
+      "path": "/tenant/ca"
     }
   ],
   "users": [
     {
       "username": "federal.admin",
       "enabled": true,
-      "credentials": [{ "type": "password", "value": "password123", "temporary": false }],
-      "realmRoles": ["FEDERAL_ADMIN"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "FEDERAL_ADMIN"
+      ],
+      "emailVerified": true,
+      "firstName": "Federal",
+      "lastName": "Admin",
+      "email": "federal.admin@idre.test"
     },
     {
       "username": "cm.tx",
       "enabled": true,
-      "credentials": [{ "type": "password", "value": "password123", "temporary": false }],
-      "realmRoles": ["CASE_MANAGER"],
-      "groups": ["/tenant/tx"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "CASE_MANAGER"
+      ],
+      "groups": [
+        "/tenant/tx"
+      ],
+      "emailVerified": true,
+      "firstName": "Case",
+      "lastName": "Manager",
+      "email": "cm.tx@idre.test"
     },
     {
       "username": "arbiter.tx",
       "enabled": true,
-      "credentials": [{ "type": "password", "value": "password123", "temporary": false }],
-      "realmRoles": ["ARBITRATOR"],
-      "groups": ["/tenant/tx"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "ARBITRATOR"
+      ],
+      "groups": [
+        "/tenant/tx"
+      ],
+      "emailVerified": true,
+      "firstName": "Arbiter",
+      "lastName": "TX",
+      "email": "arbiter.tx@idre.test"
+    },
+    {
+      "username": "auditor.tx",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "STATE_AUDITOR"
+      ],
+      "groups": [
+        "/tenant/tx"
+      ],
+      "emailVerified": true,
+      "firstName": "State",
+      "lastName": "Auditor",
+      "email": "auditor.tx@idre.test"
     }
   ],
   "bruteForceProtected": true,
   "passwordPolicy": "length(12) and digits(1) and upperCase(1) and specialChars(1) and notUsername",
-  "otpPolicyType": "totp"
+  "otpPolicyType": "totp",
+  "loginTheme": "idre"
 }

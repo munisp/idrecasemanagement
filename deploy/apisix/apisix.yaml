@@ -1,5 +1,30 @@
 # APISIX standalone mode: OIDC (Keycloak) + tenant context + open-appsec WAF hook.
 routes:
+  # Live-policy administration is more sensitive than ordinary case traffic:
+  # same OIDC, but a much tighter rate ceiling (rule edits are rare, human
+  # actions) so credential stuffing / token abuse can't hammer policy writes.
+  # APISIX prefers the more specific URI over the /v1/tenants/* wildcard below.
+  - id: case-api-rules-admin
+    uri: /v1/tenants/*/rules*
+    upstream:
+      type: roundrobin
+      nodes: { "case-api:8080": 1 }
+    plugins:
+      openid-connect:
+        bearer_only: true
+        client_id: case-api
+        client_secret: ${KEYCLOAK_CLIENT_SECRET}
+        discovery: ${KEYCLOAK_ISSUER}/.well-known/openid-configuration
+        realm: idre
+      limit-count:
+        count: 60
+        time_window: 60
+        rejected_code: 429
+      proxy-rewrite:
+        headers:
+          set:
+            X-Gateway: apisix
+
   - id: case-api
     uri: /v1/tenants/*
     upstream:

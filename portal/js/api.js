@@ -27,16 +27,27 @@ const Api = (() => {
   return {
     setTenant, getTenant,
     cases: {
-      list: () => req("GET", `${t()}/cases`),
+      // Keyset-paginated: {cases, next_cursor, total}. Legacy bare-array
+      // responses are normalized so older backends still work.
+      list: (params = {}) => {
+        const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
+        return req("GET", `${t()}/cases${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { cases: r, next_cursor: "", total: r.length } : r));
+      },
       get: (id) => req("GET", `${t()}/cases/${id}`),
       initiate: (payload) => req("POST", `${t()}/cases/initiate`, payload),
       signal: (id, signal, data) => req("POST", `${t()}/cases/${id}/signal`, { signal, data }),
-      upload: (id, file, sealed) => {
+      upload: (id, file, sealed, folder) => {
         const fd = new FormData();
         fd.append("file", file);
         if (sealed) fd.append("sealed", "true");
+        if (folder) fd.append("folder", folder);
         return req("POST", `${t()}/cases/${id}/documents`, fd, true);
       },
+      moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
+      zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
+      setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
+      lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
@@ -58,13 +69,26 @@ const Api = (() => {
       summary: () => req("GET", `${t()}/reports/summary`),
     },
     crm: {
-      accounts: (type) => req("GET", `${t()}/accounts${type ? `?type=${type}` : ""}`),
+      // Offset-paginated: {accounts, total, next_offset} (next_offset = -1 at end).
+      accounts: (type, params = {}) => {
+        const qs = new URLSearchParams({ ...(type ? { type } : {}), ...params }).toString();
+        return req("GET", `${t()}/accounts${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { accounts: r, total: r.length, next_offset: -1 } : r));
+      },
       createAccount: (p) => req("POST", `${t()}/accounts`, p),
       account360: (id) => req("GET", `${t()}/accounts/${id}/360`),
       createContact: (p) => req("POST", `${t()}/contacts`, p),
-      leads: () => req("GET", `${t()}/leads`),
+      leads: (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        return req("GET", `${t()}/leads${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { leads: r, total: r.length, next_offset: -1 } : r));
+      },
       convertLead: (id, type) => req("POST", `${t()}/leads/${id}/convert`, { type }),
-      tasks: (mine) => req("GET", `${t()}/tasks${mine ? "?mine=true" : ""}`),
+      tasks: (mine, params = {}) => {
+        const qs = new URLSearchParams({ ...(mine ? { mine: "true" } : {}), ...params }).toString();
+        return req("GET", `${t()}/tasks${qs ? "?" + qs : ""}`)
+          .then((r) => (Array.isArray(r) ? { tasks: r, total: r.length, next_offset: -1 } : r));
+      },
       createTask: (p) => req("POST", `${t()}/tasks`, p),
       completeTask: (id) => req("POST", `${t()}/tasks/${id}/complete`),
       addNote: (p) => req("POST", `${t()}/notes`, p),
@@ -82,7 +106,54 @@ const Api = (() => {
       readNotif: (id) => req("POST", `${t()}/notifications/${id}/read`),
       views: () => req("GET", `${t()}/views`),
       saveView: (p) => req("POST", `${t()}/views`, p),
+      clocks: (id) => req("GET", `${t()}/cases/${id}/clocks`),
+      allClocks: () => req("GET", `${t()}/cases/clocks`),
+      bulk: (p) => req("POST", `${t()}/cases/bulk`, p),
+      grabNext: () => req("POST", `${t()}/queues/grab-next`),
       letter: (caseId, template, qs) => req("POST", `${t()}/cases/${caseId}/letters/${template}${qs || ""}`),
+    },
+    graph: {
+      ask: (question, k) => req("POST", `${t()}/graph/ask`, { question, k }),
+      feedback: (logId, rating) => req("POST", `${t()}/graph/feedback`, { log_id: logId, rating }),
+      related: (caseId) => req("GET", `${t()}/cases/${caseId}/related`),
+      neighbors: (caseId) => req("GET", `${t()}/cases/${caseId}/graph-neighbors`),
+      sync: () => req("POST", `${t()}/graph/sync`),
+      train: (epochs) => req("POST", `${t()}/graph/train`, epochs ? { epochs } : {}),
+    },
+    prefs: {
+      all: () => req("GET", `${t()}/prefs`),
+      put: (key, value) => req("PUT", `${t()}/prefs`, { key, value }),
+    },
+    program: {
+      get: () => req("GET", `${t()}/program`),
+      rules: () => req("GET", `${t()}/rules`),
+      saveRules: (rules, note) => req("PUT", `${t()}/rules`, { rules, note }),
+      rulesAudit: () => req("GET", `${t()}/rules/audit`),
+      setDate: (caseId, key, value) => req("POST", `${t()}/cases/${caseId}/program-date`, { key, value }),
+      setStatus: (caseId, p) => req("POST", `${t()}/cases/${caseId}/status`, p),
+      eligibility: (caseId, p) => req("POST", `${t()}/cases/${caseId}/eligibility`, p),
+      optOut: (caseId, eligible, rationale) => req("POST", `${t()}/cases/${caseId}/opt-out`, { eligible, rationale }),
+      send: (caseId, p) => req("POST", `${t()}/cases/${caseId}/correspondence`, p),
+      correspondence: (caseId) => req("GET", `${t()}/cases/${caseId}/correspondence`),
+      shareLink: (caseId, kind, days) => req("POST", `${t()}/cases/${caseId}/share-links`, { kind, days_ttl: days }),
+      invoices: (caseId) => req("GET", `${t()}/cases/${caseId}/invoices`),
+      issueInvoice: (caseId, p) => req("POST", `${t()}/cases/${caseId}/invoices`, p),
+      settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
+      receivables: () => req("GET", `${t()}/reports/receivables`),
+      financial: () => req("GET", `${t()}/reports/financial`),
+      payments: (caseId) => req("GET", caseId ? `${t()}/cases/${caseId}/payments` : `${t()}/payments`),
+      checkout: (invId) => req("POST", `${t()}/invoices/${invId}/checkout`),
+      claims: (caseId) => req("GET", `${t()}/cases/${caseId}/claims`),
+      importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
+      qaQueue: () => req("GET", `${t()}/qa`),
+      qaGet: (id) => req("GET", `${t()}/qa/${id}`),
+      qaDecision: (id, decision, note) => req("POST", `${t()}/qa/${id}/decision`, { decision, note }),
+      intake: () => req("GET", `${t()}/intake`),
+      createIntake: (p) => req("POST", `${t()}/intake`, p),
+      advanceIntake: (id, status, caseId) => req("POST", `${t()}/intake/${id}/advance`, { status, case_id: caseId }),
+      deliverables: () => req("GET", `${t()}/deliverables`),
+      submitDeliverable: (p) => req("POST", `${t()}/deliverables`, p),
+      requestDeliverable: (name, contract_ref) => req("POST", `${t()}/deliverables/request`, { name, contract_ref }),
     },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),

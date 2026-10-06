@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Apply — Federal IDRE Platform</title>
+  <link rel="stylesheet" href="/css/site.css" />
+</head>
+<body>
+  <header class="site-nav">
+    <div class="wrap nav-row">
+      <a class="brand" href="/"><span class="brand-mark">ID</span> Federal IDRE Platform</a>
+      <nav class="nav-links"><a class="btn ghost" href="/app.html">Log in</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap apply-wrap">
+    <h1>Stakeholder onboarding application</h1>
+    <p class="muted">No account needed. Your application goes directly to the state
+      program's review team; on approval your organization is provisioned and your
+      contact receives portal credentials. Staff accounts are provisioned by your
+      organization's administrator — this form is for organizations, not employees.</p>
+
+    <form id="apply-form" class="apply-form" novalidate>
+      <label>State program *
+        <select id="f-state" required></select>
+      </label>
+      <label>Organization type *
+        <select id="f-type" required>
+          <option value="">Select…</option>
+          <option value="IDRE_ENTITY">IDRE entity (certified dispute-resolution entity)</option>
+          <option value="PROVIDER_ORG">Provider / facility organization</option>
+          <option value="PAYER_ORG">Health plan / payer organization</option>
+          <option value="STATE_AUDITOR_ORG">State auditor organization</option>
+        </select>
+      </label>
+      <label>Legal name *
+        <input id="f-name" required maxlength="200" placeholder="Exact legal entity name" />
+      </label>
+      <div class="grid2">
+        <label>EIN <input id="f-ein" maxlength="10" placeholder="XX-XXXXXXX (stored masked)" /></label>
+        <label>NPI <input id="f-npi" maxlength="10" placeholder="Providers: 10-digit NPI" /></label>
+      </div>
+      <div class="grid2">
+        <label>Contact name * <input id="f-contact" required maxlength="120" /></label>
+        <label>Contact email * <input id="f-email" type="email" required maxlength="200" /></label>
+      </div>
+      <label>Notes for the review team
+        <textarea id="f-notes" rows="4" maxlength="2000" placeholder="Fee schedule, COI attestation references, service lines…"></textarea>
+      </label>
+      <button class="btn solid lg" type="submit" id="f-submit">Submit application</button>
+      <p id="f-msg" class="form-msg" role="status"></p>
+    </form>
+  </main>
+
+  <footer class="site-foot"><div class="wrap">
+    <span>Federal IDRE Platform</span><span><a href="/">Home</a> · <a href="/app.html">Portal login</a></span>
+  </div></footer>
+
+  <script>
+    const STATES = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"];
+    const NAMES = {AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
+    const sel = document.getElementById("f-state");
+    sel.innerHTML = '<option value="">Select state…</option>' +
+      STATES.map(st => `<option value="${st.toLowerCase()}">${NAMES[st]} (${st})</option>`).join("");
+    const pre = new URLSearchParams(location.search).get("state");
+    if (pre) sel.value = pre.toLowerCase();
+
+    document.getElementById("apply-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById("f-msg"), btn = document.getElementById("f-submit");
+      msg.className = "form-msg"; msg.textContent = "";
+      const body = {
+        tenant: sel.value, type: document.getElementById("f-type").value,
+        legal_name: document.getElementById("f-name").value.trim(),
+        ein: document.getElementById("f-ein").value.trim(),
+        npi: document.getElementById("f-npi").value.trim(),
+        payload: {
+          contact_name: document.getElementById("f-contact").value.trim(),
+          contact_email: document.getElementById("f-email").value.trim(),
+          notes: document.getElementById("f-notes").value.trim(),
+        },
+      };
+      if (!body.tenant || !body.type || !body.legal_name || !body.payload.contact_email) {
+        msg.classList.add("err"); msg.textContent = "Please complete all required fields."; return;
+      }
+      btn.disabled = true; btn.textContent = "Submitting…";
+      try {
+        const resp = await fetch("/api/public/apply", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          msg.classList.add("ok");
+          msg.textContent = `Application received — reference ${data.application_id}. The ${sel.options[sel.selectedIndex].text} review team has been notified.`;
+          e.target.reset();
+        } else {
+          msg.classList.add("err");
+          msg.textContent = data.error ? `Submission failed: ${data.error}` : `Submission failed (${resp.status}). Please try again later.`;
+        }
+      } catch {
+        msg.classList.add("err"); msg.textContent = "Network error — please try again.";
+      } finally {
+        btn.disabled = false; btn.textContent = "Submit application";
+      }
+    });
+  </script>
+</body>
+</html>

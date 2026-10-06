@@ -24,7 +24,7 @@ tbctl --addresses "${TB_ADDRESSES:-localhost:3000}" create-accounts \
   --account "${TENANT}:4000:idre"  --account "${TENANT}:5000:refund"
 
 # Kafka topics with per-tenant prefix ACLs.
-for domain in cases offers fees audit voice; do
+for domain in cases offers fees audit voice documents rules; do
   kafka-topics.sh --bootstrap-server "${KAFKA_BROKERS:-localhost:9092}" \
     --create --if-not-exists --topic "idre.${TENANT}.${domain}" \
     --partitions 6 --replication-factor 3

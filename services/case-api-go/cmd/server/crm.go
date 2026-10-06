@@ -6,7 +6,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,6 +27,27 @@ type Account struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
+// pageParams: offset-based paging for the bounded CRM lists (accounts, tasks,
+// leads — thousands of rows at most, where OFFSET is cheap and sort orders
+// aren't keyset-friendly). Disputes use keyset pagination (listCases) instead.
+func pageParams(r *http.Request, def, max int) (limit, offset int) {
+	limit = def
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = min(n, max)
+	}
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n >= 0 {
+		offset = n
+	}
+	return limit, offset
+}
+
+func nextOffset(offset, limit, total int) int {
+	if offset+limit < total {
+		return offset + limit
+	}
+	return -1
+}
+
 func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	typ := r.URL.Query().Get("type")
@@ -35,7 +58,15 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		q += ` AND type=$2`
 		args = append(args, typ)
 	}
-	q += ` ORDER BY legal_name LIMIT 500`
+	limit, offset := pageParams(r, 100, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		strings.Replace(q, `SELECT id, tenant, type, legal_name, COALESCE(npi,''), COALESCE(phone,''),
+	             custom, created_at`, `SELECT count(*)`, 1), args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	q += fmt.Sprintf(` ORDER BY legal_name, id LIMIT %d OFFSET %d`, limit, offset)
 	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -51,7 +82,8 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 			out = append(out, a)
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accounts": out, "total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
@@ -103,12 +135,40 @@ func (s *server) account360(w http.ResponseWriter, r *http.Request) {
 		SELECT id, case_number, status, service_line FROM tenant_%s.cases
 		WHERE provider_id=$1 OR payer_id=$1 ORDER BY opened_at DESC LIMIT 50`, sanitizeTenant(tenant)), a.LegalName)
 	notes, _ := s.queryRows(r, `
-		SELECT body, author, created_at FROM public.notes
+		SELECT stream, body, author, created_at FROM public.notes
 		WHERE tenant=$1 AND record_type='ACCOUNT' AND record_id=$2
 		ORDER BY created_at DESC LIMIT 50`, tenant, id)
 
+	// Relationship health: computed from this account's dispute history — open load,
+	// breach exposure, and recency. The 360 "brief" surfaces this at a glance.
+	open, breaches := 0, 0
+	var lastTouch string
+	for _, c := range cases {
+		st, _ := c["status"].(string)
+		if !strings.HasPrefix(st, "CLOSED") && st != "SETTLED_IN_NEGOTIATION" {
+			open++
+		}
+	}
+	_ = s.db.QueryRow(r.Context(), `
+		SELECT COUNT(*), COALESCE(to_char(MAX(at),'YYYY-MM-DD"T"HH24:MI'),'')
+		FROM public.sla_breaches b
+		JOIN (SELECT $1::text AS acct) x ON true
+		WHERE b.tenant=$2`, id, tenant).Scan(&breaches, &lastTouch)
+	score := 100 - open*8 - breaches*20
+	if score < 0 {
+		score = 0
+	}
+	band := "healthy"
+	if score < 60 {
+		band = "at-risk"
+	} else if score < 85 {
+		band = "watch"
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account": a, "contacts": contacts, "cases": cases, "notes": notes,
+		"health": map[string]any{"score": score, "band": band, "open_disputes": open,
+			"sla_breaches": breaches, "formula": "100 − 8×open disputes − 20×SLA breaches"},
 	})
 }
 
@@ -143,10 +203,17 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(), `
+	limit, offset := pageParams(r, 100, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT count(*) FROM public.leads WHERE tenant=$1`, tenant).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, source, COALESCE(name,''), COALESCE(organization,''),
 		       COALESCE(phone,''), COALESCE(summary,''), status, created_at
-		FROM public.leads WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
+		FROM public.leads WHERE tenant=$1 ORDER BY created_at DESC, id LIMIT %d OFFSET %d`, limit, offset), tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -163,7 +230,8 @@ func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"leads": out, "total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 // convertLead: lead -> account (+ contact), marks lead CONVERTED.
@@ -228,7 +296,15 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 		q += ` AND assignee=$2`
 		args = append(args, p.Subject)
 	}
-	q += ` ORDER BY status, due_date NULLS LAST LIMIT 200`
+	limit, offset := pageParams(r, 100, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		strings.Replace(q, `SELECT id, subject, COALESCE(case_id,''), COALESCE(assignee,''),
+	             COALESCE(to_char(due_date,'YYYY-MM-DD'),''), status, created_at`, `SELECT count(*)`, 1), args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	q += fmt.Sprintf(` ORDER BY status, due_date NULLS LAST, id LIMIT %d OFFSET %d`, limit, offset)
 	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -246,7 +322,8 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks": out, "total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -292,15 +369,34 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		RecordType string `json:"record_type"`
 		RecordID   string `json:"record_id"`
+		Stream     string `json:"stream"` // internal|coder|clinical|legal|external_agency
 		Body       string `json:"body"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Body == "" {
 		http.Error(w, `{"error":"body required"}`, http.StatusBadRequest)
 		return
 	}
+	// Notes streams (Field Criteria): default internal; validate against the
+	// program's notes_streams list when one is seeded.
+	if in.Stream == "" {
+		in.Stream = "internal"
+	}
+	if prog := s.loadProgram(r, tenant); prog != nil && len(prog.NotesStreams) > 0 {
+		ok := false
+		for _, st := range prog.NotesStreams {
+			if st == in.Stream {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			http.Error(w, `{"error":"stream must be one of the program notes_streams"}`, http.StatusBadRequest)
+			return
+		}
+	}
 	_, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.notes (tenant, record_type, record_id, body, author)
-		VALUES ($1,$2,$3,$4,$5)`, tenant, in.RecordType, in.RecordID, in.Body, p.Subject)
+		INSERT INTO public.notes (tenant, record_type, record_id, stream, body, author)
+		VALUES ($1,$2,$3,$4,$5,$6)`, tenant, in.RecordType, in.RecordID, in.Stream, in.Body, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
