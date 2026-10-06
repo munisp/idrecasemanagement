@@ -141,6 +141,8 @@ const Api = (() => {
       settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
+      opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
+      pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status) => req("GET", `${t()}/checks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
       uploadCheck: (file) => {
