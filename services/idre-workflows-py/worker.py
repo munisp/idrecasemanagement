@@ -31,6 +31,11 @@ from workflows import (
     IdrCaseWorkflow, CmsMonthlyReportWorkflow, LedgerReconciliationWorkflow,
 )
 from onboarding import StakeholderOnboardingWorkflow, TenantOnboardingWorkflow
+from ahca_activities import (
+    set_dual_status, set_program_date, record_followup_action,
+    send_correspondence, set_case_outcome,
+)
+from ahca_workflow import AhcaDisputeWorkflow
 
 
 async def run_workers(client: Client) -> None:
@@ -62,7 +67,17 @@ async def run_workers(client: Client) -> None:
         max_concurrent_activities=50,
         max_concurrent_workflow_tasks=100,
     )
-    await asyncio.gather(worker.run(), onboarding_worker.run())
+    ahca_worker = Worker(
+        client,
+        task_queue="idre-ahca",
+        workflows=[AhcaDisputeWorkflow],
+        activities=[
+            set_dual_status, set_program_date, record_followup_action,
+            send_correspondence, set_case_outcome,
+            flag_cms_breach,  # reused as-is from activities.py -- generic, not CMS-specific at the DB/HTTP layer
+        ],
+    )
+    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run())
 
 
 # ---- Dapr binding listener ---------------------------------------------------

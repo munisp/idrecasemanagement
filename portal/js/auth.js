@@ -2,13 +2,18 @@
 const Auth = (() => {
   const cfg = window.IDRE_CONFIG;
   const base = `${cfg.keycloakUrl}/realms/${cfg.realm}/protocol/openid-connect`;
-  const K = { token: "idre.token", refresh: "idre.refresh", verifier: "idre.verifier" };
+  const K = { token: "idre.token", refresh: "idre.refresh", verifier: "idre.verifier", returnHash: "idre.returnHash" };
 
   const b64url = (buf) =>
     btoa(String.fromCharCode(...new Uint8Array(buf)))
       .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
   async function login() {
+    // Fragments never reach the server, so redirect_uri can't carry the
+    // deep-linked route (#/cases/abc, #/qa, ...) through the Keycloak round
+    // trip -- save it ourselves and restore it in handleCallback, otherwise
+    // every login always lands back on the bare path with no hash.
+    if (location.hash) sessionStorage.setItem(K.returnHash, location.hash);
     const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
     sessionStorage.setItem(K.verifier, verifier);
     const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -36,7 +41,9 @@ const Auth = (() => {
     const tok = await resp.json();
     sessionStorage.setItem(K.token, tok.access_token);
     sessionStorage.setItem(K.refresh, tok.refresh_token);
-    history.replaceState(null, "", location.pathname + location.hash);
+    const returnHash = sessionStorage.getItem(K.returnHash) || "";
+    sessionStorage.removeItem(K.returnHash);
+    history.replaceState(null, "", location.pathname + returnHash);
     return true;
   }
 

@@ -18,9 +18,31 @@ const Api = (() => {
     const data = resp.headers.get("content-type")?.includes("json") ? await resp.json() : await resp.text();
     if (!resp.ok) {
       const msg = typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`;
-      const err = new Error(msg); err.status = resp.status; throw err;
+      const err = new Error(msg); err.status = resp.status;
+      if (typeof data === "object" && data.details) err.details = data.details;
+      throw err;
     }
     return data;
+  }
+
+  // download: every file-serving endpoint requires the same Bearer auth as
+  // every other API call -- a plain <a href> can never attach it, which is
+  // exactly why "download" and the documents.zip link both 403'd with
+  // "missing bearer token" when clicked directly. Fetch with the token,
+  // then hand the browser a blob: URL to save instead.
+  async function download(path, fallbackName) {
+    const tok = await Auth.token();
+    if (!tok) throw new Error("unauthenticated");
+    const resp = await fetch(window.IDRE_CONFIG.apiBase + path, { headers: { Authorization: `Bearer ${tok}` } });
+    if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
+    if (!resp.ok) throw new Error(`download failed (HTTP ${resp.status})`);
+    const cd = resp.headers.get("content-disposition") || "";
+    const name = (cd.match(/filename="?([^"]+)"?/) || [])[1] || fallbackName || "download";
+    const blobUrl = URL.createObjectURL(await resp.blob());
+    const a = document.createElement("a");
+    a.href = blobUrl; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
   }
 
   const t = () => `/v1/tenants/${tenant}`;
@@ -30,7 +52,18 @@ const Api = (() => {
     return s ? `?${s}` : "";
   };
   return {
-    setTenant, getTenant,
+    setTenant, getTenant, download,
+    admin: {
+      // Not tenant-scoped -- creates the /tenant/<xx> group a new tenant
+      // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
+      createTenant: (payload) => req("POST", "/v1/admin/tenants", payload),
+    },
+    auditLog: {
+      list: (params = {}) => {
+        const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
+        return req("GET", `${t()}/audit-log${qs ? "?" + qs : ""}`);
+      },
+    },
     cases: {
       // Keyset-paginated: {cases, next_cursor, total}. Legacy bare-array
       // responses are normalized so older backends still work.
@@ -97,6 +130,7 @@ const Api = (() => {
       createTask: (p) => req("POST", `${t()}/tasks`, p),
       completeTask: (id) => req("POST", `${t()}/tasks/${id}/complete`),
       addNote: (p) => req("POST", `${t()}/notes`, p),
+      notes: (recordType, recordId) => req("GET", `${t()}/notes?record_type=${encodeURIComponent(recordType)}&record_id=${encodeURIComponent(recordId)}`),
       search: (q) => req("GET", `${t()}/search?q=${encodeURIComponent(q)}`),
     },
     cm: {
@@ -169,6 +203,10 @@ const Api = (() => {
       deliverables: () => req("GET", `${t()}/deliverables`),
       submitDeliverable: (p) => req("POST", `${t()}/deliverables`, p),
       requestDeliverable: (name, contract_ref) => req("POST", `${t()}/deliverables/request`, { name, contract_ref }),
+      calls: (caseId) => req("GET", `${t()}/cases/${caseId}/calls`),
+      logCall: (caseId, p) => req("POST", `${t()}/cases/${caseId}/calls`, p),
+      inquiries: (caseId) => req("GET", `${t()}/cases/${caseId}/inquiries`),
+      logInquiry: (caseId, p) => req("POST", `${t()}/cases/${caseId}/inquiries`, p),
     },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),

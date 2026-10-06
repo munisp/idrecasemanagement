@@ -14,12 +14,13 @@ roles; tenancy is the Keycloak `/tenant/<state>` group claim.
 | 2 | **CMS / Federal Admin** | `FEDERAL_ADMIN` | all 50 | `ADMIN_STAFF` application, approved by existing FEDERAL_ADMIN |
 | 3 | **State Auditor** (state DOI staff) | `STATE_AUDITOR` | read-only, all 50 states (writes rejected even in home tenant; see tenancy middleware) | `STATE_AUDITOR_ORG` + state credential letter |
 | 4 | **Case Manager** (operations staff) | `CASE_MANAGER` | assigned state(s) | `ADMIN_STAFF` + sponsoring manager |
-| 5 | **IDRE Entity** (certified dispute entity) + its **Arbitrators** | `ARBITRATOR` | states it serves | `IDRE_ENTITY` — CMS cert #, fee schedule, COI, banking; FEDERAL_ADMIN approval |
-| 6 | **Provider / Facility / Air-ambulance org** + billing staff | `PARTY` (provider) | state(s) of service | `PROVIDER_ORG` — NPI (NPPES-verified), TIN, W-9, state license |
-| 7 | **Payer / Health plan / TPA org** + claims staff | `PARTY` (payer) | state(s) of operation | `PAYER_ORG` — NAIC code, state DOI license, W-9 |
-| 8 | **Voice AI platform** (getline.ai-style) | service account `voice-integration` | per-tenant API key | API key + webhook secret issued by CASE_MANAGER |
-| 9 | **State SSL registries** (external systems) | none (data source) | per-tenant | Fluvio connector config |
-| 10 | **Members/patients** (indirect) | none | — | never log in; represented via party orgs and call-center intake |
+| 5 | **Finance Officer** (billing/settlement staff) | `FINANCE` | assigned state(s) | `ADMIN_STAFF` + sponsoring manager |
+| 6 | **IDRE Entity** (certified dispute entity) + its **Arbitrators** | `ARBITRATOR` | states it serves | `IDRE_ENTITY` — CMS cert #, fee schedule, COI, banking; FEDERAL_ADMIN approval |
+| 7 | **Provider / Facility / Air-ambulance org** + billing staff | `PARTY` (provider) | state(s) of service | `PROVIDER_ORG` — NPI (NPPES-verified), TIN, W-9, state license |
+| 8 | **Payer / Health plan / TPA org** + claims staff | `PARTY` (payer) | state(s) of operation | `PAYER_ORG` — NAIC code, state DOI license, W-9 |
+| 9 | **Voice AI platform** (getline.ai-style) | service account `voice-integration` | per-tenant API key | API key + webhook secret issued by CASE_MANAGER |
+| 10 | **State SSL registries** (external systems) | none (data source) | per-tenant | Fluvio connector config |
+| 11 | **Members/patients** (indirect) | none | — | never log in; represented via party orgs and call-center intake |
 
 ---
 

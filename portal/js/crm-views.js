@@ -43,22 +43,69 @@ const CrmViews = (() => {
     ["Dismissed", "Dismissed"], ["Withdrawn", "Withdrawn"],
     ["Plan Notification Packet Issued", "Plan notified"],
   ];
+  // Stages the board treats as "done" -- de-emphasized column styling, and
+  // excluded from the default empty-stage hiding logic's "likely to fill up
+  // soon" assumption (a closed stage being empty is normal, not a gap).
+  const TERMINAL_STAGES = new Set([
+    "CLOSED_PAID", "CLOSED_DISMISSED",
+    "Decided - Invoice Paid", "Plan Opt-Out", "Ineligible", "Dismissed",
+    "Withdrawn", "Provider Closure Letter Issued", "Provider - Withdrawal",
+  ]);
+  const KANBAN_CARD_CAP = 8;
   async function pipeline() {
     try {
-      const { cases } = await Api.cases.list({ limit: 200 });
-      const known = new Set(PIPELINE.map(([s]) => s));
+      const [{ cases }, prog] = await Promise.all([Api.cases.list({ limit: 200 }), Api.program.get().catch(() => null)]);
+      // Programmed tenants (e.g. FL AHCA) never populate the federal `status`
+      // column -- they track real progress via internal_status/agency_status
+      // instead (confirmed in programops.go: dual-status writers only ever
+      // SET internal_status, never status), so a PIPELINE keyed on `status`
+      // -- even one with FL's own vocabulary hardcoded in -- still shows
+      // every column empty for them. Confirmed live. Fall back to the
+      // federal grouping when no program config exists for this tenant.
+      const internalStatuses = prog?.config?.statuses?.internal;
+      const byField = internalStatuses?.length ? "internal_status" : "status";
+      const knownStages = internalStatuses?.length ? internalStatuses.map((s) => [s, s]) : PIPELINE;
       // Safety net: a status the board doesn't know yet still gets a column
       // instead of its cases disappearing silently.
-      const extra = [...new Set(cases.filter((c) => !known.has(c.status)).map((c) => c.status))];
-      const layout = [...PIPELINE, ...extra.map((s) => [s, s.replace(/_/g, " ").toLowerCase()])];
-      const cols = layout.map(([status, label]) => {
-        const items = cases.filter((c) => c.status === status);
-        return `<div class="kanban-col"><h3>${label} <span class="muted">${items.length}</span></h3>` +
-          items.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
-            <b>${esc(c.case_number)}</b><br/><span class="muted">${esc(c.service_line)} · $${(c.qpa_cents / 100).toLocaleString()}</span></div>`).join("") +
+      const known = new Set(knownStages.map(([s]) => s));
+      const withStatus = cases.filter((c) => c[byField]);
+      const noStatus = cases.filter((c) => !c[byField]);
+      const extra = [...new Set(withStatus.filter((c) => !known.has(c[byField])).map((c) => c[byField]))];
+      // Cases with NO status set yet (e.g. a freshly-opened PENDING_INTAKE
+      // case, before the first eligibility/status call) matched nothing in
+      // `known` AND got filtered out of `extra` by its own Boolean check --
+      // they vanished from the board with no column to land in at all.
+      // Confirmed live: ~1 in 6 FL cases had no internal_status and were
+      // simply invisible here. Give them an explicit leading column instead.
+      const stages = [
+        ...(noStatus.length ? [["__NONE__", "Not yet reviewed"]] : []),
+        ...knownStages,
+        ...extra.map((s) => [s, s.replace(/_/g, " ").toLowerCase()]),
+      ];
+      const amtField = (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents";
+      const amtLabel = (prog && prog.config) ? "Disputed" : "QPA";
+      const usd = (cents) => "$" + ((cents || 0) / 100).toLocaleString();
+      const cols = stages.map(([status, label]) => {
+        const items = status === "__NONE__" ? noStatus : withStatus.filter((c) => c[byField] === status);
+        const terminal = TERMINAL_STAGES.has(status);
+        const shown = items.slice(0, KANBAN_CARD_CAP);
+        const rest = items.length - shown.length;
+        return `<div class="kanban-col ${terminal ? "is-terminal" : ""} ${items.length ? "" : "is-empty"}">
+          <h3>${esc(label)} <span class="kanban-count">${items.length}</span></h3>` +
+          shown.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
+            <b>${esc(c.case_number)}</b>
+            <span class="muted">${esc(c.service_line || "—")} · ${usd(c[amtField])}</span></div>`).join("") +
+          (rest > 0 ? `<div class="kanban-more">+${rest} more</div>` : "") +
           `</div>`;
       });
-      return `<h1>Pipeline</h1><div class="kanban">${cols.join("")}</div>`;
+      const totalShown = withStatus.length + noStatus.length;
+      afterRender(() => $("#pipe-show-empty")?.addEventListener("change", (ev) =>
+        $("#pipe-board")?.classList.toggle("hide-empty", !ev.target.checked)));
+      return `<div class="view-head"><h1>Pipeline</h1>
+          <span class="muted">${totalShown} dispute${totalShown === 1 ? "" : "s"} across ${stages.length} stage${stages.length === 1 ? "" : "s"}
+            · amounts shown as ${esc(amtLabel)}</span></div>
+        <label class="pipe-toggle"><input type="checkbox" id="pipe-show-empty" /> Show empty stages</label>
+        <div class="kanban hide-empty" id="pipe-board">${cols.join("")}</div>`;
     } catch (e) { return `<h1>Pipeline</h1>` + err(e); }
   }
 
@@ -172,26 +219,41 @@ const CrmViews = (() => {
   }
 
   // ---- Tasks ------------------------------------------------------------------------
+  // "My tasks" used to be the ONLY view -- Api.crm.tasks(true, ...) hardcoded
+  // the mine=true filter, so anything unassigned (e.g. the escalation tasks
+  // casemgmt.go auto-creates with no assignee) or assigned to someone else
+  // was invisible here with no way to see it at all. mine now comes from the
+  // hash query string (same pattern cases() already uses for ?view=/?sort=)
+  // so the toggle is a real navigation, not just a DOM patch, and survives
+  // refresh/back-button.
   async function tasks() {
+    const mine = new URLSearchParams(location.hash.split("?")[1] || "").get("all") !== "1";
+    const title = mine ? "My tasks" : "All tasks";
     try {
-      const page = await Api.crm.tasks(true, { limit: CRM_PAGE });
+      const page = await Api.crm.tasks(mine, { limit: CRM_PAGE });
       const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
-      let html = `<h1>My tasks</h1>
+      let html = `<div class="view-head"><h1>${title}</h1></div>
+        <div class="tabs">
+          <a class="tab ${mine ? "active" : ""}" href="#/crm/tasks">My tasks</a>
+          <a class="tab ${!mine ? "active" : ""}" href="#/crm/tasks?all=1">All tasks</a>
+        </div>
         <form id="nt" class="form"><b>New task</b>
           <input name="subject" placeholder="Subject" required />
           <input name="case_id" placeholder="Case ID (optional)" />
           <input name="due_date" type="date" /><button>Create</button></form>`;
       const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
           <td>${esc(t.subject)}</td>
+          ${mine ? "" : `<td>${esc(t.assignee || "—")}</td>`}
           <td>${t.case_id ? `<a href="#/cases/${esc(t.case_id)}" class="mono">${esc(t.case_id.slice(0, 8))}…</a>` : "—"}</td>
           <td>${esc(t.due_date)}</td>
           <td>${badge(t.status)}</td>
           <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
-      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Ref</th><th>Subject</th><th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
+      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Ref</th><th>Subject</th>
+          ${mine ? "" : "<th>Assignee</th>"}<th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task", state.loaded.length, state.total, state.next)
-        : `<p class="muted">No open tasks.</p>`;
+        : `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
       afterRender(() => bindPager("task", "#task-tb tbody", state,
-        (off) => Api.crm.tasks(true, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.tasks, next: r.next_offset })),
+        (off) => Api.crm.tasks(mine, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.tasks, next: r.next_offset })),
         rowsHtml));
       afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
@@ -200,7 +262,7 @@ const CrmViews = (() => {
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       return html;
-    } catch (e) { return `<h1>My tasks</h1>` + err(e); }
+    } catch (e) { return `<h1>${title}</h1>` + err(e); }
   }
 
   async function done(id) {
@@ -227,17 +289,21 @@ const CrmViews = (() => {
   // Statutory deadlines deserve a real calendar, not a list: month grid with
   // color-coded chips (statutory clocks = brass, tasks = green, offers = blue),
   // today highlighted, month navigation, and an agenda under it.
+  // Field names here match what Api.cm.calendar() actually returns
+  // (ref/kind/label/due/case_id, from casemgmt.go's calendar() handler) --
+  // this was originally written against due_date/type/title/case_number,
+  // a shape that endpoint has never returned, so it rendered "undefined"
+  // throughout until adapted here during the main-branch merge.
   function calMonthGrid(items, y, m) {
     const first = new Date(y, m, 1);
     const daysInMonth = new Date(y, m + 1, 0).getDate();
     const todayISO = new Date().toISOString().slice(0, 10);
     const byDay = {};
     items.forEach((i) => {
-      const d = String(i.due_date || "").slice(0, 10);
+      const d = String(i.due || "").slice(0, 10);
       if (d) (byDay[d] ||= []).push(i);
     });
-    const chipCls = (t) => t === "OFFER_WINDOW_CLOSE" ? "cal-chip-stat"
-      : /TASK/i.test(t || "") ? "cal-chip-task" : "cal-chip-clock";
+    const chipCls = (k) => k === "OFFER_WINDOW" ? "cal-chip-stat" : "cal-chip-task";
     let cells = "";
     for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty"></div>`;
     for (let d = 1; d <= daysInMonth; d++) {
@@ -245,10 +311,10 @@ const CrmViews = (() => {
       const dayItems = byDay[iso] || [];
       cells += `<div class="cal-cell ${iso === todayISO ? "today" : ""} ${dayItems.length ? "has-items" : ""}">
         <span class="cal-num">${d}</span>
-        ${dayItems.slice(0, 3).map((i) => `<div class="cal-chip ${chipCls(i.type)}"
-            title="${esc(i.type)} — ${esc(i.title)}">${i.case_id
-              ? `<a href="#/cases/${esc(i.case_id)}">${esc(i.case_number || i.title)}</a>`
-              : esc(i.title)}</div>`).join("")}
+        ${dayItems.slice(0, 3).map((i) => `<div class="cal-chip ${chipCls(i.kind)}"
+            title="${esc(i.kind)} — ${esc(i.label)}">${i.case_id
+              ? `<a href="#/cases/${esc(i.case_id)}">${esc(i.label)}</a>`
+              : esc(i.label)}</div>`).join("")}
         ${dayItems.length > 3 ? `<span class="muted cal-more">+${dayItems.length - 3} more</span>` : ""}</div>`;
     }
     return `<div class="cal-grid">
@@ -259,7 +325,7 @@ const CrmViews = (() => {
   async function calendar() {
     try {
       const items = await Api.cm.calendar();
-      items.sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+      items.sort((a, b) => String(a.due).localeCompare(String(b.due)));
       const now = new Date();
       const state = { y: now.getFullYear(), m: now.getMonth() };
       const render = () => {
@@ -271,6 +337,37 @@ const CrmViews = (() => {
           document.getElementById("cal-month-label").textContent = label;
         }
       };
+      const dateOnly = (s) => String(s).slice(0, 10);
+      const groups = {};
+      items.forEach((i) => (groups[dateOnly(i.due)] ||= []).push(i));
+      const today = new Date().toISOString().slice(0, 10);
+      const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+      const dow = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" }).toUpperCase();
+      const dom = (d) => new Date(d + "T00:00:00").getDate();
+      const heading = (d) => {
+        const full = new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+        if (d === today) return "Today";
+        if (d === tomorrow) return "Tomorrow";
+        if (d < today) return `Overdue — ${full}`;
+        return full;
+      };
+      const agenda = Object.keys(groups).map((d) => {
+        const cls = d === today ? "is-today" : d < today ? "is-overdue" : "";
+        return `<div class="cal-group ${cls}">
+          <div class="cal-date"><span class="dow">${dow(d)}</span><span class="dom">${dom(d)}</span></div>
+          <div class="cal-col">
+            <div class="cal-heading">${heading(d)} <span class="muted">(${groups[d].length})</span></div>
+            <div class="cal-rows">${groups[d].map((i) => {
+              const linkable = !!i.case_id;
+              return `<div class="cal-item ${linkable ? "link" : ""}" ${linkable ? `onclick="location.hash='#/cases/${esc(i.case_id)}'"` : ""}>
+                <span class="cal-kind ${i.kind === "OFFER_WINDOW" ? "k-offer" : "k-task"}" title="${esc(i.kind)}">${i.kind === "OFFER_WINDOW" ? "⏱" : "✓"}</span>
+                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}</span>
+                ${i.kind === "TASK" ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.done('${i.ref}')">Done</button>` : ""}
+              </div>`;
+            }).join("")}</div>
+          </div>
+        </div>`;
+      }).join("");
       afterRender(() => {
         render();
         document.getElementById("cal-prev")?.addEventListener("click", () => {
@@ -280,23 +377,13 @@ const CrmViews = (() => {
           state.m++; if (state.m > 11) { state.m = 0; state.y++; } render();
         });
       });
-      const groups = {};
-      items.forEach((i) => (groups[String(i.due_date).slice(0, 10)] ||= []).push(i));
-      const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-      const agenda = Object.keys(groups).map((dd) =>
-        `<div class="cal-day"><h3>${day(dd)}</h3>` + groups[dd].map((i) =>
-          `<div class="cal-item ${i.type === "OFFER_WINDOW_CLOSE" ? "cal-stat" : "cal-task"}">
-             ${badge(i.type)} ${i.case_number
-               ? `<a href="#/cases/${i.case_id}">${esc(i.case_number)}</a> — ` : ""}${esc(i.title)}</div>`).join("") +
-        `</div>`).join("");
       return `<div class="view-head"><h1>Calendar</h1>
         <span class="muted">statutory clocks, offer windows, and task due dates</span></div>
         <div class="cal-nav">
           <button class="mini" id="cal-prev">‹ prev</button>
           <b id="cal-month-label"></b>
           <button class="mini" id="cal-next">next ›</button>
-          <span class="cal-legend"><span class="cal-chip cal-chip-stat">statutory</span>
-            <span class="cal-chip cal-chip-clock">clock</span>
+          <span class="cal-legend"><span class="cal-chip cal-chip-stat">statutory / offer window</span>
             <span class="cal-chip cal-chip-task">task</span></span></div>
         <div id="cal-grid-box"></div>
         <h2>Agenda</h2>` + (agenda || `<p class="muted">No upcoming deadlines or tasks.</p>`);

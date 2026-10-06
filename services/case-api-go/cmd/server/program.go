@@ -12,6 +12,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -58,9 +59,9 @@ type ProgramConfig struct {
 		Reasons            []string        `json:"ineligibility_reasons"`
 	} `json:"eligibility"`
 	Fees struct {
-		InitialFeeCents int64 `json:"initial_fee_cents"`
-		RefundWindowDays int  `json:"refund_window_days"`
-		InvoiceDueDays   *int `json:"invoice_due_days"`
+		InitialFeeCents  int64 `json:"initial_fee_cents"`
+		RefundWindowDays int   `json:"refund_window_days"`
+		InvoiceDueDays   *int  `json:"invoice_due_days"`
 	} `json:"fees"`
 	Escalation struct {
 		AmountTriggerCents int64    `json:"amount_trigger_cents"`
@@ -69,6 +70,17 @@ type ProgramConfig struct {
 	} `json:"escalation"`
 	NotesStreams []string            `json:"notes_streams"`
 	FieldSchema  map[string][]string `json:"field_schema"`
+	Checklist    map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
+	// Correspondence was never on this struct, so getProgram's response
+	// (what the portal's template dropdown reads) never carried it --
+	// corrTemplates() below did its own separate raw DB read instead,
+	// which is why sending correspondence always worked from server-side
+	// code but the dropdown itself had always been empty, unnoticed until
+	// the first real browser test of it this session.
+	Correspondence struct {
+		AgencyRecipients []string       `json:"agency_recipients"`
+		Templates        []CorrTemplate `json:"templates"`
+	} `json:"correspondence"`
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.
@@ -138,7 +150,7 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 			Clock: rl.Name, Label: rl.Label, Basis: rl.DayType,
 			TotalDays: rl.Days, Remaining: remaining,
 			Due: due.Format("2006-01-02"), State: clockState(remaining, rl.Days),
-			Cite: rl.Cite,
+			Cite:      rl.Cite,
 			BasisNote: fmt.Sprintf("from %s %s", rl.Basis, raw[:minI(10, len(raw))]),
 		}
 		out = append(out, cv)
@@ -165,6 +177,10 @@ func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenan
 
 // setProgramDate records a program-specific date (starts/restarts a clock).
 func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	var in struct {
@@ -179,11 +195,22 @@ func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"value must be YYYY-MM-DD"}`, http.StatusBadRequest)
 		return
 	}
-	_, err := s.db.Exec(r.Context(),
-		fmt.Sprintf(`UPDATE tenant_%s.cases SET program_dates = program_dates || jsonb_build_object($2, $3), updated_at=now() WHERE id=$1`,
+	// jsonb_build_object is polymorphic ("any"), so pgx's prepared-statement
+	// protocol can't infer $2/$3's type on its own (confirmed live: SQLSTATE
+	// 42P18 "could not determine data type of parameter $2") -- psql's
+	// literal substitution and an explicitly-typed PREPARE both sidestep
+	// this, which is why it looked fine testing by hand. Explicit casts are
+	// the standard fix.
+	res, err := s.db.Exec(r.Context(),
+		fmt.Sprintf(`UPDATE tenant_%s.cases SET program_dates = program_dates || jsonb_build_object($2::text, $3::text), updated_at=now() WHERE id=$1`,
 			sanitizeTenant(tenant)), id, in.Key, in.Value)
 	if err != nil {
+		slog.Error("setProgramDate db exec failed", "tenant", tenant, "case_id", id, "key", in.Key, "err", err)
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	if res.RowsAffected() == 0 {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	s.logActivity(r.Context(), tenant, id, "PROGRAM_DATE", fmt.Sprintf("%s recorded as %s", in.Key, in.Value))
@@ -192,6 +219,11 @@ func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
 
 // setDualStatus updates internal and/or agency status (G5).
 func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	var in struct {
@@ -212,17 +244,26 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var matched int64
 	if in.Internal != "" {
-		_, _ = s.db.Exec(r.Context(),
+		res, _ := s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status=$2, updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), id, in.Internal)
+		matched += res.RowsAffected()
 	}
 	if in.Agency != "" {
-		_, _ = s.db.Exec(r.Context(),
+		res, _ := s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET agency_status=$2, updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), id, in.Agency)
+		matched += res.RowsAffected()
 	}
-	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if matched == 0 {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
 	s.logActivity(r.Context(), tenant, id, "STATUS_CHANGE",
 		fmt.Sprintf("Status updated by %s — internal: %s, agency: %s", p.Subject, orDash(in.Internal), orDash(in.Agency)))
+	s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
+		"by": p.Subject, "internal_status": in.Internal, "agency_status": in.Agency,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -230,11 +271,27 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 // threshold matrix, 12-month filing window, explicit ineligibility flags —
 // and stores the review with its evidence.
 func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ATTORNEY, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
 		http.Error(w, `{"error":"no program rules for tenant"}`, http.StatusBadRequest)
+		return
+	}
+	// eligibility_reviews/cases carry no FK back to the case row, so without
+	// this check a nonexistent case id would still insert a review and
+	// return 200 -- the status-update side effects below would then also
+	// silently match zero rows.
+	var exists bool
+	_ = s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM tenant_%s.cases WHERE id=$1)`, sanitizeTenant(tenant)), id).Scan(&exists)
+	if !exists {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	var in struct {
@@ -291,7 +348,6 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		result, reason = "HOLD_AOR", "aor_invalid_pending_attorney"
 	}
 
-	p := r.Context().Value(ctxPrincipal{}).(principal)
 	ev, _ := json.Marshal(evidence)
 	var reviewID string
 	_ = s.db.QueryRow(r.Context(), `
@@ -309,8 +365,23 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Provider Closure Letter Issued', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), id)
 	}
+	// Auto-signal the case's program workflow (AhcaDisputeWorkflow today),
+	// same "fed by the backend step, not re-entered by a human" shape as
+	// doc-intel's DOCS_VERIFIED signal for onboarding -- staff shouldn't
+	// have to separately re-tell the workflow what checkEligibility just
+	// computed. Best-effort: a signal failure must not fail an otherwise-
+	// successful, already-persisted eligibility review.
+	var caseNumber string
+	if err := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&caseNumber); err == nil {
+		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+		_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "ELIGIBILITY_RESULT", map[string]any{"result": result, "reason": reason})
+	}
 	s.logActivity(r.Context(), tenant, id, "ELIGIBILITY_REVIEW",
 		fmt.Sprintf("Eligibility %s%s — evidence recorded (review %s)", result, orDash(" — "+reason), reviewID))
+	s.logAudit(r.Context(), tenant, id, "ELIGIBILITY_DECIDED", map[string]any{
+		"by": p.Subject, "result": result, "reason": reason, "review_id": reviewID,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence})
 }
 

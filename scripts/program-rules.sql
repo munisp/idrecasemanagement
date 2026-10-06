@@ -12,17 +12,31 @@ CREATE TABLE IF NOT EXISTS public.program_rules (
 
 -- Program-specific dates/statuses ride on the case row.
 ALTER TABLE tenant_tx.cases ADD COLUMN IF NOT EXISTS internal_status text;
--- (all tenant schemas get the same columns via the loop below)
+-- All 50 tenant schemas get the same columns -- case-api-go's listCases/
+-- getCase select internal_status/agency_status unconditionally (not just
+-- for programmed tenants), so any state missing these columns 500s on
+-- every case list/detail call. Previously hardcoded to ['tx','ca','ny','fl']
+-- despite the comment above claiming "all tenant schemas" -- confirmed live
+-- that the other 46 states (e.g. 'ga') never got these columns and 500'd on
+-- GET /v1/tenants/ga/cases. Must match init-schemas.sql's provisioning list.
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['tx','ca','ny','fl'] LOOP
-    EXECUTE format('ALTER TABLE tenant_%I.cases
+  FOREACH t IN ARRAY ARRAY['al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia',
+                           'ks','ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj',
+                           'nm','ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt',
+                           'va','wa','wv','wi','wy'] LOOP
+    -- %I must quote the whole schema name, not just the state code: with the
+    -- quoting split as tenant_%I, a reserved word like 'in' or 'or' becomes
+    -- tenant_"in" -- an unquoted prefix glued to a quoted suffix, which is a
+    -- syntax error that aborts this entire DO block (rolling back every
+    -- state processed earlier in the same loop). Confirmed live.
+    EXECUTE format('ALTER TABLE %I.cases
         ADD COLUMN IF NOT EXISTS internal_status text,
         ADD COLUMN IF NOT EXISTS agency_status text,
         ADD COLUMN IF NOT EXISTS disputed_amount_cents bigint,
         ADD COLUMN IF NOT EXISTS num_claims int,
-        ADD COLUMN IF NOT EXISTS program_dates jsonb NOT NULL DEFAULT ''{}''::jsonb', t);
+        ADD COLUMN IF NOT EXISTS program_dates jsonb NOT NULL DEFAULT ''{}''::jsonb', 'tenant_' || t);
   END LOOP;
 END $$;
 
@@ -95,6 +109,23 @@ CREATE TABLE IF NOT EXISTS public.case_claims (
     created_at   timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant, case_id, claim_number)
 );
+-- Capitol Bridge Large Volume Claims Dispute Submission Policy v01.01.2026,
+-- item 4: the required spreadsheet columns beyond what G10 originally
+-- tracked. Self-healing ADD COLUMN (see the init-schemas.sql comment on this
+-- exact pattern) so an already-provisioned table picks these up too.
+ALTER TABLE public.case_claims
+    ADD COLUMN IF NOT EXISTS patient_first_name text,
+    ADD COLUMN IF NOT EXISTS patient_last_name text,
+    ADD COLUMN IF NOT EXISTS type_of_service text,
+    ADD COLUMN IF NOT EXISTS denial_reason text,
+    ADD COLUMN IF NOT EXISTS date_of_service date,
+    ADD COLUMN IF NOT EXISTS disputed_cents bigint,
+    ADD COLUMN IF NOT EXISTS date_claim_submitted date,
+    ADD COLUMN IF NOT EXISTS date_of_denial date,
+    ADD COLUMN IF NOT EXISTS date_of_final_determination date,
+    ADD COLUMN IF NOT EXISTS provider_name text,
+    ADD COLUMN IF NOT EXISTS facility_name text,
+    ADD COLUMN IF NOT EXISTS evidence_location text;
 CREATE INDEX IF NOT EXISTS case_claims_case ON public.case_claims (tenant, case_id);
 
 -- Pre-case intake: instructions requested before any case exists (G9/G12).
@@ -178,6 +209,43 @@ CREATE TABLE IF NOT EXISTS public.opt_out_decisions (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Phone call tracker + inquiries log: the workflow narrative calls for a
+-- running record of every call a Reviewer makes/receives and every inbound
+-- inquiry, independent of formal templated correspondence
+-- (public.correspondence_log, which only covers the 16 sent templates).
+-- case_id is nullable: the source docs' own PLUM CRM/ShareFile process names
+-- it as a known gap that calls/inquiries made before a case exists never get
+-- linked to the case once one is opened. requester_email is carried so
+-- publicAhcaIntake can backfill case_id onto any pre-case rows when the real
+-- case is created (see ahca_intake.go).
+CREATE TABLE IF NOT EXISTS public.call_log (
+    id              bigserial PRIMARY KEY,
+    tenant          text NOT NULL,
+    case_id         text,
+    requester_email text,
+    direction       text NOT NULL,          -- INBOUND|OUTBOUND
+    reviewer        text NOT NULL,          -- staff principal on the call
+    phone           text NOT NULL,
+    summary         text NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS call_log_case ON public.call_log (tenant, case_id);
+CREATE INDEX IF NOT EXISTS call_log_email ON public.call_log (tenant, requester_email);
+
+CREATE TABLE IF NOT EXISTS public.inquiry_log (
+    id              bigserial PRIMARY KEY,
+    tenant          text NOT NULL,
+    case_id         text,
+    requester_email text,
+    method          text NOT NULL,          -- EMAIL|PHONE_CALL
+    inquiry_type    text NOT NULL,          -- GENERAL_QUESTION|GENERAL_INQUIRY|SUBMISSION_DOCUMENTS
+    detail          text,
+    logged_by       text NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS inquiry_log_case ON public.inquiry_log (tenant, case_id);
+CREATE INDEX IF NOT EXISTS inquiry_log_email ON public.inquiry_log (tenant, requester_email);
+
 -- Contract deliverables calendar (G7 second half).
 CREATE TABLE IF NOT EXISTS public.deliverables (
     id         bigserial PRIMARY KEY,
@@ -194,6 +262,25 @@ CREATE TABLE IF NOT EXISTS public.deliverables (
 
 -- ---------------------------------------------------------------------------
 -- Seed: Florida AHCA CDR program profile.
+-- "Closed-Refunded" added to statuses.internal: the Refund Email Notification
+-- template's own subject line is "FL CDR Case {case_number} Closed-Refunded",
+-- but that exact status string was missing from the vocabulary below --
+-- setDualStatus would have 400'd on it the first time the refund path (fee
+-- paid, packet never completed within the 7-day window) actually ran.
+--
+-- Status lifecycle notes (moved out of config->field_schema below -- three
+-- entries there held plain strings/notes instead of the []string allowlists
+-- every other field_schema key holds, which broke the Go ProgramConfig
+-- struct's json.Unmarshal with no error surfaced to the caller: loadProgram
+-- silently returned nil, and getProgram's nil-fallback made every FL
+-- request look like a plain federal NSA tenant. Confirmed live.):
+-- a case is only ever CLOSED via Plan Opt-Out, Ineligible, Dismissed, or
+-- Withdrawn. A completed case is NOT closed -- it rests at 'Decided -
+-- Invoice Paid'. The 60-day Agency clock never pauses (holds/RFIs/estimate
+-- window included). The 10-day initial review runs from complete-packet
+-- receipt. RFI may ride with the acceptance letter, but documentation not
+-- received by day 13 => Ineligible. After plan notification, internal
+-- status reads 'Plan Notification Packet Issued'.
 -- ---------------------------------------------------------------------------
 INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHCA CDR', $$
 {
@@ -244,6 +331,7 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
       {"key":"final_order","subject":"Full Review Complete {case_number}: FL AHCA","to":["agency"],"cc":["pm"]},
       {"key":"final_order_rationale_copy","subject":"Copy of Final Order Rationale {case_number}","to":["all_parties"],"cc":["agency"]},
       {"key":"rfi","subject":"Request for Additional Documentation: FL AHCA {case_number}","to":["provider_or_plan"],"cc":[]},
+      {"key":"documentation_not_received","subject":"Response Timeframe Lapsed — Additional Documentation Not Received {case_number}","to":["filing_party"],"cc":["agency"],"thread":true},
       {"key":"refund","subject":"FL CDR Case {case_number} Closed-Refunded","to":["filing_party"],"cc":[]},
       {"key":"payment_reminder","subject":"{case_number} Invoice - Payment Due Reminder","to":["billed_party"],"cc":[]},
       {"key":"past_due_reminder","subject":"{case_number} Past Due Payment Follow up","to":["billed_party"],"cc":[]},
@@ -280,6 +368,14 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     {"name":"Transition cooperation agreement","contract_ref":"8.3","due_rule":"contract:end"},
     {"name":"Final report","contract_ref":"2.4.5","due_rule":"contract:end+30bd"}
   ],
+  "checklist": {
+    "INTAKE": ["requester email + organization on file","initial review fee paid ($123.59)","case number assigned (FL{yy}-{seq})"],
+    "ELIGIBILITY": ["disputed amount meets threshold for provider type/contracted status","proof of timely filing attached (last EOB date, service date, or appeal documents)","filing window not expired (12 months from final determination)","AOR valid","no ineligibility reason present (late payment/interest only, Medicare grievance, non-FL-regulated plan, etc.)"],
+    "PROVIDER_PERMISSION": ["cost estimate sent to filing party","provider permission received or 15-day window elapsed without response"],
+    "PLAN_NOTIFICATION": ["health plan notified of the dispute","plan response received, opted out, or 15-day window elapsed (default determination)"],
+    "DETERMINATION": ["Coder plan-type verification complete","clinical review complete if requested from Nurse/Physician","Attorney rationale QA-approved","case outcome recorded","invoice issued to non-prevailing party"],
+    "PAYMENT": ["invoice paid or past-due reminder sent","recommendation sent to the Agency within 60 days of receipt"]
+  },
   "field_schema": {
     "line_of_business": ["Medicaid","Commercial","Medicare","Medicare Advantage","Marketplace","Other"],
     "disputed_issue": ["Medicaid Medical Necessity","Underpayment","Overpayment","Denial","Other"],
@@ -287,10 +383,7 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "case_outcome": ["TBD - case in process","Withdrawn","Dismissed","Provider Default Award","Provider Full Award","Provider Partial Award","Provider No Award","Other"],
     "party_billed": ["Health Plan","Provider","Both Parties","N/A"],
     "withdrawal_dismissed_reason": ["Dismissed-Timeliness eligibility failed","Member plan is not regulated by Florida","Self-Funded Plan","Provider No Response","Withdrawal-Claim Resolved","Other","N/A"],
-    "internal_status_terminal": ["Plan Opt-Out","Ineligible","Dismissed","Withdrawn"],
-    "internal_status_completed": "Decided - Invoice Paid",
-    "internal_status_after_plan_notification": "Plan Notification Packet Issued",
-    "_status_note": "AHCA 2026: a case is only ever CLOSED via Plan Opt-Out, Ineligible, Dismissed, or Withdrawn. A completed case is NOT closed — it rests at 'Decided - Invoice Paid'. The 60-day Agency clock never pauses (holds/RFIs/estimate window included). The 10-day initial review runs from complete-packet receipt. RFI may ride with the acceptance letter, but documentation not received by day 13 => Ineligible."
+    "internal_status_terminal": ["Plan Opt-Out","Ineligible","Dismissed","Withdrawn"]
   },
   "volume_rules": {
     "comment": "Capitol Bridge Large Volume Claims Dispute Submission Policy v01.01.2026 — ADOPTED by AHCA. Governs claims-per-dispute volume (NOT repeat filer volume — AHCA confirmed 2026). Applies to disputes with >=100 claims. Non-compliant disputes are found INELIGIBLE; resubmission permitted once the ineligibility reason is cured. Written exemptions by Capitol Bridge only.",

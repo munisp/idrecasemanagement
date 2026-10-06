@@ -75,6 +75,23 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 	docID := newUUID()
 	objectKey := fmt.Sprintf("%s/onboarding/%s/%s.enc", tenant, appID, docID)
 
+	// security gate: content policy + ClamAV before anything is sealed/stored.
+	// This application hasn't been approved yet — applicant-submitted onboarding
+	// documents are the least-trusted upload surface in the platform, same as
+	// case documents (documents.go), so they get the same gate, not a lighter one.
+	if err := contentPolicy(hdr.Filename, raw); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
+		return
+	}
+	sig, ok := s.scanOrRefuse(w, bytes.NewReader(raw), "file")
+	if !ok {
+		if sig != "" {
+			s.notify(r, tenant, "*", "ONBOARDING",
+				fmt.Sprintf("Upload %q on application %s rejected — ClamAV signature %s; nothing stored", hdr.Filename, appID, sig), "#/onboarding")
+		}
+		return
+	}
+
 	ct, err := s.vaultSealDoc(r, tenant, objectKey, raw)
 	if err != nil {
 		http.Error(w, `{"error":"seal failed"}`, http.StatusBadGateway)

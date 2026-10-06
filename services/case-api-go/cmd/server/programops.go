@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +24,10 @@ import (
 // number equals the case number (program convention); both parties can carry
 // independent receivables on one case (dual receivables).
 func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
@@ -67,6 +72,9 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("Invoice %s issued to %s for $%d.%02d (%s, %d-day terms) by %s",
 			caseNumber, in.Party, in.AmountCents/100, in.AmountCents%100, in.Kind, in.DueDays, p.Subject))
 	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", in.AmountCents, in.Party, caseNumber, p.Subject)
+	s.logAudit(r.Context(), tenant, caseID, "INVOICE_ISSUED", map[string]any{
+		"by": p.Subject, "invoice_id": invID, "party": in.Party, "kind": in.Kind, "amount_cents": in.AmountCents,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"invoice_id": invID, "invoice_no": caseNumber})
 }
 
@@ -100,6 +108,10 @@ func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
 // settleInvoice records a payment, void, or refund (remittance reference kept
 // for reconciliation with the payment provider).
 func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	invID := chi.URLParam(r, "invId")
 	var in struct {
@@ -154,8 +166,12 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	} else if in.Action == "REFUND" {
 		kind, dir = "REFUND_ISSUED", "OUT"
 	}
-	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef,
-		r.Context().Value(ctxPrincipal{}).(principal).Subject)
+	actor := r.Context().Value(ctxPrincipal{}).(principal).Subject
+	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, actor)
+	s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
+		"by": actor, "invoice_id": invID, "action": in.Action, "status": status,
+		"amount_cents": amount, "party": party, "remittance_ref": in.RemittanceRef,
+	})
 	// Money moved — the case status and checklist follow the fact.
 	s.maybeAdvanceStatus(r, tenant, caseID)
 	s.autoChecklist(r, tenant, caseID)
@@ -182,14 +198,30 @@ func (s *server) receivablesReport(w http.ResponseWriter, r *http.Request) {
 // (case_id, claim_number). Batch endpoint keeps 21k-claim cases ingestible
 // without per-row HTTP overhead.
 func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
 		Claims []struct {
-			ClaimNumber string `json:"claim_number"`
-			CPT         string `json:"cpt"`
-			BilledCents int64  `json:"billed_cents"`
-			PaidCents   int64  `json:"paid_cents"`
+			ClaimNumber     string `json:"claim_number"`
+			CPT             string `json:"cpt"`
+			BilledCents     int64  `json:"billed_cents"`
+			PaidCents       int64  `json:"paid_cents"`
+			DisputedCents   int64  `json:"disputed_cents"`
+			PatientFirst    string `json:"patient_first_name"`
+			PatientLast     string `json:"patient_last_name"`
+			TypeOfService   string `json:"type_of_service"`
+			DenialReason    string `json:"denial_reason"`
+			DateOfService   string `json:"date_of_service"`
+			DateSubmitted   string `json:"date_claim_submitted"`
+			DateOfDenial    string `json:"date_of_denial"`
+			DateFinalDeterm string `json:"date_of_final_determination"`
+			ProviderName    string `json:"provider_name"`
+			FacilityName    string `json:"facility_name"`
+			EvidenceLoc     string `json:"evidence_location"`
 		} `json:"claims"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || len(in.Claims) == 0 {
@@ -199,6 +231,66 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 	if len(in.Claims) > 5000 {
 		http.Error(w, `{"error":"max 5000 claims per batch"}`, http.StatusBadRequest)
 		return
+	}
+	// Capitol Bridge policy item 4: once a dispute crosses the large-volume
+	// threshold (>=100 claims), every claim line must carry the full
+	// spreadsheet record, not just claim_number/cpt/amounts. Checked against
+	// existing + this batch's count so the batch that CROSSES the threshold
+	// is already held to the fuller standard (a batch that keeps the dispute
+	// under threshold is exempt, matching "disputes with 100 claims or more").
+	var existingClaims int
+	_ = s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT coalesce(num_claims,0) FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
+		Scan(&existingClaims)
+	requireFull := false
+	if vr := s.loadVolumeRules(r, tenant); vr != nil && existingClaims+len(in.Claims) >= vr.Threshold {
+		requireFull = true
+	}
+	if requireFull {
+		var missing []string
+		for i, c := range in.Claims {
+			var absent []string
+			if c.PatientFirst == "" {
+				absent = append(absent, "patient_first_name")
+			}
+			if c.PatientLast == "" {
+				absent = append(absent, "patient_last_name")
+			}
+			if c.TypeOfService == "" {
+				absent = append(absent, "type_of_service")
+			}
+			if c.DenialReason == "" {
+				absent = append(absent, "denial_reason")
+			}
+			if c.DateOfService == "" {
+				absent = append(absent, "date_of_service")
+			}
+			if c.DateSubmitted == "" {
+				absent = append(absent, "date_claim_submitted")
+			}
+			if c.ProviderName == "" {
+				absent = append(absent, "provider_name")
+			}
+			if c.FacilityName == "" {
+				absent = append(absent, "facility_name")
+			}
+			if c.EvidenceLoc == "" {
+				absent = append(absent, "evidence_location")
+			}
+			if len(absent) > 0 {
+				missing = append(missing, fmt.Sprintf("line %d (%s): missing %s", i+1, c.ClaimNumber, strings.Join(absent, ", ")))
+			}
+			if len(missing) >= 20 {
+				missing = append(missing, "… additional rows also incomplete")
+				break
+			}
+		}
+		if len(missing) > 0 {
+			detailsJSON, _ := json.Marshal(missing)
+			http.Error(w, fmt.Sprintf(`{"error":"large-volume dispute (Capitol Bridge policy item 4): every claim line requires the full spreadsheet record","details":%s}`,
+				detailsJSON), http.StatusBadRequest)
+			return
+		}
 	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -212,9 +304,17 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if _, err := tx.Exec(r.Context(), `
-			INSERT INTO public.case_claims (tenant, case_id, claim_number, cpt, billed_cents, paid_cents)
-			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant, case_id, claim_number) DO NOTHING`,
-			tenant, caseID, c.ClaimNumber, c.CPT, c.BilledCents, c.PaidCents); err != nil {
+			INSERT INTO public.case_claims (tenant, case_id, claim_number, cpt, billed_cents, paid_cents,
+				disputed_cents, patient_first_name, patient_last_name, type_of_service, denial_reason,
+				date_of_service, date_claim_submitted, date_of_denial, date_of_final_determination,
+				provider_name, facility_name, evidence_location)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,nullif($12,'')::date,nullif($13,'')::date,
+				nullif($14,'')::date,nullif($15,'')::date,$16,$17,$18)
+			ON CONFLICT (tenant, case_id, claim_number) DO NOTHING`,
+			tenant, caseID, c.ClaimNumber, c.CPT, c.BilledCents, c.PaidCents,
+			c.DisputedCents, c.PatientFirst, c.PatientLast, c.TypeOfService, c.DenialReason,
+			c.DateOfService, c.DateSubmitted, c.DateOfDenial, c.DateFinalDeterm,
+			c.ProviderName, c.FacilityName, c.EvidenceLoc); err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
 		}
@@ -261,7 +361,10 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	rows, err := s.queryRows(r, `
-		SELECT claim_number, cpt, billed_cents, paid_cents, created_at
+		SELECT claim_number, cpt, billed_cents, paid_cents, disputed_cents,
+		       patient_first_name, patient_last_name, type_of_service, denial_reason,
+		       date_of_service, date_claim_submitted, date_of_denial, date_of_final_determination,
+		       provider_name, facility_name, evidence_location, created_at
 		FROM public.case_claims WHERE tenant=$1 AND case_id=$2 ORDER BY claim_number LIMIT 500`,
 		tenant, caseID)
 	if err != nil {
@@ -280,13 +383,18 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 // mirrors the notification flow (the NON-filing party receives the plan
 // notification packet).
 func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
-		Email           string `json:"email"`
-		ContactName     string `json:"contact_name"`
-		Org             string `json:"org"`
-		Notes           string `json:"notes"`
-		FilingPartyType string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
+		Email               string `json:"email"`
+		ContactName         string `json:"contact_name"`
+		Org                 string `json:"org"`
+		Notes               string `json:"notes"`
+		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
+		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
@@ -300,6 +408,32 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"filing_party_type must be PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
 		return
 	}
+
+	// Programmed tenants (FL AHCA CDR today): the Filing Party has always
+	// reached Capitol Bridge by phone or email, never a self-service web
+	// form (confirmed against the source documents) -- so staff processing
+	// that inbound request here IS the real, standard intake moment. It
+	// creates the real case immediately (startAhcaCase, shared with the
+	// public no-login front door) instead of a lightweight intake_requests
+	// row that would otherwise need a separate manual CONVERTED-linking
+	// step later, and that never gets a case number of its own at all.
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.ContactName, in.Org, fpt, in.DisputedAmountCents)
+		if err != nil {
+			if isUniqueViolation(err) {
+				http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
+				return
+			}
+			http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"case_id": caseID, "case_number": caseNumber, "status": "PENDING_INTAKE",
+			"filing_party_type": fpt, "programmed": true,
+		})
+		return
+	}
+
 	var id string
 	_ = s.db.QueryRow(r.Context(), `
 		INSERT INTO public.intake_requests (tenant, email, contact_name, org, notes, outreach_at, filing_party_type)
@@ -318,6 +452,10 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 // the basis the program's INITIAL_REVIEW clock config already references.
 // The review clock never starts from payment or first submission.
 func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "intakeId")
 	var in struct {
@@ -425,26 +563,69 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": in.Status})
 }
 
+// listIntake shows every request to open a dispute, not just the legacy
+// path: for non-programmed tenants that's only ever public.intake_requests
+// (there's nothing else), but for programmed tenants (FL AHCA CDR) a
+// request becomes a real case immediately (startAhcaCase) and so never
+// gets an intake_requests row at all -- it would otherwise never appear
+// here. Both are merged into one list, newest first, each row carrying
+// "origin" so the UI knows which it's looking at (a real-case row has no
+// intake lifecycle left to advance; it's just a link to the case).
 func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	limit, offset := pageParams(r, 50, 500)
-	var total int
-	if err := s.db.QueryRow(r.Context(),
-		`SELECT count(*) FROM public.intake_requests WHERE tenant=$1`, tenant).Scan(&total); err != nil {
-		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-		return
-	}
-	rows, err := s.queryRows(r, fmt.Sprintf(`
+	rows, err := s.queryRows(r, `
 		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at,
-		       filing_party_type, packet_complete_at
-		FROM public.intake_requests WHERE tenant=$1 ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`,
-		limit, offset), tenant)
+		       filing_party_type, packet_complete_at, NULL::text AS case_number,
+		       NULL::bigint AS disputed_amount_cents, 'legacy' AS origin
+		FROM public.intake_requests WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"intake": rows,
-		"total": total, "next_offset": nextOffset(offset, limit, total)})
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		caseRows, cerr := s.queryRows(r, fmt.Sprintf(`
+			SELECT NULL::uuid AS id,
+			       details->>'requester_email' AS email,
+			       details->>'requester_contact_name' AS contact_name,
+			       details->>'requester_org' AS org,
+			       status,
+			       created_at AS outreach_at,
+			       id AS case_id,
+			       created_at,
+			       coalesce(details->>'filing_party_type', 'PROVIDER') AS filing_party_type,
+			       NULL::timestamptz AS packet_complete_at,
+			       case_number,
+			       disputed_amount_cents,
+			       'case' AS origin
+			FROM tenant_%s.cases
+			WHERE details->>'requester_email' IS NOT NULL
+			ORDER BY created_at DESC LIMIT 200`, sanitizeTenant(tenant)))
+		if cerr == nil {
+			rows = append(rows, caseRows...)
+		}
+	}
+	// legacy intake_requests and programmed-tenant cases come from two
+	// different tables with no shared key to UNION on, so this can't be one
+	// paginated SQL query the way accounts/leads/tasks are -- merge, sort,
+	// then paginate the combined set in memory.
+	sort.Slice(rows, func(i, j int) bool {
+		ti, _ := rows[i]["created_at"].(time.Time)
+		tj, _ := rows[j]["created_at"].(time.Time)
+		return ti.After(tj)
+	})
+	total := len(rows)
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := []map[string]any{}
+	if offset < total {
+		page = rows[offset:end]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"intake": page, "total": total, "next_offset": nextOffset(offset, limit, total),
+	})
 }
 
 // ---- Deliverables schedule (G7) ----------------------------------------------
@@ -505,12 +686,16 @@ func (s *server) listDeliverables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
-		Name     string `json:"name"`
-		CaseID   string `json:"case_id"`
-		DueRule  string `json:"due_rule"`
-		DueDate  string `json:"due_date"`
+		Name    string `json:"name"`
+		CaseID  string `json:"case_id"`
+		DueRule string `json:"due_rule"`
+		DueDate string `json:"due_date"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" {
 		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
@@ -530,29 +715,51 @@ func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
 // ---- Agency opt-out (G14) -----------------------------------------------------
 
 func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires ATTORNEY, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
-		Eligible  bool   `json:"eligible"`  // plan eligible to opt out of the state process
+		Eligible  bool   `json:"eligible"` // plan eligible to opt out of the state process
 		Rationale string `json:"rationale"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// opt_out_decisions carries no FK back to the case row, so without this
+	// check a nonexistent case id would still insert a decision and return
+	// 200. Looked up once here and reused below for the workflow signal.
+	var caseNumber string
+	if err := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber); err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
 	_, _ = s.db.Exec(r.Context(), `
 		INSERT INTO public.opt_out_decisions (tenant, case_id, eligible, rationale, decided_by)
 		VALUES ($1,$2,$3,$4,$5)`, tenant, caseID, in.Eligible, in.Rationale, p.Subject)
 	if in.Eligible {
+		// "Plan Opt-Out" is the exact string seeded in program_rules'
+		// statuses.internal -- this direct write bypasses setDualStatus's
+		// validation entirely, so the mismatched "Opted Out" literal here
+		// had never been caught; a case opting out would show a status the
+		// portal's own dropdown doesn't recognize.
 		_, _ = s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Plan Opt-Out', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
 	}
+	// Auto-signal the case's program workflow -- recordOptOut IS the
+	// Attorney's opt-out decision the workflow is waiting on, same
+	// dedicated-endpoint correspondence as checkEligibility's auto-signal.
+	wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+	_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "PLAN_OPT_OUT", map[string]any{"eligible": in.Eligible})
 	s.logActivity(r.Context(), tenant, caseID, "OPT_OUT_DECISION",
 		fmt.Sprintf("Opt-out eligibility: %v%s (by %s)", in.Eligible, orDash(" — "+in.Rationale), p.Subject))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
-
 
 // ---- FL AHCA lifecycle semantics (AHCA answers, 2026) -------------------------
 

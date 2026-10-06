@@ -6,9 +6,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -32,6 +35,82 @@ func (s *server) logActivity(ctx context.Context, tenant, caseID, typ, body stri
 	_, _ = s.db.Exec(ctx, `
 		INSERT INTO public.case_activities (tenant, case_id, type, body)
 		VALUES ($1,$2,$3,$4)`, tenant, caseID, typ, truncate(body, 2000))
+}
+
+// logAudit appends a real, properly hash-chained entry to public.audit_log
+// (hash = sha256(prev_hash + canonical-JSON payload), chained per tenant by
+// id order -- the exact scheme scripts/verify-audit-chain.py already
+// expects and recomputes nightly). The two existing producers
+// (onboarding_activities.py) don't actually do this -- prev_hash is
+// hardcoded "" and "hash" is a human label, not a real hash -- so every
+// pre-existing row already fails that verifier. This is the first real
+// implementation; used going forward for case-lifecycle actions, which
+// previously wrote to case_activities/notifications only and never
+// appeared in the audit log at all despite the UI calling it "every
+// tenant action" -- confirmed live: a just-created intake had zero
+// audit_log rows.
+//
+// Not race-safe under concurrent writers for the same tenant (reads the
+// latest hash, then inserts -- two simultaneous calls could both read the
+// same prev_hash and fork the chain). Acceptable here: audit writes are
+// low-frequency compared to case-mutation traffic, and the existing
+// producers have the same gap. A SELECT ... FOR UPDATE would close it if
+// write volume ever makes that race likely in practice.
+func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, payload map[string]any) {
+	body, err := json.Marshal(payload) // Go sorts map keys on marshal -- matches Python's sort_keys=True
+	if err != nil {
+		return
+	}
+	var prevHash string
+	if err := s.db.QueryRow(ctx,
+		`SELECT hash FROM public.audit_log WHERE tenant=$1 ORDER BY id DESC LIMIT 1`, tenant).
+		Scan(&prevHash); err != nil {
+		prevHash = "GENESIS"
+	}
+	sum := sha256.Sum256([]byte(prevHash + string(body)))
+	hash := hex.EncodeToString(sum[:])
+	_, _ = s.db.Exec(ctx, `
+		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash)
+		VALUES ($1,$2,$3,$4,$5,$6)`, tenant, caseID, action, string(body), prevHash, hash)
+}
+
+// listAuditLog: GET /v1/tenants/{tenant}/audit-log — the hash-chained,
+// tamper-evident platform audit trail (public.audit_log). Written to
+// throughout the backend (NPI verification, onboarding decisions,
+// escalations, intake sweeps) but had zero read access anywhere until now —
+// confirmed live, not even FEDERAL_ADMIN could see it. tenancy()'s existing
+// per-role scoping handles the rest: STATE_AUDITOR and FEDERAL_ADMIN/
+// PLATFORM_ADMIN already get cross-tenant reads, everyone else only reaches
+// their own tenant's rows.
+func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM") {
+		http.Error(w, `{"error":"forbidden: requires admin, auditor, or case-staff role"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	q := r.URL.Query()
+	limit := 100
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+		limit = min(n, 500)
+	}
+	where, args := "tenant=$1", []any{tenant}
+	if caseID := q.Get("case_id"); caseID != "" {
+		args = append(args, caseID)
+		where += fmt.Sprintf(" AND case_id=$%d", len(args))
+	}
+	if action := q.Get("action"); action != "" {
+		args = append(args, action)
+		where += fmt.Sprintf(" AND action=$%d", len(args))
+	}
+	rows, err := s.queryRows(r, fmt.Sprintf(`
+		SELECT id, case_id, action, payload, prev_hash, hash, created_at
+		FROM public.audit_log WHERE %s ORDER BY created_at DESC LIMIT %d`, where, limit), args...)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": rows})
 }
 
 func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
@@ -129,8 +208,8 @@ func (s *server) escalateCase(w http.ResponseWriter, r *http.Request) {
 	// undeployed). SERVICE_WORKER is the Temporal worker's own automated-
 	// escalation call (WORKER_TOKEN auth in authn.middleware).
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
 	// ReBAC: escalation is a staff-only object-level permission.
@@ -146,17 +225,37 @@ func (s *server) escalateCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"clock required"}`, http.StatusBadRequest)
 		return
 	}
+	// Programmed tenants (e.g. FL AHCA) route escalations to their own
+	// configured role (PM, per program-rules.sql) instead of the federal
+	// default -- previously hardcoded to 'FEDERAL_ADMIN' regardless of
+	// tenant, so an AHCA PM would never see their own program's escalations.
+	escalatedTo := "FEDERAL_ADMIN"
+	if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Escalation.RouteRole != "" {
+		escalatedTo = cfg.Escalation.RouteRole
+	}
+	// Human-readable case_number, not the raw UUID -- this lands verbatim in
+	// the notification message and the calendar/tasks list, both read by
+	// staff, not machines.
+	var caseNumber string
+	if err := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
+		Scan(&caseNumber); err != nil || caseNumber == "" {
+		caseNumber = caseID
+	}
 	_, _ = s.db.Exec(r.Context(), `
 		INSERT INTO public.escalations (tenant, case_id, clock, escalated_to, detail)
-		VALUES ($1,$2,$3,'FEDERAL_ADMIN',$4)`, tenant, caseID, in.Clock, in.Detail)
+		VALUES ($1,$2,$3,$4,$5)`, tenant, caseID, in.Clock, escalatedTo, in.Detail)
 	s.notify(r, tenant, "*", "SLA_BREACH",
-		fmt.Sprintf("SLA breach %s on case %s — escalated to FEDERAL_ADMIN", in.Clock, caseID),
+		fmt.Sprintf("SLA breach %s on case %s — escalated to %s", in.Clock, caseNumber, escalatedTo),
 		"#/cases/"+caseID)
 	// supervisor task so the escalation is owned, not just logged
 	_, _ = s.db.Exec(r.Context(), `
 		INSERT INTO public.tasks (tenant, subject, case_id, due_date, created_by)
 		VALUES ($1,$2,$3, CURRENT_DATE + 2, 'system')`,
-		tenant, fmt.Sprintf("Escalation: %s breach on %s", in.Clock, caseID), caseID)
+		tenant, fmt.Sprintf("Escalation: %s breach on %s", in.Clock, caseNumber), caseID)
+	s.logAudit(r.Context(), tenant, caseID, "CASE_ESCALATED", map[string]any{
+		"by": p.Subject, "clock": in.Clock, "escalated_to": escalatedTo, "detail": in.Detail,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "escalated"})
 }
 
@@ -210,20 +309,28 @@ func (s *server) caseRelationships(w http.ResponseWriter, r *http.Request) {
 // ---- Stage checklists --------------------------------------------------------------
 
 var stageChecklistDefaults = map[string][]string{
-	"INTAKE":       {"claim docs uploaded", "parties verified", "plan type confirmed"},
-	"ELIGIBILITY":  {"federal vs SSL routing decided", "initiation window verified", "no active suspension"},
-	"OFFERS":       {"both parties fees invoiced", "both sealed offers submitted", "IDRE selection finalized"},
+	"INTAKE":      {"claim docs uploaded", "parties verified", "plan type confirmed"},
+	"ELIGIBILITY": {"federal vs SSL routing decided", "initiation window verified", "no active suspension"},
+	"OFFERS":      {"both parties fees invoiced", "both sealed offers submitted", "IDRE selection finalized"},
 	"DETERMINATION": {"offer amounts within evidence", "QPA credibility assessed", "all 12 notice elements present",
 		"written rationale recorded", "no conflict of interest", "baseball rule: one offer selected",
 		"IDRE fee split determined", "parties notified", "determination within 30bd",
 		"payment terms stated", "reportable to CMS", "signature captured"},
-	"PAYMENT":      {"payment within 30cd confirmed", "escrow settled", "refunds processed if any"},
+	"PAYMENT": {"payment within 30cd confirmed", "escrow settled", "refunds processed if any"},
 }
 
-func (s *server) ensureChecklist(tenant, caseID string) {
-	for stage, items := range stageChecklistDefaults {
-		for _, item := range items {
-			_, _ = s.db.Exec(context.Background(), `
+// ensureChecklist seeds the stage checklist for a case. Programmed tenants
+// (e.g. FL AHCA) get their own checklist from program_rules.config.checklist
+// -- the federal NSA items ("baseball rule", "reportable to CMS") don't apply
+// to AHCA's claims-dispute process and would otherwise be seeded regardless.
+func (s *server) ensureChecklist(r *http.Request, tenant, caseID string) {
+	items := stageChecklistDefaults
+	if cfg := s.loadProgram(r, tenant); cfg != nil && len(cfg.Checklist) > 0 {
+		items = cfg.Checklist
+	}
+	for stage, its := range items {
+		for _, item := range its {
+			_, _ = s.db.Exec(r.Context(), `
 				INSERT INTO public.case_checklists (tenant, case_id, stage, item)
 				VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenant, caseID, stage, item)
 		}
@@ -319,13 +426,16 @@ func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	deadlines, _ := s.queryRows(r, fmt.Sprintf(`
-		SELECT case_id::text AS ref, 'OFFER_WINDOW' AS kind, case_number AS label,
-		       to_char(offer_window_ends_at,'YYYY-MM-DD"T"HH24:MI') AS due
+		SELECT id::text AS ref, 'OFFER_WINDOW' AS kind, case_number AS label,
+		       to_char(offer_window_ends_at,'YYYY-MM-DD"T"HH24:MI') AS due, id::text AS case_id
 		FROM tenant_%s.cases
 		WHERE offer_window_ends_at IS NOT NULL AND status='OFFER_WINDOW_OPEN'`, sanitizeTenant(tenant)))
+	// case_id travels alongside the task id now so the calendar can link a
+	// task straight to its case -- previously only OFFER_WINDOW rows linked
+	// anywhere; every TASK row was plain, unclickable text.
 	tasks, _ := s.queryRows(r, `
 		SELECT id::text AS ref, 'TASK' AS kind, subject AS label,
-		       to_char(due_date,'YYYY-MM-DD') AS due
+		       to_char(due_date,'YYYY-MM-DD') AS due, coalesce(case_id,'') AS case_id
 		FROM public.tasks WHERE tenant=$1 AND status='OPEN' AND due_date IS NOT NULL`, tenant)
 	writeJSON(w, http.StatusOK, append(deadlines, tasks...))
 }
@@ -418,7 +528,7 @@ func (s *server) generateLetter(w http.ResponseWriter, r *http.Request) {
 	var cn, sl string
 	var qpa int64
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT case_number, COALESCE(service_line,''), qpa_cents
+		SELECT case_number, COALESCE(service_line,''), COALESCE(qpa_cents,0)
 		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
 		Scan(&cn, &sl, &qpa); err != nil {
 		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)

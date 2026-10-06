@@ -13,14 +13,16 @@
 <body>
   <div id="app">
     <!-- L1 global rail (Meridian shell) -->
+    <div id="rail-backdrop"></div>
     <nav id="rail" aria-label="Primary">
       <div class="rail-brand"><span class="rail-mark">ID</span><span class="rail-word">Federal IDRE</span></div>
       <nav id="nav"></nav>
-      <div class="rail-foot">Meridian UI · 45 CFR Part 149</div>
+      <div class="rail-foot" id="rail-foot"></div>
     </nav>
 
     <div id="body">
       <header id="topbar">
+        <button id="rail-toggle" class="rail-toggle" aria-label="Open menu" aria-expanded="false">☰</button>
         <span id="tenant-chip"><span class="t-avatar" id="t-avatar">—</span><span class="t-name" id="t-name">…</span></span>
         <input id="gq" type="search" placeholder="Search disputes, accounts, contacts…  (⌘K)" aria-label="Global search" />
         <span class="spacer"></span>

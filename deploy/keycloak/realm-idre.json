@@ -106,6 +106,18 @@
       },
       {
         "name": "PARTY"
+      },
+      {
+        "name": "PM"
+      },
+      {
+        "name": "CODER"
+      },
+      {
+        "name": "NURSE_PHYSICIAN"
+      },
+      {
+        "name": "ATTORNEY"
       }
     ]
   },
@@ -121,6 +133,10 @@
     {
       "name": "tenant/ca",
       "path": "/tenant/ca"
+    },
+    {
+      "name": "tenant/fl",
+      "path": "/tenant/fl"
     }
   ],
   "users": [
@@ -204,6 +220,111 @@
       "firstName": "State",
       "lastName": "Auditor",
       "email": "auditor.tx@idre.test"
+    },
+    {
+      "username": "reviewer.fl",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "CASE_MANAGER"
+      ],
+      "groups": [
+        "/tenant/fl"
+      ],
+      "emailVerified": true,
+      "firstName": "Reviewer",
+      "lastName": "FL",
+      "email": "reviewer.fl@idre.test"
+    },
+    {
+      "username": "pm.fl",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "PM"
+      ],
+      "groups": [
+        "/tenant/fl"
+      ],
+      "emailVerified": true,
+      "firstName": "PM",
+      "lastName": "FL",
+      "email": "pm.fl@idre.test"
+    },
+    {
+      "username": "coder.fl",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "CODER"
+      ],
+      "groups": [
+        "/tenant/fl"
+      ],
+      "emailVerified": true,
+      "firstName": "Coder",
+      "lastName": "FL",
+      "email": "coder.fl@idre.test"
+    },
+    {
+      "username": "nurse.fl",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "NURSE_PHYSICIAN"
+      ],
+      "groups": [
+        "/tenant/fl"
+      ],
+      "emailVerified": true,
+      "firstName": "Nurse",
+      "lastName": "FL",
+      "email": "nurse.fl@idre.test"
+    },
+    {
+      "username": "attorney.fl",
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "IdreTest123!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "ATTORNEY"
+      ],
+      "groups": [
+        "/tenant/fl"
+      ],
+      "emailVerified": true,
+      "firstName": "Attorney",
+      "lastName": "FL",
+      "email": "attorney.fl@idre.test"
     }
   ],
   "bruteForceProtected": true,
