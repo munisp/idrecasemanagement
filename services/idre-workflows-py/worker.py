@@ -31,6 +31,8 @@ from onboarding import StakeholderOnboardingWorkflow, TenantOnboardingWorkflow
 
 
 async def run_workers(client: Client) -> None:
+    # Concurrency knobs: activities are I/O-bound (DB/HTTP) — run many in
+    # flight per worker pod; scale pods horizontally beyond this.
     worker = Worker(
         client,
         task_queue="idre-cases",
@@ -39,6 +41,8 @@ async def run_workers(client: Client) -> None:
             set_case_status, post_ledger_transfer, request_lawful_reveal,
             notify_party, flag_cms_breach, run_cms_monthly_report,
         ],
+        max_concurrent_activities=100,
+        max_concurrent_workflow_tasks=200,
     )
     onboarding_worker = Worker(
         client,
@@ -49,6 +53,8 @@ async def run_workers(client: Client) -> None:
             check_state_requirements, provision_keycloak_account,
             provision_idre_ledger_accounts, send_portal_invite, record_onboarding_audit,
         ],
+        max_concurrent_activities=50,
+        max_concurrent_workflow_tasks=100,
     )
     await asyncio.gather(worker.run(), onboarding_worker.run())
 

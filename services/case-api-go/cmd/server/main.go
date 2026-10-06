@@ -339,7 +339,22 @@ func main() {
 	cfg := configFromEnv()
 	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	// Connection pool sized for throughput: 50 in-flight queries per replica
+	// (PgBouncer txn-pooling fronts Postgres in-cluster, so 50/replica is safe).
+	pcfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	must(err)
+	if v := os.Getenv("DB_POOL_MAX_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			pcfg.MaxConns = int32(n)
+		}
+	} else {
+		pcfg.MaxConns = 50
+	}
+	pcfg.MinConns = 10
+	pcfg.MaxConnLifetime = 30 * time.Minute
+	pcfg.MaxConnIdleTime = 5 * time.Minute
+	pcfg.HealthCheckPeriod = 30 * time.Second
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	must(err)
 	defer pool.Close()
 
