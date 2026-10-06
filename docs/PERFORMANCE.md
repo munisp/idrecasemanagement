@@ -99,6 +99,20 @@ Sidecar resource annotations (cpu 100m→1, mem 128Mi→512Mi, 16M body,
 32K read buffer) documented in `configuration.yaml` — default 250m/100Mi
 throttles under pub/sub fan-out bursts.
 
+### Autoscaling — KEDA (`deploy/kubernetes/keda-scaledobjects.yaml`)
+Event-driven scaling on **work depth**, not just CPU: the outbox relay scales
+1→8 replicas on unpublished outbox rows (PostgreSQL scaler, ~500 rows per
+replica, scale-to-min when idle; `FOR UPDATE SKIP LOCKED` makes multi-replica
+claiming safe). Kafka-lag scaler template included for future consumers.
+KEDA itself ships via the `keda` helmfile release (idre-obs namespace).
+
+### App manifests — `deploy/kubernetes/apps.yaml` (new)
+Production Deployments for case-api / idre-workflows / outbox-relay with the
+Dapr sidecar performance annotations from `configuration.yaml` (sized
+sidecars, 16M body, streaming request bodies). The outbox relay runs **no
+sidecar** — it speaks Kafka directly with the tuned producer (Tier-2 pattern
+already applied where it matters most).
+
 ### Go (case-api)
 Explicit pgxpool config: 50 max / 10 min conns (env-overridable via
 `DB_POOL_MAX_CONNS`), 30 min conn lifetime, 30 s health checks. Combined with

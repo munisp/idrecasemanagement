@@ -16,6 +16,7 @@ repositories:
   - name: spark          url: https://charts.bitnami.com/bitnami
   - name: ray            url: https://ray-project.github.io/kuberay-helm/
   - name: flink          url: https://archive.apache.org/dist/flink/flink-kubernetes-operator-1.9.0/
+  - name: kedacore       url: https://kedacore.github.io/charts
 
 releases:
   # ---- core -----------------------------------------------------------------
@@ -82,3 +83,13 @@ releases:
     namespace: idre-finops
     chart: kubecost/cost-analyzer
     values: [helm-values/kubecost.yaml]
+  # ---- autoscaling ------------------------------------------------------------
+  - name: keda
+    namespace: idre-obs
+    chart: kedacore/keda
+    values:
+      - resources:
+          operator:
+            requests: { cpu: 100m, memory: 128Mi }
+          metricServer:
+            requests: { cpu: 100m, memory: 128Mi }
