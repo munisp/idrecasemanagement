@@ -87,6 +87,18 @@ Workers 3 → 6 (4–8 vCPU, 8–16 GiB). Job conf (analytics-py submit):
 `spark.sql.shuffle.partitions=1024`, `spark.sql.files.maxPartitionBytes=256m`,
 Delta `optimizeWrite` + `autoCompact`.
 
+### Dapr — `deploy/dapr/`
+`configuration.yaml` (new): 1% head-based trace sampling (full tracing taxes
+every sidecar hop), low-cardinality metrics, mTLS kept on, deny-by-default
+access control. `resiliency.yaml` (new): the timeouts/retries/circuit-breakers
+the architecture doc promised — vault and case-api get circuit breakers so an
+outage doesn't cascade; pub/sub publishes retry forever (outbox events must
+not drop) while Redis cache calls get bounded retries (misses are recoverable).
+Kafka pubsub component: `initialOffset=oldest`, version pinned to the cluster.
+Sidecar resource annotations (cpu 100m→1, mem 128Mi→512Mi, 16M body,
+32K read buffer) documented in `configuration.yaml` — default 250m/100Mi
+throttles under pub/sub fan-out bursts.
+
 ### Go (case-api)
 Explicit pgxpool config: 50 max / 10 min conns (env-overridable via
 `DB_POOL_MAX_CONNS`), 30 min conn lifetime, 30 s health checks. Combined with
