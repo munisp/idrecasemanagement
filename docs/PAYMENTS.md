@@ -38,10 +38,21 @@ Ledger posting is fail-open with an error log (the money is already real);
 drift is caught by reconciling `public.payments` totals against TB account
 balances. Manual fee flows (`/fees/transfer`) post directly to TB as before.
 
-**Mojaloop is not part of the stack.** It is an interbank/scheme switch, not a
-merchant collection rail; it would only appear if a state mandated
-Mojaloop-based settlement, and would slot in as a second provider value in
-`public.payments.provider` with the same webhook → invoice → TB pattern.
+**Mojaloop settlement option (implemented, disabled by default).** Mojaloop is
+not deployed — it is an interbank/scheme switch, not a merchant collection
+rail. The platform-side boundary now exists for the day a state mandates it:
+
+- `POST /v1/tenants/{st}/invoices/{invId}/checkout?provider=mojaloop` →
+  prepares a transfer via the SDK scheme-adapter (`MOJALOOP_ADAPTER_URL`) and
+  reserves funds as a **TB pending transfer** (Mojaloop prepare phase).
+- `POST /api/webhooks/mojaloop` → HMAC-verified fulfil/reject from the
+  adapter: COMMITTED posts the pending transfer and settles the invoice;
+  ABORTED voids it. Idempotent per transferId — same webhook → invoice → TB
+  pattern as Stripe, with Mojaloop's 2-phase lifecycle mapping onto
+  TigerBeetle pending → post | void.
+- Mojaloop's central-ledger is **MySQL-only** (no upstream Postgres profile);
+  `deploy/helm-values/mojaloop.yaml` carries a tuned InnoDB config for that
+  optional deployment (`enabled: false` by default).
 
 ## Financial dashboard (`#/finance`)
 

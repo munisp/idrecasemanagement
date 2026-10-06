@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
     from activities import (
         set_case_status, post_ledger_transfer, request_lawful_reveal,
         notify_party, flag_cms_breach, run_cms_monthly_report,
+        export_ledger_snapshot, reconcile_ledger,
     )
 
 # 45 CFR Part 149 + 2026 Final Rule statutory clocks (business days / calendar days)
@@ -231,3 +232,20 @@ class CmsMonthlyReportWorkflow:
             start_to_close_timeout=timedelta(minutes=10),
         )
         return key
+
+
+@workflow.defn(name="LedgerReconciliationWorkflow")
+class LedgerReconciliationWorkflow:
+    """Daily per tenant: export TB balances to the lakehouse, then reconcile
+    Postgres payments against ledger balances. Drift -> breach + alert."""
+
+    @workflow.run
+    async def run(self, args: dict) -> dict:
+        tenant = args["tenant"]
+        await workflow.execute_activity(
+            export_ledger_snapshot, args=[tenant], start_to_close_timeout=timedelta(minutes=2),
+        )
+        result = await workflow.execute_activity(
+            reconcile_ledger, args=[tenant], start_to_close_timeout=timedelta(minutes=2),
+        )
+        return result

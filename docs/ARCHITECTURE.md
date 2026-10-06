@@ -231,8 +231,9 @@ ml       Ray: QPA-outlier scoring, settlement propensity, doc classify   ← Ray
 geo      Sedona: provider-vs-state-boundary, air-ambulance corridors     ← Spark+Sedona
 ```
 
-- **Flink** (streaming): Kafka→bronze exactly-once; **streaming SLA monitor** (event-time windows emit breach candidates to `idre.<st>.alerts` before Temporal timers even fire — early-warning).
-- **Spark** (batch): bronze→silver dedupe/merge (Delta `MERGE`), silver→gold aggregations; **CMS monthly report** job per tenant (≤30bd mandate); Delta `OPTIMIZE` + Z-ORDER on `(tenant, case_number)`; `VACUUM` honoring 6-year retention.
+- **Flink** (streaming): Kafka→bronze exactly-once (Parquet bulk sink under `bronze-raw/events/date=…`, checkpoint-committed); **streaming SLA monitor** reads each tenant's manifest clocks (5-min refresh) and emits breach candidates to the `idre.alerts` ops topic via KafkaSink before Temporal timers fire — early-warning.
+- **Spark** (batch): Parquet bronze→silver with typed common columns + raw payload (drift-proof), silver→gold aggregations; **CMS monthly report** job per tenant (≤30bd mandate) incl. `sla_breaches` (fed by outbox events from the workflow breach activity); Delta `OPTIMIZE` + Z-ORDER; `VACUUM` honoring 6-year retention.
+- **Ledger visibility**: daily `LedgerReconciliationWorkflow` per tenant exports TigerBeetle balances (`ledger.balance_snapshot` → `silver/ledger_balances` → Mojaloop-style `settlement_positions` mart) and reconciles Postgres `payments` against TB balances — drift writes `public.ledger_reconciliation` rows and raises breaches.
 - **DataFusion**: embedded SQL in a small query service exposing `POST /analytics/query` (tenant-scoped, read-only gold zone) — auditors get instant SQL without Spark.
 - **Ray**: ML workloads; Ray Serve endpoints (behind APISIX, JWT-protected) for `qpa-outlier-score`, `settlement-propensity`.
 - **Sedona**: spatial joins of provider service locations vs Census/state shapefiles; federal-vs-SSL jurisdiction checks for border-line cases; coverage-gap dashboards.

@@ -24,6 +24,11 @@ tbctl --addresses "${TB_ADDRESSES:-localhost:3000}" create-accounts \
   --account "${TENANT}:4000:idre"  --account "${TENANT}:5000:refund"
 
 # Kafka topics with per-tenant prefix ACLs.
+# Shared ops topic: Flink SLA early-warning sink produces here (tenant
+# carried in the payload; produce-only grant for the flink principal).
+if ! kafka-topics.sh --bootstrap-server "$KAFKA" --describe --topic idre.alerts >/dev/null 2>&1; then
+  kafka-topics.sh --bootstrap-server "$KAFKA" --create --topic idre.alerts     --partitions 3 --replication-factor 3 --config min.insync.replicas=2
+fi
 for domain in cases offers fees audit voice documents rules; do
   kafka-topics.sh --bootstrap-server "${KAFKA_BROKERS:-localhost:9092}" \
     --create --if-not-exists --topic "idre.${TENANT}.${domain}" \
