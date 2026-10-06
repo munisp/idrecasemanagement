@@ -85,9 +85,25 @@ func (s *server) slaReport(w http.ResponseWriter, r *http.Request) {
 // summaryReport: case-status aggregates (CMS-report style rollups).
 func (s *server) summaryReport(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// Programmed tenants (FL AHCA) track progress on internal_status, not
+	// the federal status column -- grouping by status there would aggregate
+	// every case under one empty/unused bucket. Cases that haven't reached
+	// their first internal_status yet (a just-created PENDING_INTAKE shell
+	// case) fall back to status so they aren't dropped from the rollup.
+	// Programmed tenants have no QPA concept at all (that's a federal NSA
+	// term) -- qpa_cents is always 0/null there, so the average silently
+	// showed "avg QPA $0" on every status. disputed_amount_cents is FL's
+	// actual equivalent (accumulates from imported claims). Confirmed live.
+	programmed := s.loadProgram(r, tenant) != nil
+	statusExpr := "status"
+	amountExpr := "qpa_cents"
+	if programmed {
+		statusExpr = "coalesce(internal_status, status)"
+		amountExpr = "disputed_amount_cents"
+	}
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT status, COUNT(*), COALESCE(AVG(qpa_cents),0)
-		FROM tenant_%s.cases GROUP BY status ORDER BY 2 DESC`, sanitizeTenant(tenant)))
+		SELECT %s, COUNT(*), COALESCE(AVG(%s),0)
+		FROM tenant_%s.cases GROUP BY 1 ORDER BY 2 DESC`, statusExpr, amountExpr, sanitizeTenant(tenant)))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -100,7 +116,8 @@ func (s *server) summaryReport(w http.ResponseWriter, r *http.Request) {
 		var avg float64
 		if rows.Scan(&status, &n, &avg) == nil {
 			out = append(out, map[string]any{
-				"status": status, "count": n, "avg_qpa_usd": avg / 100,
+				"status": status, "count": n, "avg_amount_usd": avg / 100,
+				"amount_label": map[bool]string{true: "Disputed", false: "QPA"}[programmed],
 			})
 		}
 	}

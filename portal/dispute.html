@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>File a dispute — Federal IDRE Platform</title>
+  <link rel="stylesheet" href="/css/site.css" />
+</head>
+<body>
+  <header class="site-nav">
+    <div class="wrap nav-row">
+      <a class="brand" href="/"><span class="brand-mark">ID</span> Federal IDRE Platform</a>
+      <nav class="nav-links"><a class="btn ghost" href="/app.html">Log in</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap apply-wrap">
+    <h1>File a dispute</h1>
+    <p class="muted">No account needed. This opens a real case with the state program right away —
+      you'll get an email with filing instructions, a secure upload link for your packet, and
+      (where a fee applies) a payment link, within moments. Staff will review your packet once
+      it's received; you can check progress by email in the meantime.</p>
+
+    <form id="dispute-form" class="apply-form" novalidate>
+      <label>State program *
+        <select id="f-state" required></select>
+      </label>
+      <label>Who is filing? *
+        <select id="f-party" required>
+          <option value="PROVIDER">Provider / facility</option>
+          <option value="HEALTH_PLAN">Health plan / payer</option>
+        </select>
+      </label>
+      <label>Organization name <input id="f-org" maxlength="200" placeholder="Your organization" /></label>
+      <div class="grid2">
+        <label>Contact name <input id="f-contact" maxlength="120" /></label>
+        <label>Contact email * <input id="f-email" type="email" required maxlength="200" /></label>
+      </div>
+      <label>Disputed amount <input id="f-amount" type="number" step="0.01" min="0" placeholder="$0.00" /></label>
+      <button class="btn solid lg" type="submit" id="f-submit">Start my dispute</button>
+      <p id="f-msg" class="form-msg" role="status"></p>
+    </form>
+  </main>
+
+  <footer class="site-foot"><div class="wrap">
+    <span>Federal IDRE Platform</span><span><a href="/">Home</a> · <a href="/app.html">Portal login</a></span>
+  </div></footer>
+
+  <script>
+    const STATES = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"];
+    const NAMES = {AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
+    const sel = document.getElementById("f-state");
+    sel.innerHTML = '<option value="">Select state…</option>' +
+      STATES.map(st => `<option value="${st.toLowerCase()}">${NAMES[st]} (${st})</option>`).join("");
+    const pre = new URLSearchParams(location.search).get("state");
+    if (pre) sel.value = pre.toLowerCase();
+
+    document.getElementById("dispute-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById("f-msg"), btn = document.getElementById("f-submit");
+      msg.className = "form-msg"; msg.textContent = "";
+      const amount = document.getElementById("f-amount").value;
+      const body = {
+        tenant: sel.value,
+        filing_party_type: document.getElementById("f-party").value,
+        org: document.getElementById("f-org").value.trim(),
+        contact_name: document.getElementById("f-contact").value.trim(),
+        email: document.getElementById("f-email").value.trim(),
+        disputed_amount_cents: amount ? Math.round(parseFloat(amount) * 100) : 0,
+      };
+      if (!body.tenant || !body.email) {
+        msg.classList.add("err"); msg.textContent = "Please select your state and enter your email."; return;
+      }
+      btn.disabled = true; btn.textContent = "Submitting…";
+      try {
+        const resp = await fetch("/api/public/ahca-intake", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          msg.classList.add("ok");
+          msg.textContent = `Case ${data.case_number} opened — check your email for filing instructions and an upload link.`;
+          e.target.reset();
+        } else {
+          msg.classList.add("err");
+          msg.textContent = data.error ? `Could not open your dispute: ${data.error}` : `Submission failed (${resp.status}). Please try again later.`;
+        }
+      } catch {
+        msg.classList.add("err"); msg.textContent = "Network error — please try again.";
+      } finally {
+        btn.disabled = false; btn.textContent = "Start my dispute";
+      }
+    });
+  </script>
+</body>
+</html>

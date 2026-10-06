@@ -17,15 +17,16 @@ import (
 // Stakeholder types: IDRE_ENTITY (certified dispute-resolution entity),
 // PROVIDER_ORG, PAYER_ORG, STATE_AUDITOR_ORG, ADMIN_STAFF.
 type OnboardingApplication struct {
-	ID          string         `json:"id"`
-	Tenant      string         `json:"tenant"`
-	Type        string         `json:"type"`        // IDRE_ENTITY | PROVIDER_ORG | PAYER_ORG | ...
-	LegalName   string         `json:"legal_name"`
-	EIN         string         `json:"ein"`         // masked at rest
-	NPI         string         `json:"npi,omitempty"`
-	Payload     map[string]any `json:"payload"`     // type-specific fields (fee schedule, COI, banking…)
-	Status      string         `json:"status"`
-	SubmittedAt time.Time      `json:"submitted_at"`
+	ID           string         `json:"id"`
+	Tenant       string         `json:"tenant"`
+	Type         string         `json:"type"` // IDRE_ENTITY | PROVIDER_ORG | PAYER_ORG | ...
+	LegalName    string         `json:"legal_name"`
+	EIN          string         `json:"ein"` // masked at rest
+	NPI          string         `json:"npi,omitempty"`
+	Payload      map[string]any `json:"payload"` // type-specific fields (fee schedule, COI, banking…)
+	Status       string         `json:"status"`
+	StatusReason string         `json:"status_reason,omitempty"`
+	SubmittedAt  time.Time      `json:"submitted_at"`
 }
 
 // createApplication inserts the application row and starts the durable
@@ -130,7 +131,7 @@ func (s *server) publicApply(w http.ResponseWriter, r *http.Request) {
 func (s *server) listApplications(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.db.Query(r.Context(), `
-		SELECT id, tenant, type, legal_name, npi, status, submitted_at
+		SELECT id, tenant, type, legal_name, npi, status, coalesce(status_reason,''), submitted_at
 		FROM public.stakeholder_applications
 		WHERE tenant=$1 ORDER BY submitted_at DESC LIMIT 200`, tenant)
 	if err != nil {
@@ -141,7 +142,7 @@ func (s *server) listApplications(w http.ResponseWriter, r *http.Request) {
 	out := []OnboardingApplication{}
 	for rows.Next() {
 		var a OnboardingApplication
-		if rows.Scan(&a.ID, &a.Tenant, &a.Type, &a.LegalName, &a.NPI, &a.Status, &a.SubmittedAt) == nil {
+		if rows.Scan(&a.ID, &a.Tenant, &a.Type, &a.LegalName, &a.NPI, &a.Status, &a.StatusReason, &a.SubmittedAt) == nil {
 			out = append(out, a)
 		}
 	}

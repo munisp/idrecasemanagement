@@ -78,10 +78,22 @@ class StakeholderOnboardingWorkflow:
             ),
         )
         if not (ein_ok and cert_ok and state_ok["ok"]):
+            # Human-readable, not the raw "ein=False cert=True state=[...]"
+            # dump this used to store -- that string reached the portal
+            # verbatim with nowhere even showing it, so a rejected applicant
+            # (or the staff reviewing them) had no way to learn why. Confirmed
+            # live.
+            reasons = []
+            if not ein_ok:
+                reasons.append("EIN/NPI verification failed")
+            if not cert_ok:
+                reasons.append("IDRE certification not found")
+            if not state_ok["ok"]:
+                missing = ", ".join(state_ok.get("missing") or [])
+                reasons.append(f"missing required documents: {missing}")
             await workflow.execute_activity(
                 set_application_status,
-                args=[app_id, "REJECTED_AUTO",
-                      f"ein={ein_ok} cert={cert_ok} state={state_ok.get('missing')}"],
+                args=[app_id, "REJECTED_AUTO", "; ".join(reasons)],
                 start_to_close_timeout=timedelta(seconds=30),
             )
             return "REJECTED_AUTO"

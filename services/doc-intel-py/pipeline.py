@@ -246,6 +246,12 @@ def stage_layout(ctx: dict, cfg: dict) -> dict:
     engine = PPStructureV3(
         use_table_recognition=cfg.get("use_table_recognition", True),
         use_seal_recognition=cfg.get("use_seal_recognition", True),
+        # Known PaddlePaddle 3.3.x regression: the oneDNN CPU backend's PIR
+        # attribute converter has no case for ArrayAttribute<DoubleAttribute>,
+        # which several of this pipeline's models hit (upstream issue
+        # PaddlePaddle/Paddle#79749/#77340). Confirmed live. No fix upstream
+        # yet -- enable_mkldnn=False is the documented workaround.
+        enable_mkldnn=False,
     )
     regions: list[dict] = []
     for i, page in enumerate(ctx["pages"]):
@@ -379,7 +385,10 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     fields = schemas[schema_name]["fields"]
 
     md = ctx.get("markdown", ctx.get("text", ""))
-    tables_hint = json.dumps(ctx.get("tables", [])[:3])[:3000]
+    # 1500 not 3000: this rides on top of chunk 0 regardless of chunk_chars,
+    # and was part of what pushed a real request to 4316 prompt tokens
+    # against Ollama's 4096 context (see pipeline.yaml's chunk_chars note).
+    tables_hint = json.dumps(ctx.get("tables", [])[:3])[:1500]
     pages = ctx.get("pages", [])
     max_pages = cfg.get("max_pages", 3)
 
@@ -410,11 +419,15 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         if i == 0:
             prompt += "\n\nTABLES:\n" + tables_hint
         content: list[dict] = [{"type": "text", "text": prompt}]
-        # Multimodal: page images give layout cues text alone loses.
-        for page in pages[i * max_pages:(i + 1) * max_pages] or pages[:max_pages]:
-            content.append({"type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{pil_to_b64(page)}"}})
-            break  # one page image per chunk keeps token cost bounded
+        # Multimodal: page images give layout cues text alone loses -- but
+        # only when the configured model actually supports it. Confirmed
+        # live: Ollama hard-400s ("model does not support multimodal
+        # requests") rather than ignoring an image sent to a text-only model.
+        if cfg.get("vision"):
+            for page in pages[i * max_pages:(i + 1) * max_pages] or pages[:max_pages]:
+                content.append({"type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{pil_to_b64(page)}"}})
+                break  # one page image per chunk keeps token cost bounded
         parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
         in_domain_votes.append(bool(parsed.pop("_in_domain", True)))
         parts.append(parsed)
@@ -574,6 +587,10 @@ def stage_verify(ctx: dict, cfg: dict) -> dict:
 
 def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     """Cross-check extracted fields against the case record; mismatches flag."""
+    # Accumulate onto whatever's already here -- a stage that failed earlier
+    # and was skipped (run_pipeline's per-stage try/except) records itself as
+    # a finding too; overwriting ctx["findings"] fresh here would silently
+    # erase that, undoing the whole point of recording it.
     findings: list[dict] = list(ctx.get("findings", []))
     ex = ctx.get("extracted", {})
     norm = ctx.get("normalized", {})
@@ -632,9 +649,25 @@ def stage_index(ctx: dict, cfg: dict) -> dict:
 # Docking engine
 # ---------------------------------------------------------------------------
 
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)(:-([^}]*))?\}")
+
+
+def _expand_env_vars(text: str) -> str:
+    """${VAR:-default} / ${VAR} substitution -- PyYAML does not do shell-style
+    env-var expansion on its own, so pipeline.yaml's endpoint/model defaults
+    (e.g. ${VLM_ENDPOINT:-http://vllm:8000/v1}) were being passed through
+    verbatim as literal strings. Confirmed live: the VLM client was trying to
+    connect to the literal unexpanded string as a URL, surfacing as a generic
+    "Connection error" with no hint the config was never resolved."""
+    def repl(m: re.Match) -> str:
+        name, _, default = m.groups()
+        return os.environ.get(name, default or "")
+    return _ENV_VAR_RE.sub(repl, text)
+
+
 def load_pipeline(path: str = "pipeline.yaml") -> dict:
     with open(path) as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(_expand_env_vars(f.read()))
 
 
 def run_pipeline(ctx: dict, case: dict | None = None) -> dict:
@@ -648,15 +681,32 @@ def run_pipeline(ctx: dict, case: dict | None = None) -> dict:
         if cond and not ctx.get(cond):
             continue
         name, cfg = st["name"], st.get("config", {})
-        if name == "vlm_extract":
-            ctx = stage_vlm_extract(ctx, cfg, spec["schemas"])
-        elif name == "validate":
-            ctx = stage_validate(ctx, cfg, case)
-        else:
-            fn = globals().get(f"stage_{name}")
-            if fn is None:
-                raise RuntimeError(f"pipeline stage not implemented: {name}")
-            ctx = fn(ctx, cfg)
+        try:
+            if name == "vlm_extract":
+                ctx = stage_vlm_extract(ctx, cfg, spec["schemas"])
+            elif name == "validate":
+                ctx = stage_validate(ctx, cfg, case)
+            else:
+                fn = globals().get(f"stage_{name}")
+                if fn is None:
+                    raise RuntimeError(f"pipeline stage not implemented: {name}")
+                ctx = fn(ctx, cfg)
+        except Exception as exc:
+            # docling is the primary parser -- if it fails there is no usable
+            # text/markdown/tables at all, so that failure stays fatal (same
+            # as before). Every other stage (ocr, layout/seal-detection,
+            # vlm_extract) is an enhancement on top of what docling already
+            # extracted: a missing vLLM endpoint or a PaddleX dependency
+            # issue shouldn't take the whole document down with it. Confirmed
+            # live: layout's PP-StructureV3 construction failing aborted
+            # run_pipeline() before persist() or the DOCS_VERIFIED/
+            # DOC_ANALYZED signal ever ran -- for every document, forever,
+            # not just the one that happened to trigger it first.
+            if name == "docling":
+                raise
+            ctx.setdefault("findings", []).append(
+                {"stage": name, "issue": f"stage failed, skipped: {exc}"}
+            )
     ctx.setdefault("status", "ANALYZED")
     return ctx
 

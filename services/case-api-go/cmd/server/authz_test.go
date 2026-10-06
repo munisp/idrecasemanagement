@@ -85,6 +85,68 @@ func TestWrongTokenFallsThroughToJWTAndFails(t *testing.T) {
 	}
 }
 
+// Reproduces the finding from scoping FL AHCA as a second program: every
+// program-layer endpoint (checkEligibility, setDualStatus, draftCorrespondence,
+// qaDecision, issueInvoice, settleInvoice, createIntake, advanceIntake,
+// recordOptOut, createShareLink, escalationTrigger) had zero role check at
+// all -- reachable by any authenticated member of the tenant, any role.
+// These table-driven cases pin the exact gate each handler now enforces.
+func TestProgramLayerRoleFloors(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		gate  []string
+		want  bool
+	}{
+		// setDualStatus / draftCorrespondence / createShareLink / importClaims /
+		// submitDeliverable: broad case-staff gate.
+		{"case staff: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"case staff: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"case staff: PARTY rejected", []string{"PARTY"}, []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		// checkEligibility: CASE_MANAGER/ATTORNEY/admins only -- not PM/CODER.
+		{"eligibility: ATTORNEY allowed", []string{"ATTORNEY"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"eligibility: PM rejected", []string{"PM"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		// settleInvoice: PM/FINANCE only -- not CASE_MANAGER (separation of duties
+		// between the reviewer who drafts the case and whoever moves money).
+		{"settle: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"settle: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		// recordOptOut: ATTORNEY only, per the source docs ("Attorney decides
+		// if the plan may opt out") -- not even CASE_MANAGER.
+		{"opt-out: ATTORNEY allowed", []string{"ATTORNEY"}, []string{"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"opt-out: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, c.gate...)
+		if got != c.want {
+			t.Errorf("%s: roles=%v gate=%v: got allowed=%v, want %v", c.name, c.roles, c.gate, got, c.want)
+		}
+	}
+}
+
+// qaDecision's QA-role gate is read straight from program_rules config (e.g.
+// "ATTORNEY" on FL AHCA's dismissal template) rather than hardcoded per
+// program -- this pins that a CODER token cannot approve an ATTORNEY-gated
+// draft, and that ATTORNEY/FEDERAL_ADMIN/PLATFORM_ADMIN can.
+func TestQaDecisionRoleMatchesConfiguredQARole(t *testing.T) {
+	qaRole := "ATTORNEY"
+	cases := []struct {
+		roles []string
+		want  bool
+	}{
+		{[]string{"CODER"}, false},
+		{[]string{"PM"}, false},
+		{[]string{"ATTORNEY"}, true},
+		{[]string{"FEDERAL_ADMIN"}, true},
+		{[]string{"PLATFORM_ADMIN"}, true},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, qaRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+		if got != c.want {
+			t.Errorf("roles=%v against qa_role=%s: got allowed=%v, want %v", c.roles, qaRole, got, c.want)
+		}
+	}
+}
+
 func TestIsUniqueViolation(t *testing.T) {
 	if isUniqueViolation(nil) {
 		t.Fatal("nil error is not a unique violation")

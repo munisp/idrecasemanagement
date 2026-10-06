@@ -1,0 +1,251 @@
+package main
+
+// Public pre-case intake for programmed tenants (FL AHCA CDR today, any
+// future state that adopts program_rules the same way). Mirrors
+// publicApply's shape (per-IP throttle, tenant validated) but produces a
+// real case row in PENDING_INTAKE instead of a stakeholder_applications
+// row: AHCA's Filing Party needs upload/download links before any case
+// exists, and the share-link system is hard-wired to a case_id that must
+// already exist. Decision (scoped with the user): create the case row
+// immediately rather than fork a parallel intake-scoped document system --
+// this reuses ShareBox, documents, notes, and correspondence completely
+// unmodified. An abandoned shell case with no packet is closed
+// CLOSED_REFUNDED by AhcaDisputeWorkflow's own 7-day refund-window wait.
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	temporalclient "go.temporal.io/sdk/client"
+)
+
+func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
+	ip := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.Split(fwd, ",")[0]
+	}
+	if !s.rateLimit("ahca-intake:"+ip, 10, 3600) {
+		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var in struct {
+		Tenant              string `json:"tenant"`
+		Email               string `json:"email"`
+		Contact             string `json:"contact_name"`
+		Org                 string `json:"org"`
+		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
+		DisputedAmountCents int64  `json:"disputed_amount_cents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil ||
+		in.Tenant == "" || in.Email == "" || !strings.Contains(in.Email, "@") {
+		http.Error(w, `{"error":"tenant and a valid email are required"}`, http.StatusBadRequest)
+		return
+	}
+	fpt := strings.ToUpper(strings.TrimSpace(in.FilingPartyType))
+	if fpt == "" {
+		fpt = "PROVIDER"
+	}
+	if fpt != "PROVIDER" && fpt != "HEALTH_PLAN" {
+		http.Error(w, `{"error":"filing_party_type must be PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
+		return
+	}
+	tenant := strings.ToLower(strings.TrimSpace(in.Tenant))
+	var exists bool
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM public.state_config WHERE tenant=$1)`, tenant).Scan(&exists); err != nil || !exists {
+		http.Error(w, `{"error":"unknown state program"}`, http.StatusBadRequest)
+		return
+	}
+	cfg := s.loadProgram(r, tenant)
+	if cfg == nil {
+		http.Error(w, `{"error":"this tenant has no pre-case intake program configured"}`, http.StatusBadRequest)
+		return
+	}
+	caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.Contact, in.Org, fpt, in.DisputedAmountCents)
+	if err != nil {
+		if isUniqueViolation(err) {
+			http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
+			return
+		}
+		http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"case_id": caseID, "case_number": caseNumber, "status": "PENDING_INTAKE", "filing_party_type": fpt,
+	})
+}
+
+// startAhcaCase is the real intake moment shared by two entry points: the
+// public no-login front door (publicAhcaIntake, above) and createIntake's
+// programmed-tenant branch (programops.go) -- staff turning an inbound
+// phone/email request into a case, which per the source documents is the
+// actual standard path (there was never a public self-service web form in
+// the real Capitol Bridge process; AHCA's Filing Party has always reached
+// them by phone or email). Both produce the exact same real case, links,
+// invoice, and email -- only the trigger differs.
+func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64) (caseID, caseNumber string, err error) {
+	caseNumber = s.nextCaseNumber(r, tenant, cfg)
+	// requester_* lands in details so the pre-case intake list can show who
+	// asked and search by email/org -- previously nothing persisted this on
+	// the case at all (only used in-flight, for the email and the
+	// call_log/inquiry_log backfill below), so the real-case intake path
+	// had no way to display requester info anywhere once the case existed.
+	detailsJSON, _ := json.Marshal(map[string]string{
+		"requester_email": email, "requester_contact_name": contactName, "requester_org": org,
+		"filing_party_type": filingPartyType,
+	})
+	if err = s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		INSERT INTO tenant_%s.cases (case_number, status, details, disputed_amount_cents)
+		VALUES ($1, 'PENDING_INTAKE', $2, nullif($3,0)) RETURNING id`, sanitizeTenant(tenant)),
+		caseNumber, detailsJSON, disputedAmountCents).Scan(&caseID); err != nil {
+		return "", "", err
+	}
+	s.logAudit(r.Context(), tenant, caseID, "CASE_INTAKE_OPENED", map[string]any{
+		"case_number": caseNumber, "requester_email": email, "requester_org": org,
+		"disputed_amount_cents": disputedAmountCents,
+	})
+
+	s.ensureChecklist(r, tenant, caseID)
+
+	// Backfill pre-case calls/inquiries logged against this email before the
+	// case existed -- PLUM CRM's own documented gap was that such contacts
+	// never got linked to the case once one opened; here they do.
+	_, _ = s.db.Exec(r.Context(),
+		`UPDATE public.call_log SET case_id=$1 WHERE tenant=$2 AND requester_email=$3 AND case_id IS NULL`,
+		caseID, tenant, email)
+	_, _ = s.db.Exec(r.Context(),
+		`UPDATE public.inquiry_log SET case_id=$1 WHERE tenant=$2 AND requester_email=$3 AND case_id IS NULL`,
+		caseID, tenant, email)
+
+	wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+	if _, werr := s.tc.ExecuteWorkflow(r.Context(), temporalclient.StartWorkflowOptions{
+		ID: wfID, TaskQueue: "idre-ahca",
+	}, "AhcaDisputeWorkflow", map[string]any{
+		"tenant": tenant, "case_id": caseID, "case_number": caseNumber,
+	}); werr != nil {
+		return caseID, caseNumber, werr
+	}
+
+	// Filing-instructions download link + an upload-only link for the filing
+	// packet, same ShareBox primitives the Reviewer uses for every later
+	// stage (G9) -- works immediately because the case already exists.
+	downloadToken := s.mintShareLink(r, tenant, caseID, "download", "", 30)
+	uploadToken := s.mintShareLink(r, tenant, caseID, "upload", "", 30)
+
+	// The docs are explicit that the FIRST email includes the initial fee
+	// payment link ("Capitol Bridge requires the ... fee to be paid in full
+	// ... click the link below"), not a later one -- issue the invoice and
+	// open its Stripe Checkout session now, same party assumption the
+	// source docs themselves make ("every document assumes the provider
+	// files"), degrading gracefully (no link, not a failed request) when
+	// Stripe isn't configured for this deployment.
+	paymentLine := "A payment link for the initial review fee will follow once your packet is received."
+	if cfg.Fees.InitialFeeCents > 0 {
+		if checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents); cerr == nil {
+			paymentLine = fmt.Sprintf("Pay the initial review fee ($%d.%02d) here: %s",
+				cfg.Fees.InitialFeeCents/100, cfg.Fees.InitialFeeCents%100, checkoutURL)
+		} else {
+			s.logActivity(r.Context(), tenant, caseID, "CHECKOUT_FAILED",
+				fmt.Sprintf("Initial fee checkout session could not be created: %s", cerr))
+		}
+	}
+
+	// submission_instructions has no qa_role in config (sends immediately,
+	// per draftCorrespondence's own semantics for a template with none) --
+	// there's no account/contact to resolve "requester" against yet, so the
+	// email just submitted is the recipient, directly.
+	var tpl *CorrTemplate
+	for _, t := range s.corrTemplates(r, tenant) {
+		if t.Key == "submission_instructions" {
+			cp := t
+			tpl = &cp
+			break
+		}
+	}
+	if tpl != nil {
+		subject := s.renderTemplate(r, tenant, caseID, tpl.Subject)
+		body := fmt.Sprintf(
+			"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
+				"Case number: %s\n\n"+
+				"Download the filing instructions and packet: https://idre.newfire.app/api/share/%s\n"+
+				"Upload your completed filing packet: https://idre.newfire.app/api/share/%s\n\n"+
+				"%s",
+			caseNumber, downloadToken, uploadToken, paymentLine,
+		)
+		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
+			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
+		} else {
+			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
+				fmt.Sprintf("Submission instructions SMTP delivery failed: %s", merr))
+		}
+	}
+
+	s.notify(r, tenant, "*", "AHCA_INTAKE",
+		fmt.Sprintf("New filing instructions request: %s (%s)", org, email), "#/cases/"+caseID)
+	return caseID, caseNumber, nil
+}
+
+// mintShareLink is createShareLink's logic without the HTTP/RBAC wrapper,
+// for server-initiated links (the public intake endpoint has no staff
+// principal to gate against). kind/objectKey/daysTTL match createShareLink's
+// own defaults and validation.
+func (s *server) mintShareLink(r *http.Request, tenant, caseID, kind, objectKey string, daysTTL int) string {
+	buf := make([]byte, 24)
+	_, _ = rand.Read(buf)
+	token := hex.EncodeToString(buf)
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), 1, 'system:ahca-intake')`,
+		token, tenant, caseID, kind, objectKey, daysTTL)
+	return token
+}
+
+// issueInitialFeeCheckout is issueInvoice + createCheckout's logic without
+// the HTTP/RBAC wrapper (same reason as mintShareLink: no staff principal
+// exists at public intake time). Mirrors both functions' SQL/Stripe calls
+// exactly so the invoice this produces is indistinguishable from one a
+// staffer issued through the ordinary endpoint.
+func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
+	var invID string
+	if err := s.db.QueryRow(r.Context(), `
+		INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
+		VALUES ($1,$2,$3,'PROVIDER','INITIAL_FEE',$4, (now() + make_interval(days => 30))::date)
+		ON CONFLICT (tenant, case_id, party, kind) DO UPDATE SET amount_cents=EXCLUDED.amount_cents, status='OPEN'
+		RETURNING id`, tenant, caseID, caseNumber, amountCents).Scan(&invID); err != nil {
+		return "", err
+	}
+	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", amountCents, "PROVIDER", caseNumber, "system:ahca-intake")
+
+	form := url.Values{}
+	form.Set("mode", "payment")
+	form.Set("success_url", s.cfg.PortalBaseURL+"/#/cases/"+caseID+"?paid=1")
+	form.Set("cancel_url", s.cfg.PortalBaseURL+"/#/cases/"+caseID)
+	form.Set("line_items[0][quantity]", "1")
+	form.Set("line_items[0][price_data][currency]", "usd")
+	form.Set("line_items[0][price_data][unit_amount]", strconv.FormatInt(amountCents, 10))
+	form.Set("line_items[0][price_data][product_data][name]",
+		fmt.Sprintf("IDRE initial review fee — invoice %s (PROVIDER)", caseNumber))
+	form.Set("metadata[invoice_id]", invID)
+	form.Set("metadata[tenant]", tenant)
+	form.Set("metadata[case_id]", caseID)
+	sess, err := s.stripePost("/v1/checkout/sessions", form)
+	if err != nil {
+		return "", err
+	}
+	sessID, _ := sess["id"].(string)
+	checkoutURL, _ := sess["url"].(string)
+	raw, _ := json.Marshal(sess)
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, raw)
+		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (session_id) DO UPDATE SET updated_at=now()`,
+		tenant, caseID, invID, sessID, amountCents, raw)
+	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amountCents, "PROVIDER", sessID, "system:ahca-intake")
+	return checkoutURL, nil
+}

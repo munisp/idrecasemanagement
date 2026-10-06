@@ -23,6 +23,11 @@ import (
 // an allowed-value list are validated against it; unlisted keys pass through
 // so a state can extend its own field set without a deploy.
 func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in map[string]any

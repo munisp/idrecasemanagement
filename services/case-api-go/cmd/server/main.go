@@ -47,29 +47,32 @@ import (
 // ---------------------------------------------------------------------------
 
 type Config struct {
-	Addr           string // :8080
-	DatabaseURL    string // postgres://...
-	KeycloakJWKS   string // https://keycloak/realms/idre/protocol/openid-connect/certs
-	KeycloakIssuer string // https://keycloak/realms/idre
-	TemporalHost   string // temporal-frontend:7233
-	TemporalNS     string // idre
-	TBAddresses    string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
-	TBClusterID    string // decimal cluster ID this TigerBeetle deployment was formatted with
-	DaprHTTP       string // http://localhost:3500
-	VaultURL       string // http://vault:8081 (mTLS via Dapr in k8s)
-	GraphIntelURL  string // http://graph-intel:8082 ("" = graph features disabled)
-	StripeSecret   string // sk_live_… / sk_test_… ("" = card payments disabled)
-	StripeWebhook  string // whsec_… signing secret for /api/webhooks/stripe
+	Addr            string // :8080
+	DatabaseURL     string // postgres://...
+	KeycloakJWKS    string // https://keycloak/realms/idre/protocol/openid-connect/certs
+	KeycloakIssuer  string // https://keycloak/realms/idre
+	TemporalHost    string // temporal-frontend:7233
+	TemporalNS      string // idre
+	TBAddresses     string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
+	TBClusterID     string // decimal cluster ID this TigerBeetle deployment was formatted with
+	DaprHTTP        string // http://localhost:3500
+	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
+	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
+	StripeSecret    string // sk_live_… / sk_test_… ("" = card payments disabled)
+	StripeWebhook   string // whsec_… signing secret for /api/webhooks/stripe
 	MojaloopAdapter string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
 	MojaloopSecret  string // HMAC secret shared with the scheme adapter
-	PortalBaseURL  string // https://portal.example.gov — Stripe success/cancel return
-	ClamdAddr      string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
-	SMTPHost       string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
-	SMTPPort       int
-	SMTPUser       string
-	SMTPPass       string
-	SMTPFrom       string // e.g. flcdr@example.org
-	WorkerToken    string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
+	PortalBaseURL   string // https://portal.example.gov — Stripe success/cancel return
+	ClamdAddr       string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
+	SMTPHost        string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
+	SMTPPort        int
+	SMTPUser        string
+	SMTPPass        string
+	SMTPFrom        string // e.g. flcdr@example.org
+	WorkerToken     string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
+	KeycloakURL     string // http://keycloak:8080 (base, no /realms/... suffix) -- admin API calls
+	KCAdmin         string // Keycloak master-realm admin username, for tenant provisioning
+	KCAdminPassword string
 }
 
 func configFromEnv() Config {
@@ -99,24 +102,29 @@ func configFromEnv() Config {
 		// --cluster=N` created the replicas' on-disk state, and a wrong ID
 		// doesn't error -- the client just hangs forever with every connection
 		// silently rejected ("invalid header_cluster" on the replica side).
-		TBClusterID:    get("TIGERBEETLE_CLUSTER_ID", ""),
-		DaprHTTP:       get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
-		VaultURL:       get("VAULT_URL", "http://localhost:8081"),
-		GraphIntelURL:  get("GRAPH_INTEL_URL", "http://localhost:8082"),
-		StripeSecret:   get("STRIPE_SECRET_KEY", ""),
-		StripeWebhook:  get("STRIPE_WEBHOOK_SECRET", ""),
+		TBClusterID:     get("TIGERBEETLE_CLUSTER_ID", ""),
+		DaprHTTP:        get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
+		VaultURL:        get("VAULT_URL", "http://localhost:8081"),
+		GraphIntelURL:   get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		StripeSecret:    get("STRIPE_SECRET_KEY", ""),
+		StripeWebhook:   get("STRIPE_WEBHOOK_SECRET", ""),
 		MojaloopAdapter: get("MOJALOOP_ADAPTER_URL", ""),
 		MojaloopSecret:  get("MOJALOOP_WEBHOOK_SECRET", ""),
-		PortalBaseURL:  get("PORTAL_BASE_URL", "http://localhost:8080"),
-		ClamdAddr:      get("CLAMD_ADDR", "localhost:3310"),
-		SMTPHost:       get("SMTP_HOST", ""),
-		SMTPPort:       getInt("SMTP_PORT", 587),
-		SMTPUser:       get("SMTP_USER", ""),
-		SMTPPass:       get("SMTP_PASS", ""),
-		SMTPFrom:       get("SMTP_FROM", "idre@localhost"),
+		PortalBaseURL:   get("PORTAL_BASE_URL", "http://localhost:8080"),
+		ClamdAddr:       get("CLAMD_ADDR", "localhost:3310"),
+		SMTPHost:        get("SMTP_HOST", ""),
+		SMTPPort:        getInt("SMTP_PORT", 587),
+		SMTPUser:        get("SMTP_USER", ""),
+		SMTPPass:        get("SMTP_PASS", ""),
+		SMTPFrom:        get("SMTP_FROM", "idre@localhost"),
 		// No default: an empty WorkerToken disables the service-auth path
 		// entirely rather than accepting a guessable default as a credential.
 		WorkerToken: get("WORKER_TOKEN", ""),
+		// Same KEYCLOAK_URL/KC_ADMIN/KC_ADMIN_PASSWORD env vars idre-workflows
+		// already uses for provision_keycloak_account (onboarding_activities.py).
+		KeycloakURL:     get("KEYCLOAK_URL", "http://localhost:8085"),
+		KCAdmin:         get("KC_ADMIN", ""),
+		KCAdminPassword: get("KC_ADMIN_PASSWORD", ""),
 	}
 }
 
@@ -129,22 +137,25 @@ type Case struct {
 	CaseNumber      string    `json:"case_number"`
 	Tenant          string    `json:"tenant"`
 	Status          string    `json:"status"`
+	InternalStatus  *string   `json:"internal_status,omitempty"`
+	AgencyStatus    *string   `json:"agency_status,omitempty"`
 	ServiceLine     string    `json:"service_line"`
 	QPA             int64     `json:"qpa_cents"`
+	DisputedAmount  int64     `json:"disputed_amount_cents"`
 	OpenedAt        time.Time `json:"opened_at"`
 	OfferWindowEnds time.Time `json:"offer_window_ends_at"`
 }
 
 type InitiateRequest struct {
-	CaseNumber       string `json:"case_number"`           // optional when the tenant program defines a numbering pattern
-	ServiceLine      string `json:"service_line"`
-	PlanType         string `json:"plan_type"` // FULLY_INSURED | SELF_FUNDED
-	QPACents         int64  `json:"qpa_cents"`
-	ProviderID       string `json:"provider_id"`
-	PayerID          string `json:"payer_id"`
-	OpenNegotiationEnd string `json:"open_negotiation_end"` // YYYY-MM-DD
-	DisputedAmountCents int64 `json:"disputed_amount_cents"` // program disputes: drives thresholds + escalation
-	NumClaims        int    `json:"num_claims"`
+	CaseNumber          string `json:"case_number"` // optional when the tenant program defines a numbering pattern
+	ServiceLine         string `json:"service_line"`
+	PlanType            string `json:"plan_type"` // FULLY_INSURED | SELF_FUNDED
+	QPACents            int64  `json:"qpa_cents"`
+	ProviderID          string `json:"provider_id"`
+	PayerID             string `json:"payer_id"`
+	OpenNegotiationEnd  string `json:"open_negotiation_end"`  // YYYY-MM-DD
+	DisputedAmountCents int64  `json:"disputed_amount_cents"` // program disputes: drives thresholds + escalation
+	NumClaims           int    `json:"num_claims"`
 }
 
 type FeeTransfer struct {
@@ -421,8 +432,8 @@ func main() {
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
-		r.Post("/fees/transfer", s.postFeeTransfer)      // escrow/admin/IDRE fee double-entry
-		r.Post("/cases/{caseId}/signal", s.signalCase)   // e.g. response filed, fees paid
+		r.Post("/fees/transfer", s.postFeeTransfer)    // escrow/admin/IDRE fee double-entry
+		r.Post("/cases/{caseId}/signal", s.signalCase) // e.g. response filed, fees paid
 
 		// Documents: encrypted upload, authorized download, analysis status.
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
@@ -445,7 +456,7 @@ func main() {
 		// Voice console + compliance reports (JWT-authenticated reads).
 		r.Get("/voice/intake", s.listVoiceIntake)
 		r.Get("/voice/logs", s.listVoiceLogs)
-		r.Post("/voice/outbound", s.outboundCall)          // trigger outbound calls
+		r.Post("/voice/outbound", s.outboundCall)             // trigger outbound calls
 		r.Get("/cases/{caseId}/activities", s.listActivities) // CRM record timeline
 
 		// CRM core: accounts, contacts, leads, tasks, notes, search.
@@ -459,40 +470,42 @@ func main() {
 		r.Post("/tasks", s.createTask)
 		r.Post("/tasks/{taskId}/complete", s.completeTask)
 		r.Post("/notes", s.addNote)
+		r.Get("/notes", s.listNotes)
 		r.Get("/search", s.globalSearch)
 
 		// Case management: assignment, escalation, relationships, checklists,
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
-		r.Get("/internal/ledger/balances", s.ledgerBalances) // worker-token: reconciliation job
-		r.Post("/checks", s.uploadCheck)                        // physical check photo/scan intake
-		r.Get("/checks", s.listChecks)                          // review queue
-		r.Post("/checks/{checkId}/clear", s.clearCheck)         // funds-cleared settlement
+		r.Get("/internal/ledger/balances", s.ledgerBalances)       // worker-token: reconciliation job
+		r.Post("/checks", s.uploadCheck)                           // physical check photo/scan intake
+		r.Get("/checks", s.listChecks)                             // review queue
+		r.Post("/checks/{checkId}/clear", s.clearCheck)            // funds-cleared settlement
 		r.Post("/internal/checks/{checkId}/result", s.checkResult) // worker-token: doc-intel OCR
 		r.Post("/cases/relate", s.relateCases)
 		r.Get("/cases/{caseId}/relationships", s.caseRelationships)
 		r.Get("/cases/{caseId}/checklist", s.getChecklist)
 		r.Post("/checklists/{itemId}/check", s.checkItem)
 		r.Get("/calendar", s.calendar)
+		r.Get("/audit-log", s.listAuditLog)
 		r.Get("/notifications", s.listNotifications)
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
-		r.Get("/prefs", s.getPrefs)   // server-side user preferences (source of truth)
+		r.Get("/prefs", s.getPrefs) // server-side user preferences (source of truth)
 		r.Put("/prefs", s.putPref)
-		r.Get("/cases/clocks", s.casesClocks)          // batch statutory-clock projection (grids)
-		r.Get("/cases/{caseId}/clocks", s.caseClocks)  // per-case projection (workspace header)
-		r.Post("/cases/bulk", s.bulkCases)             // bulk assign / status with per-item results
-		r.Post("/queues/grab-next", s.grabNext)        // atomic queue claim (triage fast lane)
+		r.Get("/cases/clocks", s.casesClocks)         // batch statutory-clock projection (grids)
+		r.Get("/cases/{caseId}/clocks", s.caseClocks) // per-case projection (workspace header)
+		r.Post("/cases/bulk", s.bulkCases)            // bulk assign / status with per-item results
+		r.Post("/queues/grab-next", s.grabNext)       // atomic queue claim (triage fast lane)
 
 		// Graph intelligence (proxied to graph-intel: FalkorDB + GraphSAGE + EPR-KGQA).
-		r.Post("/graph/ask", s.graphAsk)                      // EPR-KGQA natural-language query
-		r.Post("/graph/feedback", s.graphFeedback)            // thumbs up/down -> ART-ready log
-		r.Post("/graph/sync", s.graphSyncNow)                 // Postgres -> FalkorDB -> lakehouse
-		r.Post("/graph/to-lakehouse", s.graphToLakehouse)     // FalkorDB -> gold-zone export
-		r.Post("/graph/train", s.graphTrain)                  // GraphSAGE training round
-		r.Get("/cases/{caseId}/related", s.caseRelated)       // GNN link predictions
+		r.Post("/graph/ask", s.graphAsk)                  // EPR-KGQA natural-language query
+		r.Post("/graph/feedback", s.graphFeedback)        // thumbs up/down -> ART-ready log
+		r.Post("/graph/sync", s.graphSyncNow)             // Postgres -> FalkorDB -> lakehouse
+		r.Post("/graph/to-lakehouse", s.graphToLakehouse) // FalkorDB -> gold-zone export
+		r.Post("/graph/train", s.graphTrain)              // GraphSAGE training round
+		r.Get("/cases/{caseId}/related", s.caseRelated)   // GNN link predictions
 		r.Get("/cases/{caseId}/graph-neighbors", s.caseGraphNeighbors)
 		r.Post("/cases/{caseId}/letters/{template}", s.generateLetter)
 		r.Get("/reports/sla", s.slaReport)
@@ -500,37 +513,57 @@ func main() {
 
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
-		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
-		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate)        // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)               // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
-		r.Post("/cases/{caseId}/share-links", s.createShareLink)      // tokenized upload/download (G9)
-		r.Get("/qa", s.qaQueue)                                       // QA gate queue (G4)
+		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
+		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
-		r.Post("/cases/{caseId}/invoices", s.issueInvoice)            // dual-party receivables (G8)
+		r.Post("/cases/{caseId}/invoices", s.issueInvoice) // dual-party receivables (G8)
 		r.Get("/cases/{caseId}/invoices", s.listInvoices)
 		r.Get("/invoices", s.listInvoices)
-		r.Post("/invoices/{invId}/settle", s.settleInvoice)           // PAY|REFUND|VOID
+		r.Post("/invoices/{invId}/settle", s.settleInvoice) // PAY|REFUND|VOID
 		r.Get("/reports/receivables", s.receivablesReport)
 		r.Post("/invoices/{invId}/checkout", s.createCheckout) // Stripe Checkout session
 		r.Get("/payments", s.listPayments)                     // payment history (tenant)
 		r.Get("/cases/{caseId}/payments", s.listPayments)      // payment history (case)
 		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
-		r.Post("/cases/{caseId}/claims", s.importClaims)              // bulk claim lines (G10)
+		r.Post("/cases/{caseId}/claims", s.importClaims)       // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
-		r.Post("/intake", s.createIntake)                             // pre-case intake (G12)
+		r.Post("/intake", s.createIntake) // pre-case intake (G12)
 		r.Get("/intake", s.listIntake)
-		r.Post("/intake/{intakeId}/advance", s.advanceIntake)         // refund window enforced
+		r.Post("/intake/{intakeId}/advance", s.advanceIntake) // refund window enforced
 
 		// Rule engine administration (admin roles only; every write audited).
 		r.Get("/rules", s.listRules)
 		r.Put("/rules", s.putRules)
 		r.Get("/rules/audit", s.rulesAudit)
-		r.Get("/deliverables", s.listDeliverables)                    // contract schedule (G7)
+		r.Get("/deliverables", s.listDeliverables) // contract schedule (G7)
 		r.Post("/deliverables", s.submitDeliverable)
-		r.Post("/cases/{caseId}/opt-out", s.recordOptOut)             // plan opt-out adjudication (G14)
+		r.Post("/cases/{caseId}/opt-out", s.recordOptOut) // plan opt-out adjudication (G14)
+
+		// Phone call tracker + inquiries log: audit trail independent of
+		// formal templated correspondence; tenant-level routes cover
+		// pre-case contacts (no case_id yet).
+		r.Post("/calls", s.logCall)
+		r.Get("/calls", s.listCalls)
+		r.Post("/cases/{caseId}/calls", s.logCall)
+		r.Get("/cases/{caseId}/calls", s.listCalls)
+		r.Post("/inquiries", s.logInquiry)
+		r.Get("/inquiries", s.listInquiries)
+		r.Post("/cases/{caseId}/inquiries", s.logInquiry)
+		r.Get("/cases/{caseId}/inquiries", s.listInquiries)
+	})
+
+	// Platform admin: not tenant-scoped (tenancy() requires an existing
+	// /tenant/<st> group membership, which is exactly what this creates) --
+	// auth only, then an inline FEDERAL_ADMIN/PLATFORM_ADMIN role check.
+	r.Route("/v1/admin", func(r chi.Router) {
+		r.Use(a.middleware)
+		r.Post("/tenants", s.createTenant)
 	})
 
 	// Voice-AI surface (API-key auth, not OIDC).
@@ -549,12 +582,12 @@ func main() {
 	r.Get("/api/share/{token}", s.shareLanding)
 	r.Head("/api/share/{token}", s.resolveShareLink)
 	r.Get("/api/share/{token}/meta", s.resolveShareLink)
-	r.Post("/api/share/{token}/upload", s.shareUpload)                        // one-shot, small files
-	r.Post("/api/share/{token}/uploads", s.shareCreateUpload)                 // resumable: create
-	r.Head("/api/share/{token}/uploads/{uploadId}", s.shareUploadOffset)      // resume probe
-	r.Patch("/api/share/{token}/uploads/{uploadId}", s.shareUploadChunk)      // next chunk
+	r.Post("/api/share/{token}/upload", s.shareUpload)                   // one-shot, small files
+	r.Post("/api/share/{token}/uploads", s.shareCreateUpload)            // resumable: create
+	r.Head("/api/share/{token}/uploads/{uploadId}", s.shareUploadOffset) // resume probe
+	r.Patch("/api/share/{token}/uploads/{uploadId}", s.shareUploadChunk) // next chunk
 	r.Post("/api/share/{token}/uploads/{uploadId}/complete", s.shareCompleteUpload)
-	r.Get("/api/share/{token}/download", s.shareDownload)                     // Range/resume supported
+	r.Get("/api/share/{token}/download", s.shareDownload) // Range/resume supported
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
@@ -562,6 +595,9 @@ func main() {
 
 	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
 	r.Post("/api/public/apply", s.publicApply)
+
+	// Public pre-case intake for programmed tenants (no OIDC; per-IP throttled).
+	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
 	// intakes to INELIGIBLE and raises staff notifications for the letters.
@@ -746,7 +782,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Case-management enrichment: stage checklists + duplicate detection + timeline.
-	s.ensureChecklist(tenant, caseID)
+	s.ensureChecklist(r, tenant, caseID)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
 		fmt.Sprintf("Dispute %s initiated (%s) — %s / %s, QPA $%d.%02d, workflow %s",
 			req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
@@ -780,18 +816,20 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "workflow_id": wfID, "status": initialStatus,
 		"late_initiation_flagged": lateInitiation,
-		"possible_duplicates":    dups, // non-blocking warning, triage via /cases/relate
+		"possible_duplicates":     dups, // non-blocking warning, triage via /cases/relate
 	})
 }
 
 // listCases: keyset-paginated dispute list. Enterprise tenants hold thousands
 // of disputes (FL alone projects ~3k/yr), so a hard LIMIT 200 silently hid
 // cases once a tenant outgrew it. Params:
-//   ?limit=N      page size, default 50, max 200
-//   ?cursor=ts|id keyset position from a previous page's next_cursor
-//   ?status=S     exact status filter (saved views push filtering server-side
-//                 so a filter never applies to a partial page)
-//   ?q=text       case_number ILIKE search
+//
+//	?limit=N      page size, default 50, max 200
+//	?cursor=ts|id keyset position from a previous page's next_cursor
+//	?status=S     exact status filter (saved views push filtering server-side
+//	              so a filter never applies to a partial page)
+//	?q=text       case_number ILIKE search
+//
 // Response: {"cases": [...], "next_cursor": "...", "total": N}
 func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -816,7 +854,8 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	sortCol, sortDir := "opened_at", "DESC"
 	if s := q.Get("sort"); s != "" {
 		whitelist := map[string]string{"opened_at": "opened_at", "case_number": "case_number",
-			"status": "status", "qpa_cents": "qpa_cents", "service_line": "service_line"}
+			"status": "status", "qpa_cents": "qpa_cents", "service_line": "service_line",
+			"disputed_amount_cents": "disputed_amount_cents"}
 		col, dir := s, "ASC"
 		if strings.HasPrefix(s, "-") {
 			col, dir = strings.TrimPrefix(s, "-"), "DESC"
@@ -847,7 +886,8 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	query := fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at
+	query := fmt.Sprintf(`SELECT id, case_number, status, internal_status, agency_status,
+		                    coalesce(service_line,''), coalesce(qpa_cents,0), coalesce(disputed_amount_cents,0), opened_at
 		             FROM tenant_%s.cases WHERE true%s
 		             ORDER BY %s %s, id DESC LIMIT %d`, tbl, where, sortCol, sortDir, limit+1)
 	if offsetMode {
@@ -862,10 +902,12 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	out := []Case{}
 	for rows.Next() {
 		var c Case
-		if err := rows.Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.OpenedAt); err == nil {
-			c.Tenant = tenant
-			out = append(out, c)
+		if err := rows.Scan(&c.ID, &c.CaseNumber, &c.Status, &c.InternalStatus, &c.AgencyStatus, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt); err != nil {
+			slog.Error("listCases scan failed — row silently dropped from the list", "tenant", tenant, "err", err)
+			continue
 		}
+		c.Tenant = tenant
+		out = append(out, c)
 	}
 	next := ""
 	if len(out) > limit {
@@ -884,13 +926,13 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	var c Case
-	var details []byte
+	var details, programDates []byte
 	var internal, agency *string
 	err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT id, case_number, status, service_line, qpa_cents, opened_at,
-		                    internal_status, agency_status, details
+		fmt.Sprintf(`SELECT id, case_number, status, coalesce(service_line,''), coalesce(qpa_cents,0), coalesce(disputed_amount_cents,0), opened_at,
+		                    internal_status, agency_status, details, program_dates
 		             FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).
-		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.OpenedAt, &internal, &agency, &details)
+		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &internal, &agency, &details, &programDates)
 	if err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
@@ -898,10 +940,12 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	c.Tenant = tenant
 	var dj map[string]any
 	_ = json.Unmarshal(details, &dj)
+	var pd map[string]any
+	_ = json.Unmarshal(programDates, &pd)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": c.ID, "case_number": c.CaseNumber, "tenant": c.Tenant, "status": c.Status,
-		"service_line": c.ServiceLine, "qpa_cents": c.QPA, "opened_at": c.OpenedAt,
-		"internal_status": internal, "agency_status": agency, "details": dj,
+		"service_line": c.ServiceLine, "qpa_cents": c.QPA, "disputed_amount_cents": c.DisputedAmount, "opened_at": c.OpenedAt,
+		"internal_status": internal, "agency_status": agency, "details": dj, "program_dates": pd,
 	})
 }
 
@@ -917,11 +961,22 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	var wfID, status string
+	var caseNumber, status string
 	if err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT workflow_id, status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&wfID, &status); err != nil {
+		fmt.Sprintf(`SELECT case_number, status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&caseNumber, &status); err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
+	}
+	// Workflow IDs are never persisted to the cases table (confirmed: no
+	// INSERT or UPDATE anywhere writes it) -- initiateCase/the AHCA intake
+	// endpoint both already compute it deterministically from tenant+case
+	// number, so recompute it the same way here rather than trust a column
+	// that was always empty. Reading a program row (not the much heavier
+	// loadProgram-dependent callers elsewhere) is enough to tell which
+	// workflow this case belongs to.
+	wfID := fmt.Sprintf("IDR-%s-%s", strings.ToUpper(tenant), caseNumber)
+	if s.loadProgram(r, tenant) != nil {
+		wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 	}
 	// Statutory offer window (45 CFR 149.520(b)(2)): sealed offers are only
 	// accepted while the 10-business-day window is open — no late offers.

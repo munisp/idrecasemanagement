@@ -118,8 +118,15 @@ minio = Minio(
     secret_key=os.environ.get("MINIO_PASSWORD", "idre-secret"),
     secure=False,
 )
+# The shared OpenSearch cluster's security plugin is on -- constructed with
+# no credentials, every index() call below 401'd (opensearchpy raises
+# AuthenticationException), uncaught, which escaped persist() into main()'s
+# poll-loop catch-all and overwrote the already-successful analysis with a
+# generic ERROR status. Confirmed live.
+OPENSEARCH_PASSWORD = os.environ.get("OPENSEARCH_PASSWORD", "")
 search = OpenSearch(
     hosts=[os.environ.get("OPENSEARCH_URL", "http://localhost:9200")],
+    http_auth=("admin", OPENSEARCH_PASSWORD) if OPENSEARCH_PASSWORD else None,
     use_ssl=False,
 )
 
@@ -141,6 +148,22 @@ def load_case(tenant: str, case_id: str) -> dict | None:
             (case_id,),
         ).fetchone()
     return {"case_number": row[0], "qpa_cents": row[1]} if row else None
+
+
+def unwrap_cloudevent(raw: dict) -> dict:
+    """This consumer reads Kafka directly (confluent-kafka), not through a
+    Dapr app-level subscription, but case-api publishes through its Dapr
+    sidecar -- which wraps every message in a CloudEvents envelope
+    (real payload nested under "data", top-level "type" forced to
+    "com.dapr.event.sent") regardless of the pubsub component's config.
+    Without this, every `evt.get("type") == "doc.uploaded"` check below
+    silently never matched: the message was still consumed and committed
+    (just skipped, no exception raised), so document analysis -- and the
+    DOCS_VERIFIED/DOC_ANALYZED signals that unblock onboarding and offer
+    workflows -- was dead with zero trace anywhere."""
+    if raw.get("specversion") and isinstance(raw.get("data"), dict):
+        return raw["data"]
+    return raw
 
 
 def subject(evt: dict) -> tuple[str, str]:
@@ -181,18 +204,25 @@ def persist(evt: dict, ctx: dict) -> None:
                  "ocr_enhanced": ctx.get("ocr_enhanced", False),
              })),
         )
-    search.index(
-        index=f"idre-docs-{evt['tenant']}",
-        id=evt["doc_id"],
-        # stage_index builds the searchable body; fall back to raw fields if
-        # the pipeline stopped before indexing (e.g. early ERROR paths).
-        body={**ctx.get("index_body", {}), "case_id": case_id, "application_id": application_id}
-        if ctx.get("index_body") else {
-            "case_id": case_id, "application_id": application_id, "doc_type": ctx.get("doc_type"),
-            "text": ctx.get("text", "")[:100000],
-            "extracted": ctx.get("extracted", {}),
-        },
-    )
+    # Best-effort, like the Temporal signal call below it: the Postgres
+    # insert just above is the real system of record for analysis status.
+    # A search-index outage should never cost the already-persisted result
+    # (confirmed live: it did, before this was guarded).
+    try:
+        search.index(
+            index=f"idre-docs-{evt['tenant']}",
+            id=evt["doc_id"],
+            # stage_index builds the searchable body; fall back to raw fields if
+            # the pipeline stopped before indexing (e.g. early ERROR paths).
+            body={**ctx.get("index_body", {}), "case_id": case_id, "application_id": application_id}
+            if ctx.get("index_body") else {
+                "case_id": case_id, "application_id": application_id, "doc_type": ctx.get("doc_type"),
+                "text": ctx.get("text", "")[:100000],
+                "extracted": ctx.get("extracted", {}),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — opensearchpy's exceptions don't share one base worth catching narrowly
+        print(f"doc-intel: OpenSearch index failed (non-fatal): {exc}", file=sys.stderr, flush=True)
     if kind != "case":
         return  # case_activities is a case-timeline table; applications have no equivalent here
     # Unified timeline: analysis result appears on the case activity stream
@@ -348,7 +378,7 @@ def main() -> None:
         if msg is None or msg.error():
             continue
         try:
-            evt = json.loads(msg.value())
+            evt = unwrap_cloudevent(json.loads(msg.value()))
             if evt.get("type") == "doc.uploaded":
                 process(evt)
             elif evt.get("type") == "check.uploaded":
@@ -362,7 +392,7 @@ def main() -> None:
             # escaped uncaught and killed the whole consumer, not just this
             # one message, stopping document processing for every tenant.
             try:
-                mark(json.loads(msg.value()), "ERROR")
+                mark(unwrap_cloudevent(json.loads(msg.value())), "ERROR")
             except Exception as mark_exc:  # noqa: BLE001
                 print(f"doc-intel error (while marking a previous error): {mark_exc}", file=sys.stderr, flush=True)
             consumer.commit(msg)

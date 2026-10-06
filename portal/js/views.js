@@ -13,6 +13,75 @@ const Views = (() => {
   const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="App.rerender()">Retry</button></div>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
   const can = (...rs) => rs.some(role);
+  // Federal NSA cases price on QPA (qpa_cents); programmed tenants (FL AHCA
+  // etc.) have no such concept and always read $0 there -- they use
+  // disputed_amount_cents instead (accumulates from imported claims, or a
+  // one-time figure set when a case is opened via the generic New Dispute
+  // form). Every QPA-labeled amount in the grid/dashboard was unconditional
+  // before this -- confirmed live, FL showed "QPA $0" on every open case.
+  const amtField = (prog) => (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents";
+  const amtLabel = (prog) => (prog && prog.config) ? "Disputed" : "QPA";
+
+  // Client-side CSV export: reports were read-only on screen with no way to
+  // get the data out at all. Same blob+temp-<a> pattern api.js's download()
+  // already uses for real files; here the "file" is generated from data
+  // already on the page, so no backend round-trip is needed.
+  function downloadCSV(filename, headers, rows) {
+    const cell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const text = [headers, ...rows].map((r) => r.map(cell).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8;" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  // ---- Client-side pagination --------------------------------------------------
+  // For lists the backend already returns in one shot (bounded by a server
+  // LIMIT, e.g. 200) that were previously either dumped into one long table
+  // or silently truncated with .slice(0, N) -- slices into pages in the
+  // browser. cases()/CRM accounts/leads/tasks already have real backend
+  // offset/keyset "Load more" pagination against their own endpoints; this
+  // is for the rest (intake, audit log, QA queue, onboarding, financials)
+  // where the backend has no page param to call. Only one view is ever
+  // mounted at a time in this SPA, so state keyed by a short id string is
+  // safe -- a stale entry from the previous view is just unused until
+  // overwritten on next visit.
+  const CLIENT_PAGE = 25;
+  const pagerState = {};
+  function clientPagerHtml(id, total, page) {
+    if (total <= CLIENT_PAGE) return "";
+    const totalPages = Math.max(1, Math.ceil(total / CLIENT_PAGE));
+    return `<p class="pager" id="${id}-pg">
+      <span class="muted">Page ${page + 1} of ${totalPages} (${total} total)</span>
+      <button class="mini" id="${id}-prev" ${page === 0 ? "disabled" : ""}>‹ Prev</button>
+      <button class="mini" id="${id}-next" ${page >= totalPages - 1 ? "disabled" : ""}>Next ›</button></p>`;
+  }
+  // initClientPager: call during render to get the first page's rows + pager
+  // markup. bindClientPager: call in afterRender to wire Prev/Next.
+  function initClientPager(id, allRows, rowsHtml) {
+    pagerState[id] = { rows: allRows, page: 0, rowsHtml };
+    return { bodyHtml: rowsHtml(allRows.slice(0, CLIENT_PAGE)), pagerHtml: clientPagerHtml(id, allRows.length, 0) };
+  }
+  function renderClientPage(id, tbodySel, page, onRendered) {
+    const st = pagerState[id];
+    const totalPages = Math.max(1, Math.ceil(st.rows.length / CLIENT_PAGE));
+    st.page = Math.max(0, Math.min(page, totalPages - 1));
+    document.querySelector(tbodySel).innerHTML = st.rowsHtml(st.rows.slice(st.page * CLIENT_PAGE, (st.page + 1) * CLIENT_PAGE));
+    const pg = document.getElementById(`${id}-pg`);
+    const html = clientPagerHtml(id, st.rows.length, st.page);
+    if (pg) html ? (pg.outerHTML = html) : pg.remove();
+    bindClientPager(id, tbodySel, onRendered);
+    onRendered?.();
+  }
+  // onRendered: optional hook re-run after every page swap, for views that
+  // need more than a tbody-innerHTML replace (e.g. dashboard's caseTable()
+  // re-render needs bindGrid() re-wired for the newly-rendered rows' row
+  // clicks/checkboxes/peek buttons, not just the HTML itself).
+  function bindClientPager(id, tbodySel, onRendered) {
+    document.getElementById(`${id}-prev`)?.addEventListener("click", () => renderClientPage(id, tbodySel, pagerState[id].page - 1, onRendered));
+    document.getElementById(`${id}-next`)?.addEventListener("click", () => renderClientPage(id, tbodySel, pagerState[id].page + 1, onRendered));
+  }
 
   // ---- Statutory clock helpers -------------------------------------------------
   const clockChip = (c) => {
@@ -35,10 +104,10 @@ const Views = (() => {
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
     try {
-      const [{ cases }, summary, clocks] = await Promise.all([Api.cases.list({ limit: 200 }), Api.reports.summary(), clockMap()]);
+      const [{ cases }, summary, clocks, prog] = await Promise.all([Api.cases.list({ limit: 200 }), Api.reports.summary(), clockMap(), Api.program.get().catch(() => null)]);
       html += `<div class="cards">` + summary.map((s) =>
         `<div class="card"><div class="num">${s.count}</div><div class="lbl">${badge(s.status)}</div>
-         <div class="muted">avg QPA $${s.avg_qpa_usd.toFixed(0)}</div></div>`).join("") + `</div>`;
+         <div class="muted">avg ${esc(s.amount_label || "QPA")} $${(s.avg_amount_usd ?? 0).toFixed(0)}</div></div>`).join("") + `</div>`;
       const open = cases.filter((c) => !String(c.status).startsWith("CLOSED"));
       const attention = open.filter((c) => clocks[c.id] && clocks[c.id].length)
         .sort((a, b) => nearestClock(clocks[a.id]).remaining - nearestClock(clocks[b.id].remaining));
@@ -48,13 +117,14 @@ const Views = (() => {
             const cl = nearestClock(clocks[c.id]);
             return `<div class="att-item" onclick="location.hash='#/cases/${c.id}'">
               <span class="att-id">${esc(c.case_number)}</span>
-              <span class="att-title">${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()}</span>
+              <span class="att-title">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()}</span>
               ${badge(c.status)} ${clockChip(cl)}</div>`;
           }).join("") + `</div>`
         : `<p class="muted">Nothing needs you right now. New assignments and deadline risk appear here.</p>`;
-      html += `<h2>Open disputes (${open.length})</h2>` + caseTable(open, clocks);
-    } catch (e) { html += err(e); }
-    return html;
+      const { bodyHtml, pagerHtml } = initClientPager("od", open, (list) => caseTable(list, clocks, "", prog));
+      html += `<h2>Open disputes (${open.length})</h2><div id="od-tb">${bodyHtml}</div>${pagerHtml}`;
+      return { html, wire: () => { bindGrid(open); bindClientPager("od", "#od-tb", () => bindGrid(open)); } };
+    } catch (e) { html += err(e); return html; }
   }
 
   // ---- Disputes grid: clocks, selection, peek, density ------------------------
@@ -79,17 +149,17 @@ const Views = (() => {
     const s = q.toString();
     location.hash = "#/cases" + (s ? "?" + s : "");
   }
-  const caseTable = (rows, clocks = {}, sort = "") => rows.length ? `
+  const caseTable = (rows, clocks = {}, sort = "", prog = null) => rows.length ? `
     <div class="dg-wrap">
       <table class="dg"><thead><tr>
         <th class="selcol"><input type="checkbox" id="sel-all" aria-label="Select all"></th>
-        ${[["case_number", "Case #"], ["status", "Status"], ["service_line", "Service"], ["qpa_cents", "QPA"]]
+        ${[["case_number", "Case #"], ["status", "Status"], ["service_line", "Service"], [amtField(prog), amtLabel(prog)]]
           .map(([c, l]) => sortableTh(c, l, sort)).join("")}
         <th>Statutory clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
       rows.map((c) => `<tr class="click" data-case="${c.id}">
         <td class="selcol"><input type="checkbox" class="sel-one" data-id="${c.id}" ${selection.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.case_number)}"></td>
         <td class="mono">${esc(c.case_number)}</td><td>${badge(c.status)}</td><td>${esc(c.service_line)}</td>
-        <td class="num">$${(c.qpa_cents / 100).toLocaleString()}</td>
+        <td class="num">$${((c[amtField(prog)] || 0) / 100).toLocaleString()}</td>
         <td>${clocks[c.id] && clocks[c.id].length ? clockChip(nearestClock(clocks[c.id])) : '<span class="muted">—</span>'}</td>
         <td class="muted">${fmtDate(c.opened_at)}</td>
         <td><button class="mini peek" data-id="${c.id}" title="Peek without losing your place">▸</button></td></tr>`).join("") +
@@ -158,10 +228,10 @@ const Views = (() => {
     p.querySelector(".icon-btn").onclick = () => p.remove();
     p.addEventListener("keydown", (e) => { if (e.key === "Escape") p.remove(); });
     try {
-      const [c, clocks] = await Promise.all([Api.cases.get(id), Api.cm.clocks(id).catch(() => [])]);
+      const [c, clocks, prog] = await Promise.all([Api.cases.get(id), Api.cm.clocks(id).catch(() => []), Api.program.get().catch(() => null)]);
       p.querySelector(".peek-b").innerHTML = `
         <div class="mono muted">${esc(c.case_number)}</div>
-        <h3>${esc(c.service_line)} · $${(c.qpa_cents / 100).toLocaleString()}</h3>
+        <h3>${esc(c.service_line)} · $${((c[amtField(prog)] || 0) / 100).toLocaleString()}</h3>
         <p>${badge(c.status)}</p>
         ${clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}">${clockChip(cl)}</span>
           <span class="muted" style="font-size:11px">${esc(cl.label)} · ${esc(cl.cite)}</span></div>`).join("")}
@@ -183,7 +253,7 @@ const Views = (() => {
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
       const reqParams = { limit: PAGE_SIZE, ...(status ? { status } : {}), ...(sort ? { sort } : {}) };
-      const [page, clocks] = await Promise.all([Api.cases.list(reqParams), clockMap()]);
+      const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
       let loaded = page.cases.slice();   // accumulated rows across pages
       let cursor = page.next_cursor;     // "" when no more pages
       const total = page.total;
@@ -215,7 +285,7 @@ const Views = (() => {
               const next = await Api.cases.list(more);
               loaded = loaded.concat(next.cases);
               cursor = next.next_cursor;
-              document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks, sort || "opened_at");
+              document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks, sort || "opened_at", prog);
               $("#pg").innerHTML = pager();
               bindGrid(loaded);
               $("#more")?.addEventListener("click", loadMore);
@@ -226,6 +296,7 @@ const Views = (() => {
         $("#more")?.addEventListener("click", loadMore);
       });
       return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
+
         <span style="flex:1"></span>
         <button class="mini" id="grab">⇪ Grab next</button>
         <button class="mini" id="density">Density: ${density}</button></div>
@@ -234,7 +305,7 @@ const Views = (() => {
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
           ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` +
-        caseTable(loaded, clocks, sort || "opened_at") + `<div id="pg">${pager()}</div>`;
+        caseTable(loaded, clocks, sort || "opened_at", prog) + `<div id="pg">${pager()}</div>`;
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
@@ -357,14 +428,16 @@ const Views = (() => {
   // ---- Case detail workspace -------------------------------------------------
   async function caseDetail(id) {
     try {
-      const [c, docs, activities, checklist, rels, clocks] = await Promise.all([
+      const [c, docs, activities, checklist, rels, clocks, notesRes, prog] = await Promise.all([
         Api.cases.get(id), Api.cases.documents(id), Api.cases.activities(id),
         Api.cm.checklist(id), Api.cm.relationships(id), Api.cm.clocks(id).catch(() => []),
+        Api.crm.notes("CASE", id).catch(() => ({ notes: [] })),
+        Api.program.get().catch(() => null),
       ]);
       Palette.remember("case", c.id, c.case_number);
       let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>
         ${badge(c.status)}</div>
-        <p class="muted">${esc(c.service_line)} · QPA $${(c.qpa_cents / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
+        <p class="muted">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
 
       // Statutory clock cluster (server-projected)
       if (clocks.length)
@@ -400,7 +473,7 @@ const Views = (() => {
       // Documents — docket grouped by folder with full metadata + RBAC controls
       const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
       html += `<h2>Docket</h2>
-        <p><a class="button" href="${Api.cases.zipUrl(id)}" target="_blank">⬇ Download all as zip (plan-notification bundle)</a></p>
+        <p><a class="button" href="javascript:void(0)" onclick="Views.downloadZip('${id}')">⬇ Download all as zip (plan-notification bundle)</a></p>
         <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
         <select name="folder" aria-label="Folder">${FOLDERS.map((f) => `<option>${f}</option>`).join("")}</select>
         <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
@@ -419,7 +492,7 @@ const Views = (() => {
             <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
             <td class="muted">${esc(d.uploaded_by || "")} · ${fmtDate(d.uploaded_at)}</td>
             <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
-            <td><a href="${Api.cases.downloadUrl(id, d.doc_id)}" target="_blank">download</a>
+            <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')">download</a>
             ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
             ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
               ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">move…</option>
@@ -432,7 +505,10 @@ const Views = (() => {
       // invoices, claims, dual status, program dates, opt-out) — rendered
       // only when the tenant runs a custom program.
       html += `<div id="prog"></div>`;
-      programPanel(id).then((h) => { const b = document.getElementById("prog"); if (b) b.innerHTML = h; });
+      programPanel(id).then((h) => {
+        const b = document.getElementById("prog");
+        if (b) b.innerHTML = h;
+      });
 
       if (rels.length)
         html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
@@ -468,6 +544,27 @@ const Views = (() => {
           <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
         </div>`;
 
+      // Notes — addNote (POST /notes) existed with no way to read them back
+      // at all; case notes also mirror onto the activity timeline below but
+      // without the stream field, so internal/coder/clinical/legal/
+      // external_agency notes were indistinguishable there. Confirmed live.
+      const notes = notesRes.notes || [];
+      html += `<h2>Notes</h2>
+        <form id="note-form" class="inline-form">
+          <select name="stream" aria-label="Note stream">
+            <option value="internal">Internal</option>
+            <option value="coder">Coder</option>
+            <option value="clinical">Clinical</option>
+            <option value="legal">Legal</option>
+            <option value="external_agency">External agency</option>
+          </select>
+          <textarea name="body" rows="2" placeholder="Add a note…" required></textarea>
+          <button>Add note</button></form>` +
+        (notes.length ? `<table><tbody>` + notes.map((n) => `<tr>
+            <td>${badge(n.stream)}</td><td>${esc(n.body)}</td>
+            <td class="muted">${esc(n.author || "")} · ${fmtDate(n.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No notes yet.</p>`);
+
       html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
         activities.map((a) => `<tr><td>${badge(a.type)}</td><td>${esc(a.body)}</td>
           <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
@@ -486,6 +583,16 @@ const Views = (() => {
             catch (e) { UI.toast(e.message, { kind: "warn" }); }
           }, "Uploading…");
         });
+        $("#note-form")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const f = ev.target;
+          await UI.run(f.querySelector("button"), async () => {
+            try {
+              await Api.crm.addNote({ record_type: "CASE", record_id: id, stream: f.stream.value, body: f.body.value });
+              UI.toast("Note added"); App.rerender();
+            } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Adding…");
+        });
       });
       return html;
     } catch (e) { return err(e); }
@@ -497,6 +604,16 @@ const Views = (() => {
       try { await Api.cases.moveDoc(caseId, docId, folder); UI.toast(`Moved to ${folder}`); App.rerender(); }
       catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
+  }
+
+  async function downloadDoc(caseId, docId) {
+    try { await Api.download(Api.cases.downloadUrl(caseId, docId)); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function downloadZip(caseId) {
+    try { await Api.download(Api.cases.zipUrl(caseId), `${caseId}-documents.zip`); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function showAnalysis(caseId, docId) {
@@ -539,6 +656,7 @@ const Views = (() => {
       }, "Initiating…");
     }));
     return `<h1>New dispute</h1><form id="nd" class="form">
+
       <label>CMS case number <input name="case_number" required placeholder="CMS-TX-2026-00002" /></label>
       <label>Service line <select name="service_line"><option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option><option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select></label>
       <label>Plan type <select name="plan_type"><option>SELF_FUNDED</option><option>FULLY_INSURED</option></select></label>
@@ -555,14 +673,20 @@ const Views = (() => {
     if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
       try {
         const apps = await Api.onboarding.list();
-        html += `<h2>Review queue</h2>` + (apps.length ? `<table><thead><tr>
-          <th>Legal name</th><th>Type</th><th>Status</th><th>Submitted</th><th></th></tr></thead><tbody>` +
-          apps.map((a) => `<tr><td>${esc(a.legal_name)}</td><td>${esc(a.type)}</td>
-            <td>${badge(a.status)}</td><td>${fmtDate(a.submitted_at)}</td>
+        if (apps.length) {
+          const rowsHtml = (list) => list.map((a) => `<tr><td>${esc(a.legal_name)}</td><td>${esc(a.type)}</td>
+            <td>${badge(a.status)}</td><td class="muted">${esc(a.status_reason || "—")}</td><td>${fmtDate(a.submitted_at)}</td>
             <td>${["PENDING_APPROVAL"].includes(a.status) ? `
               <button onclick="Views.decide('${a.id}','APPROVE')">Approve</button>
-              <button class="danger" onclick="Views.decide('${a.id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">Queue empty.</p>`);
+              <button class="danger" onclick="Views.decide('${a.id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("");
+          const { bodyHtml, pagerHtml } = initClientPager("onb", apps, rowsHtml);
+          afterRender(() => bindClientPager("onb", "#onb-tb tbody"));
+          html += `<h2>Review queue</h2><table id="onb-tb"><thead><tr>
+          <th>Legal name</th><th>Type</th><th>Status</th><th>Reason</th><th>Submitted</th><th></th></tr></thead>
+          <tbody>${bodyHtml}</tbody></table>${pagerHtml}`;
+        } else {
+          html += `<h2>Review queue</h2><p class="muted">Queue empty.</p>`;
+        }
       } catch (e) { html += err(e); }
     }
     html += `<h2>New application</h2><p class="muted">Self-service registration for provider, payer, IDRE and auditor organizations.</p>
@@ -617,18 +741,29 @@ const Views = (() => {
   async function voice() {
     try {
       const [intake, logs] = await Promise.all([Api.voice.intake(), Api.voice.logs()]);
-      afterRender(() => $("#ob-call")?.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const f = Object.fromEntries(new FormData(ev.target));
-        await UI.run(ev.target.querySelector("button"), async () => {
-          try {
-            const r = await Api.voice.outbound(f.to, f.case_number, f.script);
-            UI.toast(`Outbound call ${r.status}`);
-            App.rerender();
-          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-        }, "Dialing…");
-      }));
+      const intakeRowsHtml = (list) => list.map((v) => `<tr><td>${esc(v.caller_name)}<br/><span class="muted">${esc(v.caller_phone)}</span></td>
+            <td>${esc(v.organization)}</td><td>${esc(v.summary)}</td><td>${badge(v.status)}</td><td>${fmtDate(v.created_at)}</td></tr>`).join("");
+      const intakePage = initClientPager("vintake", intake, intakeRowsHtml);
+      const logRowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.direction)}</td><td>${esc(l.tool)}</td><td>${esc(l.case_number)}</td>
+            <td>${badge(l.status)}</td><td>${fmtDate(l.created_at)}</td></tr>`).join("");
+      const logPage = initClientPager("vlog", logs, logRowsHtml);
+      afterRender(() => {
+        $("#ob-call")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const f = Object.fromEntries(new FormData(ev.target));
+          await UI.run(ev.target.querySelector("button"), async () => {
+            try {
+              const r = await Api.voice.outbound(f.to, f.case_number, f.script);
+              UI.toast(`Outbound call ${r.status}`);
+              App.rerender();
+            } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Dialing…");
+        });
+        bindClientPager("vintake", "#vintake-tb tbody");
+        bindClientPager("vlog", "#vlog-tb tbody");
+      });
       return `<h1>Voice console</h1>
+
         <h2>Outbound call</h2>
         <form id="ob-call" class="form">
           <label>Phone number <input name="to" placeholder="+1…" required /></label>
@@ -643,29 +778,46 @@ const Views = (() => {
           <p class="muted">Requires outbound calling enabled in the tenant voice config.</p>
         </form>
         <h2>Intake requests (${intake.length})</h2>` +
-        (intake.length ? `<table><thead><tr><th>Caller</th><th>Organization</th><th>Summary</th><th>Status</th><th>At</th></tr></thead><tbody>` +
-          intake.map((v) => `<tr><td>${esc(v.caller_name)}<br/><span class="muted">${esc(v.caller_phone)}</span></td>
-            <td>${esc(v.organization)}</td><td>${esc(v.summary)}</td><td>${badge(v.status)}</td><td>${fmtDate(v.created_at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
+        (intake.length ? `<table id="vintake-tb"><thead><tr><th>Caller</th><th>Organization</th><th>Summary</th><th>Status</th><th>At</th></tr></thead>
+          <tbody>${intakePage.bodyHtml}</tbody></table>${intakePage.pagerHtml}` : `<p class="muted">No intake requests.</p>`) +
         `<h2>Call log</h2>` +
-        (logs.length ? `<table><thead><tr><th>Direction</th><th>Tool/event</th><th>Case</th><th>Status</th><th>At</th></tr></thead><tbody>` +
-          logs.map((l) => `<tr><td>${esc(l.direction)}</td><td>${esc(l.tool)}</td><td>${esc(l.case_number)}</td>
-            <td>${badge(l.status)}</td><td>${fmtDate(l.created_at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No calls yet.</p>`);
+        (logs.length ? `<table id="vlog-tb"><thead><tr><th>Direction</th><th>Tool/event</th><th>Case</th><th>Status</th><th>At</th></tr></thead>
+          <tbody>${logPage.bodyHtml}</tbody></table>${logPage.pagerHtml}` : `<p class="muted">No calls yet.</p>`);
     } catch (e) { return `<h1>Voice console</h1>` + err(e); }
   }
 
   // ---- Reports ---------------------------------------------------------------------
+  let reportsData = { summary: [], sla: [] };
+  function downloadReportCSV(which) {
+    const tenant = Api.getTenant().toUpperCase();
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (which === "summary") {
+      const label = reportsData.summary[0]?.amount_label || "QPA";
+      downloadCSV(`${tenant}-case-status-rollup-${stamp}.csv`,
+        ["Status", "Count", `Avg ${label}`],
+        reportsData.summary.map((s) => [s.status, s.count, (s.avg_amount_usd ?? 0).toFixed(2)]));
+    } else {
+      downloadCSV(`${tenant}-sla-breaches-${stamp}.csv`,
+        ["Case", "Clock", "Detail", "At"],
+        reportsData.sla.map((b) => [b.case_id, b.clock, b.detail, b.at]));
+    }
+  }
+
   async function reports() {
     try {
       const [sla, summary] = await Promise.all([Api.reports.sla(), Api.reports.summary()]);
+      reportsData = { summary, sla };
       const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
         ? `<p><a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>
            <span class="muted"> jurisdiction checks + coverage gaps from the lakehouse gold zone</span></p>` : "";
-      return `<h1>Compliance reports</h1>${geoLink}<h2>Case status rollup</h2>` +
-        `<table><thead><tr><th>Status</th><th>Count</th><th>Avg QPA</th></tr></thead><tbody>` +
-        summary.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${s.avg_qpa_usd.toFixed(0)}</td></tr>`).join("") +
-        `</tbody></table><h2>Statutory SLA breaches (${sla.length})</h2>` +
+      return `<h1>Compliance reports</h1>${geoLink}
+        <div class="view-head"><h2>Case status rollup</h2>
+          <button class="mini" onclick="Views.downloadReportCSV('summary')">⬇ Download CSV</button></div>` +
+        `<table><thead><tr><th>Status</th><th>Count</th><th>Avg ${esc(summary[0]?.amount_label || "QPA")}</th></tr></thead><tbody>` +
+        summary.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${(s.avg_amount_usd ?? 0).toFixed(0)}</td></tr>`).join("") +
+        `</tbody></table>
+        <div class="view-head"><h2>Statutory SLA breaches (${sla.length})</h2>
+          ${sla.length ? `<button class="mini" onclick="Views.downloadReportCSV('sla')">⬇ Download CSV</button>` : ""}</div>` +
         (sla.length ? `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
           sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td><td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No breaches recorded.</p>`);
@@ -756,14 +908,21 @@ const Views = (() => {
     let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
       ${facts.length ? `<p class="fact-row">${facts.join(" ")}</p>` : ""}
       <details class="prog-sec" open><summary>Dual status</summary>
+      <p class="muted">Current: ${c.internal_status ? badge(c.internal_status) : "<em>none</em>"} / ${c.agency_status ? badge(c.agency_status) : "<em>none</em>"}</p>
+      <p class="muted">Case details: ${c.details && Object.keys(c.details).length
+        ? Object.entries(c.details).map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
+        : "<em>none set</em>"}</p>
       <form id="p-status" class="inline-form">
         <select name="internal"><option value="">internal status…</option>
-          ${(cfg.statuses?.internal || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+          ${(cfg.statuses?.internal || []).map((s) => `<option ${s === c.internal_status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <select name="agency"><option value="">agency status…</option>
-          ${(cfg.statuses?.agency || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+          ${(cfg.statuses?.agency || []).map((s) => `<option ${s === c.agency_status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <button>Update status</button></form></details>
 
       <details class="prog-sec"><summary>Program dates (clock bases)</summary>
+      <p class="muted">Recorded: ${c.program_dates && Object.keys(c.program_dates).length
+        ? Object.entries(c.program_dates).map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
+        : "<em>none yet</em>"}</p>
       <form id="p-date" class="inline-form">
         <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
         <input type="date" name="value" required /><button>Record date</button></form></details>
@@ -775,12 +934,14 @@ const Views = (() => {
         <input name="amount" type="number" step="0.01" placeholder="disputed $" required />
         <input name="fd" type="date" title="final determination date" />
         <input name="flags" placeholder="flags (comma-separated reason codes)" />
+        <label>AOR valid <input type="checkbox" name="aor_valid" checked /></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
-      <details class="prog-sec"><summary>Correspondence</summary>
+      <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
       <form id="p-send" class="inline-form">
         <select name="template">${(cfg.correspondence?.templates || []).map((tp) =>
           `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
+        <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
         <input name="to" placeholder="to emails (comma-separated)" required />
         <input name="cc" placeholder="cc emails" />
         <textarea name="body" rows="3" placeholder="message body" required></textarea>
@@ -794,6 +955,10 @@ const Views = (() => {
         <button>Issue invoice</button></form><div id="p-inv-list"></div>
       <form id="p-claims" class="inline-form">
         <textarea name="csv" rows="3" placeholder="claim_number,cpt,billed,paid per line (bulk import)"></textarea>
+        <p class="mhint">For disputes at/crossing 100 claims (Capitol Bridge large-volume policy), add 9 more
+          columns per line: patient_first_name,patient_last_name,type_of_service,denial_reason,
+          date_of_service(YYYY-MM-DD),date_claim_submitted(YYYY-MM-DD),provider_name,facility_name,evidence_location
+          — the import is rejected with the exact missing fields per line if any are blank.</p>
         <button>Import claims</button></form><div id="p-claims-list"></div></details>
 
       <details class="prog-sec"><summary>Share links & opt-out</summary>
@@ -802,7 +967,49 @@ const Views = (() => {
         <button id="p-share-dl">Create download link</button></div><div id="p-share-out"></div>
       <form id="p-optout" class="inline-form">
         <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
-        <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form></details>`;
+        <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form></details>
+
+      <details class="prog-sec"><summary>Workflow signals</summary>
+      <p class="muted">Tells the running case workflow what happened — distinct from the status/date forms above, which only update the database.</p>
+      <form id="p-signal" class="inline-form">
+        <select name="signal">
+          <option value="PACKET_COMPLETE">Packet complete</option>
+          <option value="OUTREACH_DONE">Outreach done (payment arrived, packet didn't)</option>
+          <option value="PROVIDER_WITHDRAW">Provider withdrew</option>
+          <option value="AOR_REVISED">AOR revised (resolves a hold)</option>
+          <option value="ESTIMATE_PERMISSION">Provider permission decided</option>
+          <option value="PLAN_RESPONSE_RECEIVED">Plan response received</option>
+          <option value="CODING_REVIEW_COMPLETE">Coder review complete</option>
+          <option value="CLINICAL_REVIEW_COMPLETE">Clinical review complete</option>
+          <option value="ATTORNEY_REVIEW_COMPLETE">Attorney review complete</option>
+          <option value="FINAL_ORDER_ISSUED">Final order issued (by AHCA)</option>
+          <option value="RFI_RESPONSE_RECEIVED">RFI response received</option>
+        </select>
+        <label>granted / estimate requested / clinical review needed <input type="checkbox" name="flag" /></label>
+        <br/><span class="muted">Only used for "Attorney review complete" — leave blank if not applicable:</span><br/>
+        <select name="case_outcome"><option value="">case outcome…</option>
+          ${(cfg.field_schema?.case_outcome || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+        <select name="party_billed"><option value="">party billed…</option>
+          ${(cfg.field_schema?.party_billed || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
+        <input name="amount" type="number" step="0.01" placeholder="final amount awarded $" />
+        <input name="num_claims" type="number" placeholder="number of claims reviewed" />
+        <button>Send signal</button></form></details>
+
+      <details class="prog-sec"><summary>Call log</summary>
+      <form id="p-call" class="inline-form">
+        <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
+        <input name="phone" placeholder="phone number" required />
+        <input name="summary" placeholder="brief description" required /><button>Log call</button></form>
+      <div id="p-call-list"></div></details>
+
+      <details class="prog-sec"><summary>Inquiries log</summary>
+      <form id="p-inquiry" class="inline-form">
+        <select name="method"><option>EMAIL</option><option>PHONE_CALL</option></select>
+        <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
+          <option value="GENERAL_INQUIRY">General inquiry</option>
+          <option value="SUBMISSION_DOCUMENTS">Submission of documents</option></select>
+        <input name="detail" placeholder="detail (optional)" /><button>Log inquiry</button></form>
+      <div id="p-inquiry-list"></div></details>`;
 
     afterRender(() => {
       const money = (v) => Math.round(parseFloat(v) * 100);
@@ -827,6 +1034,7 @@ const Views = (() => {
             disputed_amount_cents: money(f.amount.value),
             final_determination_at: f.fd.value || "",
             flags: f.flags.value ? f.flags.value.split(",").map((x) => x.trim()).filter(Boolean) : [],
+            aor_valid: f.aor_valid.checked,
           });
           document.getElementById("p-elig-out").innerHTML =
             `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""} <span class="muted">review ${esc(r.review_id)}</span></p>`;
@@ -837,7 +1045,7 @@ const Views = (() => {
         const f = ev.target;
         const split = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
         try {
-          const r = await Api.program.send(id, { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value) });
+          const r = await Api.program.send(id, { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value), rfi_to: f.rfi_to.value });
           UI.toast(r.status === "PENDING" ? "Draft submitted to QA gate" : "Sent — logged to correspondence");
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
@@ -868,8 +1076,14 @@ const Views = (() => {
       $("#p-claims")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const lines = ev.target.csv.value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-          const [claim_number, cpt, billed, paid] = l.split(",");
-          return { claim_number, cpt, billed_cents: money(billed || 0), paid_cents: money(paid || 0) };
+          const [claim_number, cpt, billed, paid, patient_first_name, patient_last_name, type_of_service,
+                 denial_reason, date_of_service, date_claim_submitted, provider_name, facility_name,
+                 evidence_location] = l.split(",").map((s) => s.trim());
+          return {
+            claim_number, cpt, billed_cents: money(billed || 0), paid_cents: money(paid || 0),
+            patient_first_name, patient_last_name, type_of_service, denial_reason,
+            date_of_service, date_claim_submitted, provider_name, facility_name, evidence_location,
+          };
         });
         try {
           const r = await Api.program.importClaims(id, lines);
@@ -883,12 +1097,38 @@ const Views = (() => {
           }
           App.rerender();
         }
-        catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        catch (e) {
+          // e.details echoes back claim_number from the submitted CSV --
+          // escape before it reaches toast's innerHTML.
+          const msg = e.details
+            ? `${esc(e.message)}<br>${e.details.map(esc).join("<br>")}`
+            : esc(e.message);
+          UI.toast(msg, { kind: "warn", sticky: !!e.details });
+        }
       });
       const share = async (kind) => {
-        try { const r = await Api.program.shareLink(id, kind, 7);
+        try {
+          const r = await Api.program.shareLink(id, kind, 7);
+          // apiBase is "" (same-origin), so this was rendering a bare
+          // relative path -- useless to copy into a different private
+          // window, which is exactly how this link is meant to be used.
+          const full = location.origin + r.path;
           document.getElementById("p-share-out").innerHTML =
-            `<p class="mono">share link: ${esc(window.IDRE_CONFIG.apiBase)}${esc(r.path)}</p>`;
+            `<p class="mono">share link: <a href="${esc(full)}" target="_blank">${esc(full)}</a></p>`;
+          // Feed the link straight into the Correspondence draft instead of
+          // leaving it for staff to copy out of here and paste into the
+          // send form by hand -- that hop was the whole friction point.
+          const sendForm = $("#p-send");
+          if (sendForm) {
+            const sentence = kind === "upload"
+              ? `Please upload your documents using this secure link: ${full}`
+              : `You can download your filing instructions and documents here: ${full}`;
+            sendForm.body.value = sendForm.body.value ? `${sendForm.body.value}\n\n${sentence}` : sentence;
+            if (!sendForm.to.value && det.requester_email) sendForm.to.value = det.requester_email;
+            document.getElementById("p-send-details").open = true;
+            sendForm.scrollIntoView({ behavior: "smooth", block: "center" });
+            UI.toast("Link added to the Correspondence draft below — review and send");
+          }
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       };
       document.getElementById("p-share-up")?.addEventListener("click", () => share("upload"));
@@ -898,6 +1138,52 @@ const Views = (() => {
         try { await Api.program.optOut(id, ev.target.eligible.checked, ev.target.rationale.value);
           UI.toast("Opt-out decision recorded"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
+      $("#p-signal")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        const data = {};
+        if (f.signal.value === "PACKET_COMPLETE") data.estimate_requested = f.flag.checked;
+        if (f.signal.value === "ESTIMATE_PERMISSION") data.granted = f.flag.checked;
+        if (f.signal.value === "CODING_REVIEW_COMPLETE") data.clinical_requested = f.flag.checked;
+        if (f.signal.value === "ATTORNEY_REVIEW_COMPLETE") {
+          if (f.case_outcome.value) data.case_outcome = f.case_outcome.value;
+          if (f.party_billed.value) data.party_billed = f.party_billed.value;
+          if (f.amount.value) data.final_amount_awarded_cents = Math.round(parseFloat(f.amount.value) * 100);
+          if (f.num_claims.value) data.num_claims_reviewed = parseInt(f.num_claims.value, 10);
+        }
+        try { await Api.cases.signal(id, f.signal.value, data); UI.toast(`Signal sent: ${f.signal.value}`); }
+        catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      const loadCalls = () => Api.program.calls(id).then((r) => {
+        const el = document.getElementById("p-call-list"); if (!el) return;
+        const rows = r.calls || [];
+        el.innerHTML = rows.length ? `<table><tbody>` + rows.map((c) =>
+          `<tr><td>${badge(c.direction)}</td><td class="mono">${esc(c.phone)}</td><td>${esc(c.summary)}</td>
+           <td class="muted">${esc(c.reviewer)} · ${fmtDate(c.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No calls logged on this case.</p>`;
+      }).catch(() => {});
+      $("#p-call")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try { await Api.program.logCall(id, { direction: f.direction.value, phone: f.phone.value, summary: f.summary.value });
+          f.reset(); loadCalls(); UI.toast("Call logged"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      loadCalls();
+      const loadInquiries = () => Api.program.inquiries(id).then((r) => {
+        const el = document.getElementById("p-inquiry-list"); if (!el) return;
+        const rows = r.inquiries || [];
+        el.innerHTML = rows.length ? `<table><tbody>` + rows.map((q) =>
+          `<tr><td>${badge(q.method)}</td><td>${esc(q.inquiry_type)}</td><td>${esc(q.detail || "")}</td>
+           <td class="muted">${esc(q.logged_by)} · ${fmtDate(q.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No inquiries logged on this case.</p>`;
+      }).catch(() => {});
+      $("#p-inquiry")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try { await Api.program.logInquiry(id, { method: f.method.value, inquiry_type: f.inquiry_type.value, detail: f.detail.value });
+          f.reset(); loadInquiries(); UI.toast("Inquiry logged"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+      loadInquiries();
     });
     return html;
   }
@@ -928,13 +1214,19 @@ const Views = (() => {
     try {
       const r = await Api.program.qaQueue();
       const q = r.queue || [];
-      return `<div class="view-head"><h1>QA gate</h1>
-        <span class="muted">nothing reaches a party without approval on gated templates</span></div>` +
-        (q.length ? `<table><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead><tbody>` +
-          q.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
+      if (!q.length)
+        return `<div class="view-head"><h1>QA gate</h1>
+          <span class="muted">nothing reaches a party without approval on gated templates</span></div>
+          <p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>`;
+      const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
             <td>${esc(i.drafted_by)}</td>
-            <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">Queue empty — no drafts awaiting review.</p>`) + `<div id="qa-detail"></div>`;
+            <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
+      const { bodyHtml, pagerHtml } = initClientPager("qa", q, rowsHtml);
+      afterRender(() => bindClientPager("qa", "#qa-tb tbody"));
+      return `<div class="view-head"><h1>QA gate</h1>
+        <span class="muted">nothing reaches a party without approval on gated templates</span></div>
+        <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead>
+        <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>`;
     } catch (e) { return err(e); }
   }
 
@@ -981,40 +1273,65 @@ const Views = (() => {
   }
 
   async function intake() {
+    // afterRender() fires AFTER the await, right before return -- see the
+    // other views in this file for why that order matters (setTimeout(fn,0)
+    // beats an in-flight fetch if called before it).
     try {
       const r = await Api.program.intake();
       const rows = r.intake || [];
+      const rowsHtml = (list) => list.map((i) => `<tr><td>${i.case_id ?
+              `<a href="#/cases/${i.case_id}">${esc(i.case_number || "view case")}</a>` :
+              `<span class="muted">—</span>`}</td>
+            <td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
+            <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
+            <td>${i.disputed_amount_cents ? `$${(i.disputed_amount_cents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
+            <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
+            <td class="muted">${fmtDate(i.outreach_at)}</td>
+            <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
+            <td>${i.origin === "legacy" && !INTAKE_TERMINAL.includes(i.status) ?
+              `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
+                <option value="">advance…</option><option>DOCS_RECEIVED</option>
+                <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
+                <option>PAID</option><option>CONVERTED</option>
+                <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("");
+      const { bodyHtml, pagerHtml } = initClientPager("intake", rows, rowsHtml);
+      afterRender(() => {
+        $("#intake-form")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          await newIntake(ev.target);
+        });
+        bindClientPager("intake", "#intake-tb tbody");
+      });
       return `<div class="view-head"><h1>Pre-case intake</h1>
-        <span class="muted">instruction requests awaiting documents and fees — the 10-day initial review starts at PACKET_COMPLETE</span></div>
-        <form class="inline-form" onsubmit="return Views.newIntake(this)">
+        <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
+        <form id="intake-form" class="inline-form">
           <input name="email" type="email" placeholder="requester email" required />
           <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
           <select name="filing_party_type" title="filing party">
             <option value="PROVIDER">Provider files</option>
             <option value="HEALTH_PLAN">Health plan files</option></select>
+          <input name="disputed_amount" type="number" step="0.01" placeholder="disputed amount $" />
           <button>New intake request</button></form>` +
-        (rows.length ? `<table><thead><tr><th>Email</th><th>Org</th><th>Filing party</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
-          rows.map((i) => `<tr><td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
-            <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
-            <td>${badge(i.status)} ${day13Countdown(i)}</td>
-            <td class="muted">${fmtDate(i.outreach_at)}</td>
-            <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
-            <td>${!INTAKE_TERMINAL.includes(i.status) ?
-              `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
-                <option value="">advance…</option><option>DOCS_RECEIVED</option>
-                <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
-                <option>PAID</option><option>CONVERTED</option>
-                <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests.</p>`);
+        (rows.length ? `<table id="intake-tb"><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Disputed</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>${bodyHtml}</tbody></table>${pagerHtml}`
+          : `<p class="muted">No intake requests.</p>`);
     } catch (e) { return err(e); }
   }
 
   async function newIntake(form) {
     try {
-      await Api.program.createIntake({ email: form.email.value, contact_name: form.contact_name.value, org: form.org.value, filing_party_type: form.filing_party_type.value });
-      UI.toast(`Intake request opened (${form.filing_party_type.value === "HEALTH_PLAN" ? "health plan" : "provider"} filing) — submission instructions queued`); App.rerender();
+      const r = await Api.program.createIntake({
+        email: form.email.value, contact_name: form.contact_name.value, org: form.org.value,
+        filing_party_type: form.filing_party_type.value,
+        disputed_amount_cents: form.disputed_amount.value ? Math.round(parseFloat(form.disputed_amount.value) * 100) : 0,
+      });
+      if (r.programmed) {
+        UI.toast(`Case ${r.case_number} opened — filing instructions emailed to ${esc(form.email.value)}`, { sticky: true });
+        location.hash = `#/cases/${r.case_id}`;
+      } else {
+        UI.toast(`Intake request opened (${form.filing_party_type.value === "HEALTH_PLAN" ? "health plan" : "provider"} filing) — submission instructions queued`);
+        App.rerender();
+      }
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    return false;
   }
 
   async function advanceIntake(id, status, sel) {
@@ -1123,45 +1440,58 @@ const Views = (() => {
       // Physical check intake (OCR/ICR — image is evidence, clearing settles)
       const ck = chks.checks || [];
       const reviewCk = ck.filter((c) => c.status === "REVIEW");
+      const ckRowsHtml = (list) => list.map((c) => `<tr>
+            <td class="mono">${esc((c.id || "").slice(0, 8))}…</td>
+            <td class="mono">${esc(c.routing_number || "?")} · ${esc(c.account_number || "?")}</td>
+            <td>${c.amount_cents != null ? usd(c.amount_cents) : "—"}</td>
+            <td>${c.legal_amount_cents != null ? usd(c.legal_amount_cents) : "—"}${c.amount_mismatch ? ' <span class="badge s-denied">mismatch</span>' : ""}</td>
+            <td class="mono">${esc(c.memo || "")}</td>
+            <td>${c.invoice_id ? `<span class="mono">${esc(c.invoice_id.slice(0, 8))}…</span>` : "—"}</td>
+            <td>${badge(c.status)}</td>
+            <td class="muted">${c.confidence ? esc(c.confidence) : "—"}</td>
+            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`).join("");
+      const ckPage = initClientPager("chk", ck, ckRowsHtml);
       html += `<h2>Check intake (OCR/ICR)</h2>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
           <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
           <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
-        (ck.length ? `<table><thead><tr><th>Check</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody>` +
-          ck.slice(0, 25).map((c) => `<tr>
-            <td class="mono">${esc((c.id || "").slice(0, 8))}…</td>
-            <td class="mono">${esc(c.routing_number || "?")} · ${esc(c.account_number || "?")}</td>
-            <td>${c.courtesy_amount_cents != null ? usd(c.courtesy_amount_cents) : "—"}</td>
-            <td>${c.legal_amount_cents != null ? usd(c.legal_amount_cents) : "—"}${c.amount_mismatch ? ' <span class="badge s-denied">mismatch</span>' : ""}</td>
-            <td class="mono">${esc(c.memo || "")}</td>
-            <td>${c.matched_invoice_id ? `<span class="mono">${esc(c.matched_invoice_id.slice(0, 8))}…</span>` : "—"}</td>
-            <td>${badge(c.status)}</td>
-            <td class="muted">${c.confidence != null ? Math.round(c.confidence * 100) + "%" : "—"}</td>
-            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` +
+        (ck.length ? `<table id="chk-tb"><thead><tr><th>Check</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead>
+          <tbody>${ckPage.bodyHtml}</tbody></table>${ckPage.pagerHtml}` +
           (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
           `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`);
 
       // Card payments
       const plist = pays.payments || [];
-      if (plist.length)
-        html += `<h2>Card payments</h2><table><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody>` +
-          plist.slice(0, 25).map((p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
+      if (plist.length) {
+        const payRowsHtml = (list) => list.map((p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
             <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
             <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
-            <td class="muted">${fmtDate(p.created_at)}</td></tr>`).join("") + `</tbody></table>`;
+            <td class="muted">${fmtDate(p.created_at)}</td></tr>`).join("");
+        const payPage = initClientPager("pay", plist, payRowsHtml);
+        html += `<h2>Card payments</h2><table id="pay-tb"><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead>
+          <tbody>${payPage.bodyHtml}</tbody></table>${payPage.pagerHtml}`;
+      }
 
       // Unified event stream
       const ev = fin.events || [];
-      html += `<h2>Transaction stream</h2>` +
-        (ev.length ? `<table><thead><tr><th>Event</th><th>Dir</th><th>Amount</th><th>Party</th><th>Reference</th><th>Actor</th><th>When</th></tr></thead><tbody>` +
-          ev.map((e) => `<tr><td>${badge(e.kind)}</td>
+      if (ev.length) {
+        const evRowsHtml = (list) => list.map((e) => `<tr><td>${badge(e.kind)}</td>
             <td>${e.direction === "IN" ? "↓ in" : e.direction === "OUT" ? "↑ out" : "—"}</td>
             <td>${usd(e.amount_cents)}</td><td>${esc(e.party || "—")}</td>
             <td class="mono">${esc(e.ref || "")}</td><td>${esc(e.actor || "")}</td>
-            <td class="muted">${fmtDate(e.created_at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No financial events yet — issue an invoice to start the stream.</p>`);
+            <td class="muted">${fmtDate(e.created_at)}</td></tr>`).join("");
+        const evPage = initClientPager("txn", ev, evRowsHtml);
+        html += `<h2>Transaction stream</h2><table id="txn-tb"><thead><tr><th>Event</th><th>Dir</th><th>Amount</th><th>Party</th><th>Reference</th><th>Actor</th><th>When</th></tr></thead>
+          <tbody>${evPage.bodyHtml}</tbody></table>${evPage.pagerHtml}`;
+      } else {
+        html += `<h2>Transaction stream</h2><p class="muted">No financial events yet — issue an invoice to start the stream.</p>`;
+      }
+      afterRender(() => {
+        bindClientPager("chk", "#chk-tb tbody");
+        bindClientPager("pay", "#pay-tb tbody");
+        bindClientPager("txn", "#txn-tb tbody");
+      });
       return html;
     } catch (e) { return err(e); }
   }
@@ -1200,6 +1530,8 @@ const Views = (() => {
       const audit = ar.changes || [];
       return `<div class="view-head"><h1>Program rules</h1>
         <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
+        <p><button onclick="Views.createTenantFlow()">＋ Create tenant</button>
+           <span class="muted">activates a pre-provisioned state's Keycloak group + optional first user</span></p>
         <p><button id="rule-add">＋ New rule</button>
            <button id="rules-save" class="btn-primary">Save all changes</button></p>
         <div id="rules-list">` +
@@ -1262,6 +1594,46 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
+  // Tenant codes are pre-provisioned at the DB level for all 50 US states
+  // (schema + cases/documents tables); what actually gates login access is
+  // the Keycloak /tenant/<xx> group, which until now only ever got created
+  // by hand against the live realm. This activates one from the admin page
+  // instead, optionally seeding its first user in the same call.
+  async function createTenantFlow() {
+    const v = await UI.modal({
+      title: "Create tenant", submitLabel: "Create",
+      fields: [
+        { name: "tenant", label: "State code", required: true, placeholder: "ga",
+          hint: "2-letter lowercase USPS code — the tenant_<xx> schema must already exist" },
+        { name: "label", label: "Display label", placeholder: "Georgia IDRE" },
+        { name: "username", label: "First user — username" },
+        { name: "email", label: "First user — email" },
+        { name: "role", label: "First user — role", value: "CASE_MANAGER", options: [
+          ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
+          ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse/Physician"], ["ATTORNEY", "Attorney"],
+          ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
+      ],
+    });
+    if (!v) return;
+    const tenant = (v.tenant || "").trim().toLowerCase();
+    if (!/^[a-z]{2}$/.test(tenant)) { UI.toast("State code must be exactly 2 lowercase letters", { kind: "error" }); return; }
+    if ((v.username && !v.email) || (!v.username && v.email)) {
+      UI.toast("First user needs both username and email, or leave both blank", { kind: "error" }); return;
+    }
+    const payload = { tenant, label: v.label || "" };
+    if (v.username && v.email) payload.first_user = { username: v.username, email: v.email, role: v.role };
+    try {
+      const r = await Api.admin.createTenant(payload);
+      let msg = `Tenant "${tenant}" ${r.group_already_existed ? "group already existed" : "group created"} (${r.group})`;
+      if (r.first_user?.temporary_password) {
+        msg += ` — user "${r.first_user.username}" created, temporary password: ${r.first_user.temporary_password}`;
+      } else if (r.first_user_error) {
+        msg += ` — ${r.first_user_error}`;
+      }
+      UI.toast(msg, { sticky: true });
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
   function bindRulesAdmin() {
     document.querySelectorAll(".rule-en").forEach((cb) => cb.addEventListener("change", () => {
       rulesDraft[+cb.dataset.idx].enabled = cb.checked;
@@ -1275,5 +1647,58 @@ const Views = (() => {
     document.getElementById("rules-save")?.addEventListener("click", () => UI.run(document.getElementById("rules-save"), rulesSave, "Saving…"));
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck };
+  // ---- Audit log -----------------------------------------------------------
+  // public.audit_log previously had zero read access anywhere, despite being
+  // written to throughout the backend (NPI verification, onboarding
+  // decisions, escalations, intake sweeps). FEDERAL_ADMIN/PLATFORM_ADMIN and
+  // STATE_AUDITOR see every tenant (same cross-tenant switcher as the rest of
+  // the portal); CASE_MANAGER/PM see their own tenant only -- all enforced
+  // server-side, the nav link here is just the matching visibility.
+  function auditRows(rows) {
+    if (!rows.length) return `<p class="muted">No audit entries match.</p>`;
+    const rowsHtml = (list) => list.map((e) => `<tr>
+        <td class="muted">${fmtDate(e.created_at)}</td>
+        <td>${e.case_id ? `<a href="#/cases/${esc(e.case_id)}">${esc(String(e.case_id).slice(0, 8))}…</a>` : `<span class="muted">—</span>`}</td>
+        <td>${badge(e.action)}</td>
+        <td class="mono" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.payload || "")}">${esc(e.payload || "")}</td>
+        <td class="mono" title="${esc(e.hash || "")}">${esc(String(e.hash || "").slice(0, 12))}…</td>
+      </tr>`).join("");
+    const { bodyHtml, pagerHtml } = initClientPager("audit", rows, rowsHtml);
+    return `<table id="audit-tb"><thead><tr><th>When</th><th>Case</th><th>Action</th><th>Payload</th><th>Hash</th></tr></thead>
+      <tbody>${bodyHtml}</tbody></table>${pagerHtml}`;
+  }
+
+  async function auditLog() {
+    // Same afterRender-before-await race as intake() -- see its comment.
+    // The list itself rendered fine (auditRows is inline in the returned
+    // HTML), but the Filter form's submit listener never attached, so
+    // clicking Filter fell back to a bare native submit: page reload,
+    // nothing happens. Almost certainly what "audit log isn't functional"
+    // actually was.
+    try {
+      const r = await Api.auditLog.list({ limit: 200 });
+      afterRender(() => {
+        $("#al-filter")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const f = Object.fromEntries(new FormData(ev.target));
+          try {
+            const rf = await Api.auditLog.list({ limit: 200, case_id: f.case_id, action: f.action });
+            document.getElementById("al-list").innerHTML = auditRows(rf.entries || []);
+            bindClientPager("audit", "#audit-tb tbody");
+          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        });
+        bindClientPager("audit", "#audit-tb tbody");
+      });
+      return `<div class="view-head"><h1>Audit log</h1>
+        <span class="muted">hash-chained, tamper-evident — every entry's hash covers its payload plus the previous entry's hash</span></div>
+        <form id="al-filter" class="inline-form">
+          <input name="case_id" placeholder="filter by case id" />
+          <input name="action" placeholder="filter by action (e.g. NPI_VERIFICATION_DEGRADED)" />
+          <button>Filter</button>
+        </form>
+        <div id="al-list">${auditRows(r.entries || [])}</div>`;
+    } catch (e) { return err(e); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, createTenantFlow, auditLog, downloadReportCSV };
 })();

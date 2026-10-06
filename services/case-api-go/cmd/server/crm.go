@@ -6,8 +6,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -410,6 +410,31 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
 }
 
+// listNotes: GET /notes?record_type=CASE&record_id=... -- addNote had no
+// counterpart to read notes back at all (confirmed live: write-only). Case
+// notes also mirror onto the activity timeline, but without the stream
+// field, so there's no way to tell internal/coder/clinical/legal/
+// external_agency notes apart there -- the whole point of streams per the
+// program config.
+func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	q := r.URL.Query()
+	recordType, recordID := q.Get("record_type"), q.Get("record_id")
+	if recordType == "" || recordID == "" {
+		http.Error(w, `{"error":"record_type and record_id required"}`, http.StatusBadRequest)
+		return
+	}
+	rows, err := s.queryRows(r, `
+		SELECT id, stream, body, author, created_at FROM public.notes
+		WHERE tenant=$1 AND record_type=$2 AND record_id=$3
+		ORDER BY created_at DESC LIMIT 200`, tenant, recordType, recordID)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"notes": rows})
+}
+
 // ---- Global search (cases + accounts + contacts + leads) ------------------------
 
 func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
@@ -456,6 +481,23 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// uuidString converts pgx's raw Values() representation of a uuid column
+// ([16]byte, confirmed empirically -- it does not come back as a string
+// through this generic path, only through an explicit Scan(&stringVar))
+// into the canonical 8-4-4-12-4 hex string. Every other column type passes
+// through unchanged. Without this, a uuid value JSON-marshals as a bare
+// array of 16 numbers, and any frontend code that interpolates it into a
+// URL (template literal on an array -- confirmed live: a settleInvoice
+// call landed at /invoices/161,145,22,...,68/settle) gets a comma-joined
+// garbage id instead of the real one, 404ing with no indication why.
+func uuidString(v any) any {
+	b, ok := v.([16]byte)
+	if !ok {
+		return v
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func (s *server) queryRows(r *http.Request, sql string, args ...any) ([]map[string]any, error) {
 	rows, err := s.db.Query(r.Context(), sql, args...)
 	if err != nil {
@@ -471,7 +513,7 @@ func (s *server) queryRows(r *http.Request, sql string, args ...any) ([]map[stri
 		}
 		m := map[string]any{}
 		for i, c := range cols {
-			m[string(c.Name)] = vals[i]
+			m[string(c.Name)] = uuidString(vals[i])
 		}
 		out = append(out, m)
 	}

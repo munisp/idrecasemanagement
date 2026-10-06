@@ -1,6 +1,16 @@
 // Service worker: app-shell PWA. Static assets cache-first; API network-first
 // with offline JSON fallback; navigation requests fall back to the cached shell.
-const SHELL = "idre-shell-v1";
+//
+// SHELL's version suffix is substituted at image build time (see
+// portal/Dockerfile) with the build timestamp, not hand-maintained. A
+// hardcoded "v1" that nobody remembers to bump is exactly how this bug
+// keeps recurring: config.js (and every other shell asset) is cache-first
+// under this name, which service workers serve regardless of server-side
+// Cache-Control or CDN cache state -- a fix on the server is invisible to
+// any browser that already has this service worker installed until the
+// cache name itself changes, which is what purges the stale entry
+// (activate() deletes every cache key not in [SHELL, API]).
+const SHELL = "idre-shell-__BUILD_VERSION__";
 const API = "idre-api-v1";
 const SHELL_ASSETS = [
   "/", "/index.html", "/css/app.css", "/manifest.webmanifest",

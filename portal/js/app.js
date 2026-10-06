@@ -3,11 +3,38 @@
   const view = document.getElementById("view");
   const nav = document.getElementById("nav");
 
-  // Service worker (PWA)
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+  // Service worker (PWA). The default fire-and-forget registration leaves
+  // an already-open tab on its OLD service worker (and its OLD cached
+  // shell) until the browser gets around to its own update check on some
+  // later navigation -- during active deploys that reads as "still the
+  // old UI" no matter how many times the server is confirmed fresh.
+  // reg.update() forces the check now instead of waiting on the browser's
+  // schedule, and a new worker installing while one is already active
+  // means a newer build landed -- reload once to pick it up.
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").then((reg) => {
+      reg.addEventListener("updatefound", () => {
+        const nw = reg.installing;
+        nw?.addEventListener("statechange", () => {
+          if (nw.state === "installed" && navigator.serviceWorker.controller) location.reload();
+        });
+      });
+      reg.update();
+      // The check above only ran once, on this page load. A tab left open
+      // across several deploys (exactly how this app gets tested -- SPA
+      // hash routing, no real reload in between) never re-checked, so a
+      // fix already live on the server stayed invisible indefinitely in
+      // that tab. Re-check on every route change instead -- cheap (no-op
+      // network request if nothing changed) and turns "still broken after
+      // you said you fixed it" into "self-heals within one navigation."
+      addEventListener("hashchange", () => reg.update());
+    });
+  }
 
-  // OIDC callback
-  if (await Auth.handleCallback()) location.hash = "#/dashboard";
+  // OIDC callback -- handleCallback() already restores the pre-login route
+  // via history.replaceState (see auth.js); forcing #/dashboard here is
+  // exactly what was stomping every deep link after a fresh login.
+  if (await Auth.handleCallback() && !location.hash) location.hash = "#/dashboard";
 
   const me = Auth.claims();
   if (!me) { Auth.login(); return; }
@@ -98,19 +125,43 @@
   ];
   if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
   links.push(["#/ask", "✦", "Ask the graph"]);
-  if (has("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+  if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
+  }
+  if (has("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/intake", "⇥", "Intake"]);
     links.push(["#/deliverables", "⎘", "Deliverables"]);
   }
-  if (has("FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
+  if (has("FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   links.push(["#/calendar", "▨", "Calendar"]);
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
-  if (has("FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
+  if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
-    `<a href="${h}" data-route="${h.slice(2).split("/")[0]}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
+    `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
+
+  // Mobile rail: collapsed to icon-only under 860px with no way to see
+  // labels or reach anything not already memorized by icon, and sign-out
+  // (in #whoami, top-right) disappears entirely at that width -- this
+  // toggle expands the rail as an overlay, and sign-out now also lives in
+  // the rail's own footer so it survives the collapse instead of needing
+  // the hidden #whoami text next to it.
+  const railToggle = document.getElementById("rail-toggle");
+  const backdrop = document.getElementById("rail-backdrop");
+  const closeRail = () => {
+    document.getElementById("rail").classList.remove("rail-open");
+    backdrop.classList.remove("show");
+    railToggle.setAttribute("aria-expanded", "false");
+  };
+  railToggle.addEventListener("click", () => {
+    const open = document.getElementById("rail").classList.toggle("rail-open");
+    backdrop.classList.toggle("show", open);
+    railToggle.setAttribute("aria-expanded", String(open));
+  });
+  backdrop.addEventListener("click", closeRail);
+  nav.addEventListener("click", (e) => { if (e.target.closest("a")) closeRail(); });
 
   // Notifications
   document.getElementById("bell").onclick = async () => {
@@ -119,7 +170,7 @@
     w.className = "notif-panel";
     w.innerHTML = `<h3>Notifications</h3>` + (n.length ? n.map((x) =>
       `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>location.reload())">
-         <b>${x.type}</b> — ${x.message} <span class="muted">${new Date(x.created_at).toLocaleString()}</span></div>`).join("")
+         <b>${x.type}</b> — ${x.body} <span class="muted">${new Date(x.at).toLocaleString()}</span></div>`).join("")
       : `<p class="muted">No notifications.</p>`);
     document.body.appendChild(w);
     setTimeout(() => document.addEventListener("click", (e) => { if (!w.contains(e.target) && e.target.id !== "bell") w.remove(); }, { once: true }), 0);
@@ -131,10 +182,17 @@
     if (unread) { b.textContent = unread; b.style.display = "block"; }
   })();
 
-  // Identity
+  // Identity. The avatar doubles as the sign-out control on narrow
+  // viewports, where .who-txt (and the #lo link inside it) is hidden by
+  // CSS to save header space -- without this there was no way to sign out
+  // on mobile at all.
   const initials = (me.name || "?").split(/[\s._-]+/).map((s) => s[0]).join("").slice(0, 2).toUpperCase();
   document.getElementById("whoami").innerHTML =
-    `<span class="avatar">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo">sign out</a></span>`;
+    `<span class="avatar" id="avatar-lo" title="Sign out" role="button" tabindex="0">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo">sign out</a></span>`;
+  document.getElementById("avatar-lo").addEventListener("click", Auth.logout);
+  document.getElementById("rail-foot").innerHTML =
+    `<a href="javascript:void(0)" id="rail-lo" title="Sign out"><span class="ri">⏻</span><span class="rl">Sign out — ${me.name}</span></a>`;
+  document.getElementById("rail-lo").addEventListener("click", Auth.logout);
   document.getElementById("gq").addEventListener("keydown", (e) => {
     if (e.key === "Enter") location.hash = `#/search/${encodeURIComponent(e.target.value)}`;
   });
@@ -150,7 +208,7 @@
     [/^#\/crm\/accounts\/new$/, CrmViews.accountNew],
     [/^#\/crm\/accounts\/([\w-]+)$/, (m) => CrmViews.account360(m[1])],
     [/^#\/crm\/leads$/, CrmViews.leads],
-    [/^#\/crm\/tasks$/, CrmViews.tasks],
+    [/^#\/crm\/tasks(\?.*)?$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
     [/^#\/ask$/, Views.askGraph],
     [/^#\/qa$/, Views.qaQueue],
@@ -163,18 +221,31 @@
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
     [/^#\/rules$/, Views.rulesAdmin],
+    [/^#\/audit$/, Views.auditLog],
   ];
 
   async function render() {
     const h = location.hash || "#/dashboard";
     nav.querySelectorAll("a").forEach((a) => {
       const r = a.dataset.route;
-      a.classList.toggle("active", h.startsWith("#/" + r) || (r === "cases" && h.startsWith("#/new")));
+      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || (r === "cases" && h.startsWith("#/new")));
     });
     for (const [re, fn] of routes) {
       const m = h.match(re);
       if (m) {
-        view.innerHTML = await fn(m);
+        const result = await fn(m);
+        // Views that need to wire up listeners after rendering return
+        // {html, wire} instead of a plain string: wire() must run AFTER
+        // this assignment, never via queueMicrotask inside the view
+        // function itself -- that always runs as an earlier microtask
+        // than this assignment (confirmed empirically), so every listener
+        // it tried to attach found nothing yet and silently no-op'd.
+        if (result && typeof result === "object" && "html" in result) {
+          view.innerHTML = result.html;
+          result.wire?.();
+        } else {
+          view.innerHTML = result;
+        }
         view.classList.remove("view-in");
         void view.offsetWidth; // restart the enter animation on every render
         view.classList.add("view-in");

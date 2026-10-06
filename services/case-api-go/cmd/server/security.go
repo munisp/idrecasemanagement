@@ -60,11 +60,15 @@ func (s *server) clamScan(r io.Reader) (string, error) {
 	if _, err := conn.Write([]byte{0, 0, 0, 0}); err != nil { // terminator
 		return "", err
 	}
-	resp, err := bufio.NewReader(conn).ReadString('\n')
+	// clamd terminates its INSTREAM reply with NUL, not a newline — reading
+	// for '\n' here blocked until clamd closed the connection, surfacing as
+	// an EOF error on every single scan (so every upload was fail-closed,
+	// scanner healthy or not).
+	resp, err := bufio.NewReader(conn).ReadString(0)
 	if err != nil {
 		return "", err
 	}
-	resp = strings.TrimSpace(resp)
+	resp = strings.TrimSpace(strings.TrimRight(resp, "\x00"))
 	// "stream: OK" | "stream: <Signature> FOUND" | "stream: <error> ERROR"
 	switch {
 	case strings.HasSuffix(resp, " OK"):
