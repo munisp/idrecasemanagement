@@ -24,6 +24,10 @@ COPY requirements.txt .
 # "Could not import module" with no indication it was a torch/torchvision
 # ABI mismatch at all.
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# transformers: TrOCR handwriting ICR (microsoft/trocr-base-handwritten) for
+# the check legal-amount line; model weights pull from HF Hub on first dock
+# (bake into the image with a build-time warmup if the cluster is air-gapped).
+RUN pip install --no-cache-dir transformers
 RUN pip install --no-cache-dir paddlepaddle paddleocr pypdfium2
 # paddleocr pulls in paddlex transitively but without its [ocr] extra, so
 # PP-StructureV3 (the layout/seal-detection stage) can't construct --

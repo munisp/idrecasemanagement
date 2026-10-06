@@ -46,6 +46,11 @@ const Api = (() => {
   }
 
   const t = () => `/v1/tenants/${tenant}`;
+  // query-string builder: drops empty values, returns "" or "?a=1&b=2"
+  const qs = (params) => {
+    const s = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v != null)).toString();
+    return s ? `?${s}` : "";
+  };
   return {
     setTenant, getTenant, download,
     admin: {
@@ -166,6 +171,7 @@ const Api = (() => {
       setDate: (caseId, key, value) => req("POST", `${t()}/cases/${caseId}/program-date`, { key, value }),
       setStatus: (caseId, p) => req("POST", `${t()}/cases/${caseId}/status`, p),
       eligibility: (caseId, p) => req("POST", `${t()}/cases/${caseId}/eligibility`, p),
+      eligibilityHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/eligibility`),
       optOut: (caseId, eligible, rationale) => req("POST", `${t()}/cases/${caseId}/opt-out`, { eligible, rationale }),
       send: (caseId, p) => req("POST", `${t()}/cases/${caseId}/correspondence`, p),
       correspondence: (caseId) => req("GET", `${t()}/cases/${caseId}/correspondence`),
@@ -175,21 +181,23 @@ const Api = (() => {
       settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
-      checks: (status) => req("GET", `${t()}/checks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+      opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
+      pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
+      checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
       uploadCheck: (file) => {
         const fd = new FormData();
         fd.append("check", file);
         return req("POST", `${t()}/checks`, fd, true);
       },
-      payments: (caseId) => req("GET", caseId ? `${t()}/cases/${caseId}/payments` : `${t()}/payments`),
+      payments: (caseId, opts) => req("GET", (caseId ? `${t()}/cases/${caseId}/payments` : `${t()}/payments`) + qs(opts || {})),
       checkout: (invId) => req("POST", `${t()}/invoices/${invId}/checkout`),
       claims: (caseId) => req("GET", `${t()}/cases/${caseId}/claims`),
       importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
       qaQueue: () => req("GET", `${t()}/qa`),
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
       qaDecision: (id, decision, note) => req("POST", `${t()}/qa/${id}/decision`, { decision, note }),
-      intake: () => req("GET", `${t()}/intake`),
+      intake: (opts) => req("GET", `${t()}/intake${qs(opts || {})}`),
       createIntake: (p) => req("POST", `${t()}/intake`, p),
       advanceIntake: (id, status, caseId) => req("POST", `${t()}/intake/${id}/advance`, { status, case_id: caseId }),
       deliverables: () => req("GET", `${t()}/deliverables`),

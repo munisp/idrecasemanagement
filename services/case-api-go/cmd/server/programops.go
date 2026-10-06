@@ -86,14 +86,23 @@ func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
 		where += ` AND case_id=$2`
 		args = append(args, caseID)
 	}
-	rows, err := s.queryRows(r, `
+	limit, offset := pageParams(r, 50, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT count(*) FROM public.invoices WHERE `+where, args...).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT id, case_id, invoice_no, party, kind, amount_cents, status, due_date, paid_at, remittance_ref, created_at
-		FROM public.invoices WHERE `+where+` ORDER BY created_at DESC`, args...)
+		FROM public.invoices WHERE `+where+` ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`,
+		limit, offset), args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"invoices": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"invoices": rows,
+		"total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 // settleInvoice records a payment, void, or refund (remittance reference kept
@@ -163,6 +172,9 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 		"by": actor, "invoice_id": invID, "action": in.Action, "status": status,
 		"amount_cents": amount, "party": party, "remittance_ref": in.RemittanceRef,
 	})
+	// Money moved — the case status and checklist follow the fact.
+	s.maybeAdvanceStatus(r, tenant, caseID)
+	s.autoChecklist(r, tenant, caseID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }
 
@@ -561,6 +573,7 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 // intake lifecycle left to advance; it's just a link to the case).
 func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	limit, offset := pageParams(r, 50, 500)
 	rows, err := s.queryRows(r, `
 		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at,
 		       filing_party_type, packet_complete_at, NULL::text AS case_number,
@@ -590,17 +603,29 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 			ORDER BY created_at DESC LIMIT 200`, sanitizeTenant(tenant)))
 		if cerr == nil {
 			rows = append(rows, caseRows...)
-			sort.Slice(rows, func(i, j int) bool {
-				ti, _ := rows[i]["created_at"].(time.Time)
-				tj, _ := rows[j]["created_at"].(time.Time)
-				return ti.After(tj)
-			})
-			if len(rows) > 200 {
-				rows = rows[:200]
-			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"intake": rows})
+	// legacy intake_requests and programmed-tenant cases come from two
+	// different tables with no shared key to UNION on, so this can't be one
+	// paginated SQL query the way accounts/leads/tasks are -- merge, sort,
+	// then paginate the combined set in memory.
+	sort.Slice(rows, func(i, j int) bool {
+		ti, _ := rows[i]["created_at"].(time.Time)
+		tj, _ := rows[j]["created_at"].(time.Time)
+		return ti.After(tj)
+	})
+	total := len(rows)
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := []map[string]any{}
+	if offset < total {
+		page = rows[offset:end]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"intake": page, "total": total, "next_offset": nextOffset(offset, limit, total),
+	})
 }
 
 // ---- Deliverables schedule (G7) ----------------------------------------------

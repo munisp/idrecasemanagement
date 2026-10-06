@@ -511,11 +511,16 @@ func main() {
 		r.Get("/reports/sla", s.slaReport)
 		r.Get("/reports/summary", s.summaryReport)
 
+		// Operations dashboard: live presence heartbeat + manager KPI board.
+		r.Post("/presence/ping", s.presencePing) // any authenticated user
+		r.Get("/ops/dashboard", s.opsDashboard)  // staff roles only
+
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
 		r.Post("/cases/{caseId}/program-date", s.setProgramDate)        // record clock-basis events
 		r.Post("/cases/{caseId}/status", s.setDualStatus)               // dual internal/agency status (G5)
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
@@ -925,12 +930,13 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
+	s.maybeAdvanceStatus(r, tenant, id) // status follows platform facts
 	var c Case
 	var details, programDates []byte
 	var internal, agency *string
 	err := s.db.QueryRow(r.Context(),
 		fmt.Sprintf(`SELECT id, case_number, status, coalesce(service_line,''), coalesce(qpa_cents,0), coalesce(disputed_amount_cents,0), opened_at,
-		                    internal_status, agency_status, details, program_dates
+		                    internal_status, agency_status, details, COALESCE(program_dates,'{}'::jsonb)
 		             FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).
 		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &internal, &agency, &details, &programDates)
 	if err != nil {

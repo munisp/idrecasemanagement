@@ -79,9 +79,9 @@
     { id: "l2", name: "J. Park", organization: "Humana", source: "WEB", summary: "Payer onboarding inquiry — batch disputes.", status: "CONVERTED" },
   ];
   const TASKS = [
-    { id: "t1", subject: "Call Riverbend re: missing remit page", case_id: "c1", due_date: "2026-10-01", status: "OPEN" },
-    { id: "t2", subject: "Review batch eligibility for CMS-TX-2026-01490", case_id: "", due_date: "2026-10-02", status: "OPEN" },
-    { id: "t3", subject: "Verify escrow posting for admin fee", case_id: "c3", due_date: "2026-09-29", status: "DONE" },
+    { id: "t1", task_ref: "TASK-2026-00041", subject: "Call Riverbend re: missing remit page", case_id: "c1", due_date: "2026-10-01", status: "OPEN" },
+    { id: "t2", task_ref: "TASK-2026-00042", subject: "Review batch eligibility for CMS-TX-2026-01490", case_id: "", due_date: "2026-10-02", status: "OPEN" },
+    { id: "t3", task_ref: "TASK-2026-00039", subject: "Verify escrow posting for admin fee", case_id: "c3", due_date: "2026-09-29", status: "DONE" },
   ];
   const CAL = [
     { type: "OFFER_WINDOW_CLOSE", title: "Offer window closes (10bd)", case_id: "c2", case_number: "CMS-TX-2026-01479", due_date: "2026-10-07" },
@@ -148,7 +148,9 @@
       if (/\/cases\/[\w-]+\/activities$/.test(p)) return json(ACTS);
       if (/\/cases\/[\w-]+\/checklist$/.test(p)) return json(CHECKLIST);
       if (/\/cases\/[\w-]+\/relationships$/.test(p)) return json(RELS);
-      if (/\/cases\/[\w-]+$/.test(p)) { const id = p.split("/")[2]; return json(CASES.find((c) => c.id === id) || CASES[0]); }
+      if (/\/cases\/[\w-]+$/.test(p)) { const id = p.split("/")[2]; const cc = CASES.find((c) => c.id === id) || CASES[0];
+        return json({ ...cc, internal_status: "In Review", agency_status: "Submitted",
+          program_dates: { received_at: "2026-09-20", plan_notified_at: "2026-09-25" } }); }
       if (/\/cases(\?|$)/.test(p)) {
         // Mirror the backend's keyset pagination over the fixture set.
         const qs = new URLSearchParams(p.split("?")[1] || "");
@@ -255,7 +257,9 @@
     } });
     if (/\/cases\/[\w-]+\/program-date$/.test(p)) return json({ status: "recorded" });
     if (/\/cases\/[\w-]+\/status$/.test(p)) return json({ status: "updated" });
-    if (/\/cases\/[\w-]+\/eligibility$/.test(p)) return json({ review_id: "er1", result: "ELIGIBLE", reason: "", evidence: { threshold_min_cents: 2500000 } });
+        if (/\/cases\/[\w-]+\/eligibility$/.test(p) && (!opts.method || opts.method === "GET")) return json({ reviews: [
+      { id: "er1", result: "ELIGIBLE", reason: "", evidence: { threshold_min_cents: 2500000 }, decided_by: "maria.chen", created_at: d(30) }] });
+if (/\/cases\/[\w-]+\/eligibility$/.test(p) && opts.method === "POST") return json({ review_id: "er1", result: "ELIGIBLE", reason: "", evidence: { threshold_min_cents: 2500000 } });
     if (/\/cases\/[\w-]+\/correspondence$/.test(p) && opts.method === "POST") {
       const b = JSON.parse(opts.body || "{}");
       return json(b.template === "dismissal"
@@ -290,10 +294,13 @@
       body: "Dear provider,\n\nFollowing preliminary review, case CMS-TX-2026-01482 does not meet the program eligibility threshold…",
       to_recipients: ["billing@provider.example"], cc_recipients: ["cdr@ahca.example"], status: "PENDING", drafted_by: "maria.chen", created_at: d(2) });
     if (/\/qa$/.test(p)) return json({ queue: [
-      { id: "qa1", case_id: "c1", artifact: "dismissal", channel: "email", subject: "Dismissal CMS-TX-2026-01482: FL AHCA", status: "PENDING", drafted_by: "maria.chen", created_at: d(2) }] });
-    if (/\/intake$/.test(p) && opts.method === "POST") return json({ intake_id: "in2", status: "INSTRUCTED" });
+      { id: "qa1", case_id: "c1", artifact: "dismissal", channel: "email", subject: "Dismissal CMS-TX-2026-01482: FL AHCA", status: "PENDING", drafted_by: "maria.chen", created_at: d(2) }],
+      recent: [
+        { id: "qa0", case_id: "c3", subject: "Determination letter CMS-TX-2026-01490", status: "SENT", drafted_by: "maria.chen", reviewed_by: "atty.rogers", reviewed_at: d(26) },
+        { id: "qa9", case_id: "c5", subject: "Payment chase CMS-TX-2026-01477", status: "REJECTED", drafted_by: "sam.ortiz", reviewed_by: "atty.rogers", reviewed_at: d(50) }] });
+    if (/\/intake(\?.*)?$/.test(p) && opts.method === "POST") return json({ intake_id: "in2", status: "INSTRUCTED" });
     if (/\/intake\/[\w-]+\/advance$/.test(p)) return json({ status: JSON.parse(opts.body || "{}").status });
-    if (/\/intake$/.test(p)) return json({ intake: [
+    if (/\/intake(\?.*)?$/.test(p)) return json({ intake: [
       { id: "in1", email: "revcycle@memorial.example", org: "Memorial Regional", status: "DOCS_RECEIVED", outreach_at: d(48), created_at: d(50), filing_party_type: "PROVIDER", packet_complete_at: null },
       { id: "in4", email: "disputes@bayfront.example", org: "Bayfront Medical", status: "PACKET_COMPLETE", outreach_at: d(200), created_at: d(202), filing_party_type: "PROVIDER", packet_complete_at: d(100) },
       { id: "in3", email: "claims@sunhealth.example", org: "Sun Health Plan", status: "PAID", outreach_at: d(120), created_at: d(122), filing_party_type: "HEALTH_PLAN", packet_complete_at: null }] });
@@ -358,7 +365,38 @@
       { id: "chk-demo-0003", routing_number: "061000104", account_number: "3301884562", check_number: "0912",
         courtesy_amount_cents: 12359, legal_amount_cents: 12359, amount_mismatch: false,
         memo: "determination fee", matched_invoice_id: "inv3-demo", status: "CLEARED", confidence: 0.97, created_at: d(6) }] });
-    if (/\/payments$/.test(p) || /\/cases\/[\w-]+\/payments$/.test(p)) return json({ payments: [
+    if (/\/presence\/ping$/.test(p)) return json({ status: "seen" });
+    if (/\/ops\/dashboard$/.test(p)) return json({
+      tenant: "tx",
+      online: [
+        { user_sub: "demo-maria", display_name: "maria.chen", roles: ["CASE_MANAGER"], last_seen: new Date().toISOString() },
+        { user_sub: "demo-james", display_name: "j.osei", roles: ["ARBITRATOR"], last_seen: new Date(Date.now() - 60e3).toISOString() },
+        { user_sub: "demo-priya", display_name: "priya.nair", roles: ["FINANCE"], last_seen: new Date(Date.now() - 110e3).toISOString() }],
+      tasks_by_assignee: [
+        { assignee: "maria.chen", open: 9, overdue: 2, done_30d: 21 },
+        { assignee: "j.osei", open: 6, overdue: 0, done_30d: 14 },
+        { assignee: "priya.nair", open: 4, overdue: 1, done_30d: 11 },
+        { assignee: "(unassigned)", open: 5, overdue: 3, done_30d: 0 }],
+      task_kpis: [{ open: 24, overdue: 6, done_30d: 46, created_30d: 61, completion_pct_30d: 75.4 }],
+      cases: [
+        { status: "IN_REVIEW", n: 18 }, { status: "ACCEPTED", n: 11 },
+        { status: "DECIDED", n: 27 }, { status: "PLAN_NOTIFICATION", n: 6 },
+        { status: "DISMISSED", n: 4 }, { status: "WITHDRAWN", n: 2 }],
+      case_kpis: [{ unassigned_open: 7, opened_7d: 9, opened_30d: 34, avg_open_age_days: 16.2 }],
+      sla: [{ breaches_7d: 1, breaches_total: 5, determination_breaches: 3, payment_breaches: 2 }],
+      outstanding: [
+        { party: "HEALTH_PLAN", open_invoices: 9, open_cents: 1240800, overdue_cents: 261160 },
+        { party: "PROVIDER", open_invoices: 14, open_cents: 1730260, overdue_cents: 76000 }],
+      financial: [{ collected_cents: 4812300, collected_30d_cents: 918400, refunded_cents: 41200 }],
+      queues: [{ checks_review: 1, checks_awaiting_clear: 1, qa_pending: 3, intake_open: 4, onboarding_pending: 2 }],
+      escalations: [
+        { case_id: "c2-demo-8871", clock: "DETERMINATION_30BD", level: 1, escalated_to: "SUPERVISOR", created_at: d(20) },
+        { case_id: "c7-demo-1120", clock: "PAYMENT_30CD", level: 2, escalated_to: "FEDERAL_ADMIN", created_at: d(70) }],
+      cases_trend: Array.from({ length: 30 }, (_, i) => ({ day: d((29 - i) * 24).slice(0, 10), opened: [2,3,1,0,4,2,5,3,2,1,3,4,2,0,1,3,2,4,5,3,2,1,4,3,2,6,4,3,5,4][i] })),
+      collections_trend: Array.from({ length: 30 }, (_, i) => ({ day: d((29 - i) * 24).slice(0, 10),
+        collected_cents: [41200,0,12359,88750,41200,0,0,152300,41200,66000,0,23410,98000,41200,0,12359,41200,88750,0,41200,152300,66000,41200,0,98000,41200,23410,12359,88750,152300][i], refunded_cents: 0 })),
+      throughput_trend: Array.from({ length: 14 }, (_, i) => ({ day: d((13 - i) * 24).slice(0, 10), done: [3,5,2,6,4,1,0,4,6,3,5,7,4,5][i] })) });
+    if (/\/payments(\?.*)?$/.test(p) || /\/cases\/[\w-]+\/payments(\?.*)?$/.test(p)) return json({ payments: [
       { id: "pay1", case_id: "c1", invoice_id: "inv3", provider: "stripe", session_id: "cs_test_demo1", payment_intent: "pi_3Qf2demo1", amount_cents: 41200, currency: "usd", payer_email: "ap@sunhealth.example", status: "PAID", created_at: d(4) },
       { id: "pay3", case_id: "c2", invoice_id: "inv1", provider: "stripe", session_id: "cs_test_demo2", payment_intent: null, amount_cents: 12359, currency: "usd", payer_email: null, status: "PENDING", created_at: d(1) }] });
     if (/\/cases\/[\w-]+\/assign$/.test(p)) return json({ assigned_to: "m.chen" });

@@ -241,12 +241,14 @@ const CrmViews = (() => {
           <input name="subject" placeholder="Subject" required />
           <input name="case_id" placeholder="Case ID (optional)" />
           <input name="due_date" type="date" /><button>Create</button></form>`;
-      const rowsHtml = (list) => list.map((t) => `<tr><td>${esc(t.subject)}</td>
+      const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
+          <td>${esc(t.subject)}</td>
           ${mine ? "" : `<td>${esc(t.assignee || "—")}</td>`}
-          <td>${t.case_id ? `<a href="#/cases/${esc(t.case_id)}">${esc(t.case_id.slice(0, 8))}…</a>` : "—"}</td><td>${esc(t.due_date)}</td>
+          <td>${t.case_id ? `<a href="#/cases/${esc(t.case_id)}" class="mono">${esc(t.case_id.slice(0, 8))}…</a>` : "—"}</td>
+          <td>${esc(t.due_date)}</td>
           <td>${badge(t.status)}</td>
           <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
-      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Subject</th>
+      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Ref</th><th>Subject</th>
           ${mine ? "" : "<th>Assignee</th>"}<th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task", state.loaded.length, state.total, state.next)
         : `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
@@ -256,7 +258,7 @@ const CrmViews = (() => {
       afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
-        try { await Api.crm.createTask(f); UI.toast("Task created"); App.rerender(); }
+        try { const r = await Api.crm.createTask(f); UI.toast(`Task ${r.task_ref || ""} created`.trim()); App.rerender(); }
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       return html;
@@ -283,11 +285,58 @@ const CrmViews = (() => {
     } catch (e) { return err(e); }
   }
 
-  // ---- Calendar (deadline agenda) --------------------------------------------------------
+  // ---- Calendar (month grid + agenda) ----------------------------------------------------
+  // Statutory deadlines deserve a real calendar, not a list: month grid with
+  // color-coded chips (statutory clocks = brass, tasks = green, offers = blue),
+  // today highlighted, month navigation, and an agenda under it.
+  // Field names here match what Api.cm.calendar() actually returns
+  // (ref/kind/label/due/case_id, from casemgmt.go's calendar() handler) --
+  // this was originally written against due_date/type/title/case_number,
+  // a shape that endpoint has never returned, so it rendered "undefined"
+  // throughout until adapted here during the main-branch merge.
+  function calMonthGrid(items, y, m) {
+    const first = new Date(y, m, 1);
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const todayISO = new Date().toISOString().slice(0, 10);
+    const byDay = {};
+    items.forEach((i) => {
+      const d = String(i.due || "").slice(0, 10);
+      if (d) (byDay[d] ||= []).push(i);
+    });
+    const chipCls = (k) => k === "OFFER_WINDOW" ? "cal-chip-stat" : "cal-chip-task";
+    let cells = "";
+    for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty"></div>`;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const iso = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      const dayItems = byDay[iso] || [];
+      cells += `<div class="cal-cell ${iso === todayISO ? "today" : ""} ${dayItems.length ? "has-items" : ""}">
+        <span class="cal-num">${d}</span>
+        ${dayItems.slice(0, 3).map((i) => `<div class="cal-chip ${chipCls(i.kind)}"
+            title="${esc(i.kind)} — ${esc(i.label)}">${i.case_id
+              ? `<a href="#/cases/${esc(i.case_id)}">${esc(i.label)}</a>`
+              : esc(i.label)}</div>`).join("")}
+        ${dayItems.length > 3 ? `<span class="muted cal-more">+${dayItems.length - 3} more</span>` : ""}</div>`;
+    }
+    return `<div class="cal-grid">
+      ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => `<div class="cal-dow">${d}</div>`).join("")}
+      ${cells}</div>`;
+  }
+
   async function calendar() {
     try {
       const items = await Api.cm.calendar();
       items.sort((a, b) => String(a.due).localeCompare(String(b.due)));
+      const now = new Date();
+      const state = { y: now.getFullYear(), m: now.getMonth() };
+      const render = () => {
+        const label = new Date(state.y, state.m, 1)
+          .toLocaleDateString("en-US", { month: "long", year: "numeric" });
+        const grid = document.getElementById("cal-grid-box");
+        if (grid) {
+          grid.innerHTML = calMonthGrid(items, state.y, state.m);
+          document.getElementById("cal-month-label").textContent = label;
+        }
+      };
       const dateOnly = (s) => String(s).slice(0, 10);
       const groups = {};
       items.forEach((i) => (groups[dateOnly(i.due)] ||= []).push(i));
@@ -302,7 +351,7 @@ const CrmViews = (() => {
         if (d < today) return `Overdue — ${full}`;
         return full;
       };
-      const html = Object.keys(groups).map((d) => {
+      const agenda = Object.keys(groups).map((d) => {
         const cls = d === today ? "is-today" : d < today ? "is-overdue" : "";
         return `<div class="cal-group ${cls}">
           <div class="cal-date"><span class="dow">${dow(d)}</span><span class="dom">${dom(d)}</span></div>
@@ -319,7 +368,25 @@ const CrmViews = (() => {
           </div>
         </div>`;
       }).join("");
-      return `<h1>Calendar</h1>` + (html || `<p class="muted">No upcoming deadlines or tasks.</p>`);
+      afterRender(() => {
+        render();
+        document.getElementById("cal-prev")?.addEventListener("click", () => {
+          state.m--; if (state.m < 0) { state.m = 11; state.y--; } render();
+        });
+        document.getElementById("cal-next")?.addEventListener("click", () => {
+          state.m++; if (state.m > 11) { state.m = 0; state.y++; } render();
+        });
+      });
+      return `<div class="view-head"><h1>Calendar</h1>
+        <span class="muted">statutory clocks, offer windows, and task due dates</span></div>
+        <div class="cal-nav">
+          <button class="mini" id="cal-prev">‹ prev</button>
+          <b id="cal-month-label"></b>
+          <button class="mini" id="cal-next">next ›</button>
+          <span class="cal-legend"><span class="cal-chip cal-chip-stat">statutory / offer window</span>
+            <span class="cal-chip cal-chip-task">task</span></span></div>
+        <div id="cal-grid-box"></div>
+        <h2>Agenda</h2>` + (agenda || `<p class="muted">No upcoming deadlines or tasks.</p>`);
     } catch (e) { return `<h1>Calendar</h1>` + err(e); }
   }
 

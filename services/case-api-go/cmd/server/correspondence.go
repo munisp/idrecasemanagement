@@ -157,13 +157,15 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
-		Template    string            `json:"template"` // template key from program config
-		Body        string            `json:"body"`     // staff-composed body (subject comes from config)
-		To          []string          `json:"to"`       // resolved recipient emails
-		CC          []string          `json:"cc"`
-		Vars        map[string]string `json:"vars"`         // extra placeholders
-		ShareTokens []string          `json:"share_tokens"` // attach share links
-		RfiTo       string            `json:"rfi_to"`       // "provider"|"plan" -- only used when template=="rfi"
+		Template     string            `json:"template"` // template key from program config
+		Body         string            `json:"body"`     // staff-composed body (subject comes from config)
+		To           []string          `json:"to"`       // resolved recipient emails
+		CC           []string          `json:"cc"`
+		Vars         map[string]string `json:"vars"`          // extra placeholders
+		ShareTokens  []string          `json:"share_tokens"`  // attach pre-created share links
+		RfiTo        string            `json:"rfi_to"`        // "provider"|"plan" -- only used when template=="rfi"
+		AutoShare    bool              `json:"auto_share"`    // mint an upload link and embed it (G9, no copy-paste)
+		AutoDownload bool              `json:"auto_download"` // mint a download link for case documents and embed it
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Template == "" {
 		http.Error(w, `{"error":"template required"}`, http.StatusBadRequest)
@@ -197,6 +199,43 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	for k, v := range in.Vars {
 		subject = strings.ReplaceAll(subject, "{"+k+"}", v)
 		body = strings.ReplaceAll(body, "{"+k+"}", v)
+	}
+	// Auto-share (G9): the template or the sender wants a secure upload link in
+	// the message. Mint one inline and substitute the {share_link} placeholder —
+	// the case manager never leaves the compose screen to copy-paste a URL.
+	// Fire when explicitly requested OR when the body still carries the
+	// placeholder after variable substitution.
+	if in.AutoShare || strings.Contains(body, "{share_link}") {
+		link := s.autoShareLink(r, tenant, caseID, "upload", "")
+		if strings.Contains(body, "{share_link}") {
+			body = strings.ReplaceAll(body, "{share_link}", link)
+		} else {
+			body += "\n\nSecure upload link: " + link
+		}
+	}
+	// Auto-download (G9): {download_link} pins a download link to the case's
+	// latest generated document (determination letter, notice) — the sender
+	// never hunts the document panel for a URL.
+	if in.AutoDownload || strings.Contains(body, "{download_link}") {
+		var objectKey string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
+			SELECT object_key FROM tenant_%s.documents
+			WHERE case_id=$1 AND NOT sealed AND scan_status<>'BLOCKED'
+			ORDER BY created_at DESC LIMIT 1`, sanitizeTenant(tenant)), caseID).Scan(&objectKey)
+		link := ""
+		if objectKey != "" {
+			link = s.autoShareLink(r, tenant, caseID, "download", objectKey)
+		}
+		if strings.Contains(body, "{download_link}") {
+			if link != "" {
+				body = strings.ReplaceAll(body, "{download_link}", link)
+			} else {
+				body = strings.ReplaceAll(body, "{download_link}",
+					"(document pending — link will follow)")
+			}
+		} else if link != "" {
+			body += "\n\nSecure document download link: " + link
+		}
 	}
 	// append share links (G9) when requested
 	if len(in.ShareTokens) > 0 {
@@ -271,6 +310,8 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 				_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "RFI_SENT", map[string]any{"to": rfiTo})
 			}
 		}
+		// "parties notified" and friends tick themselves on delivery.
+		s.autoChecklist(r, tenant, caseID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"qa_id": qid, "status": status, "subject": subject})
 }
@@ -287,7 +328,13 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"queue": rows})
+	// Recent decisions keep the page useful when the pending queue is empty —
+	// reviewers see what the gate has been doing, not a blank screen.
+	recent, _ := s.queryRows(r, `
+		SELECT id, case_id, subject, status, drafted_by, reviewed_by, reviewed_at
+		FROM public.qa_reviews WHERE tenant=$1 AND status<>'PENDING'
+		ORDER BY reviewed_at DESC NULLS LAST LIMIT 20`, tenant)
+	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent})
 }
 
 func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +422,8 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 			fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
+		// Notification is a fact now — the checklist follows.
+		s.autoChecklist(r, tenant, caseID)
 	} else {
 		s.logActivity(r.Context(), tenant, caseID, "QA_REJECTED",
 			fmt.Sprintf("Draft rejected in QA by %s: %s%s", p.Subject, subject, orDash(" — "+in.Note)))
@@ -397,15 +446,25 @@ func (s *server) logCorrespondence(r *http.Request, tenant, caseID, direction, t
 func (s *server) listCorrespondence(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
-	rows, err := s.queryRows(r, `
+	limit, offset := pageParams(r, 50, 500)
+	var total int
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT count(*) FROM public.correspondence_log WHERE tenant=$1 AND case_id=$2`,
+		tenant, caseID).Scan(&total); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT id, direction, template, subject, recipients, sent_by, created_at
-		FROM public.correspondence_log WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC`,
+		FROM public.correspondence_log WHERE tenant=$1 AND case_id=$2
+		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset),
 		tenant, caseID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"correspondence": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"correspondence": rows,
+		"total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 // ---- Share links (G9: ShareFile replacement) --------------------------------
@@ -449,6 +508,28 @@ func (s *server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "SHARE_LINK",
 		fmt.Sprintf("Secure %s link created (%d-day expiry) by %s", in.Kind, in.DaysTTL, p.Subject))
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "path": "/api/share/" + token, "kind": in.Kind})
+}
+
+// autoShareLink mints a 7-day, 10-use upload link for a case and returns the
+// absolute portal URL. Used by draftCorrespondence's auto-share path so the
+// sender never has to pre-create and paste a link. Failure is soft: the
+// placeholder degrades to the relative path rather than failing the draft.
+func (s *server) autoShareLink(r *http.Request, tenant, caseID, kind, objectKey string) string {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "/s/"
+	}
+	token := hex.EncodeToString(buf)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + interval '7 days', 10, $6)`,
+		token, tenant, caseID, kind, objectKey, p.Subject); err != nil {
+		return "/s/" + token
+	}
+	s.logActivity(r.Context(), tenant, caseID, "SHARE_LINK",
+		fmt.Sprintf("Secure %s link auto-created for correspondence by %s", kind, p.Subject))
+	return strings.TrimRight(s.cfg.PortalBaseURL, "/") + "/s/" + token
 }
 
 // resolveShareLink is the unauthenticated landing for a token (upload/download

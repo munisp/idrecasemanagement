@@ -66,6 +66,10 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, caseID, "LETTER_REQUESTED",
 		fmt.Sprintf("Letter generation requested by %s — template %s", p.Subject, key))
+	// A determination letter request while IN_REVIEW advances the case once
+	// the rendered document lands; tick what the platform can already prove.
+	s.autoChecklist(r, tenant, caseID)
+	s.maybeAdvanceStatus(r, tenant, caseID)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "template": key})
 }
 

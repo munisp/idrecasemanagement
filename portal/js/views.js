@@ -787,41 +787,139 @@ const Views = (() => {
   }
 
   // ---- Reports ---------------------------------------------------------------------
-  let reportsData = { summary: [], sla: [] };
-  function downloadReportCSV(which) {
-    const tenant = Api.getTenant().toUpperCase();
-    const stamp = new Date().toISOString().slice(0, 10);
-    if (which === "summary") {
-      const label = reportsData.summary[0]?.amount_label || "QPA";
-      downloadCSV(`${tenant}-case-status-rollup-${stamp}.csv`,
-        ["Status", "Count", `Avg ${label}`],
-        reportsData.summary.map((s) => [s.status, s.count, (s.avg_amount_usd ?? 0).toFixed(2)]));
-    } else {
-      downloadCSV(`${tenant}-sla-breaches-${stamp}.csv`,
-        ["Case", "Clock", "Detail", "At"],
-        reportsData.sla.map((b) => [b.case_id, b.clock, b.detail, b.at]));
-    }
+  // CSV download helper — every report card offers one (stakeholder handoff).
+  function csvDownload(name, headers, rows) {
+    const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = [headers.map(q).join(",")]
+      .concat(rows.map((r) => r.map(q).join(","))).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
+  // Reports: runnable on-platform, each card runs its query, renders a chart
+  // and a table, and exports CSV. No external BI tool needed for the
+  // statutory reporting loop.
   async function reports() {
-    try {
-      const [sla, summary] = await Promise.all([Api.reports.sla(), Api.reports.summary()]);
-      reportsData = { summary, sla };
-      const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
-        ? `<p><a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>
-           <span class="muted"> jurisdiction checks + coverage gaps from the lakehouse gold zone</span></p>` : "";
-      return `<h1>Compliance reports</h1>${geoLink}
-        <div class="view-head"><h2>Case status rollup</h2>
-          <button class="mini" onclick="Views.downloadReportCSV('summary')">⬇ Download CSV</button></div>` +
-        `<table><thead><tr><th>Status</th><th>Count</th><th>Avg ${esc(summary[0]?.amount_label || "QPA")}</th></tr></thead><tbody>` +
-        summary.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${(s.avg_amount_usd ?? 0).toFixed(0)}</td></tr>`).join("") +
-        `</tbody></table>
-        <div class="view-head"><h2>Statutory SLA breaches (${sla.length})</h2>
-          ${sla.length ? `<button class="mini" onclick="Views.downloadReportCSV('sla')">⬇ Download CSV</button>` : ""}</div>` +
-        (sla.length ? `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
-          sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td><td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No breaches recorded.</p>`);
-    } catch (e) { return `<h1>Compliance reports</h1>` + err(e); }
+    const PALETTE = ["#2E6B52", "#B08D3E", "#1D4E7E", "#5B3E8C", "#9C2B1F", "#3F7E6B", "#7A5C2E"];
+    const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
+      ? `<a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>` : "";
+    afterRender(() => {
+      // 1) Case status rollup
+      document.getElementById("rpt-status")?.addEventListener("click", async (ev) => {
+        await UI.run(ev.currentTarget, async () => {
+          try {
+            const rows = await Api.reports.summary();
+            // Federal NSA cases price on QPA; programmed tenants (FL AHCA)
+            // have no QPA concept and return 0 there -- the backend already
+            // picks the right column server-side and tells us which one via
+            // amount_label (see program.go/reports.go). This card previously
+            // hardcoded avg_qpa_usd, which doesn't exist in the response at
+            // all for programmed tenants -- every FL row showed "Avg QPA $0".
+            const label = rows[0]?.amount_label || "QPA";
+            const el = document.getElementById("rpt-status-out");
+            el.innerHTML = `<div class="chart-card">` +
+              chartDonut(rows.map((s, i) => ({ label: s.status, value: s.count, color: PALETTE[i % PALETTE.length] }))) +
+              `</div><table><thead><tr><th>Status</th><th>Count</th><th>Avg ${esc(label)}</th></tr></thead><tbody>` +
+              rows.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${Number(s.avg_amount_usd || 0).toFixed(0)}</td></tr>`).join("") +
+              `</tbody></table>
+               <p><button class="mini" id="rpt-status-csv">⬇ CSV</button></p>`;
+            document.getElementById("rpt-status-csv").onclick = () =>
+              csvDownload("case_status_rollup.csv", ["status", "count", `avg_${label.toLowerCase()}_usd`],
+                rows.map((s) => [s.status, s.count, Number(s.avg_amount_usd || 0).toFixed(2)]));
+          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        }, "Running…");
+      });
+      // 2) SLA breaches
+      document.getElementById("rpt-sla")?.addEventListener("click", async (ev) => {
+        await UI.run(ev.currentTarget, async () => {
+          try {
+            const sla = await Api.reports.sla();
+            const byClock = {};
+            sla.forEach((b) => { byClock[b.clock] = (byClock[b.clock] || 0) + 1; });
+            const el = document.getElementById("rpt-sla-out");
+            el.innerHTML = (sla.length
+              ? `<div class="chart-card">` + chartHBars(
+                  Object.entries(byClock).map(([k, v]) => ({ label: k, value: v }))) + `</div>` +
+                `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
+                sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td>
+                  <td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") + `</tbody></table>
+                 <p><button class="mini" id="rpt-sla-csv">⬇ CSV</button></p>`
+              : `<p class="muted">No breaches recorded — all statutory clocks held. ✔</p>`);
+            const b = document.getElementById("rpt-sla-csv");
+            if (b) b.onclick = () => csvDownload("sla_breaches.csv", ["case_id", "clock", "detail", "at"],
+              sla.map((x) => [x.case_id, x.clock, x.detail, x.at]));
+          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        }, "Running…");
+      });
+      // 3) Financial summary
+      document.getElementById("rpt-fin")?.addEventListener("click", async (ev) => {
+        await UI.run(ev.currentTarget, async () => {
+          try {
+            const fin = await Api.program.financial();
+            const k = fin.kpi || {};
+            const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+            const buckets = ["current", "1-30", "31-60", "60+"].map((b) => {
+              const row = (fin.aging || []).find((a) => a.bucket === b);
+              return { label: b === "current" ? "Current" : b + "d", value: row ? row.total_cents / 100 : 0 };
+            });
+            document.getElementById("rpt-fin-out").innerHTML =
+              `<div class="kpi-row">
+                 <div class="kpi"><span class="kpi-n">${usd(k.collected_cents)}</span><span class="kpi-l">Collected</span></div>
+                 <div class="kpi"><span class="kpi-n">${usd(k.collected_30d_cents)}</span><span class="kpi-l">Last 30 days</span></div>
+                 <div class="kpi"><span class="kpi-n">${usd(k.refunded_cents)}</span><span class="kpi-l">Refunded</span></div></div>
+               <div class="chart-card">${chartHBars(buckets, (v) => "$" + v.toLocaleString())}</div>
+               <p class="muted">A/R aging, open invoices, USD</p>
+               <p><button class="mini" id="rpt-fin-csv">⬇ CSV</button></p>`;
+            document.getElementById("rpt-fin-csv").onclick = () =>
+              csvDownload("financial_summary.csv", ["metric", "value_usd"], [
+                ["collected_all_time", (k.collected_cents || 0) / 100],
+                ["collected_30d", (k.collected_30d_cents || 0) / 100],
+                ["refunded", (k.refunded_cents || 0) / 100],
+                ["payments_settled", k.payments_count ?? 0]]);
+          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        }, "Running…");
+      });
+      // 4) Caseload & throughput trend
+      document.getElementById("rpt-trend")?.addEventListener("click", async (ev) => {
+        await UI.run(ev.currentTarget, async () => {
+          try {
+            const d = await Api.program.opsDashboard();
+            const mk = (arr) => (arr || []).map((p) => ({ x: p.d || p.day || "", y: p.n || 0 }));
+            document.getElementById("rpt-trend-out").innerHTML =
+              `<div class="chart-grid">
+                 <div class="chart-card"><h3>Intake — last 30 days</h3>${chartArea(mk(d.cases_trend), { label: "rpt-intake" })}</div>
+                 <div class="chart-card"><h3>Throughput (tasks completed)</h3>${chartArea(mk(d.throughput_trend), { label: "rpt-thru", color: "#1D4E7E" })}</div>
+                 <div class="chart-card"><h3>Collections</h3>${chartArea(mk(d.collections_trend), { label: "rpt-coll", color: "#B08D3E", fmt: (v) => "$" + (v / 100).toLocaleString() })}</div>
+               </div>
+               <p><button class="mini" id="rpt-trend-csv">⬇ CSV</button></p>`;
+            document.getElementById("rpt-trend-csv").onclick = () =>
+              csvDownload("trends_30d.csv", ["day", "intake", "tasks_done", "collections_cents"],
+                (d.cases_trend || []).map((p, i) => [p.d || p.day, p.n,
+                  (d.throughput_trend || [])[i]?.n ?? 0, (d.collections_trend || [])[i]?.n ?? 0]));
+          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        }, "Running…");
+      });
+    });
+    return `<div class="view-head"><h1>Reports</h1>
+      <span class="muted">run on demand, charted on-platform, exportable — statutory reporting without external BI</span></div>
+      ${geoLink ? `<p>${geoLink}</p>` : ""}
+      <div class="rpt-grid">
+        <div class="rpt-card"><h2>Case status rollup</h2>
+          <p class="muted">dispute counts and average QPA by lifecycle status</p>
+          <button id="rpt-status">▶ Run report</button><div id="rpt-status-out"></div></div>
+        <div class="rpt-card"><h2>Statutory SLA breaches</h2>
+          <p class="muted">every clock breach, grouped by clock, with case references</p>
+          <button id="rpt-sla">▶ Run report</button><div id="rpt-sla-out"></div></div>
+        <div class="rpt-card"><h2>Financial summary</h2>
+          <p class="muted">collections, refunds, A/R aging — the money picture</p>
+          <button id="rpt-fin">▶ Run report</button><div id="rpt-fin-out"></div></div>
+        <div class="rpt-card"><h2>Caseload & throughput trend</h2>
+          <p class="muted">30-day intake, completed tasks, collections</p>
+          <button id="rpt-trend">▶ Run report</button><div id="rpt-trend-out"></div></div>
+      </div>`;
   }
 
   // ---- Ask the graph (EPR-KGQA) ------------------------------------------------
@@ -920,14 +1018,22 @@ const Views = (() => {
         <button>Update status</button></form></details>
 
       <details class="prog-sec"><summary>Program dates (clock bases)</summary>
-      <p class="muted">Recorded: ${c.program_dates && Object.keys(c.program_dates).length
-        ? Object.entries(c.program_dates).map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
-        : "<em>none yet</em>"}</p>
+      <p class="muted">Statutory clocks run <b>from</b> these dates — recording one starts or restarts its clock.
+        Record the date once; every deadline that depends on it re-projects automatically.</p>
+      <div id="p-dates-list"></div>
+      <div id="p-clock-proj"></div>
       <form id="p-date" class="inline-form">
         <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
         <input type="date" name="value" required /><button>Record date</button></form></details>
 
       <details class="prog-sec"><summary>Eligibility review</summary>
+      <p class="muted">The engine applies this program's rules in order and records the evidence with the verdict:
+        <b>1)</b> an explicit ineligibility flag wins immediately; <b>2)</b> the filing window (e.g. final
+        determination + 12 months) is checked; <b>3)</b> the disputed amount is tested against the provider-type
+        threshold matrix (contracted status included); <b>4)</b> an invalid AOR puts the case on attorney hold.
+        Result is ELIGIBLE, INELIGIBLE (with reason code), or HOLD_AOR — and INELIGIBLE/HOLD move the case status
+        automatically.</p>
+      <div id="p-elig-history"></div>
       <form id="p-elig" class="inline-form">
         <input name="provider_type" placeholder="provider type (e.g. hospital_inpatient)" required />
         <label>contracted <input type="checkbox" name="contracted" /></label>
@@ -944,7 +1050,9 @@ const Views = (() => {
         <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
         <input name="to" placeholder="to emails (comma-separated)" required />
         <input name="cc" placeholder="cc emails" />
-        <textarea name="body" rows="3" placeholder="message body" required></textarea>
+        <textarea name="body" rows="3" placeholder="message body — {share_link} inserts a secure upload link, {download_link} a link to the latest generated document; both are minted on send" required></textarea>
+        <label><input type="checkbox" name="auto_share" checked /> Attach a secure upload link (minted on send)</label>
+        <label><input type="checkbox" name="auto_download" /> Attach a download link to the latest generated document (minted on send)</label>
         <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
 
       <details class="prog-sec"><summary>Invoices & claims</summary>
@@ -1019,10 +1127,42 @@ const Views = (() => {
         try { await Api.program.setStatus(id, { internal_status: f.internal.value, agency_status: f.agency.value });
           UI.toast("Status updated"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
+      const loadDates = () => {
+        Api.cases.get(id).then((cc) => {
+          const el = document.getElementById("p-dates-list"); if (!el) return;
+          const pd = cc.program_dates || {};
+          const rows = (cfg.clocks || []).map((cl) => {
+            const rec = pd[cl.basis];
+            return `<tr><td>${esc(cl.label)}</td><td class="mono">${esc(cl.basis)}</td>
+              <td>${rec ? `<b>${esc(rec)}</b>` : `<span class="muted">not recorded</span>`}</td></tr>`;
+          });
+          el.innerHTML = `<table><thead><tr><th>Clock basis</th><th>Key</th><th>Recorded</th></tr></thead>
+            <tbody>${rows.join("")}</tbody></table>`;
+        }).catch(() => {});
+        Api.cm.clocks(id).then((cls) => {
+          const el = document.getElementById("p-clock-proj"); if (!el) return;
+          const arr = Array.isArray(cls) ? cls : (cls.clocks || []);
+          if (!arr.length) { el.innerHTML = ""; return; }
+          el.innerHTML = `<p><b>Projected deadlines</b></p><table><thead><tr><th>Clock</th><th>Due</th><th>State</th><th>Basis</th></tr></thead><tbody>` +
+            arr.map((cl) => `<tr><td>${esc(cl.label || cl.clock || "")}</td>
+              <td>${fmtDate(cl.due)}</td><td>${badge(cl.state || "")}</td>
+              <td class="muted">${esc(cl.basis_note || cl.basis || "")}</td></tr>`).join("") + `</tbody></table>`;
+        }).catch(() => {});
+      };
+      loadDates();
+      const loadElig = () => Api.program.eligibilityHistory(id).then((r) => {
+        const el = document.getElementById("p-elig-history"); if (!el) return;
+        const revs = r.reviews || [];
+        el.innerHTML = revs.length ? `<table><thead><tr><th>Result</th><th>Reason</th><th>By</th><th>When</th></tr></thead><tbody>` +
+          revs.map((v) => `<tr><td>${badge(v.result)}</td><td>${esc(v.reason || "—")}</td>
+            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>`).join("") +
+          `</tbody></table>` : `<p class="muted">No eligibility review on record yet.</p>`;
+      }).catch(() => {});
+      loadElig();
       $("#p-date")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;
-        try { await Api.program.setDate(id, f.key.value, f.value.value); UI.toast("Program date recorded — clocks re-projected"); App.rerender(); }
+        try { await Api.program.setDate(id, f.key.value, f.value.value); UI.toast("Program date recorded — clocks re-projected"); loadDates(); }
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
       $("#p-elig")?.addEventListener("submit", async (ev) => {
@@ -1038,6 +1178,7 @@ const Views = (() => {
           });
           document.getElementById("p-elig-out").innerHTML =
             `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""} <span class="muted">review ${esc(r.review_id)}</span></p>`;
+          loadElig();
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
       $("#p-send")?.addEventListener("submit", async (ev) => {
@@ -1045,7 +1186,7 @@ const Views = (() => {
         const f = ev.target;
         const split = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
         try {
-          const r = await Api.program.send(id, { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value), rfi_to: f.rfi_to.value });
+          const r = await Api.program.send(id, { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value), rfi_to: f.rfi_to.value, auto_share: f.auto_share.checked, auto_download: f.auto_download.checked });
           UI.toast(r.status === "PENDING" ? "Draft submitted to QA gate" : "Sent — logged to correspondence");
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
@@ -1057,13 +1198,7 @@ const Views = (() => {
            <td class="muted">${esc(m.template || "")} · ${fmtDate(m.created_at)}</td></tr>`).join("") +
           `</tbody></table>` : "";
       }).catch(() => {});
-      $("#p-inv")?.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const f = ev.target;
-        try { await Api.program.issueInvoice(id, { party: f.party.value, kind: f.kind.value, amount_cents: money(f.amount.value) });
-          UI.toast("Invoice issued (number = case number)"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-      });
-      Api.program.invoices(id).then((r) => {
+      const renderInvoices = (r) => {
         const el = document.getElementById("p-inv-list"); if (!el) return;
         el.innerHTML = (r.invoices || []).length ? `<table><tbody>` + r.invoices.map((v) =>
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
@@ -1072,7 +1207,21 @@ const Views = (() => {
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY',this)">mark paid</a> ·
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
-      }).catch(() => {});
+      };
+      const refreshInv = () => Api.program.invoices(id).then(renderInvoices).catch(() => {});
+      refreshInv();
+      // Card payments settle via Stripe webhook — poll so status flips live
+      // instead of requiring a manual reload.
+      const invPoll = setInterval(() => {
+        if (!document.getElementById("p-inv-list")) { clearInterval(invPoll); return; }
+        refreshInv();
+      }, 20000);
+      $("#p-inv")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        try { await Api.program.issueInvoice(id, { party: f.party.value, kind: f.kind.value, amount_cents: money(f.amount.value) });
+          UI.toast("Invoice issued (number = case number)"); refreshInv(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
       $("#p-claims")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const lines = ev.target.csv.value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
@@ -1214,10 +1363,22 @@ const Views = (() => {
     try {
       const r = await Api.program.qaQueue();
       const q = r.queue || [];
+      const recent = r.recent || [];
+      const intro = `<details class="prog-sec" ${q.length ? "" : "open"}><summary>What the QA gate does</summary>
+        <p class="muted">Every correspondence template in this program's rules either sends <b>immediately</b>
+        or carries a <b>QA role</b> (e.g. attorney, program manager). Drafts on gated templates stop here as
+        <b>PENDING</b> — the named role reviews the exact subject, body, recipients, and any secure links, then
+        approves (email is delivered and logged) or rejects with a note back to the drafter. Ungated templates
+        never appear here. An empty queue simply means no gated draft is waiting right now.</p></details>`;
+      const recentHtml = recent.length
+        ? `<h2>Recently decided</h2><table><thead><tr><th>Subject</th><th>Status</th><th>Reviewed by</th><th>When</th></tr></thead><tbody>` +
+          recent.map((i) => `<tr><td>${esc(i.subject)}</td><td>${badge(i.status)}</td>
+            <td>${esc(i.reviewed_by || "—")}</td><td class="muted">${fmtDate(i.reviewed_at)}</td></tr>`).join("") +
+          `</tbody></table>` : "";
       if (!q.length)
         return `<div class="view-head"><h1>QA gate</h1>
           <span class="muted">nothing reaches a party without approval on gated templates</span></div>
-          <p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>`;
+          ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}`;
       const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
             <td>${esc(i.drafted_by)}</td>
             <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
@@ -1225,8 +1386,9 @@ const Views = (() => {
       afterRender(() => bindClientPager("qa", "#qa-tb tbody"));
       return `<div class="view-head"><h1>QA gate</h1>
         <span class="muted">nothing reaches a party without approval on gated templates</span></div>
+        ${intro}<h2>Awaiting review (${q.length})</h2>
         <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead>
-        <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>`;
+        <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}`;
     } catch (e) { return err(e); }
   }
 
@@ -1277,31 +1439,15 @@ const Views = (() => {
     // other views in this file for why that order matters (setTimeout(fn,0)
     // beats an in-flight fetch if called before it).
     try {
-      const r = await Api.program.intake();
+      const r = await Api.program.intake({ limit: 50 });
       const rows = r.intake || [];
-      const rowsHtml = (list) => list.map((i) => `<tr><td>${i.case_id ?
-              `<a href="#/cases/${i.case_id}">${esc(i.case_number || "view case")}</a>` :
-              `<span class="muted">—</span>`}</td>
-            <td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
-            <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
-            <td>${i.disputed_amount_cents ? `$${(i.disputed_amount_cents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
-            <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
-            <td class="muted">${fmtDate(i.outreach_at)}</td>
-            <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
-            <td>${i.origin === "legacy" && !INTAKE_TERMINAL.includes(i.status) ?
-              `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
-                <option value="">advance…</option><option>DOCS_RECEIVED</option>
-                <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
-                <option>PAID</option><option>CONVERTED</option>
-                <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("");
-      const { bodyHtml, pagerHtml } = initClientPager("intake", rows, rowsHtml);
-      afterRender(() => {
-        $("#intake-form")?.addEventListener("submit", async (ev) => {
-          ev.preventDefault();
-          await newIntake(ev.target);
-        });
-        bindClientPager("intake", "#intake-tb tbody");
-      });
+      const intakeNext = r.next_offset ?? -1;
+      const intakeTotal = r.total ?? rows.length;
+      window._intakePager = { next: intakeNext }; // reset on every view render
+      afterRender(() => $("#intake-form")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        await newIntake(ev.target);
+      }));
       return `<div class="view-head"><h1>Pre-case intake</h1>
         <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
         <form id="intake-form" class="inline-form">
@@ -1312,9 +1458,51 @@ const Views = (() => {
             <option value="HEALTH_PLAN">Health plan files</option></select>
           <input name="disputed_amount" type="number" step="0.01" placeholder="disputed amount $" />
           <button>New intake request</button></form>` +
-        (rows.length ? `<table id="intake-tb"><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Disputed</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>${bodyHtml}</tbody></table>${pagerHtml}`
-          : `<p class="muted">No intake requests.</p>`);
+        (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Disputed</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
+          rows.map(intakeRowHtml).join("") +
+          `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
+        (intakeNext >= 0 ? `<p class="pager" id="intake-pg"><span class="muted">Showing ${rows.length} of ${intakeTotal}</span>
+          <button class="mini" onclick="Views.intakeMore(this)">Load more (${Math.min(50, intakeTotal - rows.length)} remaining)</button></p>` : "");
     } catch (e) { return err(e); }
+  }
+
+  // Shared by intake()'s initial render and intakeMore()'s appended page --
+  // a real-case row (origin:"case", from startAhcaCase) has no intake
+  // lifecycle left to advance and no outreach-based day-13 clock; only
+  // legacy intake_requests rows get those.
+  function intakeRowHtml(i) {
+    return `<tr><td>${i.case_id ?
+        `<a href="#/cases/${i.case_id}">${esc(i.case_number || "view case")}</a>` :
+        `<span class="muted">—</span>`}</td>
+      <td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
+      <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
+      <td>${i.disputed_amount_cents ? `$${(i.disputed_amount_cents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
+      <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
+      <td class="muted">${fmtDate(i.outreach_at)}</td>
+      <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
+      <td>${i.origin === "legacy" && !INTAKE_TERMINAL.includes(i.status) ?
+        `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
+          <option value="">advance…</option><option>DOCS_RECEIVED</option>
+          <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
+          <option>PAID</option><option>CONVERTED</option>
+          <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`;
+  }
+
+  async function intakeMore(btn) {
+    const st = window._intakePager || { next: 50 };
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.intake({ limit: 50, offset: st.next });
+        const rows = r.intake || [];
+        st.next = r.next_offset ?? -1;
+        window._intakePager = st;
+        const body = document.querySelector("#intake-pg")?.previousElementSibling?.querySelector("tbody");
+        if (body) body.insertAdjacentHTML("beforeend", rows.map(intakeRowHtml).join(""));
+        const pg = document.getElementById("intake-pg");
+        if (pg && st.next < 0) pg.outerHTML = "";
+        else if (pg) pg.querySelector("button").textContent = "Load more";
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Loading…");
   }
 
   async function newIntake(form) {
@@ -1363,18 +1551,40 @@ const Views = (() => {
     try {
       const r = await Api.program.deliverables();
       const d = r.deliverables || [];
+      const hist = r.history || [];
+      const lastDelivered = (name) => hist.filter((h) => h.name === name)
+        .sort((a, b) => String(b.delivered_at).localeCompare(String(a.delivered_at)))[0];
+      const daysUntil = (due) => Math.ceil((new Date(due + "T00:00:00") - Date.now()) / 864e5);
+      const dueChip = (due) => {
+        if (!due) return `<span class="muted">—</span>`;
+        const n = daysUntil(due);
+        if (n < 0) return `<span class="badge s-denied">${Math.abs(n)}d overdue</span>`;
+        if (n <= 3) return `<span class="badge warn">due in ${n}d</span>`;
+        return `<span class="badge s-paid">due in ${n}d</span>`;
+      };
       return `<div class="view-head"><h1>Contract deliverables</h1>
-        <span class="muted">program report schedule</span></div>
-        <form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
-          <input name="name" required placeholder="Ad hoc report name" />
-          <input name="ref" placeholder="Contract ref (optional)" size="10" />
-          <button class="mini">request ad hoc (due +10 business days)</button></form>` +
-        (d.length ? `<table><thead><tr><th>Deliverable</th><th>Rule</th><th>Next due</th><th></th></tr></thead><tbody>` +
-          d.map((x) => `<tr><td>${esc(x.name)}</td><td class="mono">${esc(x.due_rule)}</td><td>${esc(x.next_due)}</td>
-            <td><button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}', this)">mark delivered</button></td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No deliverables configured for this program.</p>`) +
-        ((r.history || []).length ? `<h2>Delivery history</h2><table><tbody>` +
-          r.history.map((h) => `<tr><td>${esc(h.name)}</td><td>${badge(h.status)}</td>
+        <span class="muted">what the program owes the agency, when it's due, and proof it shipped</span></div>
+      <details class="prog-sec" open><summary>How deliverables work</summary>
+        <p class="muted">Each program contract defines scheduled reports (the <b>rule</b> — e.g. monthly, per quarter).
+        The platform computes the <b>next due date</b> from the rule and delivery history. When a report ships,
+        press <b>mark delivered</b> — that records the delivery timestamp (your proof to the agency) and rolls the
+        schedule forward. Ad hoc agency requests get a due date of +10 business days automatically.
+        Anything overdue or due within 3 days is highlighted; due soon is amber, on track is green.</p></details>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
+        <input name="name" required placeholder="Ad hoc report name" />
+        <input name="ref" placeholder="Contract ref (optional)" size="10" />
+        <button class="mini">request ad hoc (due +10 business days)</button></form>` +
+        (d.length ? `<div class="deliv-grid">` + d.map((x) => {
+          const last = lastDelivered(x.name);
+          return `<div class="deliv-card">
+            <div class="deliv-head"><b>${esc(x.name)}</b>${dueChip(x.next_due)}</div>
+            <div class="muted mono">${esc(x.due_rule)}</div>
+            <div class="deliv-meta">next due <b>${esc(x.next_due || "—")}</b><br/>
+              last delivered ${last ? fmtDate(last.delivered_at) : `<span class="muted">never</span>`}</div>
+            <button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}', this)">✓ mark delivered</button></div>`;
+        }).join("") + `</div>` : `<p class="muted">No deliverables configured for this program.</p>`) +
+        (hist.length ? `<h2>Delivery history</h2><table><thead><tr><th>Deliverable</th><th>Status</th><th>Delivered</th></tr></thead><tbody>` +
+          hist.map((h) => `<tr><td>${esc(h.name)}</td><td>${badge(h.status)}</td>
             <td class="muted">${fmtDate(h.delivered_at)}</td></tr>`).join("") + `</tbody></table>` : "");
     } catch (e) { return err(e); }
   }
@@ -1398,10 +1608,17 @@ const Views = (() => {
 
   async function finance() {
     try {
+      const FIN_PAGE = 25;
       const [fin, pays, chks] = await Promise.all([
-        Api.program.financial(), Api.program.payments().catch(() => ({ payments: [] })),
-        Api.program.checks().catch(() => ({ checks: [] })),
+        Api.program.financial(),
+        Api.program.payments(null, { limit: FIN_PAGE }).catch(() => ({ payments: [] })),
+        Api.program.checks("", { limit: FIN_PAGE }).catch(() => ({ checks: [] })),
       ]);
+      // accumulated rows + server offsets for the "Load more" pagers
+      finPager = {
+        checks: { rows: chks.checks || [], next: chks.next_offset ?? -1, total: chks.total ?? (chks.checks || []).length },
+        payments: { rows: pays.payments || [], next: pays.next_offset ?? -1, total: pays.total ?? (pays.payments || []).length },
+      };
       const k = fin.kpi || {};
       const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
       let html = `<div class="view-head"><h1>Financials</h1>
@@ -1438,40 +1655,50 @@ const Views = (() => {
           `</tbody></table>`;
 
       // Physical check intake (OCR/ICR — image is evidence, clearing settles)
-      const ck = chks.checks || [];
-      const reviewCk = ck.filter((c) => c.status === "REVIEW");
-      const ckRowsHtml = (list) => list.map((c) => `<tr>
+      // Field names here match checks.go's real SELECT (confirmed directly):
+      // courtesy_amount_cents (aliased from amount_cents), invoice_id (NOT
+      // matched_invoice_id), and confidence is a text enum ("high"/"medium"/
+      // "low", written by check_processor.py) -- not a 0-1 float, so no
+      // percent math on it.
+      checkRow = (c) => `<tr>
             <td class="mono">${esc((c.id || "").slice(0, 8))}…</td>
+            <td>${esc(c.payer_name || "—")}</td>
+            <td class="mono">${esc(c.check_date || "—")}</td>
             <td class="mono">${esc(c.routing_number || "?")} · ${esc(c.account_number || "?")}</td>
-            <td>${c.amount_cents != null ? usd(c.amount_cents) : "—"}</td>
+            <td>${c.courtesy_amount_cents != null ? usd(c.courtesy_amount_cents) : "—"}</td>
             <td>${c.legal_amount_cents != null ? usd(c.legal_amount_cents) : "—"}${c.amount_mismatch ? ' <span class="badge s-denied">mismatch</span>' : ""}</td>
             <td class="mono">${esc(c.memo || "")}</td>
             <td>${c.invoice_id ? `<span class="mono">${esc(c.invoice_id.slice(0, 8))}…</span>` : "—"}</td>
             <td>${badge(c.status)}</td>
             <td class="muted">${c.confidence ? esc(c.confidence) : "—"}</td>
-            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`).join("");
-      const ckPage = initClientPager("chk", ck, ckRowsHtml);
+            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`;
+      payRow = (p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
+            <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
+            <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
+            <td class="muted">${fmtDate(p.created_at)}</td></tr>`;
+      const ck = finPager.checks.rows;
+      const reviewCk = ck.filter((c) => c.status === "REVIEW");
       html += `<h2>Check intake (OCR/ICR)</h2>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
           <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
           <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
-        (ck.length ? `<table id="chk-tb"><thead><tr><th>Check</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead>
-          <tbody>${ckPage.bodyHtml}</tbody></table>${ckPage.pagerHtml}` +
+        (ck.length ? `<table><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
+          ck.map(checkRow).join("") + `</tbody></table>` +
           (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
-          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`);
+          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`) +
+        (finPager.checks.next >= 0
+          ? `<p class="pager" id="fin-ck-pg"><span class="muted">Showing ${ck.length} of ${finPager.checks.total}</span>
+             <button class="mini" onclick="Views.financeMore('checks', this)">Load more (${Math.min(FIN_PAGE, finPager.checks.total - ck.length)} remaining)</button></p>` : "");
 
       // Card payments
-      const plist = pays.payments || [];
-      if (plist.length) {
-        const payRowsHtml = (list) => list.map((p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
-            <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
-            <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
-            <td class="muted">${fmtDate(p.created_at)}</td></tr>`).join("");
-        const payPage = initClientPager("pay", plist, payRowsHtml);
-        html += `<h2>Card payments</h2><table id="pay-tb"><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead>
-          <tbody>${payPage.bodyHtml}</tbody></table>${payPage.pagerHtml}`;
-      }
+      const plist = finPager.payments.rows;
+      if (plist.length)
+        html += `<h2>Card payments</h2><table><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
+          plist.map(payRow).join("") + `</tbody></table>` +
+          (finPager.payments.next >= 0
+            ? `<p class="pager" id="fin-pay-pg"><span class="muted">Showing ${plist.length} of ${finPager.payments.total}</span>
+               <button class="mini" onclick="Views.financeMore('payments', this)">Load more (${Math.min(FIN_PAGE, finPager.payments.total - plist.length)} remaining)</button></p>` : "");
 
       // Unified event stream
       const ev = fin.events || [];
@@ -1488,12 +1715,39 @@ const Views = (() => {
         html += `<h2>Transaction stream</h2><p class="muted">No financial events yet — issue an invoice to start the stream.</p>`;
       }
       afterRender(() => {
-        bindClientPager("chk", "#chk-tb tbody");
-        bindClientPager("pay", "#pay-tb tbody");
         bindClientPager("txn", "#txn-tb tbody");
       });
       return html;
     } catch (e) { return err(e); }
+  }
+
+  // finance() pager state — survives only for the rendered page
+  let finPager = null;
+  let checkRow = null, payRow = null; // row renderers set by finance()
+
+  async function financeMore(kind, btn) {
+    const st = finPager?.[kind];
+    if (!st || st.next < 0) return;
+    await UI.run(btn, async () => {
+      try {
+        const limit = 25;
+        const r = kind === "checks"
+          ? await Api.program.checks("", { limit, offset: st.next })
+          : await Api.program.payments(null, { limit, offset: st.next });
+        const rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
+        st.rows = st.rows.concat(rows);
+        st.next = r.next_offset ?? -1;
+        st.total = r.total ?? st.total;
+        const body = document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body");
+        const render = kind === "checks" ? checkRow : payRow;
+        if (body && render) body.insertAdjacentHTML("beforeend", rows.map(render).join(""));
+        const pg = document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg");
+        if (pg) pg.outerHTML = st.next >= 0
+          ? `<p class="pager" id="${kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"}"><span class="muted">Showing ${st.rows.length} of ${st.total}</span>
+             <button class="mini" onclick="Views.financeMore('${kind}', this)">Load more (${Math.min(25, st.total - st.rows.length)} remaining)</button></p>`
+          : `<p class="pager"><span class="muted">Showing ${st.rows.length} of ${st.total}</span></p>`;
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Loading…");
   }
 
   async function uploadCheck(file, btn) {
@@ -1514,6 +1768,150 @@ const Views = (() => {
       try { await Api.program.clearCheck(checkId, ref); UI.toast("Check cleared — invoice settled, ledger posted"); App.rerender(); }
       catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
+  }
+
+  // ---- Inline SVG charts (dependency-free; match the app palette) ---------
+  const CH_COLORS = ["#2E6B52", "#B08D3E", "#1D4E7E", "#5B3E8C", "#9C2B1F", "#1E5B3C", "#8A5E10", "#6E6A5E"];
+
+  function chartDonut(segs, size = 180) {
+    const total = segs.reduce((a, s) => a + s.value, 0);
+    if (!total) return `<div class="chart-empty muted">No data yet</div>`;
+    const R = 70, C = 2 * Math.PI * R;
+    let off = 0;
+    const arcs = segs.filter((s) => s.value > 0).map((s, i) => {
+      const frac = s.value / total, len = frac * C;
+      const el = `<circle r="${R}" cx="${size/2}" cy="${size/2}" fill="none"
+        stroke="${s.color || CH_COLORS[i % CH_COLORS.length]}" stroke-width="26"
+        stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}"
+        transform="rotate(-90 ${size/2} ${size/2})"><title>${esc(s.label)}: ${s.value}</title></circle>`;
+      off += len;
+      return el;
+    }).join("");
+    const legend = segs.filter((s) => s.value > 0).map((s, i) =>
+      `<span class="legend-item"><i style="background:${s.color || CH_COLORS[i % CH_COLORS.length]}"></i>${esc(s.label)} <b>${s.value}</b></span>`).join("");
+    return `<div class="donut-wrap"><svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img">
+      ${arcs}<text x="${size/2}" y="${size/2 - 4}" text-anchor="middle" class="donut-n">${total}</text>
+      <text x="${size/2}" y="${size/2 + 16}" text-anchor="middle" class="donut-l">total</text></svg>
+      <div class="legend">${legend}</div></div>`;
+  }
+
+  function chartHBars(rows, fmt = (v) => v) {
+    const max = Math.max(...rows.map((r) => r.value), 1);
+    return `<div class="hbars">` + rows.map((r) => `<div class="hbar-row">
+      <span class="hbar-label" title="${esc(r.label)}">${esc(r.label)}</span>
+      <span class="hbar-track"><span class="hbar-fill${r.warn ? " warn" : ""}" style="width:${Math.max(2, (r.value / max) * 100)}%"></span>
+        ${r.warnValue ? `<span class="hbar-fill bad" style="width:${(r.warnValue / max) * 100}%"></span>` : ""}</span>
+      <span class="hbar-val">${esc(String(fmt(r.value)))}${r.warnValue ? ` <b class="bad-t">${fmt(r.warnValue)} overdue</b>` : ""}</span>
+      </div>`).join("") + `</div>`;
+  }
+
+  function chartArea(points, { w = 560, h = 150, color = "#2E6B52", fmt = (v) => v, label = "" } = {}) {
+    if (!points.length) return `<div class="chart-empty muted">No data yet</div>`;
+    const max = Math.max(...points.map((p) => p.y), 1);
+    const px = (i) => (i / Math.max(points.length - 1, 1)) * (w - 44) + 36;
+    const py = (v) => h - 24 - (v / max) * (h - 40);
+    const line = points.map((p, i) => `${i ? "L" : "M"}${px(i).toFixed(1)},${py(p.y).toFixed(1)}`).join(" ");
+    const area = `${line} L${px(points.length - 1).toFixed(1)},${h - 24} L${px(0).toFixed(1)},${h - 24} Z`;
+    const gid = "g" + Math.abs(label.split("").reduce((a, c) => a + c.charCodeAt(0), 0));
+    const ticks = [0, Math.floor(points.length / 2), points.length - 1].map((i) =>
+      `<text x="${px(i)}" y="${h - 8}" text-anchor="middle" class="axis">${esc(points[i].x)}</text>`).join("");
+    return `<svg viewBox="0 0 ${w} ${h}" class="area-chart" role="img" aria-label="${esc(label)}">
+      <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${color}" stop-opacity="0.35"/><stop offset="1" stop-color="${color}" stop-opacity="0.02"/>
+      </linearGradient></defs>
+      <line x1="36" y1="${h - 24}" x2="${w - 8}" y2="${h - 24}" class="axis-line"/>
+      <text x="4" y="${py(max) + 4}" class="axis">${fmt(max)}</text>
+      <path d="${area}" fill="url(#${gid})"/>
+      <path d="${line}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>
+      ${points.map((p, i) => `<circle cx="${px(i)}" cy="${py(p.y)}" r="2.4" fill="${color}"><title>${esc(p.x)}: ${fmt(p.y)}</title></circle>`).join("")}
+      ${ticks}</svg>`;
+  }
+
+  // ---- Operations dashboard (staff roles; presence + workload + KPIs) -----
+
+  async function opsDashboard() {
+    try {
+      const d = await Api.program.opsDashboard();
+      const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+      const tk = (d.task_kpis && d.task_kpis[0]) || {};
+      const ck = (d.case_kpis && d.case_kpis[0]) || {};
+      const sla = (d.sla && d.sla[0]) || {};
+      const fin = (d.financial && d.financial[0]) || {};
+      const q = (d.queues && d.queues[0]) || {};
+
+      // Auto-refresh every 30s while the view stays open (presence + queues move).
+      afterRender(() => setTimeout(() => { if (location.hash === "#/ops") App.rerender(); }, 30000));
+
+      let html = `<div class="view-head"><h1>Operations dashboard</h1>
+        <span class="muted">live workload, presence and stakeholder KPIs · tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · refreshes every 30s</span></div>
+        <div class="kpi-row">
+          <div class="kpi"><span class="kpi-n">${tk.completion_pct_30d ?? "—"}%</span><span class="kpi-l">Task completion (30d)</span></div>
+          <div class="kpi"><span class="kpi-n">${tk.open ?? 0}</span><span class="kpi-l">Open tasks${tk.overdue ? ` · <b class="bad-t">${tk.overdue} overdue</b>` : ""}</span></div>
+          <div class="kpi"><span class="kpi-n">${ck.unassigned_open ?? 0}</span><span class="kpi-l">Unassigned open cases</span></div>
+          <div class="kpi"><span class="kpi-n">${sla.breaches_7d ?? 0}</span><span class="kpi-l">SLA breaches (7d) · ${sla.breaches_total ?? 0} total</span></div>
+          <div class="kpi"><span class="kpi-n">${usd(fin.collected_30d_cents)}</span><span class="kpi-l">Collected (30d)</span></div>
+          <div class="kpi"><span class="kpi-n">${(d.online || []).length}</span><span class="kpi-l">Staff online now</span></div>
+        </div>`;
+
+      // Queue alerts strip
+      const alerts = [
+        [q.checks_review, "checks awaiting OCR review", "#/finance"],
+        [q.checks_awaiting_clear, "matched checks awaiting clearing", "#/finance"],
+        [q.qa_pending, "letters in the QA gate", "#/qa"],
+        [q.intake_open, "pre-case intake requests open", "#/intake"],
+        [q.onboarding_pending, "onboarding applications pending", "#/onboarding"],
+      ].filter(([n]) => Number(n) > 0);
+      if (alerts.length)
+        html += `<div class="ops-alerts">` + alerts.map(([n, label, href]) =>
+          `<a class="ops-alert" href="${href}"><b>${n}</b> ${label}</a>`).join("") + `</div>`;
+
+      // Charts row 1: pipeline donut + intake trend
+      const statuses = (d.cases || []).map((c) => ({ label: c.status, value: Number(c.n) }));
+      const opened = (d.cases_trend || []).map((x) => ({ x: String(x.day).slice(5), y: Number(x.opened) }));
+      html += `<div class="chart-grid">
+        <div class="chart-card"><h2>Case pipeline by status</h2>${chartDonut(statuses)}
+          <p class="muted chart-foot">${ck.opened_7d ?? 0} opened in 7d · ${ck.opened_30d ?? 0} in 30d${ck.avg_open_age_days ? ` · avg open age ${ck.avg_open_age_days}d` : ""}</p></div>
+        <div class="chart-card"><h2>Intake pace — cases opened, 30 days</h2>
+          ${chartArea(opened, { label: "cases opened", color: "#2E6B52" })}</div></div>`;
+
+      // Charts row 2: workload by assignee + throughput
+      const byAssignee = (d.tasks_by_assignee || []).map((a) => ({
+        label: a.assignee, value: Number(a.open), warnValue: Number(a.overdue) || 0, warn: Number(a.overdue) > 0 }));
+      const done = (d.throughput_trend || []).map((x) => ({ x: String(x.day).slice(5), y: Number(x.done) }));
+      html += `<div class="chart-grid">
+        <div class="chart-card"><h2>Workload by assignee (open tasks${byAssignee.some((a) => a.warn) ? ", red = overdue" : ""})</h2>
+          ${byAssignee.length ? chartHBars(byAssignee) : '<p class="muted">No tasks yet.</p>'}</div>
+        <div class="chart-card"><h2>Throughput — tasks completed, 14 days</h2>
+          ${chartArea(done, { label: "tasks completed", color: "#B08D3E" })}</div></div>`;
+
+      // Collections trend (full width)
+      const coll = (d.collections_trend || []).map((x) => ({ x: String(x.day).slice(5), y: Math.round(Number(x.collected_cents) / 100) }));
+      html += `<div class="chart-card"><h2>Collections — payments settled per day, 30 days</h2>
+        ${chartArea(coll, { label: "collections", color: "#1D4E7E", fmt: (v) => "$" + v.toLocaleString(), w: 1120 })}</div>`;
+
+      // Presence + outstanding side by side
+      const online = d.online || [];
+      html += `<div class="chart-grid">
+        <div class="chart-card"><h2>Who's online</h2>` +
+          (online.length ? `<table><thead><tr><th></th><th>Staff</th><th>Roles</th><th>Last seen</th></tr></thead><tbody>` +
+            online.map((u) => `<tr><td><span class="presence-dot"></span></td>
+              <td>${esc(u.display_name || u.user_sub)}</td>
+              <td class="muted">${esc((Array.isArray(u.roles) ? u.roles : []).filter((r) => !String(r).startsWith("default")).join(", ") || "—")}</td>
+              <td class="muted">${fmtDate(u.last_seen)}</td></tr>`).join("") + `</tbody></table>`
+          : `<p class="muted">No staff active in the last 3 minutes.</p>`) + `</div>
+        <div class="chart-card"><h2>Outstanding receivables</h2>` +
+          ((d.outstanding || []).length ? `<table><thead><tr><th>Party</th><th>Open</th><th>Total</th><th>Overdue</th></tr></thead><tbody>` +
+            d.outstanding.map((o) => `<tr><td>${badge(o.party)}</td><td>${o.open_invoices}</td>
+              <td>${usd(o.open_cents)}</td><td class="${Number(o.overdue_cents) > 0 ? "bad-t" : ""}">${usd(o.overdue_cents)}</td></tr>`).join("") +
+            `</tbody></table>` : `<p class="muted">No open invoices.</p>`) + `</div></div>`;
+
+      // Escalation trail
+      if ((d.escalations || []).length)
+        html += `<h2>Recent escalations</h2><table><thead><tr><th>Case</th><th>Clock</th><th>Level</th><th>To</th><th>When</th></tr></thead><tbody>` +
+          d.escalations.map((e) => `<tr><td class="mono">${esc((e.case_id || "").slice(0, 8))}…</td><td>${badge(e.clock)}</td>
+            <td>L${e.level}</td><td>${esc(e.escalated_to || "—")}</td><td class="muted">${fmtDate(e.created_at)}</td></tr>`).join("") + `</tbody></table>`;
+      return html;
+    } catch (e) { return err(e); }
   }
 
   // ---- Rules admin (FEDERAL_ADMIN / PLATFORM_ADMIN; every save audited) -----
@@ -1700,5 +2098,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, createTenantFlow, auditLog, downloadReportCSV };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, createTenantFlow, auditLog, intakeMore, financeMore, opsDashboard };
 })();
