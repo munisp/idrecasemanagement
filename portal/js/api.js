@@ -141,6 +141,13 @@ const Api = (() => {
       settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
+      checks: (status) => req("GET", `${t()}/checks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+      clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
+      uploadCheck: (file) => {
+        const fd = new FormData();
+        fd.append("check", file);
+        return req("POST", `${t()}/checks`, fd, true);
+      },
       payments: (caseId) => req("GET", caseId ? `${t()}/cases/${caseId}/payments` : `${t()}/payments`),
       checkout: (invId) => req("POST", `${t()}/invoices/${invId}/checkout`),
       claims: (caseId) => req("GET", `${t()}/cases/${caseId}/claims`),

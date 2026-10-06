@@ -1081,8 +1081,9 @@ const Views = (() => {
 
   async function finance() {
     try {
-      const [fin, pays] = await Promise.all([
+      const [fin, pays, chks] = await Promise.all([
         Api.program.financial(), Api.program.payments().catch(() => ({ payments: [] })),
+        Api.program.checks().catch(() => ({ checks: [] })),
       ]);
       const k = fin.kpi || {};
       const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
@@ -1119,6 +1120,29 @@ const Views = (() => {
           bm.map((x) => `<tr><td>${esc(x.provider)}</td><td>${badge(x.status)}</td><td>${x.n}</td><td>${usd(x.total_cents)}</td></tr>`).join("") +
           `</tbody></table>`;
 
+      // Physical check intake (OCR/ICR — image is evidence, clearing settles)
+      const ck = chks.checks || [];
+      const reviewCk = ck.filter((c) => c.status === "REVIEW");
+      html += `<h2>Check intake (OCR/ICR)</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
+          <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
+          <button class="mini">📷 scan / upload check</button>
+          <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
+        (ck.length ? `<table><thead><tr><th>Check</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody>` +
+          ck.slice(0, 25).map((c) => `<tr>
+            <td class="mono">${esc((c.id || "").slice(0, 8))}…</td>
+            <td class="mono">${esc(c.routing_number || "?")} · ${esc(c.account_number || "?")}</td>
+            <td>${c.courtesy_amount_cents != null ? usd(c.courtesy_amount_cents) : "—"}</td>
+            <td>${c.legal_amount_cents != null ? usd(c.legal_amount_cents) : "—"}${c.amount_mismatch ? ' <span class="badge s-denied">mismatch</span>' : ""}</td>
+            <td class="mono">${esc(c.memo || "")}</td>
+            <td>${c.matched_invoice_id ? `<span class="mono">${esc(c.matched_invoice_id.slice(0, 8))}…</span>` : "—"}</td>
+            <td>${badge(c.status)}</td>
+            <td class="muted">${c.confidence != null ? Math.round(c.confidence * 100) + "%" : "—"}</td>
+            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`).join("") +
+          `</tbody></table>` +
+          (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
+          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`);
+
       // Card payments
       const plist = pays.payments || [];
       if (plist.length)
@@ -1140,6 +1164,26 @@ const Views = (() => {
           `</tbody></table>` : `<p class="muted">No financial events yet — issue an invoice to start the stream.</p>`);
       return html;
     } catch (e) { return err(e); }
+  }
+
+  async function uploadCheck(file, btn) {
+    if (!file) { UI.toast("Choose a check image first", { kind: "warn" }); return; }
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.uploadCheck(file);
+        UI.toast(`Check ${String(r.id || "").slice(0, 8)}… received — OCR processing`);
+        App.rerender();
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Uploading…");
+  }
+
+  async function clearCheck(checkId, el) {
+    const ref = prompt("Bank clearing reference (deposit slip / lockbox ref):", "");
+    if (ref === null) return;
+    await UI.run(el, async () => {
+      try { await Api.program.clearCheck(checkId, ref); UI.toast("Check cleared — invoice settled, ledger posted"); App.rerender(); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
   }
 
   // ---- Rules admin (FEDERAL_ADMIN / PLATFORM_ADMIN; every save audited) -----
@@ -1231,5 +1275,5 @@ const Views = (() => {
     document.getElementById("rules-save")?.addEventListener("click", () => UI.run(document.getElementById("rules-save"), rulesSave, "Saving…"));
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck };
 })();

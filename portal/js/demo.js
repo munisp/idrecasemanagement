@@ -346,6 +346,18 @@
         { id: 6, case_id: "c3", kind: "REFUND_ISSUED", direction: "OUT", amount_cents: 41200, party: "PROVIDER", ref: "pi_3Qe9demo7", actor: "stripe-webhook", created_at: d(12) },
         { id: 5, case_id: "c3", kind: "PAYMENT_PAID", direction: "IN", amount_cents: 41200, party: "PROVIDER", ref: "pi_3Qe9demo7", actor: "stripe-webhook", created_at: d(30) }],
       stripe_enabled: true });
+    if (/\/checks(\?.*)?$/.test(p) && opts.method === "POST") return json({ id: "chk-demo-new1", status: "RECEIVED" });
+    if (/\/checks\/[\w-]+\/clear$/.test(p)) return json({ status: "CLEARED" });
+    if (/\/checks(\?.*)?$/.test(p)) return json({ checks: [
+      { id: "chk-demo-0001", routing_number: "063100277", account_number: "4882011765", check_number: "1042",
+        courtesy_amount_cents: 41200, legal_amount_cents: 41200, amount_mismatch: false,
+        memo: "INV CMS-TX-2026-01479", matched_invoice_id: "inv1-demo", status: "MATCHED", confidence: 0.94, created_at: d(1) },
+      { id: "chk-demo-0002", routing_number: "026009593", account_number: "7712034198", check_number: "2287",
+        courtesy_amount_cents: 88750, legal_amount_cents: null, amount_mismatch: false,
+        memo: "", matched_invoice_id: null, status: "REVIEW", confidence: 0.61, created_at: d(2) },
+      { id: "chk-demo-0003", routing_number: "061000104", account_number: "3301884562", check_number: "0912",
+        courtesy_amount_cents: 12359, legal_amount_cents: 12359, amount_mismatch: false,
+        memo: "determination fee", matched_invoice_id: "inv3-demo", status: "CLEARED", confidence: 0.97, created_at: d(6) }] });
     if (/\/payments$/.test(p) || /\/cases\/[\w-]+\/payments$/.test(p)) return json({ payments: [
       { id: "pay1", case_id: "c1", invoice_id: "inv3", provider: "stripe", session_id: "cs_test_demo1", payment_intent: "pi_3Qf2demo1", amount_cents: 41200, currency: "usd", payer_email: "ap@sunhealth.example", status: "PAID", created_at: d(4) },
       { id: "pay3", case_id: "c2", invoice_id: "inv1", provider: "stripe", session_id: "cs_test_demo2", payment_intent: null, amount_cents: 12359, currency: "usd", payer_email: null, status: "PENDING", created_at: d(1) }] });
