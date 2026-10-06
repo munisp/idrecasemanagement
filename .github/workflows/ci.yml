@@ -9,6 +9,7 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITLEAKS_ENABLE_COMMENTS: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   go:
     runs-on: ubuntu-latest
     steps:
@@ -29,6 +30,12 @@ jobs:
             services/analytics-py services/outbox-relay-py services/edge-bridge-py \
             services/graph-intel-py services/lettergen-py
           pip install -q pytest
+          # check_processor.py's own deps (not the full requirements.txt --
+          # that also pulls in docling/paddlepaddle/paddleocr/torch, none of
+          # which test_check_processor.py's pure-function tests need, and
+          # installing them here would make this job minutes slower for no
+          # reason).
+          pip install -q numpy opencv-python-headless pytesseract pillow
           cd services/doc-intel-py && python -m pytest -q
   yaml:
     runs-on: ubuntu-latest
