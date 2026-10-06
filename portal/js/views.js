@@ -1159,8 +1159,11 @@ const Views = (() => {
 
   async function intake() {
     try {
-      const r = await Api.program.intake();
+      const r = await Api.program.intake({ limit: 50 });
       const rows = r.intake || [];
+      const intakeNext = r.next_offset ?? -1;
+      const intakeTotal = r.total ?? rows.length;
+      window._intakePager = { next: intakeNext }; // reset on every view render
       return `<div class="view-head"><h1>Pre-case intake</h1>
         <span class="muted">instruction requests awaiting documents and fees — the 10-day initial review starts at PACKET_COMPLETE</span></div>
         <form class="inline-form" onsubmit="return Views.newIntake(this)">
@@ -1182,8 +1185,37 @@ const Views = (() => {
                 <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
                 <option>PAID</option><option>CONVERTED</option>
                 <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests.</p>`);
+          `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
+        (intakeNext >= 0 ? `<p class="pager" id="intake-pg"><span class="muted">Showing ${rows.length} of ${intakeTotal}</span>
+          <button class="mini" onclick="Views.intakeMore(this)">Load more (${Math.min(50, intakeTotal - rows.length)} remaining)</button></p>` : "");
     } catch (e) { return err(e); }
+  }
+
+  async function intakeMore(btn) {
+    const st = window._intakePager || { next: 50 };
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.intake({ limit: 50, offset: st.next });
+        const rows = r.intake || [];
+        st.next = r.next_offset ?? -1;
+        window._intakePager = st;
+        const body = document.querySelector("#intake-pg")?.previousElementSibling?.querySelector("tbody");
+        if (body) body.insertAdjacentHTML("beforeend", rows.map((i) => `<tr><td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
+            <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
+            <td>${badge(i.status)} ${day13Countdown(i)}</td>
+            <td class="muted">${fmtDate(i.outreach_at)}</td>
+            <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
+            <td>${!INTAKE_TERMINAL.includes(i.status) ?
+              `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
+                <option value="">advance…</option><option>DOCS_RECEIVED</option>
+                <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
+                <option>PAID</option><option>CONVERTED</option>
+                <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`).join(""));
+        const pg = document.getElementById("intake-pg");
+        if (pg && st.next < 0) pg.outerHTML = "";
+        else if (pg) pg.querySelector("button").textContent = "Load more";
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Loading…");
   }
 
   async function newIntake(form) {
@@ -1280,10 +1312,17 @@ const Views = (() => {
 
   async function finance() {
     try {
+      const FIN_PAGE = 25;
       const [fin, pays, chks] = await Promise.all([
-        Api.program.financial(), Api.program.payments().catch(() => ({ payments: [] })),
-        Api.program.checks().catch(() => ({ checks: [] })),
+        Api.program.financial(),
+        Api.program.payments(null, { limit: FIN_PAGE }).catch(() => ({ payments: [] })),
+        Api.program.checks("", { limit: FIN_PAGE }).catch(() => ({ checks: [] })),
       ]);
+      // accumulated rows + server offsets for the "Load more" pagers
+      finPager = {
+        checks: { rows: chks.checks || [], next: chks.next_offset ?? -1, total: chks.total ?? (chks.checks || []).length },
+        payments: { rows: pays.payments || [], next: pays.next_offset ?? -1, total: pays.total ?? (pays.payments || []).length },
+      };
       const k = fin.kpi || {};
       const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
       let html = `<div class="view-head"><h1>Financials</h1>
@@ -1320,15 +1359,7 @@ const Views = (() => {
           `</tbody></table>`;
 
       // Physical check intake (OCR/ICR — image is evidence, clearing settles)
-      const ck = chks.checks || [];
-      const reviewCk = ck.filter((c) => c.status === "REVIEW");
-      html += `<h2>Check intake (OCR/ICR)</h2>
-        <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
-          <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
-          <button class="mini">📷 scan / upload check</button>
-          <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
-        (ck.length ? `<table><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody>` +
-          ck.slice(0, 25).map((c) => `<tr>
+      checkRow = (c) => `<tr>
             <td class="mono">${esc((c.id || "").slice(0, 8))}…</td>
             <td>${esc(c.payer_name || "—")}</td>
             <td class="mono">${esc(c.check_date || "—")}</td>
@@ -1339,19 +1370,34 @@ const Views = (() => {
             <td>${c.matched_invoice_id ? `<span class="mono">${esc(c.matched_invoice_id.slice(0, 8))}…</span>` : "—"}</td>
             <td>${badge(c.status)}</td>
             <td class="muted">${c.confidence != null ? Math.round(c.confidence * 100) + "%" : "—"}</td>
-            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`).join("") +
-          `</tbody></table>` +
-          (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
-          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`);
-
-      // Card payments
-      const plist = pays.payments || [];
-      if (plist.length)
-        html += `<h2>Card payments</h2><table><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody>` +
-          plist.slice(0, 25).map((p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
+            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`;
+      payRow = (p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
             <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
             <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
-            <td class="muted">${fmtDate(p.created_at)}</td></tr>`).join("") + `</tbody></table>`;
+            <td class="muted">${fmtDate(p.created_at)}</td></tr>`;
+      const ck = finPager.checks.rows;
+      const reviewCk = ck.filter((c) => c.status === "REVIEW");
+      html += `<h2>Check intake (OCR/ICR)</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
+          <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
+          <button class="mini">📷 scan / upload check</button>
+          <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
+        (ck.length ? `<table><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
+          ck.map(checkRow).join("") + `</tbody></table>` +
+          (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
+          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`) +
+        (finPager.checks.next >= 0
+          ? `<p class="pager" id="fin-ck-pg"><span class="muted">Showing ${ck.length} of ${finPager.checks.total}</span>
+             <button class="mini" onclick="Views.financeMore('checks', this)">Load more (${Math.min(FIN_PAGE, finPager.checks.total - ck.length)} remaining)</button></p>` : "");
+
+      // Card payments
+      const plist = finPager.payments.rows;
+      if (plist.length)
+        html += `<h2>Card payments</h2><table><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
+          plist.map(payRow).join("") + `</tbody></table>` +
+          (finPager.payments.next >= 0
+            ? `<p class="pager" id="fin-pay-pg"><span class="muted">Showing ${plist.length} of ${finPager.payments.total}</span>
+               <button class="mini" onclick="Views.financeMore('payments', this)">Load more (${Math.min(FIN_PAGE, finPager.payments.total - plist.length)} remaining)</button></p>` : "");
 
       // Unified event stream
       const ev = fin.events || [];
@@ -1365,6 +1411,35 @@ const Views = (() => {
           `</tbody></table>` : `<p class="muted">No financial events yet — issue an invoice to start the stream.</p>`);
       return html;
     } catch (e) { return err(e); }
+  }
+
+  // finance() pager state — survives only for the rendered page
+  let finPager = null;
+  let checkRow = null, payRow = null; // row renderers set by finance()
+
+  async function financeMore(kind, btn) {
+    const st = finPager?.[kind];
+    if (!st || st.next < 0) return;
+    await UI.run(btn, async () => {
+      try {
+        const limit = 25;
+        const r = kind === "checks"
+          ? await Api.program.checks("", { limit, offset: st.next })
+          : await Api.program.payments(null, { limit, offset: st.next });
+        const rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
+        st.rows = st.rows.concat(rows);
+        st.next = r.next_offset ?? -1;
+        st.total = r.total ?? st.total;
+        const body = document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body");
+        const render = kind === "checks" ? checkRow : payRow;
+        if (body && render) body.insertAdjacentHTML("beforeend", rows.map(render).join(""));
+        const pg = document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg");
+        if (pg) pg.outerHTML = st.next >= 0
+          ? `<p class="pager" id="${kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"}"><span class="muted">Showing ${st.rows.length} of ${st.total}</span>
+             <button class="mini" onclick="Views.financeMore('${kind}', this)">Load more (${Math.min(25, st.total - st.rows.length)} remaining)</button></p>`
+          : `<p class="pager"><span class="muted">Showing ${st.rows.length} of ${st.total}</span></p>`;
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Loading…");
   }
 
   async function uploadCheck(file, btn) {
@@ -1620,5 +1695,5 @@ const Views = (() => {
     document.getElementById("rules-save")?.addEventListener("click", () => UI.run(document.getElementById("rules-save"), rulesSave, "Saving…"));
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, intakeMore, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, financeMore, opsDashboard };
 })();
