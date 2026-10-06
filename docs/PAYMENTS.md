@@ -23,6 +23,27 @@ Stripe).
 - No Stripe SDK: the integration is dependency-free REST + HMAC, keeping the
   Go module graph offline-reproducible.
 
+## Physical checks (OCR/ICR intake)
+
+Payers can photograph or scan a check (mobile-deposit style) — the platform
+processes it in near-real-time:
+
+1. `POST /v1/tenants/{st}/checks` (multipart image) — vault-sealed, stored in
+   MinIO, `check.uploaded` event queued.
+2. doc-intel `check_processor` extracts: **MICR line** (routing/account/check
+   number, ABA checksum-verified), **courtesy amount** (numeric box), **legal
+   amount** (handwritten line — best-effort ICR, always lower confidence),
+   date, payee, memo.
+3. Matching: memo carrying the invoice number wins; else unique exact-amount
+   match on open invoices. A courtesy/legal mismatch or low confidence routes
+   to **REVIEW** — extraction never settles money on its own.
+4. Matched checks create a payment in `PENDING_CLEARING` (the image is
+   evidence, not money). `POST /checks/{id}/clear` (staff or a future bank
+   lockbox webhook, with the deposit ref) is the only path that marks the
+   invoice PAID and posts the TB clearing→escrow leg.
+
+Review queue: `GET /v1/tenants/{st}/checks?status=REVIEW`.
+
 ## Ledger of record: TigerBeetle
 
 Stripe is the *rail*; **TigerBeetle is the ledger of record**. Every card
