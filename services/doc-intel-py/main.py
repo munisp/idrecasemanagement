@@ -183,6 +183,58 @@ def subject(evt: dict) -> tuple[str, str]:
     return "application", evt["application_id"]
 
 
+_SERVICE_LINE_KEYWORDS = (
+    ("AIR AMBULANCE", "AIR_AMBULANCE"), ("ANESTHESIA", "ANESTHESIA"),
+    ("RADIOLOGY", "RADIOLOGY"), ("LAB", "LAB"), ("EMERGENCY", "ER"), ("ER", "ER"),
+)
+
+
+def backfill_case_fields(tenant: str, case_id: str, extracted: dict) -> list[str]:
+    """Fill a couple of case fields from analyzed-document facts so staff
+    don't have to re-type what the document already states -- but only
+    fields with an unambiguous semantic match, and only where the case
+    doesn't already carry a value (never overwrites staff-entered data).
+
+    qpa_usd (idr_claim schema) IS the case's qpa_cents -- same concept,
+    direct match. service_line is inferred from the EOB schema's
+    service_lines[0] leading keyword -- a coarse category guess, safe to
+    get wrong (falls through to manual, never silently wrong in a way that
+    matters). Deliberately NOT doing the equivalent for disputed_amount_cents:
+    EOB's allowed_amount_usd/patient_responsibility_usd are the insurer's
+    determination and the patient's share, neither of which IS the amount a
+    provider is disputing -- auto-filling a dollar figure into the wrong
+    financial concept on a legal dispute record would be worse than leaving
+    it blank for a human to enter.
+    """
+    changed: list[str] = []
+    qpa_usd = extracted.get("qpa_usd")
+    service_lines = extracted.get("service_lines") or []
+    with psycopg.connect(DSN, autocommit=True) as c:
+        row = c.execute(
+            f"SELECT qpa_cents, service_line FROM tenant_{tenant}.cases WHERE id=%s",
+            (case_id,),
+        ).fetchone()
+        if not row:
+            return changed
+        cur_qpa, cur_service_line = row
+        if qpa_usd and not cur_qpa:
+            try:
+                cents = round(float(qpa_usd) * 100)
+            except (TypeError, ValueError):
+                cents = 0
+            if cents > 0:
+                c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))
+                changed.append(f"QPA ${cents / 100:,.2f}")
+        if not cur_service_line and service_lines:
+            first = str(service_lines[0]).upper()
+            for kw, canon in _SERVICE_LINE_KEYWORDS:
+                if kw in first:
+                    c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (canon, case_id))
+                    changed.append(f"service line {canon}")
+                    break
+    return changed
+
+
 def persist(evt: dict, ctx: dict) -> None:
     kind, subj_id = subject(evt)
     case_id = subj_id if kind == "case" else None
@@ -247,6 +299,15 @@ def persist(evt: dict, ctx: dict) -> None:
                VALUES (%s,%s,'ANALYSIS_COMPLETE',%s)""",
             (evt["tenant"], case_id, summary[:2000]),
         )
+    changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}))
+    if changed:
+        with psycopg.connect(DSN, autocommit=True) as c:
+            c.execute(
+                """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                   VALUES (%s,%s,'AUTO_FILLED',%s)""",
+                (evt["tenant"], case_id,
+                 f"Auto-filled from document analysis: {', '.join(changed)} — review before relying on it"),
+            )
 
 
 def process(evt: dict) -> None:

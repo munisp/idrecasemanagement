@@ -756,14 +756,23 @@ const Views = (() => {
     afterRender(() => $("#nd").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));
+      const file = ev.target.doc.files[0];
       await UI.run(ev.target.querySelector("button"), async () => {
         try {
           const r = await Api.cases.initiate({
             case_number: f.case_number, service_line: f.service_line, plan_type: f.plan_type,
-            qpa_cents: Math.round(parseFloat(f.qpa) * 100), provider_id: f.provider_id,
+            qpa_cents: f.qpa ? Math.round(parseFloat(f.qpa) * 100) : 0, provider_id: f.provider_id,
             payer_id: f.payer_id, open_negotiation_end: f.one_end,
           });
-          UI.toast("Dispute initiated — statutory clocks started");
+          if (file) {
+            // Upload is async analysis -- QPA/service line fill in on their
+            // own once doc-intel finishes (usually well under a minute);
+            // don't block navigation on it.
+            Api.cases.upload(r.case_id, file).catch(() => {});
+            UI.toast("Dispute initiated — analyzing attached document, QPA/service line will fill in automatically", { sticky: true });
+          } else {
+            UI.toast("Dispute initiated — statutory clocks started");
+          }
           location.hash = `#/cases/${r.case_id}`;
         } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
       }, "Initiating…");
@@ -771,9 +780,11 @@ const Views = (() => {
     return `<h1>New dispute</h1><form id="nd" class="form">
 
       <label>CMS case number <input name="case_number" required placeholder="CMS-TX-2026-00002" /></label>
-      <label>Service line <select name="service_line"><option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option><option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select></label>
+      <label>Attach claim/EOB document <span class="muted">(optional — QPA and service line fill in automatically once analyzed, instead of typing them below)</span>
+        <input name="doc" type="file" accept=".pdf,.png,.jpg,.jpeg,.tiff,.webp" /></label>
+      <label>Service line <select name="service_line"><option value="">— leave to auto-fill —</option><option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option><option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select></label>
       <label>Plan type <select name="plan_type"><option>SELF_FUNDED</option><option>FULLY_INSURED</option></select></label>
-      <label>QPA (USD) <input name="qpa" type="number" step="0.01" required /></label>
+      <label>QPA (USD) <input name="qpa" type="number" step="0.01" placeholder="leave blank to auto-fill from document" /></label>
       <label>Provider ID <input name="provider_id" required /></label>
       <label>Payer ID <input name="payer_id" required /></label>
       <label>Open negotiation end <input name="one_end" type="date" required /></label>
@@ -1663,6 +1674,7 @@ const Views = (() => {
             <option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option>
             <option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select>
           <input name="amount" type="number" step="0.01" placeholder="${esc(label)} $" />
+          <input name="doc" type="file" accept=".pdf,.png,.jpg,.jpeg,.tiff,.webp" title="attach claim/EOB — service line fills in automatically once analyzed (programmed tenants)" />
           <button>New intake request</button></form>` +
         (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
@@ -1728,6 +1740,13 @@ const Views = (() => {
         disputed_amount_cents: cents, qpa_cents: cents,
       });
       if (r.programmed) {
+        const file = form.doc.files[0];
+        if (file) {
+          // Real case exists immediately for programmed tenants -- the doc
+          // can attach right away; analysis fills in service_line on its
+          // own shortly (see doc-intel's backfill_case_fields).
+          Api.cases.upload(r.case_id, file).catch(() => {});
+        }
         UI.toast(`Case ${r.case_number} opened — filing instructions emailed to ${esc(form.email.value)}`, { sticky: true });
         location.hash = `#/cases/${r.case_id}`;
       } else {
