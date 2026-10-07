@@ -79,6 +79,13 @@ stages:
                              # stage's own MAX_PROMPT_CHARS hard-truncates at 2000 regardless,
                              # so a chunk much larger than that would just get silently cut off
                              # mid-content by that backstop; sized to actually fit instead
+      # Chunk concurrency for multi-chunk docs. This endpoint is the LOCAL
+      # in-cluster Ollama, NOT OpenAI: requests past OLLAMA_NUM_PARALLEL
+      # (default 1) just serialize server-side while multiplying KV-cache
+      # memory on a shared instance with an OOM history. 2 overlaps HTTP/
+      # JSON overhead with inference; raise ONLY together with
+      # OLLAMA_NUM_PARALLEL on the Ollama deployment itself.
+      parallel_chunks: ${VLM_PARALLEL_CHUNKS:-2}
       schema: idr_claim      # FALLBACK schema — the classified doc_type's
                              # schema is preferred automatically (see schemas:)
 
