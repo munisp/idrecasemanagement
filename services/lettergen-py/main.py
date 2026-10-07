@@ -120,11 +120,17 @@ def to_pdf(docx_bytes: bytes) -> bytes:
 
 
 def vault_seal(tenant: str, key: str, pt: bytes) -> bytes:
+    # /docs/seal responds with sealed_b64, not data_b64 -- confirmed against
+    # vault-rs's own seal_doc handler and against documents.go's working
+    # caller, which already reads sealed_b64. This mismatch meant every
+    # letter generation attempt failed here with KeyError('data_b64'),
+    # confirmed live: never caught before because nothing ever reached this
+    # far until the Kafka connectivity fix above let a request through.
     resp = httpx.post(f"{VAULT}/docs/seal", timeout=60, json={
         "tenant": tenant, "key": key, "data_b64": base64.b64encode(pt).decode(),
     })
     resp.raise_for_status()
-    return base64.b64decode(resp.json()["data_b64"])
+    return base64.b64decode(resp.json()["sealed_b64"])
 
 
 def template_config(tenant: str, key: str) -> dict:
