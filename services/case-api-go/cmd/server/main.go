@@ -494,6 +494,7 @@ func main() {
 		r.Get("/checks", s.listChecks)                             // review queue
 		r.Post("/checks/{checkId}/clear", s.clearCheck)            // funds-cleared settlement
 		r.Post("/internal/checks/{checkId}/result", s.checkResult) // worker-token: doc-intel OCR
+		r.Post("/internal/copilot/actions/apply", s.copilotApplyAction) // worker-token: Phase 3 batch executor
 		r.Post("/cases/relate", s.relateCases)
 		r.Get("/cases/{caseId}/relationships", s.caseRelationships)
 		r.Get("/cases/{caseId}/checklist", s.getChecklist)
@@ -536,6 +537,10 @@ func main() {
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)   // auto-adjudicate from case+doc data (Lever 1)
 		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)         // grounded advisory brief (Phase 1 copilot)
 		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)    // latest persisted brief
+		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)         // Phase 2: QA-gated determination/correspondence drafts
+		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions)              // Phase 3: bounded action-batch proposal
+		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
+		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
