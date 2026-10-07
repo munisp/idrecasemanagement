@@ -347,6 +347,10 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "CLAIMS_IMPORT",
 		fmt.Sprintf("%d claim lines imported ($%d.%02d billed; running total %d claims)",
 			len(in.Claims), billed/100, billed%100, len(in.Claims)))
+	s.logAudit(r.Context(), tenant, caseID, "CLAIMS_IMPORTED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "line_count": len(in.Claims),
+		"billed_cents": billed, "full_record_required": requireFull,
+	})
 	resp := map[string]any{"imported": len(in.Claims)}
 	// Adopted Capitol Bridge large-volume policy (v01.01.2026): evaluated on
 	// every import when the tenant has it enabled; violations land on the
@@ -395,6 +399,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		Notes               string `json:"notes"`
 		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
+		QPACents            int64  `json:"qpa_cents"` // federal NSA tenants only — programmed tenants use disputed_amount_cents
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
@@ -436,9 +441,18 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 
 	var id string
 	_ = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.intake_requests (tenant, email, contact_name, org, notes, outreach_at, filing_party_type)
-		VALUES ($1,$2,$3,$4,$5, now(), $6) RETURNING id`,
-		tenant, in.Email, in.ContactName, in.Org, in.Notes, fpt).Scan(&id)
+		INSERT INTO public.intake_requests (tenant, email, contact_name, org, notes, outreach_at, filing_party_type, qpa_cents)
+		VALUES ($1,$2,$3,$4,$5, now(), $6, nullif($7,0)) RETURNING id`,
+		tenant, in.Email, in.ContactName, in.Org, in.Notes, fpt, in.QPACents).Scan(&id)
+	// The programmed-tenant branch above is already audited inside
+	// startAhcaCase (CASE_INTAKE_OPENED); this is the legacy intake row.
+	// The insert error is swallowed above, so only audit a row that exists.
+	if id != "" {
+		s.logAudit(r.Context(), tenant, "", "INTAKE_CREATED", map[string]any{
+			"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "intake_id": id,
+			"org": in.Org, "filing_party_type": fpt,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"intake_id": id, "status": "INSTRUCTED", "filing_party_type": fpt})
 }
 
@@ -516,26 +530,34 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
 		}
+		s.logAudit(r.Context(), tenant, "", "INTAKE_ADVANCED", map[string]any{
+			"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "intake_id": id,
+			"from_status": current, "to_status": in.Status,
+		})
 		writeJSON(w, http.StatusOK, map[string]string{"status": in.Status})
 		return
 	}
 	if in.Status == "CONVERTED" {
-		// Carry the filing party type and the packet-complete anchor onto the
-		// case record so the review clock and notification routing follow the
-		// case, not the intake row.
+		// Carry the filing party type, packet-complete anchor, and QPA
+		// (federal NSA tenants only -- programmed tenants never reach this
+		// branch) onto the case record so the review clock, notification
+		// routing, and threshold/eligibility math all follow the case, not
+		// the intake row that's about to become historical.
 		var fpt string
 		var packetAt *time.Time
+		var qpaCents *int64
 		_ = s.db.QueryRow(r.Context(),
-			`SELECT filing_party_type, packet_complete_at FROM public.intake_requests WHERE tenant=$1 AND id=$2`,
-			tenant, id).Scan(&fpt, &packetAt)
+			`SELECT filing_party_type, packet_complete_at, qpa_cents FROM public.intake_requests WHERE tenant=$1 AND id=$2`,
+			tenant, id).Scan(&fpt, &packetAt, &qpaCents)
 		var packetISO string
 		if packetAt != nil {
 			packetISO = packetAt.UTC().Format(time.RFC3339)
 		}
 		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 			UPDATE tenant_%s.cases SET details = details || jsonb_build_object(
-			  'filing_party_type', $2::text, 'packet_complete_at', $3::text), updated_at=now()
-			WHERE id=$1`, sanitizeTenant(tenant)), in.CaseID, fpt, packetISO); err != nil {
+			  'filing_party_type', $2::text, 'packet_complete_at', $3::text),
+			  qpa_cents = coalesce($4, qpa_cents), updated_at=now()
+			WHERE id=$1`, sanitizeTenant(tenant)), in.CaseID, fpt, packetISO, qpaCents); err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
 		}
@@ -560,6 +582,11 @@ func (s *server) advanceIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	// case_id is only set on CONVERTED (in.CaseID is "" otherwise).
+	s.logAudit(r.Context(), tenant, in.CaseID, "INTAKE_ADVANCED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "intake_id": id,
+		"from_status": current, "to_status": in.Status,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": in.Status})
 }
 
@@ -577,30 +604,38 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRows(r, `
 		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at,
 		       filing_party_type, packet_complete_at, NULL::text AS case_number,
-		       NULL::bigint AS disputed_amount_cents, 'legacy' AS origin
+		       NULL::bigint AS disputed_amount_cents, qpa_cents, 'legacy' AS origin
 		FROM public.intake_requests WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		// tenant_X.cases has no created_at column (only opened_at) -- this
+		// query referenced created_at three times and has been failing on
+		// every call since it was written, silently (queryRows just returns
+		// an error that was swallowed by `if cerr == nil`), meaning no
+		// real-case-origin row has EVER appeared in this merged list.
+		// Confirmed live: a freshly-opened case's own row was absent here
+		// despite satisfying the WHERE clause.
 		caseRows, cerr := s.queryRows(r, fmt.Sprintf(`
 			SELECT NULL::uuid AS id,
 			       details->>'requester_email' AS email,
 			       details->>'requester_contact_name' AS contact_name,
 			       details->>'requester_org' AS org,
 			       status,
-			       created_at AS outreach_at,
+			       opened_at AS outreach_at,
 			       id AS case_id,
-			       created_at,
+			       opened_at AS created_at,
 			       coalesce(details->>'filing_party_type', 'PROVIDER') AS filing_party_type,
 			       NULL::timestamptz AS packet_complete_at,
 			       case_number,
 			       disputed_amount_cents,
+			       qpa_cents,
 			       'case' AS origin
 			FROM tenant_%s.cases
 			WHERE details->>'requester_email' IS NOT NULL
-			ORDER BY created_at DESC LIMIT 200`, sanitizeTenant(tenant)))
+			ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))
 		if cerr == nil {
 			rows = append(rows, caseRows...)
 		}
@@ -704,11 +739,18 @@ func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
 	if in.DueRule == "" {
 		in.DueRule = "adhoc"
 	}
-	_, _ = s.db.Exec(r.Context(), `
+	_, insErr := s.db.Exec(r.Context(), `
 		INSERT INTO public.deliverables (tenant, name, due_rule, case_id, due_date, status, delivered_at)
 		VALUES ($1,$2,$3,nullif($4,''),nullif($5,'')::date,'DELIVERED',now())
 		ON CONFLICT (tenant, name, case_id) DO UPDATE SET status='DELIVERED', delivered_at=now()`,
 		tenant, in.Name, in.DueRule, in.CaseID, in.DueDate)
+	// Response unchanged (pre-existing behavior), but only audit a write that landed.
+	if insErr == nil {
+		s.logAudit(r.Context(), tenant, in.CaseID, "DELIVERABLE_SUBMITTED", map[string]any{
+			"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "name": in.Name,
+			"due_rule": in.DueRule, "due_date": in.DueDate,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "DELIVERED"})
 }
 
@@ -739,7 +781,7 @@ func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `
+	_, optOutErr := s.db.Exec(r.Context(), `
 		INSERT INTO public.opt_out_decisions (tenant, case_id, eligible, rationale, decided_by)
 		VALUES ($1,$2,$3,$4,$5)`, tenant, caseID, in.Eligible, in.Rationale, p.Subject)
 	if in.Eligible {
@@ -758,6 +800,13 @@ func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
 	_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "PLAN_OPT_OUT", map[string]any{"eligible": in.Eligible})
 	s.logActivity(r.Context(), tenant, caseID, "OPT_OUT_DECISION",
 		fmt.Sprintf("Opt-out eligibility: %v%s (by %s)", in.Eligible, orDash(" — "+in.Rationale), p.Subject))
+	// Response unchanged (pre-existing behavior), but only audit a decision that was persisted.
+	if optOutErr == nil {
+		s.logAudit(r.Context(), tenant, caseID, "OPT_OUT_DECIDED", map[string]any{
+			"by": p.Subject, "eligible": in.Eligible, "rationale": truncate(in.Rationale, 500),
+			"workflow_id": wfID,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 

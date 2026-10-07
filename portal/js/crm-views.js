@@ -2,6 +2,7 @@
 const CrmViews = (() => {
   // See views.js: bind after router innerHTML injection (macrotask, not microtask).
   const afterRender = (fn) => setTimeout(fn, 0);
+  const $ = (sel) => document.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
@@ -51,7 +52,6 @@ const CrmViews = (() => {
     "Decided - Invoice Paid", "Plan Opt-Out", "Ineligible", "Dismissed",
     "Withdrawn", "Provider Closure Letter Issued", "Provider - Withdrawal",
   ]);
-  const KANBAN_CARD_CAP = 8;
   async function pipeline() {
     try {
       const [{ cases }, prog] = await Promise.all([Api.cases.list({ limit: 200 }), Api.program.get().catch(() => null)]);
@@ -85,18 +85,20 @@ const CrmViews = (() => {
       const amtField = (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents";
       const amtLabel = (prog && prog.config) ? "Disputed" : "QPA";
       const usd = (cents) => "$" + ((cents || 0) / 100).toLocaleString();
+      // Every card renders now -- a column scrolls internally (fixed
+      // height, its own scrollbar) instead of hard-capping at 8 with a
+      // "+N more" dead end that gave no way to actually reach the rest.
+      // The board itself still scrolls horizontally across columns.
       const cols = stages.map(([status, label]) => {
         const items = status === "__NONE__" ? noStatus : withStatus.filter((c) => c[byField] === status);
         const terminal = TERMINAL_STAGES.has(status);
-        const shown = items.slice(0, KANBAN_CARD_CAP);
-        const rest = items.length - shown.length;
         return `<div class="kanban-col ${terminal ? "is-terminal" : ""} ${items.length ? "" : "is-empty"}">
-          <h3>${esc(label)} <span class="kanban-count">${items.length}</span></h3>` +
-          shown.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
+          <h3>${esc(label)} <span class="kanban-count">${items.length}</span></h3>
+          <div class="kanban-col-body">` +
+          items.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
             <b>${esc(c.case_number)}</b>
             <span class="muted">${esc(c.service_line || "—")} · ${usd(c[amtField])}</span></div>`).join("") +
-          (rest > 0 ? `<div class="kanban-more">+${rest} more</div>` : "") +
-          `</div>`;
+          `</div></div>`;
       });
       const totalShown = withStatus.length + noStatus.length;
       afterRender(() => $("#pipe-show-empty")?.addEventListener("change", (ev) =>

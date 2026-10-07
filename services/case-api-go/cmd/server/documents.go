@@ -207,6 +207,10 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	// (and any status that follows from them) update themselves.
 	s.autoChecklist(r, tenant, caseID)
 	s.maybeAdvanceStatus(r, tenant, caseID)
+	s.logAudit(r.Context(), tenant, caseID, "DOCUMENT_UPLOADED", map[string]any{
+		"by": p.Subject, "doc_id": docID, "filename": hdr.Filename, "folder": folder,
+		"sealed": sealedDoc, "bytes": len(raw), "quarantined": quarantined,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"doc_id": docID, "version": version, "bytes": len(raw),
 		"analysis": analysis,
@@ -295,6 +299,9 @@ func (s *server) moveDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, caseID, "DOCUMENT_MOVED",
 		fmt.Sprintf("Document re-filed to %s by %s", in.Folder, p.Subject))
+	s.logAudit(r.Context(), tenant, caseID, "DOCUMENT_MOVED", map[string]any{
+		"by": p.Subject, "doc_id": docID, "folder": in.Folder,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"folder": in.Folder})
 }
 
@@ -354,6 +361,45 @@ func (s *server) documentAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":%q,"doc_type":%q,"result":%s}`, status, docType, payload)
+}
+
+// retryDocumentAnalysis: POST .../documents/{docId}/analysis/retry — re-runs
+// the doc-intel pipeline against an already-uploaded document by republishing
+// the same doc.uploaded event doc-intel originally consumed. Nothing in
+// MinIO/vault changes; doc-intel's own upsert (ON CONFLICT (doc_id) DO
+// UPDATE) overwrites the stale/failed public.doc_analysis row in place.
+// Exists because viewing analysis is read-only against that stored row —
+// there was previously no way to get a fresh pipeline run without a brand
+// new upload, which repeatedly looked like "the fix didn't work" when it
+// was really just the old failure still sitting in the table.
+func (s *server) retryDocumentAnalysis(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	docID := chi.URLParam(r, "docId")
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "PARTY", "CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"role may not retry analysis"}`, http.StatusForbidden)
+		return
+	}
+	var objectKey, contentType string
+	var sealed bool
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT object_key, content_type, sealed FROM tenant_%s.documents
+		WHERE id=$1 AND case_id=$2`, sanitizeTenant(tenant)), docID, caseID).
+		Scan(&objectKey, &contentType, &sealed)
+	if err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	s.publish(r.Context(), tenant, "documents", map[string]any{
+		"type": "doc.uploaded", "tenant": tenant, "case_id": caseID,
+		"doc_id": docID, "object_key": objectKey, "content_type": contentType,
+		"sealed": sealed, "at": time.Now().UTC(),
+	})
+	s.logAudit(r.Context(), tenant, caseID, "DOCUMENT_ANALYSIS_RETRIED", map[string]any{
+		"by": p.Subject, "doc_id": docID,
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"doc_id": docID, "analysis": "QUEUED"})
 }
 
 // ---- vault helpers ---------------------------------------------------------

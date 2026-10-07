@@ -148,6 +148,13 @@ CREATE TABLE IF NOT EXISTS public.intake_requests (
 ALTER TABLE public.intake_requests
     ADD COLUMN IF NOT EXISTS filing_party_type text NOT NULL DEFAULT 'PROVIDER', -- PROVIDER|HEALTH_PLAN
     ADD COLUMN IF NOT EXISTS packet_complete_at timestamptz;                     -- null = awaiting documents
+-- Federal NSA intakes price on QPA from the very first contact (it drives
+-- eligibility/threshold logic downstream); the form sent it but nothing
+-- stored it -- every legacy intake silently dropped the amount. Programmed
+-- tenants never use this column (their amount lands on the real case
+-- directly via startAhcaCase, not an intake_requests row at all).
+ALTER TABLE public.intake_requests
+    ADD COLUMN IF NOT EXISTS qpa_cents bigint;
 
 -- Rule-engine audit trail (append-only by design — no UPDATE/DELETE path).
 -- Every rules write stores the full before/after config plus actor + note.

@@ -313,6 +313,14 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		// "parties notified" and friends tick themselves on delivery.
 		s.autoChecklist(r, tenant, caseID)
 	}
+	corrAction := "CORRESPONDENCE_SENT"
+	if status == "PENDING" {
+		corrAction = "CORRESPONDENCE_DRAFTED" // held at the QA gate, not yet sent
+	}
+	s.logAudit(r.Context(), tenant, caseID, corrAction, map[string]any{
+		"by": p.Subject, "qa_id": qid, "template": in.Template, "status": status,
+		"to": in.To, "cc": in.CC,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"qa_id": qid, "status": status, "subject": subject})
 }
 
@@ -507,6 +515,11 @@ func (s *server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, caseID, "SHARE_LINK",
 		fmt.Sprintf("Secure %s link created (%d-day expiry) by %s", in.Kind, in.DaysTTL, p.Subject))
+	// The token is a bearer credential -- never written to the audit payload.
+	s.logAudit(r.Context(), tenant, caseID, "SHARE_LINK_CREATED", map[string]any{
+		"by": p.Subject, "kind": in.Kind, "days_ttl": in.DaysTTL, "max_uses": in.MaxUses,
+		"object_key": in.ObjectKey,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "path": "/api/share/" + token, "kind": in.Kind})
 }
 

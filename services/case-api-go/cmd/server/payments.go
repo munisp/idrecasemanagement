@@ -169,6 +169,10 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 		RETURNING id`, tenant, caseID, invID, sessID, amount, raw).Scan(&payID)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amount, party, sessID,
 		r.Context().Value(ctxPrincipal{}).(principal).Subject)
+	s.logAudit(r.Context(), tenant, caseID, "CHECKOUT_CREATED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "provider": "stripe",
+		"invoice_id": invID, "payment_id": payID, "session_id": sessID, "amount_cents": amount,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"payment_id": payID, "checkout_url": checkoutURL, "session_id": sessID,
 	})
@@ -201,9 +205,9 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 	switch evt.Type {
 	case "checkout.session.completed":
 		var sess struct {
-			ID            string `json:"id"`
-			PaymentIntent string `json:"payment_intent"`
-			Email         string `json:"customer_email"`
+			ID            string            `json:"id"`
+			PaymentIntent string            `json:"payment_intent"`
+			Email         string            `json:"customer_email"`
 			Metadata      map[string]string `json:"metadata"`
 		}
 		if json.Unmarshal(evt.Data.Object, &sess) != nil {
@@ -224,8 +228,14 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 			WHERE tenant=$1 AND id=$2 AND status='OPEN' RETURNING amount_cents, party`,
 			tenant, invID, sess.PaymentIntent).Scan(&amount, &party)
 		s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, party, sess.PaymentIntent, "stripe-webhook")
+		// Money moved here exactly as much as it does through settleInvoice's
+		// own UI-triggered path -- the only difference is who called it.
+		s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
+			"by": "stripe-webhook", "invoice_id": invID, "action": "PAY", "status": "PAID",
+			"amount_cents": amount, "party": party, "remittance_ref": sess.PaymentIntent,
+		})
 		s.postPaymentLedger(tenant, caseID, sess.PaymentIntent, party, uint64(amount), false) // clearing → escrow
-		s.maybeAdvanceStatus(r, tenant, caseID) // invoice PAID => case may close
+		s.maybeAdvanceStatus(r, tenant, caseID)                                               // invoice PAID => case may close
 		s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED",
 			fmt.Sprintf("Card payment of $%d.%02d received via Stripe (%s) — invoice settled, ledger posted", amount/100, amount%100, sess.PaymentIntent))
 		// Program rules (invoice.settled) — settlement is already committed in
@@ -255,8 +265,8 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 
 	case "charge.refunded":
 		var ch struct {
-			PaymentIntent string `json:"payment_intent"`
-			AmountRefunded int64 `json:"amount_refunded"`
+			PaymentIntent  string `json:"payment_intent"`
+			AmountRefunded int64  `json:"amount_refunded"`
 		}
 		if json.Unmarshal(evt.Data.Object, &ch) == nil && ch.PaymentIntent != "" {
 			var tenant, caseID, invID string
@@ -268,6 +278,10 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 				_, _ = s.db.Exec(r.Context(), `
 					UPDATE public.invoices SET status='REFUNDED' WHERE tenant=$1 AND id=$2`, tenant, invID)
 				s.finEvent(r, tenant, caseID, invID, "REFUND_ISSUED", "OUT", ch.AmountRefunded, "", ch.PaymentIntent, "stripe-webhook")
+				s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
+					"by": "stripe-webhook", "invoice_id": invID, "action": "REFUND", "status": "REFUNDED",
+					"amount_cents": ch.AmountRefunded, "remittance_ref": ch.PaymentIntent,
+				})
 				s.postPaymentLedger(tenant, caseID, ch.PaymentIntent, "", uint64(ch.AmountRefunded), true) // escrow → clearing
 				s.logActivity(r.Context(), tenant, caseID, "REFUND_ISSUED",
 					fmt.Sprintf("Stripe refund of $%d.%02d issued (%s) — ledger reversal posted", ch.AmountRefunded/100, ch.AmountRefunded%100, ch.PaymentIntent))

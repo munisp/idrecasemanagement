@@ -195,11 +195,27 @@ func (s *server) createTenant(w http.ResponseWriter, r *http.Request) {
 		"tenant": in.Tenant, "group": groupPath,
 		"group_already_existed": groupResp.StatusCode == http.StatusConflict,
 	}
+	// Chained under the newly activated tenant. Never includes the
+	// temporary password -- only whether the first user was created.
+	auditTenantCreated := func() {
+		payload := map[string]any{
+			"by": p.Subject, "group": groupPath,
+			"group_already_existed": groupResp.StatusCode == http.StatusConflict,
+		}
+		if in.FirstUser != nil {
+			_, created := out["first_user"]
+			payload["first_user"] = in.FirstUser.Username
+			payload["first_user_role"] = in.FirstUser.Role
+			payload["first_user_created"] = created
+		}
+		s.logAudit(r.Context(), in.Tenant, "", "TENANT_CREATED", payload)
+	}
 
 	if in.FirstUser != nil {
 		tempPassword, err := generateTempPassword()
 		if err != nil {
 			out["first_user_error"] = "password generation failed: " + err.Error()
+			auditTenantCreated()
 			writeJSON(w, http.StatusCreated, out)
 			return
 		}
@@ -232,5 +248,6 @@ func (s *server) createTenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	auditTenantCreated()
 	writeJSON(w, http.StatusCreated, out)
 }

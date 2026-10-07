@@ -70,6 +70,9 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 	// the rendered document lands; tick what the platform can already prove.
 	s.autoChecklist(r, tenant, caseID)
 	s.maybeAdvanceStatus(r, tenant, caseID)
+	s.logAudit(r.Context(), tenant, caseID, "LETTER_REQUESTED", map[string]any{
+		"by": p.Subject, "template": key, "case_number": caseNumber,
+	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "template": key})
 }
 

@@ -385,10 +385,13 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     fields = schemas[schema_name]["fields"]
 
     md = ctx.get("markdown", ctx.get("text", ""))
-    # 1500 not 3000: this rides on top of chunk 0 regardless of chunk_chars,
-    # and was part of what pushed a real request to 4316 prompt tokens
-    # against Ollama's 4096 context (see pipeline.yaml's chunk_chars note).
-    tables_hint = json.dumps(ctx.get("tables", [])[:3])[:1500]
+    # Docling's own markdown export already renders detected tables as GFM
+    # markdown tables inline in `md` -- this JSON blob is largely the SAME
+    # table data a second time, structured differently. Sized small since
+    # MAX_PROMPT_CHARS below hard-caps the whole prompt at 2000 chars
+    # anyway -- this just avoids that cap being spent entirely on a
+    # redundant copy of content `md` already has.
+    tables_hint = json.dumps(ctx.get("tables", [])[:1])[:300]
     pages = ctx.get("pages", [])
     max_pages = cfg.get("max_pages", 3)
 
@@ -418,15 +421,47 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         prompt += "Document content (markdown with layout) follows, then extracted tables.\n\n" + chunk
         if i == 0:
             prompt += "\n\nTABLES:\n" + tables_hint
+        # Hard backstop. Every chars-per-token ratio assumed here so far has
+        # been wrong, twice: billing content (CPT/HCPCS codes, NPIs, dollar
+        # amounts, dates, MICR strings) is mostly digits and symbols, and
+        # that tokenizes far denser than English prose, by an amount that
+        # keeps moving the goalposts (9000 chars -> 4581 tokens, then 6000
+        # chars -> 4532 tokens -- the real ratio got WORSE, not better, when
+        # the cap shrank, meaning density isn't even constant across
+        # documents). Stop estimating a ratio and just cap low enough that
+        # no plausible density can overflow: 2000 chars would need under
+        # 0.49 chars/token to still exceed 4096 -- not a real tokenizer
+        # outcome for any text, JSON, or digit-heavy content.
+        MAX_PROMPT_CHARS = 2000
+        if len(prompt) > MAX_PROMPT_CHARS:
+            prompt = prompt[:MAX_PROMPT_CHARS]
         content: list[dict] = [{"type": "text", "text": prompt}]
         # Multimodal: page images give layout cues text alone loses -- but
-        # only when the configured model actually supports it. Confirmed
-        # live: Ollama hard-400s ("model does not support multimodal
-        # requests") rather than ignoring an image sent to a text-only model.
+        # only when the configured model actually supports it. The deployed
+        # model/vision flag found live (VLM_MODEL=qwen2.5vl:7b, VLM_VISION=
+        # true) don't match this file's own long-standing comments assuming
+        # a text-only model with vision off -- someone upgraded the live
+        # config without updating here. With vision genuinely on, every
+        # call attached a FULL page bitmap straight from pdf_to_pages'
+        # 200-300dpi render (1700x2200+ px for a letter page) -- the real
+        # source of every "exceeds context size" failure this prompt-char
+        # cap could never fix, since image tokens aren't text and this cap
+        # never touched them. Confirmed live against this exact endpoint/
+        # model: a 2000-char text prompt alone costs ~1030 prompt tokens,
+        # but the SAME request with a page image attached costs ~2095 --
+        # ~1065 tokens of pure image cost -- and that number held constant
+        # (not proportional) across every size tried from 350px up to
+        # 612px on the long edge, i.e. a resize within that range is free:
+        # it doesn't trade away any of the layout-cue fidelity the image
+        # was for. Thumbnail to a small fixed box before encoding instead
+        # of sending the raw full-DPI render.
         if cfg.get("vision"):
+            max_px = cfg.get("vlm_image_max_px", 650)
             for page in pages[i * max_pages:(i + 1) * max_pages] or pages[:max_pages]:
+                thumb = page.copy()
+                thumb.thumbnail((max_px, max_px))
                 content.append({"type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{pil_to_b64(page)}"}})
+                                "image_url": {"url": f"data:image/png;base64,{pil_to_b64(thumb)}"}})
                 break  # one page image per chunk keeps token cost bounded
         parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
         in_domain_votes.append(bool(parsed.pop("_in_domain", True)))

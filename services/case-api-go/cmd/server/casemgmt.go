@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -95,13 +96,31 @@ func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 		limit = min(n, 500)
 	}
 	where, args := "tenant=$1", []any{tenant}
-	if caseID := q.Get("case_id"); caseID != "" {
+	// "filter by case id" read as a search box, but case_id here is always
+	// the raw case UUID -- nobody searches by that, they search by the case
+	// NUMBER they actually see everywhere else in the UI (e.g. FL26-012).
+	// Typing a case number against an exact UUID match silently returned
+	// nothing, which is almost certainly what "search doesn't work" was.
+	// Resolve a non-UUID input as a case_number first.
+	if caseID := strings.TrimSpace(q.Get("case_id")); caseID != "" {
+		if _, err := uuid.Parse(caseID); err != nil {
+			if cfg := s.loadProgram(r, tenant); cfg != nil {
+				var resolved string
+				_ = s.db.QueryRow(r.Context(),
+					fmt.Sprintf(`SELECT id::text FROM tenant_%s.cases WHERE case_number=$1`, sanitizeTenant(tenant)),
+					caseID).Scan(&resolved)
+				caseID = resolved // "" if no match -- the WHERE clause below then correctly matches nothing
+			}
+		}
 		args = append(args, caseID)
 		where += fmt.Sprintf(" AND case_id=$%d", len(args))
 	}
-	if action := q.Get("action"); action != "" {
-		args = append(args, action)
-		where += fmt.Sprintf(" AND action=$%d", len(args))
+	// Exact match on action forced the user to know and type the literal
+	// constant (e.g. "CASE_STATUS_CHANGED") -- partial, case-insensitive
+	// match lets "status" or "escalat" actually find something.
+	if action := strings.TrimSpace(q.Get("action")); action != "" {
+		args = append(args, "%"+action+"%")
+		where += fmt.Sprintf(" AND action ILIKE $%d", len(args))
 	}
 	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT id, case_id, action, payload, prev_hash, hash, created_at
@@ -194,6 +213,10 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO public.case_activities (tenant, case_id, type, body)
 		VALUES ($1,$2,'MILESTONE',$3)`, tenant, caseID,
 		fmt.Sprintf("Assigned to %s (%s)", assignee, in.Role))
+	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "assigned_to": assignee,
+		"role": in.Role, "manual": in.Assignee != "",
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"assigned_to": assignee, "role": in.Role})
 }
 
@@ -291,6 +314,10 @@ func (s *server) relateCases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	s.logAudit(r.Context(), tenant, in.CaseID, "CASES_RELATED", map[string]any{
+		"by":              r.Context().Value(ctxPrincipal{}).(principal).Subject,
+		"related_case_id": in.RelatedID, "rel_type": in.RelType,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "related"})
 }
 
@@ -411,12 +438,24 @@ func (s *server) getChecklist(w http.ResponseWriter, r *http.Request) {
 func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	_, err := s.db.Exec(r.Context(), `
+	itemID := chi.URLParam(r, "itemId")
+	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.case_checklists SET done=true, done_by=$3, done_at=now()
-		WHERE tenant=$1 AND id=$2`, tenant, chi.URLParam(r, "itemId"), p.Subject)
+		WHERE tenant=$1 AND id=$2`, tenant, itemID, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	// Only audit when a real item was ticked; look up its case so the entry
+	// is filterable per case.
+	if res.RowsAffected() > 0 {
+		var itemCaseID, stage, item string
+		_ = s.db.QueryRow(r.Context(), `
+			SELECT case_id, stage, item FROM public.case_checklists WHERE tenant=$1 AND id=$2`,
+			tenant, itemID).Scan(&itemCaseID, &stage, &item)
+		s.logAudit(r.Context(), tenant, itemCaseID, "CHECKLIST_ITEM_CHECKED", map[string]any{
+			"by": p.Subject, "item_id": itemID, "stage": stage, "item": item,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "checked"})
 }
@@ -563,6 +602,10 @@ func (s *server) generateLetter(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO tenant_%s.documents (id, case_id, object_key, size_bytes, content_type, sealed, uploaded_by, version)
 		VALUES ($1,$2,$3,$4,'text/plain',false,'system',1)`, sanitizeTenant(tenant)),
 		docID, caseID, key, buf.Len())
+	s.logAudit(r.Context(), tenant, caseID, "LETTER_GENERATED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "template": name,
+		"doc_id": docID, "case_number": cn,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"doc_id": docID, "object_key": key})
 }
 

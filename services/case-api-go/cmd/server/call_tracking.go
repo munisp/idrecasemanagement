@@ -57,6 +57,9 @@ func (s *server) logCall(w http.ResponseWriter, r *http.Request) {
 		s.logActivity(r.Context(), tenant, caseID,
 			"CALL", fmt.Sprintf("%s call with %s by %s: %s", in.Direction, in.Phone, p.Subject, in.Summary))
 	}
+	s.logAudit(r.Context(), tenant, caseID, "CALL_LOGGED", map[string]any{
+		"by": p.Subject, "call_id": id, "direction": in.Direction, "phone": in.Phone,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
@@ -135,6 +138,9 @@ func (s *server) logInquiry(w http.ResponseWriter, r *http.Request) {
 		s.logActivity(r.Context(), tenant, caseID,
 			"INQUIRY", fmt.Sprintf("%s inquiry (%s) logged by %s", in.Method, in.InquiryType, p.Subject))
 	}
+	s.logAudit(r.Context(), tenant, caseID, "INQUIRY_LOGGED", map[string]any{
+		"by": p.Subject, "inquiry_id": id, "method": in.Method, "inquiry_type": in.InquiryType,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 

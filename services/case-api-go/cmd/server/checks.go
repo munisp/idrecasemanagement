@@ -74,6 +74,10 @@ func (s *server) uploadCheck(w http.ResponseWriter, r *http.Request) {
 		"object_key": key, "content_type": ct,
 	})
 	s.logActivity(r.Context(), tenant, "", "CHECK_RECEIVED", "Check image received for extraction ("+checkID+")")
+	s.logAudit(r.Context(), tenant, "", "CHECK_UPLOADED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "check_id": checkID,
+		"content_type": ct, "bytes": len(img),
+	})
 	writeJSON(w, http.StatusAccepted, map[string]any{"check_id": checkID, "status": "RECEIVED"})
 }
 
@@ -163,6 +167,12 @@ func (s *server) checkResult(w http.ResponseWriter, r *http.Request) {
 		checkID, tenant, status)
 	s.logActivity(r.Context(), tenant, caseID, "CHECK_"+status,
 		fmt.Sprintf("Check %s extracted (conf=%s, match=%s)", checkID, in.Confidence, orDash(matchedBy)))
+	// Account/routing numbers deliberately left out of the audit payload.
+	s.logAudit(r.Context(), tenant, caseID, "CHECK_PROCESSED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "check_id": checkID,
+		"status": status, "matched_by": matchedBy, "invoice_id": invID,
+		"amount_cents": in.AmountCents, "confidence": in.Confidence,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": status, "match": matchedBy, "invoice_id": invID})
 }
 
@@ -211,6 +221,10 @@ func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 	s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
 		"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
 		"method": "check", "remittance_ref": in.RemittanceRef, "tenant": tenant,
+	})
+	s.logAudit(r.Context(), tenant, caseID, "CHECK_CLEARED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "check_id": checkID,
+		"invoice_id": invID, "amount_cents": amount, "remittance_ref": in.RemittanceRef,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "CLEARED"})
 }

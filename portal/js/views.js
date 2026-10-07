@@ -619,18 +619,29 @@ const Views = (() => {
   async function showAnalysis(caseId, docId) {
     const box = $("#analysis");
     box.innerHTML = `<p class="muted">Loading analysis…</p>`;
+    const retryBtn = `<button onclick="Views.retryAnalysis('${caseId}','${docId}')">↻ Retry analysis</button>`;
     try {
       const a = await Api.cases.analysis(caseId, docId);
       const r = a.result || {};
+      const hasFindings = (r.findings || []).length > 0;
       box.innerHTML = `<h3>Document analysis ${badge(a.status)}</h3>
         <p class="muted">type: ${esc(a.doc_type)} · seal detected: ${r.seal_detected ? "yes" : "no"} · tables: ${r.table_count ?? 0}</p>
         <pre>${esc(JSON.stringify(r.extracted || {}, null, 2))}</pre>
-        ${(r.findings || []).length ? `<p class="error">Findings: ${esc(JSON.stringify(r.findings))}</p>` : ""}`;
+        ${hasFindings ? `<p class="error">Findings: ${esc(JSON.stringify(r.findings))}</p>` : ""}
+        <p>${retryBtn}</p>`;
     } catch (e) {
       box.innerHTML = e.status === 404
-        ? `<h3>Document analysis</h3><p class="muted">No analysis result yet — the document is still queued for the OCR/extraction pipeline (or was uploaded before doc-intel processed it). Try again shortly.</p>`
+        ? `<h3>Document analysis</h3><p class="muted">No analysis result yet — the document is still queued for the OCR/extraction pipeline (or was uploaded before doc-intel processed it). Try again shortly.</p><p>${retryBtn}</p>`
         : err(e);
     }
+  }
+
+  async function retryAnalysis(caseId, docId) {
+    try {
+      await Api.cases.retryAnalysis(caseId, docId);
+      UI.toast("Re-analysis queued — refreshing shortly");
+      setTimeout(() => showAnalysis(caseId, docId), 4000);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function check(itemId) {
@@ -802,124 +813,156 @@ const Views = (() => {
   // Reports: runnable on-platform, each card runs its query, renders a chart
   // and a table, and exports CSV. No external BI tool needed for the
   // statutory reporting loop.
+  // Reports: every card loads automatically on open (these are cheap
+  // aggregate queries, not expensive jobs -- making a reporting LANDING
+  // page show nothing until four separate clicks was the wrong default)
+  // and each still carries its own ↻ refresh + CSV export. A KPI strip up
+  // top answers "how are we doing" in one glance before anyone reads a
+  // single chart, same pattern Financials already uses.
+  const RPT_PALETTE = ["#2E6B52", "#B08D3E", "#1D4E7E", "#5B3E8C", "#9C2B1F", "#3F7E6B", "#7A5C2E"];
+  // UI.run(ctrl, fn) early-returns with ctrl undefined (no button to
+  // animate) -- fine for a click handler, wrong for the initial auto-load
+  // call, which has no button at all and would silently never run.
+  const runOrDirect = (btn, fn) => btn ? UI.run(btn, fn, "") : fn();
+  async function loadRptStatus(btn) {
+    await runOrDirect(btn, async () => {
+      try {
+        const rows = await Api.reports.summary();
+        // Federal NSA cases price on QPA; programmed tenants (FL AHCA) have
+        // no QPA concept and return 0 there -- the backend picks the right
+        // column server-side and tells us which one via amount_label.
+        const label = rows[0]?.amount_label || "QPA";
+        const open = rows.filter((s) => !/^CLOSED|^Decided|^Dismissed|^Withdrawn|^Ineligible/.test(s.status))
+          .reduce((n, s) => n + s.count, 0);
+        document.getElementById("kpi-open").textContent = open.toLocaleString();
+        document.getElementById("rpt-status-out").innerHTML = `<div class="chart-card">` +
+          chartDonut(rows.map((s, i) => ({ label: s.status, value: s.count, color: RPT_PALETTE[i % RPT_PALETTE.length] }))) +
+          `</div><table><thead><tr><th>Status</th><th>Count</th><th>Avg ${esc(label)}</th></tr></thead><tbody>` +
+          rows.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${Number(s.avg_amount_usd || 0).toFixed(0)}</td></tr>`).join("") +
+          `</tbody></table>`;
+        document.getElementById("rpt-status-csv").onclick = () =>
+          csvDownload("case_status_rollup.csv", ["status", "count", `avg_${label.toLowerCase()}_usd`],
+            rows.map((s) => [s.status, s.count, Number(s.avg_amount_usd || 0).toFixed(2)]));
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
+  }
+  async function loadRptSla(btn) {
+    await runOrDirect(btn, async () => {
+      try {
+        const sla = await Api.reports.sla();
+        document.getElementById("kpi-breaches").textContent = sla.length.toLocaleString();
+        const byClock = {};
+        sla.forEach((b) => { byClock[b.clock] = (byClock[b.clock] || 0) + 1; });
+        document.getElementById("rpt-sla-out").innerHTML = (sla.length
+          ? `<div class="chart-card">` + chartHBars(
+              Object.entries(byClock).map(([k, v]) => ({ label: k, value: v }))) + `</div>` +
+            `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
+            sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td>
+              <td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") + `</tbody></table>`
+          : `<p class="muted">No breaches recorded — all statutory clocks held. ✔</p>`);
+        document.getElementById("rpt-sla-csv").onclick = () => csvDownload("sla_breaches.csv", ["case_id", "clock", "detail", "at"],
+          sla.map((x) => [x.case_id, x.clock, x.detail, x.at]));
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
+  }
+  async function loadRptFin(btn) {
+    await runOrDirect(btn, async () => {
+      try {
+        const fin = await Api.program.financial();
+        const k = fin.kpi || {};
+        const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+        document.getElementById("kpi-collected").textContent = usd(k.collected_30d_cents);
+        const buckets = ["current", "1-30", "31-60", "60+"].map((b) => {
+          const row = (fin.aging || []).find((a) => a.bucket === b);
+          return { label: b === "current" ? "Current" : b + "d", value: row ? row.total_cents / 100 : 0 };
+        });
+        document.getElementById("rpt-fin-out").innerHTML =
+          `<div class="kpi-row">
+             <div class="kpi"><span class="kpi-n">${usd(k.collected_cents)}</span><span class="kpi-l">Collected</span></div>
+             <div class="kpi"><span class="kpi-n">${usd(k.collected_30d_cents)}</span><span class="kpi-l">Last 30 days</span></div>
+             <div class="kpi"><span class="kpi-n">${usd(k.refunded_cents)}</span><span class="kpi-l">Refunded</span></div></div>
+           <div class="chart-card">${chartHBars(buckets, (v) => "$" + v.toLocaleString())}</div>
+           <p class="muted">A/R aging, open invoices, USD</p>`;
+        document.getElementById("rpt-fin-csv").onclick = () =>
+          csvDownload("financial_summary.csv", ["metric", "value_usd"], [
+            ["collected_all_time", (k.collected_cents || 0) / 100],
+            ["collected_30d", (k.collected_30d_cents || 0) / 100],
+            ["refunded", (k.refunded_cents || 0) / 100],
+            ["payments_settled", k.payments_count ?? 0]]);
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
+  }
+  async function loadRptTrend(btn) {
+    await runOrDirect(btn, async () => {
+      try {
+        const d = await Api.program.opsDashboard();
+        const mk = (arr) => (arr || []).map((p) => ({ x: p.d || p.day || "", y: p.n || 0 }));
+        document.getElementById("rpt-trend-out").innerHTML =
+          `<div class="chart-grid">
+             <div class="chart-card"><h3>Intake — last 30 days</h3>${chartArea(mk(d.cases_trend), { label: "rpt-intake" })}</div>
+             <div class="chart-card"><h3>Throughput (tasks completed)</h3>${chartArea(mk(d.throughput_trend), { label: "rpt-thru", color: "#1D4E7E" })}</div>
+             <div class="chart-card"><h3>Collections</h3>${chartArea(mk(d.collections_trend), { label: "rpt-coll", color: "#B08D3E", fmt: (v) => "$" + (v / 100).toLocaleString() })}</div>
+           </div>`;
+        document.getElementById("rpt-trend-csv").onclick = () =>
+          csvDownload("trends_30d.csv", ["day", "intake", "tasks_done", "collections_cents"],
+            (d.cases_trend || []).map((p, i) => [p.d || p.day, p.n,
+              (d.throughput_trend || [])[i]?.n ?? 0, (d.collections_trend || [])[i]?.n ?? 0]));
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
+  }
+  const RPT_TABS = [
+    { key: "status", icon: "◔", label: "Case status", accent: 1,
+      desc: "dispute counts and average amount by lifecycle status" },
+    { key: "sla", icon: "◷", label: "SLA breaches", accent: 2,
+      desc: "every clock breach, grouped by clock, with case references" },
+    { key: "fin", icon: "◍", label: "Financial", accent: 3,
+      desc: "collections, refunds, A/R aging — the money picture" },
+    { key: "trend", icon: "▲", label: "Trends", accent: 4,
+      desc: "30-day intake, completed tasks, collections" },
+  ];
+  function switchRptTab(key) {
+    RPT_TABS.forEach((t) => {
+      document.getElementById(`rpt-tab-${t.key}`)?.classList.toggle("active", t.key === key);
+      const panel = document.getElementById(`rpt-panel-${t.key}`);
+      if (panel) panel.hidden = t.key !== key;
+    });
+  }
   async function reports() {
-    const PALETTE = ["#2E6B52", "#B08D3E", "#1D4E7E", "#5B3E8C", "#9C2B1F", "#3F7E6B", "#7A5C2E"];
     const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
       ? `<a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>` : "";
     afterRender(() => {
-      // 1) Case status rollup
-      document.getElementById("rpt-status")?.addEventListener("click", async (ev) => {
-        await UI.run(ev.currentTarget, async () => {
-          try {
-            const rows = await Api.reports.summary();
-            // Federal NSA cases price on QPA; programmed tenants (FL AHCA)
-            // have no QPA concept and return 0 there -- the backend already
-            // picks the right column server-side and tells us which one via
-            // amount_label (see program.go/reports.go). This card previously
-            // hardcoded avg_qpa_usd, which doesn't exist in the response at
-            // all for programmed tenants -- every FL row showed "Avg QPA $0".
-            const label = rows[0]?.amount_label || "QPA";
-            const el = document.getElementById("rpt-status-out");
-            el.innerHTML = `<div class="chart-card">` +
-              chartDonut(rows.map((s, i) => ({ label: s.status, value: s.count, color: PALETTE[i % PALETTE.length] }))) +
-              `</div><table><thead><tr><th>Status</th><th>Count</th><th>Avg ${esc(label)}</th></tr></thead><tbody>` +
-              rows.map((s) => `<tr><td>${badge(s.status)}</td><td>${s.count}</td><td>$${Number(s.avg_amount_usd || 0).toFixed(0)}</td></tr>`).join("") +
-              `</tbody></table>
-               <p><button class="mini" id="rpt-status-csv">⬇ CSV</button></p>`;
-            document.getElementById("rpt-status-csv").onclick = () =>
-              csvDownload("case_status_rollup.csv", ["status", "count", `avg_${label.toLowerCase()}_usd`],
-                rows.map((s) => [s.status, s.count, Number(s.avg_amount_usd || 0).toFixed(2)]));
-          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-        }, "Running…");
-      });
-      // 2) SLA breaches
-      document.getElementById("rpt-sla")?.addEventListener("click", async (ev) => {
-        await UI.run(ev.currentTarget, async () => {
-          try {
-            const sla = await Api.reports.sla();
-            const byClock = {};
-            sla.forEach((b) => { byClock[b.clock] = (byClock[b.clock] || 0) + 1; });
-            const el = document.getElementById("rpt-sla-out");
-            el.innerHTML = (sla.length
-              ? `<div class="chart-card">` + chartHBars(
-                  Object.entries(byClock).map(([k, v]) => ({ label: k, value: v }))) + `</div>` +
-                `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
-                sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td>
-                  <td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") + `</tbody></table>
-                 <p><button class="mini" id="rpt-sla-csv">⬇ CSV</button></p>`
-              : `<p class="muted">No breaches recorded — all statutory clocks held. ✔</p>`);
-            const b = document.getElementById("rpt-sla-csv");
-            if (b) b.onclick = () => csvDownload("sla_breaches.csv", ["case_id", "clock", "detail", "at"],
-              sla.map((x) => [x.case_id, x.clock, x.detail, x.at]));
-          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-        }, "Running…");
-      });
-      // 3) Financial summary
-      document.getElementById("rpt-fin")?.addEventListener("click", async (ev) => {
-        await UI.run(ev.currentTarget, async () => {
-          try {
-            const fin = await Api.program.financial();
-            const k = fin.kpi || {};
-            const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
-            const buckets = ["current", "1-30", "31-60", "60+"].map((b) => {
-              const row = (fin.aging || []).find((a) => a.bucket === b);
-              return { label: b === "current" ? "Current" : b + "d", value: row ? row.total_cents / 100 : 0 };
-            });
-            document.getElementById("rpt-fin-out").innerHTML =
-              `<div class="kpi-row">
-                 <div class="kpi"><span class="kpi-n">${usd(k.collected_cents)}</span><span class="kpi-l">Collected</span></div>
-                 <div class="kpi"><span class="kpi-n">${usd(k.collected_30d_cents)}</span><span class="kpi-l">Last 30 days</span></div>
-                 <div class="kpi"><span class="kpi-n">${usd(k.refunded_cents)}</span><span class="kpi-l">Refunded</span></div></div>
-               <div class="chart-card">${chartHBars(buckets, (v) => "$" + v.toLocaleString())}</div>
-               <p class="muted">A/R aging, open invoices, USD</p>
-               <p><button class="mini" id="rpt-fin-csv">⬇ CSV</button></p>`;
-            document.getElementById("rpt-fin-csv").onclick = () =>
-              csvDownload("financial_summary.csv", ["metric", "value_usd"], [
-                ["collected_all_time", (k.collected_cents || 0) / 100],
-                ["collected_30d", (k.collected_30d_cents || 0) / 100],
-                ["refunded", (k.refunded_cents || 0) / 100],
-                ["payments_settled", k.payments_count ?? 0]]);
-          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-        }, "Running…");
-      });
-      // 4) Caseload & throughput trend
-      document.getElementById("rpt-trend")?.addEventListener("click", async (ev) => {
-        await UI.run(ev.currentTarget, async () => {
-          try {
-            const d = await Api.program.opsDashboard();
-            const mk = (arr) => (arr || []).map((p) => ({ x: p.d || p.day || "", y: p.n || 0 }));
-            document.getElementById("rpt-trend-out").innerHTML =
-              `<div class="chart-grid">
-                 <div class="chart-card"><h3>Intake — last 30 days</h3>${chartArea(mk(d.cases_trend), { label: "rpt-intake" })}</div>
-                 <div class="chart-card"><h3>Throughput (tasks completed)</h3>${chartArea(mk(d.throughput_trend), { label: "rpt-thru", color: "#1D4E7E" })}</div>
-                 <div class="chart-card"><h3>Collections</h3>${chartArea(mk(d.collections_trend), { label: "rpt-coll", color: "#B08D3E", fmt: (v) => "$" + (v / 100).toLocaleString() })}</div>
-               </div>
-               <p><button class="mini" id="rpt-trend-csv">⬇ CSV</button></p>`;
-            document.getElementById("rpt-trend-csv").onclick = () =>
-              csvDownload("trends_30d.csv", ["day", "intake", "tasks_done", "collections_cents"],
-                (d.cases_trend || []).map((p, i) => [p.d || p.day, p.n,
-                  (d.throughput_trend || [])[i]?.n ?? 0, (d.collections_trend || [])[i]?.n ?? 0]));
-          } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-        }, "Running…");
-      });
+      RPT_TABS.forEach((t) => document.getElementById(`rpt-tab-${t.key}`)
+        ?.addEventListener("click", () => switchRptTab(t.key)));
+      document.getElementById("rpt-status-refresh")?.addEventListener("click", (ev) => loadRptStatus(ev.currentTarget));
+      document.getElementById("rpt-sla-refresh")?.addEventListener("click", (ev) => loadRptSla(ev.currentTarget));
+      document.getElementById("rpt-fin-refresh")?.addEventListener("click", (ev) => loadRptFin(ev.currentTarget));
+      document.getElementById("rpt-trend-refresh")?.addEventListener("click", (ev) => loadRptTrend(ev.currentTarget));
+      // All four load up front (tab switching is then instant, no reload
+      // wait) -- same auto-load behavior as before tabs, just reshuffled
+      // into panels so a wide table/chart row never fights 3 siblings for
+      // horizontal space.
+      loadRptStatus(); loadRptSla(); loadRptFin(); loadRptTrend();
     });
+    const loading = `<p class="muted">Loading…</p>`;
+    const panelBody = { status: loading, sla: loading, fin: loading, trend: loading };
     return `<div class="view-head"><h1>Reports</h1>
-      <span class="muted">run on demand, charted on-platform, exportable — statutory reporting without external BI</span></div>
+      <span class="muted">charted on-platform, exportable — statutory reporting without external BI</span></div>
       ${geoLink ? `<p>${geoLink}</p>` : ""}
-      <div class="rpt-grid">
-        <div class="rpt-card"><h2>Case status rollup</h2>
-          <p class="muted">dispute counts and average QPA by lifecycle status</p>
-          <button id="rpt-status">▶ Run report</button><div id="rpt-status-out"></div></div>
-        <div class="rpt-card"><h2>Statutory SLA breaches</h2>
-          <p class="muted">every clock breach, grouped by clock, with case references</p>
-          <button id="rpt-sla">▶ Run report</button><div id="rpt-sla-out"></div></div>
-        <div class="rpt-card"><h2>Financial summary</h2>
-          <p class="muted">collections, refunds, A/R aging — the money picture</p>
-          <button id="rpt-fin">▶ Run report</button><div id="rpt-fin-out"></div></div>
-        <div class="rpt-card"><h2>Caseload & throughput trend</h2>
-          <p class="muted">30-day intake, completed tasks, collections</p>
-          <button id="rpt-trend">▶ Run report</button><div id="rpt-trend-out"></div></div>
-      </div>`;
+      <div class="kpi-row rpt-kpi-strip">
+        <div class="kpi"><span class="kpi-n" id="kpi-open">—</span><span class="kpi-l">Open disputes</span></div>
+        <div class="kpi kpi-danger"><span class="kpi-n" id="kpi-breaches">—</span><span class="kpi-l">SLA breaches</span></div>
+        <div class="kpi"><span class="kpi-n" id="kpi-collected">—</span><span class="kpi-l">Collected (30 days)</span></div>
+      </div>
+      <div class="rpt-tabs" role="tablist">
+        ${RPT_TABS.map((t, i) => `<button class="rpt-tab rpt-accent-${t.accent} ${i === 0 ? "active" : ""}"
+          id="rpt-tab-${t.key}" role="tab">${t.icon} ${esc(t.label)}</button>`).join("")}
+      </div>
+      ${RPT_TABS.map((t, i) => `<div class="rpt-panel rpt-accent-${t.accent}" id="rpt-panel-${t.key}" ${i === 0 ? "" : "hidden"}>
+        <div class="rpt-card-head"><h2>${t.icon} ${esc(t.label)}</h2>
+          <div class="rpt-card-actions"><button class="mini" id="rpt-${t.key}-refresh" title="Refresh">↻</button>
+            <button class="mini" id="rpt-${t.key}-csv">⬇ CSV</button></div></div>
+        <p class="muted">${esc(t.desc)}</p>
+        <div id="rpt-${t.key}-out">${panelBody[t.key]}</div></div>`).join("")}`;
   }
 
   // ---- Ask the graph (EPR-KGQA) ------------------------------------------------
@@ -1439,11 +1482,18 @@ const Views = (() => {
     // other views in this file for why that order matters (setTimeout(fn,0)
     // beats an in-flight fetch if called before it).
     try {
-      const r = await Api.program.intake({ limit: 50 });
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: 50 }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
       const intakeNext = r.next_offset ?? -1;
       const intakeTotal = r.total ?? rows.length;
       window._intakePager = { next: intakeNext }; // reset on every view render
+      // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
+      // no QPA concept and use a disputed amount instead -- same split as
+      // everywhere else amounts show in this app. The amount typed here is
+      // sent as both keys (programops.go's createIntake only reads the one
+      // that applies to this tenant and ignores the other), so the form
+      // itself doesn't need to branch -- only its label does.
+      const label = amtLabel(prog);
       afterRender(() => $("#intake-form")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         await newIntake(ev.target);
@@ -1456,9 +1506,9 @@ const Views = (() => {
           <select name="filing_party_type" title="filing party">
             <option value="PROVIDER">Provider files</option>
             <option value="HEALTH_PLAN">Health plan files</option></select>
-          <input name="disputed_amount" type="number" step="0.01" placeholder="disputed amount $" />
+          <input name="amount" type="number" step="0.01" placeholder="${esc(label)} $" />
           <button>New intake request</button></form>` +
-        (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Disputed</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
+        (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
         (intakeNext >= 0 ? `<p class="pager" id="intake-pg"><span class="muted">Showing ${rows.length} of ${intakeTotal}</span>
@@ -1469,14 +1519,17 @@ const Views = (() => {
   // Shared by intake()'s initial render and intakeMore()'s appended page --
   // a real-case row (origin:"case", from startAhcaCase) has no intake
   // lifecycle left to advance and no outreach-based day-13 clock; only
-  // legacy intake_requests rows get those.
+  // legacy intake_requests rows get those. The amount cell reads whichever
+  // of qpa_cents/disputed_amount_cents the backend actually populated for
+  // that row's tenant (only one of the two is ever non-null per row).
   function intakeRowHtml(i) {
+    const amtCents = i.disputed_amount_cents ?? i.qpa_cents;
     return `<tr><td>${i.case_id ?
         `<a href="#/cases/${i.case_id}">${esc(i.case_number || "view case")}</a>` :
         `<span class="muted">—</span>`}</td>
       <td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
       <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
-      <td>${i.disputed_amount_cents ? `$${(i.disputed_amount_cents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
+      <td>${amtCents ? `$${(amtCents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
       <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
       <td class="muted">${fmtDate(i.outreach_at)}</td>
       <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
@@ -1507,10 +1560,15 @@ const Views = (() => {
 
   async function newIntake(form) {
     try {
+      // Sent as both keys -- createIntake (programops.go) only reads the one
+      // that applies to this tenant (qpa_cents for federal, disputed_amount_
+      // cents for programmed) and ignores the other, so the form doesn't
+      // need to know which kind of tenant it's running against.
+      const cents = form.amount.value ? Math.round(parseFloat(form.amount.value) * 100) : 0;
       const r = await Api.program.createIntake({
         email: form.email.value, contact_name: form.contact_name.value, org: form.org.value,
         filing_party_type: form.filing_party_type.value,
-        disputed_amount_cents: form.disputed_amount.value ? Math.round(parseFloat(form.disputed_amount.value) * 100) : 0,
+        disputed_amount_cents: cents, qpa_cents: cents,
       });
       if (r.programmed) {
         UI.toast(`Case ${r.case_number} opened — filing instructions emailed to ${esc(form.email.value)}`, { sticky: true });
@@ -2111,5 +2169,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, createTenantFlow, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, createTenantFlow, auditLog, intakeMore, financeMore, opsDashboard };
 })();

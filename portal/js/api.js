@@ -88,6 +88,7 @@ const Api = (() => {
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
+      retryAnalysis: (id, docId) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/retry`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
       activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },

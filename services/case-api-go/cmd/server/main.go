@@ -441,6 +441,7 @@ func main() {
 		r.Get("/cases/{caseId}/documents/{docId}/download", s.downloadDocument)
 		r.Patch("/cases/{caseId}/documents/{docId}", s.moveDocument) // re-file to folder (staff only)
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
+		r.Post("/cases/{caseId}/documents/{docId}/analysis/retry", s.retryDocumentAnalysis)
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
@@ -818,6 +819,10 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
 	}
 	s.graphSync(tenant) // nudge FalkorDB + lakehouse silver (best-effort)
+	s.logAudit(r.Context(), tenant, caseID, "CASE_INITIATED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "case_number": req.CaseNumber,
+		"status": initialStatus, "workflow_id": wfID, "late_initiation": lateInitiation,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "workflow_id": wfID, "status": initialStatus,
 		"late_initiation_flagged": lateInitiation,
@@ -1000,6 +1005,9 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, id, body.Signal,
 		fmt.Sprintf("Workflow signal %s delivered to %s — %s", body.Signal, wfID, truncate(string(detail), 500)))
 	s.graphSync(tenant) // graph reflects status transitions (best-effort)
+	s.logAudit(r.Context(), tenant, id, "CASE_SIGNALED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "signal": body.Signal, "workflow_id": wfID,
+	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
 }
 
@@ -1140,6 +1148,9 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	s.publish(r.Context(), tenant, "fees", map[string]any{
 		"type": "fee.transfer", "case_id": req.CaseID, "kind": req.Kind,
 		"party": req.PartyID, "amount_cents": req.Amount, "post": req.PostKind,
+	})
+	s.logAudit(r.Context(), tenant, req.CaseID, "FEE_TRANSFER_POSTED", map[string]any{
+		"by": p.Subject, "kind": req.Kind, "party": req.PartyID, "amount_cents": req.Amount, "post_kind": req.PostKind,
 	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "recorded"})
 }
