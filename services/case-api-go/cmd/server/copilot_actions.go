@@ -187,7 +187,13 @@ func (s *server) copilotProposeActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	system, user := copilotActionsPrompt(facts)
-	reply, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 1200)
+	// Strict JSON, ≤5 actions, one short rationale paragraph -- genuinely
+	// needs well under this. 1200 was an unused ceiling shared with the
+	// prose endpoints; at this model's observed ~3.3 tok/s a model that
+	// rambled instead of complying could still run minutes long and
+	// 504/502 at every proxy layer in front of it (confirmed live on the
+	// sibling /copilot/brief endpoint).
+	reply, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 400)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":  "copilot model unreachable — no batch proposed; the facts below are still authoritative",

@@ -73,7 +73,7 @@ Write a decision-preparation brief for the human case worker, in exactly these s
 1. ELIGIBILITY BRIEF — posture, rule basis, and (if listed) exactly which inputs are missing for auto-adjudication.
 2. EVIDENCE COMPARISON — what the analyzed documents establish, QPA vs disputed amount when both present, and any conflicts between documents.
 3. UNCERTAINTIES — low-confidence fields, findings, and anything a human must verify before relying on this brief.
-Rules: use ONLY the JSON facts below. If a fact is absent write "not in record". NEVER invent identifiers, amounts, dates, or parties. Cite the source field for every number (e.g. "per doc eob trusted field allowed_amount_usd"). Close with one line: "DRAFT — advisory only; not a determination."`
+Rules: use ONLY the JSON facts below. If a fact is absent write "not in record". NEVER invent identifiers, amounts, dates, or parties. Cite the source field for every number (e.g. "per doc eob trusted field allowed_amount_usd"). Keep each section to 1-2 short sentences — this runs on a slow local model, so brevity matters; target 120 words total, never more than 200. Close with one line: "DRAFT — advisory only; not a determination."`
 	facts, _ := json.MarshalIndent(f, "", "  ")
 	user = "CASE FACT SHEET (platform-verified):\n" + string(facts)
 	return system, user
@@ -266,7 +266,12 @@ func (s *server) copilotBrief(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	system, user := copilotPrompt(facts)
-	brief, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 1200)
+	// 320 tokens ≈ 200 words, matching the prompt's own cap -- at this
+	// model's observed ~3.3 tok/s on this hardware, 1200 meant a brief
+	// could run 5-6 minutes and 504/502 at every proxy layer in front of
+	// it (confirmed live). The real fix is the shorter prompt above; this
+	// is just the hard backstop in case the model doesn't fully comply.
+	brief, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 320)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":  "copilot model unreachable — the brief is advisory; the facts below are still authoritative",

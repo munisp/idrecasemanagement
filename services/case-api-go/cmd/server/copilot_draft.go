@@ -52,7 +52,9 @@ attach to a payment determination. Structure:
 3. EVIDENCE — what the trusted document fields support; name low-confidence
    fields as items the reviewer must verify, never as fact.
 4. OPEN QUESTIONS — uncertainties the reviewer must resolve.
-5. PROPOSED RATIONALE — 2-4 sentences the reviewer can accept, edit, or reject.`
+5. PROPOSED RATIONALE — 2-4 sentences the reviewer can accept, edit, or reject.
+Keep sections 1-4 to 1-2 short sentences each — this runs on a slow local
+model, so brevity matters; target 180 words total, never more than 280.`
 	case draftKindCorrespondence:
 		system = base + `
 
@@ -107,7 +109,14 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	system, user := copilotDraftPrompt(in.Kind, facts, in.Instructions)
-	draft, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 1500)
+	// 500 tokens ≈ 300 words, comfortably above either prompt's own target
+	// (180/200 words) with headroom -- at this model's observed ~3.3 tok/s,
+	// 1500 meant a draft could run 5+ minutes and 504/502 at every proxy
+	// layer in front of it (confirmed live on the sibling /copilot/brief
+	// endpoint). The real fix is the brevity instructions in the prompts
+	// above; this is just the hard backstop in case the model doesn't
+	// fully comply.
+	draft, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 500)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":  "copilot model unreachable — no draft created; the facts below are still authoritative",
