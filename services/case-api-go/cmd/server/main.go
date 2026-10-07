@@ -900,9 +900,13 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	tbl := sanitizeTenant(tenant)
 	// One FROM clause for count + select: the escalations join feeds the
 	// triage-lane expression (any escalation history -> COMPLEX). $1 = tenant.
+	// public.escalations.case_id is text (every other write site inserts a
+	// Go string, e.g. casemgmt.go's escalateCase), while cases.id is uuid on
+	// every tenant schema -- confirmed live, "operator does not exist: text
+	// = uuid" on literally every listCases call before this cast was added.
 	fromClause := fmt.Sprintf(`FROM tenant_%s.cases c
 		LEFT JOIN (SELECT DISTINCT case_id FROM public.escalations WHERE tenant=$1) esc
-		  ON esc.case_id = c.id`, tbl)
+		  ON esc.case_id = c.id::text`, tbl)
 	where, args := "", []any{tenant}
 	add := func(clause string, v any) {
 		args = append(args, v)
