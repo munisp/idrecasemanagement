@@ -60,6 +60,9 @@ type Config struct {
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
 	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
 	CopilotModel    string // local model name, e.g. qwen2.5:7b-instruct
+	OpenSearchURL   string // http://opensearch:9200 ("" = document full-text search disabled)
+	OpenSearchUser  string // basic-auth user ("" = no auth, dev only)
+	OpenSearchPass  string // basic-auth password
 	StripeSecret    string // sk_live_… / sk_test_… ("" = card payments disabled)
 	StripeWebhook   string // whsec_… signing secret for /api/webhooks/stripe
 	MojaloopAdapter string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
@@ -112,6 +115,9 @@ func configFromEnv() Config {
 		// extraction and graph-intel KGQA — a shared LOCAL instance with a
 		// known OOM history, so briefs are single bounded calls, never loops.
 		CopilotEndpoint: get("COPILOT_ENDPOINT", get("VLM_ENDPOINT", "http://ollama.ollama.svc.cluster.local:11434/v1")),
+		OpenSearchURL:   get("OPENSEARCH_URL", ""),
+		OpenSearchUser:  get("OPENSEARCH_USER", ""),
+		OpenSearchPass:  get("OPENSEARCH_PASSWORD", ""),
 		CopilotModel:    get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
 		StripeSecret:    get("STRIPE_SECRET_KEY", ""),
 		StripeWebhook:   get("STRIPE_WEBHOOK_SECRET", ""),
@@ -489,11 +495,11 @@ func main() {
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
-		r.Get("/internal/ledger/balances", s.ledgerBalances)       // worker-token: reconciliation job
-		r.Post("/checks", s.uploadCheck)                           // physical check photo/scan intake
-		r.Get("/checks", s.listChecks)                             // review queue
-		r.Post("/checks/{checkId}/clear", s.clearCheck)            // funds-cleared settlement
-		r.Post("/internal/checks/{checkId}/result", s.checkResult) // worker-token: doc-intel OCR
+		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
+		r.Post("/checks", s.uploadCheck)                                // physical check photo/scan intake
+		r.Get("/checks", s.listChecks)                                  // review queue
+		r.Post("/checks/{checkId}/clear", s.clearCheck)                 // funds-cleared settlement
+		r.Post("/internal/checks/{checkId}/result", s.checkResult)      // worker-token: doc-intel OCR
 		r.Post("/internal/copilot/actions/apply", s.copilotApplyAction) // worker-token: Phase 3 batch executor
 		r.Post("/cases/relate", s.relateCases)
 		r.Get("/cases/{caseId}/relationships", s.caseRelationships)
@@ -530,18 +536,18 @@ func main() {
 
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
-		r.Post("/cases/{caseId}/program-date", s.setProgramDate)        // record clock-basis events
-		r.Post("/cases/{caseId}/status", s.setDualStatus)               // dual internal/agency status (G5)
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
-		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)   // auto-adjudicate from case+doc data (Lever 1)
-		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)         // grounded advisory brief (Phase 1 copilot)
-		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)    // latest persisted brief
-		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)         // Phase 2: QA-gated determination/correspondence drafts
-		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions)              // Phase 3: bounded action-batch proposal
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate)           // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)                  // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)          // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)         // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)      // auto-adjudicate from case+doc data (Lever 1)
+		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)            // grounded advisory brief (Phase 1 copilot)
+		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)       // latest persisted brief
+		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)            // Phase 2: QA-gated determination/correspondence drafts
+		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions) // Phase 3: bounded action-batch proposal
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
-		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
+		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence)                      // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
 		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
