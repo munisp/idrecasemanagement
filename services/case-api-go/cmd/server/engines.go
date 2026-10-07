@@ -170,6 +170,12 @@ func (s *server) caseClocks(w http.ResponseWriter, r *http.Request) {
 func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// Tighter than routine single-case actions -- one call mutates many cases
+	// at once, so the gate stays at management roles, not full case staff.
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		Action   string   `json:"action"`
 		CaseIDs  []string `json:"case_ids"`
@@ -238,6 +244,10 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 func (s *server) grabNext(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	t := sanitizeTenant(tenant)
 	var id, cn, status string
 	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`

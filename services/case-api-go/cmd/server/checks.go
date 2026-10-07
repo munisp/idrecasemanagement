@@ -26,6 +26,10 @@ import (
 // puts it on the doc-intel queue for extraction.
 func (s *server) uploadCheck(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	if err := r.ParseMultipartForm(16 << 20); err != nil {
 		http.Error(w, `{"error":"multipart form required"}`, http.StatusBadRequest)
 		return
@@ -86,6 +90,15 @@ func (s *server) uploadCheck(w http.ResponseWriter, r *http.Request) {
 // exact amount match on a single open invoice. Any amount mismatch or low
 // confidence routes to REVIEW — extraction never auto-settles money.
 func (s *server) checkResult(w http.ResponseWriter, r *http.Request) {
+	// Route comment says "worker-token: doc-intel OCR" but nothing ever
+	// enforced that -- any authenticated tenant member could POST fabricated
+	// extraction results (routing/account numbers, amounts, confidence) for
+	// any check, bypassing the OCR pipeline entirely. Only the pipeline's own
+	// WORKER_TOKEN identity may report results.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, serviceRole) {
+		http.Error(w, `{"error":"forbidden: check results may only be reported by the extraction worker"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	checkID := chi.URLParam(r, "checkId")
 	var in struct {
@@ -181,6 +194,13 @@ func (s *server) checkResult(w http.ResponseWriter, r *http.Request) {
 // the ONLY path that turns a check image into settled money.
 func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// Money-moving, same separation-of-duties floor as settleInvoice: FINANCE/
+	// PM/admins, not CASE_MANAGER -- the person who manages the case is not
+	// the one who gets to also confirm its money cleared.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	checkID := chi.URLParam(r, "checkId")
 	var in struct {
 		RemittanceRef string `json:"remittance_ref"` // bank deposit/lockbox ref
