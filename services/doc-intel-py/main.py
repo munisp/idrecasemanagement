@@ -12,6 +12,9 @@ import os
 import re
 import signal
 import sys
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import psycopg
@@ -274,7 +277,10 @@ def process(evt: dict) -> None:
             print(f"doc-intel: refused office container {evt.get('doc_id')}: {reason}",
                   file=sys.stderr, flush=True)
             return
-    pages, truncated = bytes_to_pages(raw, evt.get("content_type", ""), kind=kind_of)
+    # Raster pages only for image uploads. PDFs render LAZILY inside the
+    # pipeline (ensure_pages) — a born-digital PDF never pays for bitmaps.
+    pages, truncated = (bytes_to_pages(raw, evt.get("content_type", ""), kind=kind_of)
+                        if kind_of == "image" else ([], False))
     ctx = {
         "filename": evt.get("object_key", ""),
         "raw_bytes": raw,                                   # Docling parses bytes directly
@@ -282,11 +288,12 @@ def process(evt: dict) -> None:
         "pages": pages,                                     # for OCR fallback + VLM image
     }
     ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
+    truncated = truncated or ctx.get("pages_truncated", False)
     if truncated:
         # Page-capped render: analysis covers the first DOC_INTEL_MAX_PAGES
         # pages; a human must look at the rest.
         ctx.setdefault("findings", []).append(
-            {"field": None, "issue": f"Document exceeds page cap — analysis covers first {len(pages)} pages only; remainder needs manual review"})
+            {"field": None, "issue": f"Document exceeds page cap — analysis covers first {len(ctx.get('pages', []))} pages only; remainder needs manual review"})
         ctx["status"] = "ANALYZED_WITH_FINDINGS"
         ctx["result_truncated"] = True
     persist(evt, ctx)
@@ -372,30 +379,61 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    print("doc-intel consuming idre.*.documents ...", flush=True)
+    # Bounded worker pool: analysis is I/O-heavy (vault fetch, VLM round-
+    # trips) plus CPU bursts (OCR). Serial poll->process->commit left the
+    # pool idle during every network wait. Documents are processed
+    # concurrently but commits stay IN ORDER (head-of-line drain), so an
+    # offset is only committed once every preceding message has finished —
+    # at-least-once semantics unchanged. DOC_INTEL_WORKERS default 3: the
+    # heavy models are process singletons now, so each extra worker costs
+    # threads, not model copies.
+    workers = int(os.environ.get("DOC_INTEL_WORKERS", "3"))
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="doc")
+    pending = deque()  # (msg, future), FIFO for in-order commit
+
+    def run(evt: dict) -> None:
+        if evt.get("type") == "doc.uploaded":
+            process(evt)
+        elif evt.get("type") == "check.uploaded":
+            process_check(evt)
+
+    def drain(block: bool = False) -> None:
+        while pending and (block or pending[0][1].done()):
+            msg, fut = pending[0]
+            try:
+                fut.result()  # raises only on a bug that escaped process()
+            except Exception as exc:  # noqa: BLE001
+                # Poison message handling: park on doc_processing_errors,
+                # keep consuming. mark() itself must never raise here.
+                print(f"doc-intel error: {exc}", file=sys.stderr, flush=True)
+                try:
+                    mark(unwrap_cloudevent(json.loads(msg.value())), "ERROR")
+                except Exception as mark_exc:  # noqa: BLE001
+                    print(f"doc-intel error (while marking a previous error): {mark_exc}",
+                          file=sys.stderr, flush=True)
+            consumer.commit(msg)
+            pending.popleft()
+            block = False
+
+    print(f"doc-intel consuming idre.*.documents (workers={workers}) ...", flush=True)
     while running:
-        msg = consumer.poll(1.0)
+        drain()
+        if len(pending) >= workers * 2:
+            time.sleep(0.05)  # backpressure: don't outrun the pool
+            continue
+        msg = consumer.poll(0.5)
         if msg is None or msg.error():
             continue
         try:
             evt = unwrap_cloudevent(json.loads(msg.value()))
-            if evt.get("type") == "doc.uploaded":
-                process(evt)
-            elif evt.get("type") == "check.uploaded":
-                process_check(evt)
-            consumer.commit(msg)
-        except Exception as exc:  # noqa: BLE001
+            pending.append((msg, pool.submit(run, evt)))
+        except Exception as exc:  # noqa: BLE001 — unparseable envelope
             print(f"doc-intel error: {exc}", file=sys.stderr, flush=True)
-            # Poison message handling: park on doc_processing_errors, keep
-            # consuming. mark() itself must never be able to raise here -- it
-            # used to (a blind evt["case_id"] on an application event), which
-            # escaped uncaught and killed the whole consumer, not just this
-            # one message, stopping document processing for every tenant.
-            try:
-                mark(unwrap_cloudevent(json.loads(msg.value())), "ERROR")
-            except Exception as mark_exc:  # noqa: BLE001
-                print(f"doc-intel error (while marking a previous error): {mark_exc}", file=sys.stderr, flush=True)
             consumer.commit(msg)
+    # graceful shutdown: finish in-flight work before closing
+    while pending:
+        drain(block=True)
+    pool.shutdown(wait=True)
     consumer.close()
 
 
