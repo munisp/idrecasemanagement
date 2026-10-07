@@ -149,7 +149,7 @@ func (s *server) putRules(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := tx.Exec(r.Context(), `
 		INSERT INTO public.rule_changes (tenant, changed_by, note, before, after)
-		VALUES ($1,$2,$3,$4,$5)`, tenant, p.Subject, in.Note, string(before), string(after)); err != nil {
+		VALUES ($1,$2,$3,$4,$5)`, tenant, displayName(p), in.Note, string(before), string(after)); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
@@ -158,7 +158,7 @@ func (s *server) putRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logActivity(r.Context(), tenant, "", "RULES_UPDATED",
-		fmt.Sprintf("Program rules updated by %s (%d rules)%s", p.Subject, len(in.Rules), orDash(" — "+in.Note)))
+		fmt.Sprintf("Program rules updated by %s (%d rules)%s", displayName(p), len(in.Rules), orDash(" — "+in.Note)))
 	// Full before/after diff lives in public.rule_changes; the chained entry
 	// records that the change happened, by whom, and why.
 	s.logAudit(r.Context(), tenant, "", "RULES_UPDATED", map[string]any{
