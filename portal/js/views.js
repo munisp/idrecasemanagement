@@ -1622,9 +1622,13 @@ const Views = (() => {
           <select name="filing_party_type" title="filing party">
             <option value="PROVIDER">Provider files</option>
             <option value="HEALTH_PLAN">Health plan files</option></select>
+          <select name="service_line" title="service line">
+            <option value="">Service line…</option>
+            <option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option>
+            <option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select>
           <input name="amount" type="number" step="0.01" placeholder="${esc(label)} $" />
           <button>New intake request</button></form>` +
-        (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
+        (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
         (intakeNext >= 0 ? `<p class="pager" id="intake-pg"><span class="muted">Showing ${rows.length} of ${intakeTotal}</span>
@@ -1645,6 +1649,7 @@ const Views = (() => {
         `<span class="muted">—</span>`}</td>
       <td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
       <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
+      <td>${i.service_line ? esc(i.service_line) : `<span class="muted">—</span>`}</td>
       <td>${amtCents ? `$${(amtCents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
       <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
       <td class="muted">${fmtDate(i.outreach_at)}</td>
@@ -1683,7 +1688,7 @@ const Views = (() => {
       const cents = form.amount.value ? Math.round(parseFloat(form.amount.value) * 100) : 0;
       const r = await Api.program.createIntake({
         email: form.email.value, contact_name: form.contact_name.value, org: form.org.value,
-        filing_party_type: form.filing_party_type.value,
+        filing_party_type: form.filing_party_type.value, service_line: form.service_line.value,
         disputed_amount_cents: cents, qpa_cents: cents,
       });
       if (r.programmed) {

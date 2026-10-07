@@ -68,7 +68,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"this tenant has no pre-case intake program configured"}`, http.StatusBadRequest)
 		return
 	}
-	caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.Contact, in.Org, fpt, in.DisputedAmountCents)
+	caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.Contact, in.Org, fpt, in.DisputedAmountCents, "")
 	if err != nil {
 		if isUniqueViolation(err) {
 			http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
@@ -90,7 +90,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 // the real Capitol Bridge process; AHCA's Filing Party has always reached
 // them by phone or email). Both produce the exact same real case, links,
 // invoice, and email -- only the trigger differs.
-func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64) (caseID, caseNumber string, err error) {
+func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, serviceLine string) (caseID, caseNumber string, err error) {
 	caseNumber = s.nextCaseNumber(r, tenant, cfg)
 	// requester_* lands in details so the pre-case intake list can show who
 	// asked and search by email/org -- previously nothing persisted this on
@@ -102,9 +102,9 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 		"filing_party_type": filingPartyType,
 	})
 	if err = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		INSERT INTO tenant_%s.cases (case_number, status, details, disputed_amount_cents)
-		VALUES ($1, 'PENDING_INTAKE', $2, nullif($3,0)) RETURNING id`, sanitizeTenant(tenant)),
-		caseNumber, detailsJSON, disputedAmountCents).Scan(&caseID); err != nil {
+		INSERT INTO tenant_%s.cases (case_number, status, details, disputed_amount_cents, service_line)
+		VALUES ($1, 'PENDING_INTAKE', $2, nullif($3,0), nullif($4,'')) RETURNING id`, sanitizeTenant(tenant)),
+		caseNumber, detailsJSON, disputedAmountCents, serviceLine).Scan(&caseID); err != nil {
 		return "", "", err
 	}
 	s.logAudit(r.Context(), tenant, caseID, "CASE_INTAKE_OPENED", map[string]any{

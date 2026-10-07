@@ -408,6 +408,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		QPACents            int64  `json:"qpa_cents"` // federal NSA tenants only — programmed tenants use disputed_amount_cents
+		ServiceLine         string `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
@@ -431,7 +432,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	// row that would otherwise need a separate manual CONVERTED-linking
 	// step later, and that never gets a case number of its own at all.
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
-		caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.ContactName, in.Org, fpt, in.DisputedAmountCents)
+		caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.ContactName, in.Org, fpt, in.DisputedAmountCents, in.ServiceLine)
 		if err != nil {
 			if isUniqueViolation(err) {
 				http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
@@ -612,7 +613,8 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRows(r, `
 		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at,
 		       filing_party_type, packet_complete_at, NULL::text AS case_number,
-		       NULL::bigint AS disputed_amount_cents, qpa_cents, 'legacy' AS origin
+		       NULL::bigint AS disputed_amount_cents, qpa_cents, 'legacy' AS origin,
+		       NULL::text AS service_line
 		FROM public.intake_requests WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -640,7 +642,8 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 			       case_number,
 			       disputed_amount_cents,
 			       qpa_cents,
-			       'case' AS origin
+			       'case' AS origin,
+			       service_line
 			FROM tenant_%s.cases
 			WHERE details->>'requester_email' IS NOT NULL
 			ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))
