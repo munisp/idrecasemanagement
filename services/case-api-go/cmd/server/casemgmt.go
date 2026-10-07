@@ -21,6 +21,20 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+// caseStaffRoles: the broad gate for case-specific staff actions (letter
+// generation) that the portal's own UI already restricts to case-management
+// roles -- as opposed to tighter gates for money (FINANCE/PM) or
+// management-only actions (CASE_MANAGER/PM).
+var caseStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+
+// crmStaffRoles: CRM (accounts/contacts/tasks/notes/leads) and case-relating
+// actions -- the portal's nav shows Accounts/Leads/Tasks to every
+// authenticated role with no restriction, so this is every real staff role
+// (ARBITRATOR and FINANCE included, unlike caseStaffRoles) minus PARTY,
+// which has no portal login to lose access to today but shouldn't get
+// internal CRM write access if that ever changes.
+var crmStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+
 // ---- Notifications -----------------------------------------------------------
 
 func (s *server) notify(r *http.Request, tenant, userSub, typ, body, link string) {
@@ -173,6 +187,10 @@ func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 // fewest open assignments wins. Manual override via {"assignee": "<sub>"}.
 
 func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
@@ -295,6 +313,13 @@ func (s *server) listEscalations(w http.ResponseWriter, r *http.Request) {
 // ---- Relationships & batching -----------------------------------------------------
 
 func (s *server) relateCases(w http.ResponseWriter, r *http.Request) {
+	// crmStaffRoles not caseStaffRoles: the GNN "confirm link" button
+	// (views.js) renders with no role restriction at all on the case detail
+	// page, so ARBITRATOR/FINANCE need to reach this same as CRM actions do.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
 		CaseID    string `json:"case_id"`
@@ -438,6 +463,14 @@ func (s *server) getChecklist(w http.ResponseWriter, r *http.Request) {
 func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// caseStaffRoles plus ARBITRATOR: the portal's own checklist UI
+	// (views.js) has always shown the check button to ARBITRATOR -- a real,
+	// actively-used federal NSA role -- so the gate matches what's already
+	// exposed rather than silently 403ing a working interaction.
+	if !hasAnyRole(p, "ARBITRATOR") && !hasAnyRole(p, caseStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	itemID := chi.URLParam(r, "itemId")
 	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.case_checklists SET done=true, done_by=$3, done_at=now()
@@ -556,6 +589,10 @@ Payment due within 30 calendar days per 45 CFR 149.510(c)(4)(vii).`,
 }
 
 func (s *server) generateLetter(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, caseStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	name := chi.URLParam(r, "template")

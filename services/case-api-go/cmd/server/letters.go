@@ -21,6 +21,10 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 	caseID := chi.URLParam(r, "caseId")
 	key := chi.URLParam(r, "templateKey")
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, caseStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 
 	// Template must be configured for this program.
 	prog := s.loadProgram(r, tenant)

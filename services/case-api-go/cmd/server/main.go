@@ -683,6 +683,10 @@ const initiationWindowBD = 4
 
 func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 
 	// Idempotency (Redis): mobile/PWA retries replay the same key and get the
 	// original case back instead of a duplicate dispute.
@@ -961,6 +965,32 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 }
 
 // signalCase forwards business signals into the running workflow.
+// signalRoleFloors: signalCase forwards WHATEVER signal name the caller
+// sends straight to the Temporal workflow (federal NSA's IdrCaseWorkflow or
+// FL AHCA's AhcaDisputeWorkflow, whichever wfID resolves to) -- there was no
+// server-side differentiation at all, despite the portal's own UI only ever
+// showing e.g. "Finalize IDRE selection" (SELECTION_FINALIZED) to
+// CASE_MANAGER/FEDERAL_ADMIN and "Issue determination" (DETERMINATION_ISSUED)
+// to ARBITRATOR. Mirrors each signal's UI-implied caller, with admins always
+// allowed. AHCA entries match the equivalent REST endpoint's own gate where
+// one exists (PLAN_OPT_OUT -> recordOptOut's ATTORNEY-only floor;
+// ELIGIBILITY_RESULT -> checkEligibility's floor) rather than inventing a
+// separate rule for the same decision reaching the workflow two ways.
+var signalRoleFloors = map[string][]string{
+	"RESPONSE_FILED":           {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"OFFER_SUBMITTED":          {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"FEES_PAID":                {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"SELECTION_FINALIZED":      {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"DETERMINATION_ISSUED":     {"ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PAYMENT_RECORDED":         {"FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"SETTLED_OR_WITHDRAWN":     {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PLAN_OPT_OUT":             {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"ELIGIBILITY_RESULT":       {"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"CODING_REVIEW_COMPLETE":   {"CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"ATTORNEY_REVIEW_COMPLETE": {"ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+}
+
 func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
@@ -970,6 +1000,20 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Signal == "" {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	// Unmapped signals (PACKET_COMPLETE, OUTREACH_DONE, PROVIDER_WITHDRAW,
+	// AOR_REVISED, ESTIMATE_PERMISSION, PLAN_RESPONSE_RECEIVED, RFI_SENT,
+	// RFI_RESPONSE_RECEIVED, FINAL_ORDER_ISSUED) default to the broad
+	// case-staff floor -- excludes PARTY/unauthenticated misuse without
+	// requiring every one of these general case-tracking signals to be
+	// individually enumerated above.
+	gate := signalRoleFloors[body.Signal]
+	if gate == nil {
+		gate = caseStaffRoles
+	}
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, append(append([]string{}, gate...), serviceRole)...) {
+		http.Error(w, fmt.Sprintf(`{"error":"forbidden: signal %q is not permitted for your role"}`, body.Signal), http.StatusForbidden)
 		return
 	}
 	var caseNumber, status string

@@ -88,6 +88,10 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		Type      string         `json:"type"`
 		LegalName string         `json:"legal_name"`
@@ -180,6 +184,10 @@ func (s *server) account360(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		AccountID string `json:"account_id"`
 		Name      string `json:"name"`
@@ -245,6 +253,10 @@ func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 // convertLead: lead -> account (+ contact), marks lead CONVERTED.
 func (s *server) convertLead(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	leadID := chi.URLParam(r, "leadId")
 	var name, org, phone string
 	var status string
@@ -341,6 +353,10 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		Subject  string `json:"subject"`
 		CaseID   string `json:"case_id"`
@@ -375,6 +391,10 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	taskID := chi.URLParam(r, "taskId")
 	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.tasks SET status='DONE', completed_at=now() WHERE tenant=$1 AND id=$2`,
@@ -396,6 +416,10 @@ func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		RecordType string `json:"record_type"`
 		RecordID   string `json:"record_id"`

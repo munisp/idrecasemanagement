@@ -109,6 +109,10 @@ func (s *server) stripePost(path string, form url.Values) (map[string]any, error
 // returns the hosted payment URL.
 func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	invID := chi.URLParam(r, "invId")
 	var caseID, invoiceNo, party, kind string
 	var amount int64
@@ -438,6 +442,14 @@ func (s *server) financialReport(w http.ResponseWriter, r *http.Request) {
 // /v1 route — intended callers are the Temporal reconciliation workflow and
 // the balance-snapshot exporter (WORKER_TOKEN service auth).
 func (s *server) ledgerBalances(w http.ResponseWriter, r *http.Request) {
+	// The comment above says WORKER_TOKEN service auth was the intent, but
+	// nothing enforced it -- full ledger balances across every party/escrow
+	// account were readable by any authenticated tenant member. Reconciliation
+	// job + the humans who'd actually act on a balance, nobody else.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
 	tenant := chi.URLParam(r, "*")
 	if tenant == "" {
 		tenant = chi.URLParam(r, "tenant")
