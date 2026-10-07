@@ -177,7 +177,9 @@
     w.innerHTML = `<h3>Notifications${n.length ?
         ` <a href="javascript:void(0)" class="notif-markall" onclick="Api.cm.readAllNotifs().then(()=>location.reload())">Mark all as read</a>` : ""
       }</h3>` + (n.length ? n.map((x) =>
-      `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>location.reload())">
+      `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>{${
+        x.link ? `location.hash='${x.link}';location.reload()` : "location.reload()"
+      }})">
          <b>${x.type}</b> — ${x.body} <span class="muted">${new Date(x.at).toLocaleString()}</span></div>`).join("")
       : `<p class="muted">No notifications.</p>`);
     document.body.appendChild(w);
