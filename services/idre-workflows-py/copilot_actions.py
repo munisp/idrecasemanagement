@@ -17,10 +17,17 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 
-import httpx
-import psycopg
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+
+# httpx/psycopg are imported inside each activity below, not here -- this
+# module also defines CopilotActionBatchWorkflow, and Temporal's workflow
+# sandbox reloads the whole containing module to validate the workflow
+# class. A top-level `import httpx` got swept into that validation and
+# tripped the sandbox's deterministic-stdlib guard (RestrictedWorkflow-
+# AccessError on urllib.request.Request.__mro_entries__), crashing every
+# worker on startup. workflows.py/ahca_workflow.py already keep I/O
+# imports out of their module scope for the same reason -- this matches.
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
@@ -39,6 +46,7 @@ class BatchInput:
 @activity.defn
 async def fetch_batch_action_count(tenant: str, batch_id: str) -> int:
     """How many actions the approved batch carries (capped server-side)."""
+    import psycopg
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
             "SELECT jsonb_array_length(actions) FROM public.copilot_action_batches"
@@ -52,6 +60,7 @@ async def fetch_batch_action_count(tenant: str, batch_id: str) -> int:
 async def apply_copilot_action(tenant: str, batch_id: str, index: int) -> str:
     """Apply ONE action via case-api's worker-authenticated executor, which
     re-validates batch state + params and records the per-action result."""
+    import httpx
     async with httpx.AsyncClient(base_url=CASE_API, timeout=30) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/internal/copilot/actions/apply",
@@ -69,6 +78,7 @@ async def apply_copilot_action(tenant: str, batch_id: str, index: int) -> str:
 async def expire_copilot_batch(tenant: str, batch_id: str) -> None:
     """TTL elapsed with no human decision — mark EXPIRED (if still pending)
     and leave a timeline note on the case."""
+    import psycopg
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
             "UPDATE public.copilot_action_batches SET status='EXPIRED', updated_at=now()"
