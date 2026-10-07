@@ -386,11 +386,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	var caseID, subject, body, status, artifact, channel string
+	var caseID, subject, body, status, artifact, channel, draftedBy string
 	var toJ, ccJ []byte
 	err := s.db.QueryRow(r.Context(),
-		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
-		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel)
+		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'), coalesce(drafted_by,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
+		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &draftedBy)
 	// APPROVED (not yet SENT) + a fresh APPROVE decision is a retry of a
 	// previously failed send -- status only reaches APPROVED-without-SENT
 	// when sendMail below failed last time, and the response used to claim
@@ -403,6 +403,18 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	isRetry := status == "APPROVED" && in.Decision == "APPROVE" && channel != "note"
 	if err != nil || (status != "PENDING" && !isRetry) {
 		http.Error(w, `{"error":"not pending"}`, http.StatusConflict)
+		return
+	}
+	// Self-approval guard: the drafter and the reviewer must be different
+	// people, or a "QA gate" isn't actually one. Skipped for action-batch-
+	// originated drafts ("batch approved by X") -- those already passed an
+	// independent human decision at the batch-approval step (approving a
+	// draft_followup_correspondence action IS that decision); this row is
+	// that decision's paperwork, not a second judgment call needing a
+	// different reviewer. displayName(p) != "" guards strings.Contains(x,
+	// "") always being true -- an empty name must never match everything.
+	if name := displayName(p); name != "" && !strings.Contains(draftedBy, "batch approved by") && strings.Contains(draftedBy, name) {
+		http.Error(w, `{"error":"forbidden: cannot approve or reject your own draft -- needs a second reviewer"}`, http.StatusForbidden)
 		return
 	}
 	// Generic QA-role gate: the approver must hold the role the template
