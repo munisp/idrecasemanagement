@@ -170,9 +170,13 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		// ledgerBalances: reconciliation job + the humans who'd act on a balance.
 		{"ledger: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
 		{"ledger: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
-		// initiateCase: who may open a new federal NSA case record.
-		{"initiate: ARBITRATOR allowed", []string{"ARBITRATOR"}, []string{"CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"initiate: PARTY rejected", []string{"PARTY"}, []string{"CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// initiateCase: who may open a new federal NSA case record. PARTY is
+		// allowed -- the portal's "New dispute" nav + form is self-service
+		// federal NSA filing, not staff-only (confirmed against the UI's own
+		// nav gate: has("PARTY", "CASE_MANAGER")).
+		{"initiate: ARBITRATOR allowed", []string{"ARBITRATOR"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// assignCase / bulkCases: reassignment is a management decision, not
 		// routine casework -- narrower than the broad case-staff gate.
 		{"assign: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},

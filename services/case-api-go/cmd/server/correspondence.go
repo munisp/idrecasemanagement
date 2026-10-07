@@ -399,7 +399,12 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"forbidden: requires %s, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, qaRole), http.StatusForbidden)
 			return
 		}
-	} else if !hasAnyRole(p, "CASE_MANAGER", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		// ARBITRATOR added: the portal's own QA Gate nav link already shows
+		// to ARBITRATOR (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY",
+		// ...)), and a federal determination letter's QA review -- which
+		// lands here, not in the qa_role branch above -- is exactly the kind
+		// of review an arbitrator needs to approve before it goes out.
+	} else if !hasAnyRole(p, "CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
