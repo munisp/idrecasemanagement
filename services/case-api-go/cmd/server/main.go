@@ -58,6 +58,8 @@ type Config struct {
 	DaprHTTP        string // http://localhost:3500
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
+	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
+	CopilotModel    string // local model name, e.g. qwen2.5:7b-instruct
 	StripeSecret    string // sk_live_… / sk_test_… ("" = card payments disabled)
 	StripeWebhook   string // whsec_… signing secret for /api/webhooks/stripe
 	MojaloopAdapter string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
@@ -102,10 +104,15 @@ func configFromEnv() Config {
 		// --cluster=N` created the replicas' on-disk state, and a wrong ID
 		// doesn't error -- the client just hangs forever with every connection
 		// silently rejected ("invalid header_cluster" on the replica side).
-		TBClusterID:     get("TIGERBEETLE_CLUSTER_ID", ""),
-		DaprHTTP:        get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
-		VaultURL:        get("VAULT_URL", "http://localhost:8081"),
-		GraphIntelURL:   get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		TBClusterID:   get("TIGERBEETLE_CLUSTER_ID", ""),
+		DaprHTTP:      get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
+		VaultURL:      get("VAULT_URL", "http://localhost:8081"),
+		GraphIntelURL: get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		// The copilot shares the in-cluster ollama already serving doc-intel
+		// extraction and graph-intel KGQA — a shared LOCAL instance with a
+		// known OOM history, so briefs are single bounded calls, never loops.
+		CopilotEndpoint: get("COPILOT_ENDPOINT", get("VLM_ENDPOINT", "http://ollama.ollama.svc.cluster.local:11434/v1")),
+		CopilotModel:    get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
 		StripeSecret:    get("STRIPE_SECRET_KEY", ""),
 		StripeWebhook:   get("STRIPE_WEBHOOK_SECRET", ""),
 		MojaloopAdapter: get("MOJALOOP_ADAPTER_URL", ""),
@@ -527,6 +534,8 @@ func main() {
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)   // auto-adjudicate from case+doc data (Lever 1)
+		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)         // grounded advisory brief (Phase 1 copilot)
+		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)    // latest persisted brief
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence) // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)

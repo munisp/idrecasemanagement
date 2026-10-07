@@ -550,6 +550,21 @@ const Views = (() => {
         html += `<div class="actions">` + acts.map((a, i) =>
           `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
 
+      // Copilot brief (Phase 1): grounded, advisory-only decision prep for
+      // staff. Rendered from the latest persisted brief; generation is a
+      // single bounded call against the local model, audit-logged.
+      if (can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        html += `<h2>Copilot brief <span class="badge s-review">DRAFT · advisory</span></h2>
+          <div id="copilot"><p class="muted">Loading…</p></div>`;
+        Api.program.copilotBriefLatest(id).then((r) => {
+          const b = document.getElementById("copilot");
+          if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id);
+        }).catch(() => {
+          const b = document.getElementById("copilot");
+          if (b) b.innerHTML = copilotCard(null, null, id);
+        });
+      }
+
       // Documents — docket grouped by folder with full metadata + RBAC controls
       const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
       html += `<h2>Docket</h2>
@@ -1937,6 +1952,41 @@ const Views = (() => {
     }, "Creating task…");
   }
 
+  // Copilot brief (Phase 1) — renders the latest grounded, advisory-only
+  // brief plus the (re)generate action. The server returns 502 with facts
+  // when the local model is unreachable; surface that via the catch path.
+  function copilotCard(brief, generatedAt, caseId) {
+    const genBtn = `<button class="mini" onclick="Views.copilotBrief('${caseId}', this)">↻ ${brief ? "Regenerate" : "Generate"} brief</button>`;
+    if (!brief)
+      return `<p class="muted">No brief generated yet. The copilot drafts a grounded eligibility brief, evidence comparison, and uncertainty list from platform-verified case facts only — it never changes case state.</p><p>${genBtn}</p>`;
+    return `<pre class="copilot-brief" style="white-space:pre-wrap;font:inherit;line-height:1.45">${esc(brief)}</pre>
+      <p class="muted">Generated ${generatedAt ? new Date(generatedAt).toLocaleString() : "—"} · advisory only, not a determination · audit-logged</p>
+      <p>${genBtn}</p>`;
+  }
+
+  async function copilotBrief(caseId, btn) {
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.copilotBrief(caseId);
+        const b = document.getElementById("copilot");
+        if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, caseId);
+        UI.toast("Copilot brief generated (DRAFT — advisory only)");
+      } catch (e) {
+        const b = document.getElementById("copilot");
+        if (e.data && e.data.facts) {
+          // 502 fallback: model unreachable, server returned verified facts
+          if (b) b.innerHTML = copilotCard(null, null, caseId) +
+            `<p class="muted">Model unreachable — raw verified facts returned instead.</p>
+             <pre style="white-space:pre-wrap;font:12px monospace">${esc(JSON.stringify(e.data.facts, null, 2))}</pre>`;
+          UI.toast("Copilot model unreachable — showing verified facts only", { kind: "warn" });
+        } else {
+          if (b) b.innerHTML = copilotCard(null, null, caseId);
+          UI.toast(e.message, { kind: "warn" });
+        }
+      }
+    }, "Drafting brief…");
+  }
+
   async function uploadCheck(file, btn) {
     if (!file) { UI.toast("Choose a check image first", { kind: "warn" }); return; }
     await UI.run(btn, async () => {
@@ -2415,5 +2465,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();
