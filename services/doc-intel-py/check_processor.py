@@ -19,9 +19,13 @@ usually HANDWRITTEN — this module reads it with a real ICR engine chain:
   3. Tesseract — last-resort fallback; reading marked low confidence.
 
 Engine selection: CHECK_ICR_ENGINE=trocr|paddle|tesseract|auto (default auto
-= first available in the order above). MICR stays on Tesseract regardless:
-Paddle/TrOCR charsets don't cover the E-13B ⑈⑆⑇ symbols, and the digit-run
-parser + ABA checksum already self-validates.
+= first available in the order above). MICR is read FIRST by the in-house
+E-13B engine (micr_engine.py — monospace cell-grid segmentation + template
+NCC against the bundled Nimra font, fonts/Nimra-E13B.ttf, SIL OFL 1.1),
+which recognizes the ⑈⑆⑇⑉ separator symbols natively; tesseract remains
+as the fallback ensemble, and every routing must still pass the ⑆…⑆
+structural bracket + ABA checksum (with unique-solution single-digit
+repair) — miss, don't guess.
 
 A courtesy/legal mismatch always routes the check to REVIEW (never
 auto-match on conflicting amounts).
@@ -442,7 +446,13 @@ def _vocab_match(tok: str) -> str | None:
             m = _vocab_match(rest)
             if m:
                 return head + " " + m
-    close = difflib.get_close_matches(tok, _VOCAB, n=2, cutoff=0.65)
+    # Fuzzy matching is for cursive ICR misreads of REAL words ('hunderd').
+    # Short tokens ('to', 'the') sit within 0.65 of number words by accident,
+    # and on degraded scans they fabricate phantom amounts — so fuzzy needs
+    # length >= 4 and a stricter cutoff.
+    if len(tok) < 4:
+        return None
+    close = difflib.get_close_matches(tok, _VOCAB, n=2, cutoff=0.78)
     if len(close) == 1 or (
             len(close) == 2
             and difflib.SequenceMatcher(None, tok, close[0]).ratio()
@@ -471,6 +481,7 @@ def words_to_cents(text: str) -> int | None:
     toks = expanded
     total, current, cents = 0, 0, None
     saw_word = False
+    word_hits = 0
     for i, t in enumerate(toks):
         if re.fullmatch(r"\d+/\d+", t):
             cents = int(t.split("/")[0])
@@ -482,11 +493,16 @@ def words_to_cents(text: str) -> int | None:
             else:
                 current += int(t)
         elif t in WORDS:
-            current += WORDS[t]; saw_word = True
+            current += WORDS[t]; saw_word = True; word_hits += 1
         elif t in SCALES:
-            current = max(1, current) * SCALES[t]
+            current = max(1, current) * SCALES[t]; word_hits += 1
             if SCALES[t] >= 1000:
                 total, current = total + current, 0
+    # A real legal line always carries multiple number words ('Seven hundred
+    # fifteen …') or a word plus an explicit n/100 fraction. A single fuzzy
+    # hit in OCR garbage is a phantom — refuse it.
+    if word_hits < 2 and not re.search(r"\d+/\d+", text):
+        return None
     if not saw_word and cents is None:
         return None
     if total + current == 0 and cents is None:
@@ -511,6 +527,77 @@ def parse_courtesy(text: str) -> int | None:
     return None
 
 
+def _orient(img: np.ndarray) -> tuple[np.ndarray, str]:
+    """Phone photos arrive rotated. Tesseract OSD detects 90/180/270 turns
+    directly; the fallback is MICR bottom-edge ink density (the E-13B band
+    hugs the very bottom of a correctly oriented check; signature/memo ink
+    sits higher, so a bottom-10% density scan disambiguates 180 flips).
+    Always returns landscape."""
+    try:
+        import pytesseract
+        rot = int(pytesseract.image_to_osd(img).split("Rotate: ")[1].split("\n")[0])
+        if rot in (90, 180, 270):
+            img = cv2.rotate(img, {90: cv2.ROTATE_90_CLOCKWISE,
+                                   180: cv2.ROTATE_180,
+                                   270: cv2.ROTATE_90_COUNTERCLOCKWISE}[rot])
+        if img.shape[1] < img.shape[0]:
+            img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        return img, "osd"
+    except Exception:
+        pass
+    cands = [img, cv2.rotate(img, cv2.ROTATE_180),
+             cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE),
+             cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)]
+    land = [c for c in cands if c.shape[1] >= c.shape[0]] or cands
+
+    def bottom_density(c: np.ndarray) -> float:
+        g = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+        band = g[int(g.shape[0]*0.90):, :]
+        _, bw = cv2.threshold(band, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        return float(np.mean(bw > 0))
+
+    return max(land, key=bottom_density), "heuristic"
+
+
+def _dewarp(img: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Phone photos shoot the check at an angle on a desk. The check is the
+    largest 4-corner contour; rectify it to a flat rectangle. Conservative:
+    any doubt (no quad, quad too small) returns the original untouched."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    g = cv2.GaussianBlur(g, (5, 5), 0)
+    edges = cv2.dilate(cv2.Canny(g, 40, 120), np.ones((5, 5), np.uint8))
+    cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return img, False
+    c = max(cnts, key=cv2.contourArea)
+    if cv2.contourArea(c) < 0.25 * img.shape[0] * img.shape[1]:
+        return img, False
+    approx = cv2.approxPolyDP(c, 0.02 * cv2.arcLength(c, True), True)
+    if len(approx) != 4:
+        return img, False
+    pts = approx.reshape(4, 2).astype(np.float32)
+    ssum, sdiff = pts.sum(1), np.diff(pts, axis=1).ravel()
+    rect = np.float32([pts[np.argmin(ssum)], pts[np.argmin(sdiff)],
+                       pts[np.argmax(ssum)], pts[np.argmax(sdiff)]])
+    W = int(max(np.linalg.norm(rect[0]-rect[1]), np.linalg.norm(rect[2]-rect[3])))
+    H = int(max(np.linalg.norm(rect[0]-rect[3]), np.linalg.norm(rect[1]-rect[2])))
+    if W < 200 or H < 100:
+        return img, False
+    M = cv2.getPerspectiveTransform(rect, np.float32([[0, 0], [W, 0], [W, H], [0, H]]))
+    return cv2.warpPerspective(img, M, (W, H)), True
+
+
+def _quality(img: np.ndarray) -> dict:
+    """Scan-quality gate: Laplacian-variance blur score, mean brightness,
+    megapixels. Recorded in the extraction detail so REVIEW shows WHY a
+    scan was hard, and the confidence rollup can penalize bad captures."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = float(cv2.Laplacian(g, cv2.CV_64F).var())
+    return {"blur": round(blur, 1),           # <80 blurry, <30 severely
+            "brightness": round(float(g.mean()), 1),  # <90 too dark
+            "megapixels": round(img.shape[0]*img.shape[1]/1e6, 2)}
+
+
 def extract_check(image_bytes: bytes) -> CheckExtraction:
     """Full extraction from a check photo/scan. Never raises on image quirks —
     returns low-confidence partial results instead of failing the intake.
@@ -531,6 +618,12 @@ def extract_check(image_bytes: bytes) -> CheckExtraction:
         if img is None:
             out.detail["error"] = "undecodable image"
             return out
+        # capture normalization: fix rotation, flatten perspective, grade the
+        # scan. Phone photos of checks are the norm, not the exception.
+        img, orient_how = _orient(img)
+        img, dewarped = _dewarp(img)
+        q = _quality(img)
+        out.detail["capture"] = {**q, "orient": orient_how, "dewarped": dewarped}
         h, w = img.shape[:2]
         # Full-page paddle pass once — every field gets its lines by
         # coordinates. This is the single biggest accuracy win: the detector
@@ -546,12 +639,54 @@ def extract_check(image_bytes: bytes) -> CheckExtraction:
         #    is a miss -> REVIEW (miss, don't guess).
         band = img[int(h*0.85):int(h*0.99), int(w*0.02):int(w*0.98)]
         bg = cv2.resize(gray_up(band, 1), None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(bg)
+        # skew is the most common scan defect — deskew BEFORE binarizing so the
+        # E-13B glyph pitch survives thresholding
+        bg_de = _deskew(bg)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(bg_de)
         _, bw_otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        bw_adapt = cv2.adaptiveThreshold(bg, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        bw_adapt = cv2.adaptiveThreshold(bg_de, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                          cv2.THRESH_BINARY, 41, 13)
+        clahe_raw = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(bg)
+        _, bw_otsu_raw = cv2.threshold(clahe_raw, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         micr_raws: list[str] = []
-        for prep in (bw_otsu, bw_adapt, bg):
+        # 1a) In-house E-13B engine (micr_engine.py): monospace cell-grid
+        #     segmentation + template NCC against the bundled Nimra font.
+        #     It reads the four MICR separator symbols NATIVELY — where
+        #     tesseract approximates them as ':'/'"' and loses field
+        #     boundaries. Acceptance posture mirrors the phantom-guard:
+        #     a clean high-score read is trusted immediately; a read with
+        #     unknown cells ('?') is held as a candidate and only accepted
+        #     if a later independent read corroborates the same routing.
+        eng_candidate = None
+        try:
+            import micr_engine
+            for prep in (bg_de, bw_otsu):
+                try:
+                    etxt, escore = micr_engine.recognize(prep)
+                except Exception:
+                    etxt, escore = None, 0.0
+                if not etxt:
+                    continue
+                micr_raws.append(f"e13b:{etxt}({escore:.2f})")
+                r = micr_engine.extract_routing(etxt)  # ⑆…⑆ bracket + checksum (+1-digit repair)
+                _, a, c = parse_micr(etxt)
+                if r:
+                    unknowns = etxt.count("?")
+                    # clean high-score read, or a single-unknown read whose
+                    # routing was pinned by the unique checksum solution
+                    if (unknowns == 0 and escore >= 0.85) or (unknowns == 1 and escore >= 0.75):
+                        out.routing_number, out.account_number, out.check_number = r, a, c
+                        break
+                    eng_candidate = eng_candidate or (r, a, c)
+                if "⑆" in etxt or "⑈" in etxt:
+                    out.account_number = out.account_number or a
+                    out.check_number = out.check_number or c
+        except ImportError:
+            pass
+        # 1b) tesseract preps
+        for prep in (bw_otsu, bw_adapt, bw_otsu_raw, bg_de):
+            if out.routing_number:
+                break
             txt = _ocr(prep, psm=7, whitelist="0123456789⑈⑆⑇⑄ABCDabcd| ") \
                   or _ocr(prep, psm=7)
             if txt:
@@ -560,9 +695,15 @@ def extract_check(image_bytes: bytes) -> CheckExtraction:
             if r and routing_checksum_valid(r):
                 out.routing_number, out.account_number, out.check_number = r, a, c
                 break
-            # keep best-effort account/check even when routing misses
-            out.account_number = out.account_number or a
-            out.check_number = out.check_number or c
+            # best-effort account/check ONLY when the read actually saw MICR
+            # separators (normalized to |/~ by parse_micr's symbol map).
+            # Separator-free digit soup is field-boundary garbage: under
+            # degradation it concatenates routing+account+check into one run,
+            # and trusting it writes phantom settlement metadata.
+            norm = txt.translate(str.maketrans("", "", " ")).replace('"', "|").replace(":", "|")
+            if "|" in norm or "~" in norm or "⑈" in txt or "⑆" in txt:
+                out.account_number = out.account_number or a
+                out.check_number = out.check_number or c
         # full-page paddle read of the band (E-13B symbols surface as ':'/'"')
         band_lines = [l for l in page if l["cy"] >= 0.85]
         if band_lines and not out.routing_number:
@@ -571,6 +712,14 @@ def extract_check(image_bytes: bytes) -> CheckExtraction:
             r, a, c = parse_micr(ptxt)
             if r and routing_checksum_valid(r):
                 out.routing_number, out.account_number, out.check_number = r, a, c
+        # deferred engine candidate: accept only when a non-engine read
+        # independently contains the same checksum-valid routing
+        if not out.routing_number and eng_candidate:
+            r, a, c = eng_candidate
+            if any(r in raw for raw in micr_raws if not raw.startswith("e13b:")):
+                out.routing_number = r
+                out.account_number = out.account_number or a
+                out.check_number = out.check_number or c
         out.detail["micr_raw"] = " || ".join(micr_raws)
         out.detail["micr_preps_tried"] = len(micr_raws)
 
@@ -675,9 +824,10 @@ def extract_check(image_bytes: bytes) -> CheckExtraction:
         amounts_agree = (out.amount_cents is not None
                          and out.amount_cents == out.legal_amount_cents)
         consensus_ok = box_votes >= 2 and (legal_votes >= 2 or legal_votes == 0)
-        if amounts_agree and hits == 3 and not out.amount_mismatch and strong:
+        capture_ok = q["blur"] >= 30 and q["brightness"] >= 60 and q["megapixels"] >= 0.05
+        if amounts_agree and hits == 3 and not out.amount_mismatch and strong and capture_ok:
             out.confidence = "high"
-        elif amounts_agree and hits >= 2 and strong:
+        elif amounts_agree and hits >= 2 and strong and capture_ok:
             out.confidence = "high"
         elif hits >= 2 and consensus_ok and not out.amount_mismatch:
             out.confidence = "medium"

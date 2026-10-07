@@ -1729,7 +1729,8 @@ const Views = (() => {
             <td>${c.invoice_id ? `<span class="mono">${esc(c.invoice_id.slice(0, 8))}…</span>` : "—"}</td>
             <td>${badge(c.status)}</td>
             <td class="muted">${c.confidence ? esc(c.confidence) : "—"}</td>
-            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}</td></tr>`;
+            <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}
+                ${c.status === "REVIEW" && c.case_id ? `<button class="mini" onclick="Views.requestRescan('${c.id}','${c.case_id}', this)">↻ request rescan</button>` : ""}</td></tr>`;
       payRow = (p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
             <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
             <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
@@ -1806,6 +1807,18 @@ const Views = (() => {
           : `<p class="pager"><span class="muted">Showing ${st.rows.length} of ${st.total}</span></p>`;
       } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     }, "Loading…");
+  }
+
+  async function requestRescan(checkId, caseId, btn) {
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.crm.createTask({
+          subject: `Request clearer scan of check ${checkId.slice(0, 8)}… (OCR confidence too low) — send the payer a secure upload link from the case Correspondence panel`,
+          case_id: caseId, due_date: new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10),
+        });
+        UI.toast(`Rescan task ${r.task_ref || ""} created on the case`.trim());
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Creating task…");
   }
 
   async function uploadCheck(file, btn) {
