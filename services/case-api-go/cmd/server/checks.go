@@ -252,6 +252,12 @@ func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 // listChecks: review queue + status filtering for staff.
 func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// Check images carry real bank routing/account numbers -- financial
+	// data, financial-read gate, not just case staff.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
 	status := r.URL.Query().Get("status")
 	limit, offset := pageParams(r, 50, 500)
 	var total int

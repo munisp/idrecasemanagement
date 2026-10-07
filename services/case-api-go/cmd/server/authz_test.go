@@ -106,12 +106,14 @@ func TestProgramLayerRoleFloors(t *testing.T) {
 		// checkEligibility: CASE_MANAGER/ATTORNEY/admins only -- not PM/CODER.
 		{"eligibility: ATTORNEY allowed", []string{"ATTORNEY"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"eligibility: PM rejected", []string{"PM"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
-		// settleInvoice: PM/FINANCE only -- not CASE_MANAGER (separation of duties
-		// between the reviewer who drafts the case and whoever moves money).
+		// settleInvoice: permanent policy is PM/FINANCE only -- not
+		// CASE_MANAGER (separation of duties between the reviewer who drafts
+		// the case and whoever moves money).
 		{"settle: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"settle: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
-		// recordOptOut: ATTORNEY only, per the source docs ("Attorney decides
-		// if the plan may opt out") -- not even CASE_MANAGER.
+		// recordOptOut: permanent policy is ATTORNEY only, per the source
+		// docs ("Attorney decides if the plan may opt out") -- not even
+		// CASE_MANAGER.
 		{"opt-out: ATTORNEY allowed", []string{"ATTORNEY"}, []string{"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"opt-out: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 	}
@@ -138,6 +140,7 @@ func TestQaDecisionRoleMatchesConfiguredQARole(t *testing.T) {
 		{[]string{"ATTORNEY"}, true},
 		{[]string{"FEDERAL_ADMIN"}, true},
 		{[]string{"PLATFORM_ADMIN"}, true},
+		{[]string{"CASE_MANAGER"}, false},
 	}
 	for _, c := range cases {
 		got := hasAnyRole(principal{Roles: c.roles}, qaRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
@@ -167,7 +170,8 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		{"checkResult: serviceRole allowed", []string{serviceRole}, []string{serviceRole}, true},
 		{"checkResult: PLATFORM_ADMIN rejected", []string{"PLATFORM_ADMIN"}, []string{serviceRole}, false},
 		{"checkResult: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{serviceRole}, false},
-		// ledgerBalances: reconciliation job + the humans who'd act on a balance.
+		// ledgerBalances: permanent policy is reconciliation job + the humans
+		// who'd act on a balance -- not CASE_MANAGER.
 		{"ledger: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
 		{"ledger: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// initiateCase: who may open a new federal NSA case record. PARTY is
@@ -190,7 +194,8 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		{"uploadCheck: FINANCE allowed", []string{"FINANCE"}, []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
 		{"uploadCheck: NURSE_PHYSICIAN rejected", []string{"NURSE_PHYSICIAN"}, []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// clearCheck: the ONLY path that turns a check image into settled
-		// money -- same floor as settleInvoice, CASE_MANAGER excluded.
+		// money -- permanent policy is the same floor as settleInvoice,
+		// CASE_MANAGER excluded.
 		{"clearCheck: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
 		{"clearCheck: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// caseStaffRoles: generateLetter/requestLetterGen -- the portal only
@@ -272,6 +277,114 @@ func TestSignalCaseRoleFloors(t *testing.T) {
 			t.Errorf("%s: signal=%s roles=%v: got allowed=%v, want %v", c.name, c.signal, c.roles, got, c.want)
 		}
 	}
+}
+
+// Live role testing (a human driving the real portal as each seeded user)
+// found what the previous two audits missed: read-only endpoints serving
+// the Financials, QA Gate, and Reports pages had zero backend gate at all,
+// so a narrow specialist role with no business reason to see any of it --
+// ARBITRATOR, CODER, NURSE_PHYSICIAN, ATTORNEY -- could read check images'
+// real bank routing/account numbers, invoices, payments, and pending QA
+// correspondence drafts just by typing the URL directly; only the nav hid
+// the page from them, nothing on the server did. Pins the gate each got.
+func TestThirdRoleAuditFloors_ReadEndpoints(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		gate  []string
+		want  bool
+	}{
+		// financialReadRoles: listChecks/financialReport/receivablesReport/
+		// listInvoices/listPayments. Matches the Financials nav gate exactly.
+		{"financialRead: STATE_AUDITOR allowed (read-only oversight)", []string{"STATE_AUDITOR"}, financialReadRoles, true},
+		{"financialRead: ARBITRATOR rejected", []string{"ARBITRATOR"}, financialReadRoles, false},
+		{"financialRead: CODER rejected", []string{"CODER"}, financialReadRoles, false},
+		{"financialRead: NURSE_PHYSICIAN rejected", []string{"NURSE_PHYSICIAN"}, financialReadRoles, false},
+		{"financialRead: ATTORNEY rejected", []string{"ATTORNEY"}, financialReadRoles, false},
+		// qaReadRoles: qaQueue/qaGet. Matches the QA Gate nav gate exactly.
+		{"qaRead: ARBITRATOR allowed", []string{"ARBITRATOR"}, qaReadRoles, true},
+		{"qaRead: ATTORNEY allowed", []string{"ATTORNEY"}, qaReadRoles, true},
+		{"qaRead: CODER rejected", []string{"CODER"}, qaReadRoles, false},
+		{"qaRead: NURSE_PHYSICIAN rejected", []string{"NURSE_PHYSICIAN"}, qaReadRoles, false},
+		{"qaRead: FINANCE rejected", []string{"FINANCE"}, qaReadRoles, false},
+		// reportsReadRoles: summaryReport/slaReport. Matches the Reports nav
+		// gate exactly -- notably FINANCE and ARBITRATOR are NOT here, unlike
+		// financialReadRoles, because the Reports nav never admitted them.
+		{"reportsRead: PM allowed", []string{"PM"}, reportsReadRoles, true},
+		{"reportsRead: FINANCE rejected", []string{"FINANCE"}, reportsReadRoles, false},
+		{"reportsRead: ARBITRATOR rejected", []string{"ARBITRATOR"}, reportsReadRoles, false},
+		// opsRoles (opsDashboard, also backs the Reports -> Trends tab): PM
+		// added so Trends doesn't 403 for a role the Reports nav itself
+		// grants access to (confirmed live: it did, and the frontend just
+		// hung on "Loading..." forever instead of showing the error).
+		{"opsRoles: PM allowed", []string{"PM"}, opsRoles, true},
+		{"opsRoles: CODER rejected (no Reports nav access at all)", []string{"CODER"}, opsRoles, false},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, c.gate...)
+		if got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+}
+
+// createFederalAdmin / createTenantStaff: there was previously no way to
+// create a FEDERAL_ADMIN/PLATFORM_ADMIN account at all through the app
+// (federal.admin itself was hand-seeded directly in the Keycloak realm),
+// and no way to add a second staff member to an already-existing tenant
+// without resubmitting a whole tenant-creation request. Scoped with the
+// user: either federal tier can mint more of either federal role; a
+// CASE_MANAGER may add tenant staff only to their own tenant.
+func TestAdminCreationRoleFloors(t *testing.T) {
+	t.Run("createFederalAdmin", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			roles []string
+			want  bool
+		}{
+			{"PLATFORM_ADMIN allowed", []string{"PLATFORM_ADMIN"}, true},
+			{"FEDERAL_ADMIN allowed", []string{"FEDERAL_ADMIN"}, true},
+			{"CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+			{"PM rejected", []string{"PM"}, false},
+		}
+		for _, c := range cases {
+			got := hasAnyRole(principal{Roles: c.roles}, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+			if got != c.want {
+				t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+			}
+		}
+	})
+
+	t.Run("createTenantStaff tenant-scoping", func(t *testing.T) {
+		// Mirrors createTenantStaff's own gate logic (admins bypass the
+		// tenant check; CASE_MANAGER must match the target tenant).
+		allowed := func(roles []string, callerTenant, targetTenant string) bool {
+			p := principal{Roles: roles}
+			if hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+				return true
+			}
+			return hasRole(p, "CASE_MANAGER") && targetTenant == callerTenant
+		}
+		cases := []struct {
+			name         string
+			roles        []string
+			callerTenant string
+			targetTenant string
+			want         bool
+		}{
+			{"FEDERAL_ADMIN can target any tenant", []string{"FEDERAL_ADMIN"}, "tx", "fl", true},
+			{"CASE_MANAGER can target own tenant", []string{"CASE_MANAGER"}, "fl", "fl", true},
+			{"CASE_MANAGER rejected on a different tenant", []string{"CASE_MANAGER"}, "tx", "fl", false},
+			{"ARBITRATOR rejected even on own tenant", []string{"ARBITRATOR"}, "tx", "tx", false},
+		}
+		for _, c := range cases {
+			got := allowed(c.roles, c.callerTenant, c.targetTenant)
+			if got != c.want {
+				t.Errorf("%s: roles=%v caller=%s target=%s: got allowed=%v, want %v",
+					c.name, c.roles, c.callerTenant, c.targetTenant, got, c.want)
+			}
+		}
+	})
 }
 
 func TestIsUniqueViolation(t *testing.T) {

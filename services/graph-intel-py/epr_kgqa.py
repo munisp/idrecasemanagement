@@ -84,8 +84,28 @@ def _ollama_generate(prompt: str) -> tuple[str, str]:
     return resp.json()["response"].strip(), f"ollama:{OLLAMA_MODEL}"
 
 
+def _general_summary(tenant: str) -> list[str]:
+    """Aggregate overview, used when the question names no specific case or
+    party (link_entities' stopword list filters out generic words like
+    "summary"/"disputes"/"currently" on purpose, so a broad "what's the
+    summary of our disputes" question links zero entities -- that's not a
+    failed lookup, it's a different kind of question this QA system didn't
+    previously have an answer for at all, surfacing as a flat "no matching
+    cases" even when the tenant has plenty of cases). Feeds both the ollama
+    prompt and the extractive fallback so this works whichever one answers."""
+    cases = graphdb.case_index(tenant)
+    if not cases:
+        return []
+    by_status: dict[str, int] = {}
+    for c in cases:
+        status = c["status"] or "UNKNOWN"
+        by_status[status] = by_status.get(status, 0) + 1
+    breakdown = ", ".join(f"{n} {s}" for s, n in sorted(by_status.items(), key=lambda kv: -kv[1]))
+    return [f"{len(cases)} total case(s) in this tenant's graph — status breakdown: {breakdown}."]
+
+
 def _extractive_answer(question: str, entities: list[dict], paths: list[str],
-                       ranked: list[dict]) -> str:
+                       ranked: list[dict], general: list[str] | None = None) -> str:
     lines = ["Based on the dispute graph (deterministic composer — ollama unreachable):"]
     if entities:
         ent_s = "; ".join(f"{e['label']} ({e['kind']}{', ' + e['detail'] if e['detail'] else ''})"
@@ -97,12 +117,16 @@ def _extractive_answer(question: str, entities: list[dict], paths: list[str],
         top = ", ".join(f"{r['case_id']} (score {r['score']})" for r in ranked[:3])
         lines.append(f"GNN link prediction ranks these as most related: {top}.")
     if not (entities or paths):
-        lines.append("No matching cases or parties were found in this tenant's graph.")
+        if general:
+            lines.extend(general)
+        else:
+            lines.append("No matching cases or parties were found in this tenant's graph.")
     return "\n".join(lines)
 
 
-def _prompt(question: str, paths: list[str]) -> str:
-    evidence = "\n".join(f"- {p}" for p in paths[:12]) or "(no graph paths retrieved)"
+def _prompt(question: str, paths: list[str], general: list[str] | None = None) -> str:
+    evidence_lines = paths[:12] or (general or [])
+    evidence = "\n".join(f"- {p}" for p in evidence_lines) or "(no graph paths retrieved)"
     return (
         "You are the IDRE dispute-graph analyst for a federal No Surprises Act "
         "platform. Answer ONLY from the evidence paths below — every claim must "
@@ -116,6 +140,7 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
     entities = link_entities(tenant, question)
     entity_ids = [e["id"] for e in entities]
     paths = graphdb.retrieve_paths(tenant, entity_ids) if entity_ids else []
+    general = _general_summary(tenant) if not entity_ids else []
 
     # GNN ranking for the first linked case (graph <-> gnn <-> kgqa)
     ranked: list[dict] = []
@@ -126,9 +151,9 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
 
     generator = ""
     try:
-        answer, generator = _ollama_generate(_prompt(question, paths))
+        answer, generator = _ollama_generate(_prompt(question, paths, general))
     except Exception:
-        answer = _extractive_answer(question, entities, paths, ranked)
+        answer = _extractive_answer(question, entities, paths, ranked, general)
         generator = "extractive-fallback"
 
     log_id = lakehouse_io.append_kgqa_log({

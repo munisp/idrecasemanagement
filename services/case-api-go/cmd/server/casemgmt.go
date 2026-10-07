@@ -35,6 +35,25 @@ var caseStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", 
 // internal CRM write access if that ever changes.
 var crmStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
+// financialReadRoles: checks/invoices/payments/financial-report reads --
+// these were reachable by ANY authenticated tenant member via direct URL
+// (only the Financials nav link hid them from the wrong roles, the backend
+// enforced nothing), which meant a narrow specialist role with no financial
+// remit at all -- ARBITRATOR, CODER, NURSE_PHYSICIAN, ATTORNEY -- could read
+// check images' bank routing/account numbers just by typing the address.
+// Matches the portal's own Financials nav gate exactly.
+var financialReadRoles = []string{"FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole}
+
+// qaReadRoles: the QA review queue/detail (correspondence drafts awaiting
+// approval) -- same gap as financialReadRoles, same fix. Matches the
+// portal's own QA Gate nav gate.
+var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+
+// reportsReadRoles: the Reports page's summary/SLA endpoints. Matches the
+// portal's own Reports nav gate (notably FINANCE and ARBITRATOR are NOT
+// here, unlike financialReadRoles -- Reports nav never included them).
+var reportsReadRoles = []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", serviceRole}
+
 // ---- Notifications -----------------------------------------------------------
 
 func (s *server) notify(r *http.Request, tenant, userSub, typ, body, link string) {

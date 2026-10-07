@@ -139,6 +139,10 @@
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
+  // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
+  // not the Rules page -- CASE_MANAGER never has a standing right to edit
+  // program rules, so this stays reachable independent of that gate.
+  if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/team", "⚉", "Team"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
@@ -223,6 +227,7 @@
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
     [/^#\/rules$/, Views.rulesAdmin],
+    [/^#\/team$/, Views.teamAdmin],
     [/^#\/audit$/, Views.auditLog],
   ];
 

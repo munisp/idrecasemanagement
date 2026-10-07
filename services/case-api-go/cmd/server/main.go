@@ -570,6 +570,14 @@ func main() {
 	r.Route("/v1/admin", func(r chi.Router) {
 		r.Use(a.middleware)
 		r.Post("/tenants", s.createTenant)
+		r.Post("/federal-admins", s.createFederalAdmin)
+		r.Get("/federal-admins", s.listFederalAdmins)
+		r.Patch("/federal-admins/{username}", s.updateFederalAdminStatus)
+		r.Delete("/federal-admins/{username}", s.deleteFederalAdmin)
+		r.Post("/tenant-staff", s.createTenantStaff)
+		r.Get("/tenant-staff", s.listTenantStaff)
+		r.Patch("/tenant-staff/{username}", s.updateTenantStaffStatus)
+		r.Delete("/tenant-staff/{username}", s.deleteTenantStaff)
 	})
 
 	// Voice-AI surface (API-key auth, not OIDC).

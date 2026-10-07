@@ -79,6 +79,10 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	where, args := `tenant=$1`, []any{tenant}
@@ -180,6 +184,10 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 
 // receivablesReport: aging view across the tenant (open/paid/refunded totals).
 func (s *server) receivablesReport(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.queryRows(r, `
 		SELECT party, kind, status, count(*) AS n, sum(amount_cents) AS total_cents,
