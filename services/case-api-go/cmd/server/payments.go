@@ -350,6 +350,10 @@ func (s *server) refundCardPayment(r *http.Request, tenant, invID string) error 
 
 // listPayments: payment history for a case or the whole tenant.
 func (s *server) listPayments(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	where, args := `tenant=$1`, []any{tenant}
@@ -388,6 +392,10 @@ func (s *server) finEvent(r *http.Request, tenant, caseID, invID, kind, directio
 // financialReport powers the finance dashboard: money in/out by period,
 // receivables aging, payment-method mix, and the raw event stream.
 func (s *server) financialReport(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 
 	kpis, err := s.queryRows(r, `

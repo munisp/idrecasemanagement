@@ -61,6 +61,15 @@ func (s *server) listVoiceLogs(w http.ResponseWriter, r *http.Request) {
 
 // slaReport: statutory breach feed for auditors/federal admins.
 func (s *server) slaReport(w http.ResponseWriter, r *http.Request) {
+	// Gate matches the Reports page's own nav gate, not just this comment's
+	// narrower description -- all four Reports tabs load on the same page
+	// view, and a tighter per-tab gate here would just reproduce the same
+	// "hangs on Loading forever" bug the Trends tab has for roles the
+	// Reports nav never intended to admit in the first place.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, reportsReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a reporting role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.db.Query(r.Context(), `
 		SELECT case_id, clock, COALESCE(detail,''), created_at
@@ -85,6 +94,10 @@ func (s *server) slaReport(w http.ResponseWriter, r *http.Request) {
 
 // summaryReport: case-status aggregates (CMS-report style rollups).
 func (s *server) summaryReport(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, reportsReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a reporting role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	// Programmed tenants (FL AHCA) track progress on internal_status, not
 	// the federal status column -- grouping by status there would aggregate

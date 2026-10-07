@@ -30,12 +30,15 @@ jobs:
             services/analytics-py services/outbox-relay-py services/edge-bridge-py \
             services/graph-intel-py services/lettergen-py
           pip install -q pytest
-          # check_processor.py's own deps (not the full requirements.txt --
-          # that also pulls in docling/paddlepaddle/paddleocr/torch, none of
-          # which test_check_processor.py's pure-function tests need, and
-          # installing them here would make this job minutes slower for no
-          # reason).
-          pip install -q numpy opencv-python-headless pytesseract pillow
+          # check_processor.py's and pipeline.py's own deps (not the full
+          # requirements.txt -- that also pulls in docling/paddlepaddle/
+          # paddleocr/torch, none of which test_check_processor.py's or
+          # test_pipeline.py's pure-function tests need since both modules
+          # import those heavy libs lazily inside function bodies, not at
+          # module scope; installing them here would make this job minutes
+          # slower for no reason). httpx/pyyaml are pipeline.py's own
+          # module-level imports -- needed just to collect test_pipeline.py.
+          pip install -q numpy opencv-python-headless pytesseract pillow httpx pyyaml
           cd services/doc-intel-py && python -m pytest -q
   yaml:
     runs-on: ubuntu-latest

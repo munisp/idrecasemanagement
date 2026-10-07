@@ -104,7 +104,26 @@ const Views = (() => {
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
     try {
-      const [{ cases }, summary, clocks, prog] = await Promise.all([Api.cases.list({ limit: 200 }), Api.reports.summary(), clockMap(), Api.program.get().catch(() => null)]);
+      const [{ cases }, clocks, prog] = await Promise.all([Api.cases.list({ limit: 200 }), clockMap(), Api.program.get().catch(() => null)]);
+      // Status rollup computed client-side from the case list the dashboard
+      // already fetched, not Api.reports.summary() -- that endpoint is
+      // gated to CASE_MANAGER/PM/FEDERAL_ADMIN/STATE_AUDITOR/PLATFORM_ADMIN
+      // (it matches the Reports page's own nav gate), but the home
+      // dashboard has to render for every real staff role, ARBITRATOR/
+      // CODER/NURSE_PHYSICIAN/ATTORNEY/FINANCE included. Promise.all was
+      // rejecting whole on that one 403, breaking the entire dashboard for
+      // those roles -- confirmed live. Approximate beyond the first 200
+      // cases (the limit this call already used); the authoritative,
+      // unlimited rollup stays on the Reports page.
+      const amtF = amtField(prog), amtL = amtLabel(prog);
+      const byStatus = {};
+      cases.forEach((c) => {
+        const b = byStatus[c.status] || (byStatus[c.status] = { status: c.status, count: 0, _sum: 0 });
+        b.count++; b._sum += (c[amtF] || 0) / 100;
+      });
+      const summary = Object.values(byStatus).map((b) => ({
+        status: b.status, count: b.count, avg_amount_usd: b.count ? b._sum / b.count : 0, amount_label: amtL,
+      }));
       html += `<div class="cards">` + summary.map((s) =>
         `<div class="card"><div class="num">${s.count}</div><div class="lbl">${badge(s.status)}</div>
          <div class="muted">avg ${esc(s.amount_label || "QPA")} $${(s.avg_amount_usd ?? 0).toFixed(0)}</div></div>`).join("") + `</div>`;
@@ -885,6 +904,16 @@ const Views = (() => {
   // animate) -- fine for a click handler, wrong for the initial auto-load
   // call, which has no button at all and would silently never run.
   const runOrDirect = (btn, fn) => btn ? UI.run(btn, fn, "") : fn();
+  // A toast disappears in a few seconds; the panel itself was left showing
+  // its initial "Loading…" placeholder forever on any error (confirmed
+  // live: a 403 from a role mismatch looked indistinguishable from a
+  // panel that's still fetching). Replace the placeholder with a visible,
+  // persistent message too, not just the transient toast.
+  const rptError = (outId, e) => {
+    const el = document.getElementById(outId);
+    if (el) el.innerHTML = `<p class="error">Couldn't load this report: ${esc(e.message || "unknown error")}</p>`;
+    UI.toast(e.message, { kind: "warn" });
+  };
   async function loadRptStatus(btn) {
     await runOrDirect(btn, async () => {
       try {
@@ -904,7 +933,7 @@ const Views = (() => {
         document.getElementById("rpt-status-csv").onclick = () =>
           csvDownload("case_status_rollup.csv", ["status", "count", `avg_${label.toLowerCase()}_usd`],
             rows.map((s) => [s.status, s.count, Number(s.avg_amount_usd || 0).toFixed(2)]));
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      } catch (e) { rptError("rpt-status-out", e); }
     });
   }
   async function loadRptSla(btn) {
@@ -923,7 +952,7 @@ const Views = (() => {
           : `<p class="muted">No breaches recorded — all statutory clocks held. ✔</p>`);
         document.getElementById("rpt-sla-csv").onclick = () => csvDownload("sla_breaches.csv", ["case_id", "clock", "detail", "at"],
           sla.map((x) => [x.case_id, x.clock, x.detail, x.at]));
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      } catch (e) { rptError("rpt-sla-out", e); }
     });
   }
   async function loadRptFin(btn) {
@@ -950,7 +979,7 @@ const Views = (() => {
             ["collected_30d", (k.collected_30d_cents || 0) / 100],
             ["refunded", (k.refunded_cents || 0) / 100],
             ["payments_settled", k.payments_count ?? 0]]);
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      } catch (e) { rptError("rpt-fin-out", e); }
     });
   }
   async function loadRptTrend(btn) {
@@ -968,7 +997,7 @@ const Views = (() => {
           csvDownload("trends_30d.csv", ["day", "intake", "tasks_done", "collections_cents"],
             (d.cases_trend || []).map((p, i) => [p.d || p.day, p.n,
               (d.throughput_trend || [])[i]?.n ?? 0, (d.collections_trend || [])[i]?.n ?? 0]));
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      } catch (e) { rptError("rpt-trend-out", e); }
     });
   }
   const RPT_TABS = [
@@ -1539,9 +1568,16 @@ const Views = (() => {
       note = v.note;
     } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
     await UI.run(el, async () => {
-      try { await Api.program.qaDecision(qaId, decision, note);
-          UI.toast(decision === "APPROVE" ? "Approved — sent and logged" : "Rejected"); App.rerender(); }
-      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      try {
+        const r = await Api.program.qaDecision(qaId, decision, note);
+        if (r.email_delivery_error) {
+          UI.toast(`Approved, but email delivery failed: ${r.email_delivery_error} — still APPROVED, retry once the address is fixed`,
+            { kind: "warn", sticky: true });
+        } else {
+          UI.toast(decision === "APPROVE" ? "Approved — sent and logged" : "Rejected");
+        }
+        App.rerender();
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
   }
 
@@ -2081,6 +2117,8 @@ const Views = (() => {
         <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
         <p><button onclick="Views.createTenantFlow()">＋ Create tenant</button>
            <span class="muted">activates a pre-provisioned state's Keycloak group + optional first user</span></p>
+        <p><button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>
+           <span class="muted">cross-tenant FEDERAL_ADMIN or PLATFORM_ADMIN account</span></p>
         <p><button id="rule-add">＋ New rule</button>
            <button id="rules-save" class="btn-primary">Save all changes</button></p>
         <div id="rules-list">` +
@@ -2174,12 +2212,140 @@ const Views = (() => {
     try {
       const r = await Api.admin.createTenant(payload);
       let msg = `Tenant "${tenant}" ${r.group_already_existed ? "group already existed" : "group created"} (${r.group})`;
-      if (r.first_user?.temporary_password) {
+      let kind;
+      if (r.first_user?.role_assignment_error) {
+        msg += ` — user "${r.first_user.username}" created, but role assignment FAILED: ${r.first_user.role_assignment_error} — fix this in Keycloak directly before relying on this account`;
+        kind = "error";
+      } else if (r.first_user?.temporary_password) {
         msg += ` — user "${r.first_user.username}" created, temporary password: ${r.first_user.temporary_password}`;
       } else if (r.first_user_error) {
         msg += ` — ${r.first_user_error}`;
       }
-      UI.toast(msg, { sticky: true });
+      UI.toast(msg, kind ? { kind, sticky: true } : { sticky: true });
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  // Creates a cross-tenant FEDERAL_ADMIN/PLATFORM_ADMIN account -- there was
+  // previously no way to do this through the app at all; federal.admin
+  // itself was seeded by hand-editing the Keycloak realm.
+  async function createFederalAdminFlow() {
+    const v = await UI.modal({
+      title: "Create federal admin", submitLabel: "Create",
+      fields: [
+        { name: "username", label: "Username", required: true },
+        { name: "email", label: "Email", required: true },
+        { name: "role", label: "Role", value: "FEDERAL_ADMIN",
+          options: [["FEDERAL_ADMIN", "Federal admin"], ["PLATFORM_ADMIN", "Platform admin"]] },
+      ],
+    });
+    if (!v) return;
+    try {
+      const r = await Api.admin.createFederalAdmin({ username: v.username, email: v.email, role: v.role });
+      if (r.role_assignment_error) {
+        UI.toast(`User "${r.username}" created, but role assignment FAILED: ${r.role_assignment_error} — fix this in Keycloak directly before relying on this account`,
+          { kind: "error", sticky: true });
+      } else {
+        UI.toast(`User "${r.username}" created (${r.role}) — temporary password: ${r.temporary_password}`, { sticky: true });
+      }
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  // #/team -- the one page a CASE_MANAGER has a standing right to (their
+  // own tenant, enforced server-side by createTenantStaff/listTenantStaff),
+  // independent of the Rules page's FEDERAL_ADMIN/PLATFORM_ADMIN-only gate.
+  // scope is "tenant" (acts via the tenant-staff endpoints, tenant required)
+  // or "federal" (cross-tenant admin endpoints, no tenant). The caller's own
+  // row never gets action buttons -- the backend rejects self-suspend/
+  // self-delete too, but hiding them here avoids a round-trip just to find
+  // that out, and stops an admin from locking themselves out by accident.
+  function staffTableHtml(members, scope, tenant) {
+    if (!members.length) return `<p class="muted">No staff found.</p>`;
+    const me = Auth.claims()?.name;
+    return `<table><thead><tr><th>Username</th><th>Email</th><th>Roles</th><th>Status</th><th></th></tr></thead><tbody>` +
+      members.map((m) => {
+        const isSelf = m.username === me;
+        const actions = isSelf ? '<span class="muted">(you)</span>' : (
+          (m.enabled
+            ? `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',false)">Suspend</button>`
+            : `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',true)">Reactivate</button>`) +
+          ` <button class="mini" onclick="Views.deleteStaffMember('${scope}','${esc(tenant || "")}','${esc(m.username)}')">Delete</button>`
+        );
+        return `<tr><td class="mono">${esc(m.username)}</td><td>${esc(m.email || "—")}</td>
+        <td>${(m.roles || []).map((r) => badge(r)).join(" ") || "—"}</td>
+        <td>${m.enabled ? '<span class="badge s-paid">enabled</span>' : '<span class="badge s-denied">disabled</span>'}</td>
+        <td>${actions}</td></tr>`;
+      }).join("") +
+      `</tbody></table>`;
+  }
+  async function teamAdmin() {
+    const isAdmin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const tenant = Api.getTenant();
+    let html = `<div class="view-head"><h1>Team</h1>
+      <span class="muted">add staff accounts to ${isAdmin ? "any activated tenant" : "your own tenant"}</span></div>
+      <p><button onclick="Views.addTenantStaffFlow()">＋ Add tenant staff</button>
+      ${isAdmin ? ` <button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>` : ""}</p>`;
+    try {
+      const [staff, federal] = await Promise.all([
+        Api.admin.listTenantStaff(tenant),
+        isAdmin ? Api.admin.listFederalAdmins().catch(() => []) : Promise.resolve(null),
+      ]);
+      html += `<h2>Staff — tenant ${esc(tenant.toUpperCase())}</h2>${staffTableHtml(staff, "tenant", tenant)}`;
+      if (federal) html += `<h2>Federal / platform admins <span class="muted">cross-tenant</span></h2>${staffTableHtml(federal, "federal")}`;
+      return html;
+    } catch (e) { return html + err(e); }
+  }
+
+  // Suspend (enabled=false) or reactivate (enabled=true) a staff account.
+  // Backend re-checks role/tenant scoping and the self-action guard
+  // independently -- this is UX, not the security boundary.
+  async function setStaffEnabled(scope, tenant, username, enabled) {
+    try {
+      if (scope === "federal") await Api.admin.setFederalAdminEnabled(username, enabled);
+      else await Api.admin.setTenantStaffEnabled(tenant, username, enabled);
+      UI.toast(`${username} ${enabled ? "reactivated" : "suspended"}`);
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  async function deleteStaffMember(scope, tenant, username) {
+    if (!(await UI.confirm(`Delete ${username}?`, "This permanently removes the account. It cannot be undone.", "Delete", true))) return;
+    try {
+      if (scope === "federal") await Api.admin.deleteFederalAdmin(username);
+      else await Api.admin.deleteTenantStaff(tenant, username);
+      UI.toast(`${username} deleted`);
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  // Adds a second (or third...) staff member to an already-activated
+  // tenant, without resubmitting a whole "create tenant" request just to
+  // piggyback a new first_user. Tenant field is pre-filled with the
+  // caller's own tenant -- the only one a CASE_MANAGER can actually target.
+  async function addTenantStaffFlow() {
+    const v = await UI.modal({
+      title: "Add tenant staff", submitLabel: "Create",
+      fields: [
+        { name: "tenant", label: "State code", required: true, value: Api.getTenant(),
+          hint: "2-letter lowercase USPS code — must already be an activated tenant" },
+        { name: "username", label: "Username", required: true },
+        { name: "email", label: "Email", required: true },
+        { name: "role", label: "Role", value: "CASE_MANAGER", options: [
+          ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
+          ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse/Physician"], ["ATTORNEY", "Attorney"],
+          ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
+      ],
+    });
+    if (!v) return;
+    const tenant = (v.tenant || "").trim().toLowerCase();
+    if (!/^[a-z]{2}$/.test(tenant)) { UI.toast("State code must be exactly 2 lowercase letters", { kind: "error" }); return; }
+    try {
+      const r = await Api.admin.createTenantStaff({ tenant, username: v.username, email: v.email, role: v.role });
+      if (r.role_assignment_error) {
+        UI.toast(`User "${r.username}" created, but role assignment FAILED: ${r.role_assignment_error} — fix this in Keycloak directly before relying on this account`,
+          { kind: "error", sticky: true });
+      } else {
+        UI.toast(`User "${r.username}" created (${r.role}) on tenant ${tenant} — temporary password: ${r.temporary_password}`, { sticky: true });
+      }
     } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
@@ -2249,5 +2415,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, createTenantFlow, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();

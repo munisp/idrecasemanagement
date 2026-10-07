@@ -57,6 +57,22 @@ const Api = (() => {
       // Not tenant-scoped -- creates the /tenant/<xx> group a new tenant
       // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createTenant: (payload) => req("POST", "/v1/admin/tenants", payload),
+      // Cross-tenant: creates a FEDERAL_ADMIN/PLATFORM_ADMIN account.
+      // FEDERAL_ADMIN/PLATFORM_ADMIN only.
+      createFederalAdmin: (payload) => req("POST", "/v1/admin/federal-admins", payload),
+      // Adds staff to an EXISTING tenant. FEDERAL_ADMIN/PLATFORM_ADMIN for
+      // any tenant, or CASE_MANAGER for their own tenant only.
+      createTenantStaff: (payload) => req("POST", "/v1/admin/tenant-staff", payload),
+      listFederalAdmins: () => req("GET", "/v1/admin/federal-admins"),
+      listTenantStaff: (tenant) => req("GET", `/v1/admin/tenant-staff?tenant=${encodeURIComponent(tenant)}`),
+      setTenantStaffEnabled: (tenant, username, enabled) =>
+        req("PATCH", `/v1/admin/tenant-staff/${encodeURIComponent(username)}`, { tenant, enabled }),
+      deleteTenantStaff: (tenant, username) =>
+        req("DELETE", `/v1/admin/tenant-staff/${encodeURIComponent(username)}?tenant=${encodeURIComponent(tenant)}`),
+      setFederalAdminEnabled: (username, enabled) =>
+        req("PATCH", `/v1/admin/federal-admins/${encodeURIComponent(username)}`, { enabled }),
+      deleteFederalAdmin: (username) =>
+        req("DELETE", `/v1/admin/federal-admins/${encodeURIComponent(username)}`),
     },
     auditLog: {
       list: (params = {}) => {

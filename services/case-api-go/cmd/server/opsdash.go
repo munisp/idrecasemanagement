@@ -16,7 +16,15 @@ import (
 	"net/http"
 )
 
-var opsRoles = []string{"CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
+// PM included: opsDashboard backs both the standalone Ops page (gated to
+// the roles below) and the Reports -> Trends tab, which PM can reach via
+// the Reports nav link -- without PM here, Trends 403s for a role the nav
+// itself grants access to, and the frontend doesn't surface that 403, so
+// it just hangs on "Loading..." forever (confirmed live during role
+// testing: pm.fl/coder.fl/nurse.fl/attorney.fl all hit this, but only PM
+// is a real mismatch -- the other three correctly have no Reports nav
+// access at all, so their 403 here is consistent, not a bug).
+var opsRoles = []string{"CASE_MANAGER", "ARBITRATOR", "FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
 
 func (s *server) presencePing(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)

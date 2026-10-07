@@ -575,6 +575,14 @@ func main() {
 	r.Route("/v1/admin", func(r chi.Router) {
 		r.Use(a.middleware)
 		r.Post("/tenants", s.createTenant)
+		r.Post("/federal-admins", s.createFederalAdmin)
+		r.Get("/federal-admins", s.listFederalAdmins)
+		r.Patch("/federal-admins/{username}", s.updateFederalAdminStatus)
+		r.Delete("/federal-admins/{username}", s.deleteFederalAdmin)
+		r.Post("/tenant-staff", s.createTenantStaff)
+		r.Get("/tenant-staff", s.listTenantStaff)
+		r.Patch("/tenant-staff/{username}", s.updateTenantStaffStatus)
+		r.Delete("/tenant-staff/{username}", s.deleteTenantStaff)
 	})
 
 	// Voice-AI surface (API-key auth, not OIDC).
@@ -688,8 +696,13 @@ const initiationWindowBD = 4
 
 func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// PARTY included deliberately: the portal's "New dispute" nav link (and
+	// this exact form -- CMS case number, QPA, provider/payer IDs) is shown
+	// to PARTY as self-service federal NSA filing, not just staff. Caught by
+	// cross-checking the UI's own nav gate against this handler's roles
+	// after first writing it without PARTY.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PARTY, CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 

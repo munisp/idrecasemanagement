@@ -57,27 +57,29 @@ func (s *server) corrTemplates(r *http.Request, tenant string) []CorrTemplate {
 
 // resolveRecipients turns correspondence-template role labels (provider,
 // health_plan, agency, requester, filing_party) into real contact emails,
-// via the same legal-name match account360 already uses (case.provider_id/
-// payer_id store the party's legal name as text, not an account UUID --
-// confirmed against crm.go's own join). Partial by design: "pm" would need
-// a Keycloak user-by-role lookup this codebase has no API for anywhere yet,
-// and "billed_party"/"all_parties"/"provider_or_plan" need invoice/template
-// context resolveRecipients doesn't have — those roles resolve to no
-// addresses here rather than a guess, so draftCorrespondence's caller-
-// supplied to/cc (today's only path) still works as the fallback.
+// via the same account-id match account360 uses (case.provider_id/payer_id
+// are accounts.id, confirmed directly against live data -- 158 real case
+// matches on id; the legal-name match this comment used to describe never
+// matched anything, a wrong assumption that had gone unverified since).
+// Partial by design: "pm" would need a Keycloak user-by-role lookup this
+// codebase has no API for anywhere yet, and "billed_party"/"all_parties"/
+// "provider_or_plan" need invoice/template context resolveRecipients
+// doesn't have — those roles resolve to no addresses here rather than a
+// guess, so draftCorrespondence's caller-supplied to/cc (today's only
+// path) still works as the fallback.
 func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles []string) []string {
-	var providerName, payerName string
+	var providerAccountID, payerAccountID string
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT coalesce(provider_id,''), coalesce(payer_id,'') FROM tenant_%s.cases WHERE id=$1`,
-		sanitizeTenant(tenant)), caseID).Scan(&providerName, &payerName)
+		sanitizeTenant(tenant)), caseID).Scan(&providerAccountID, &payerAccountID)
 
-	lookup := func(legalName string) []string {
-		if legalName == "" {
+	lookup := func(accountID string) []string {
+		if accountID == "" {
 			return nil
 		}
 		rows, err := s.queryRows(r, `
 			SELECT c.email FROM public.contacts c JOIN public.accounts a ON a.id = c.account_id
-			WHERE a.tenant=$1 AND a.legal_name=$2 AND coalesce(c.email,'') <> ''`, tenant, legalName)
+			WHERE a.tenant=$1 AND a.id::text=$2 AND coalesce(c.email,'') <> ''`, tenant, accountID)
 		if err != nil {
 			return nil
 		}
@@ -113,9 +115,9 @@ func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles
 	for _, role := range roles {
 		switch role {
 		case "provider", "requester", "filing_party":
-			add(lookup(providerName))
+			add(lookup(providerAccountID))
 		case "health_plan":
-			add(lookup(payerName))
+			add(lookup(payerAccountID))
 		case "agency":
 			add(agencyRecipients)
 		}
@@ -328,6 +330,10 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 // PENDING review marks it SENT and writes the correspondence log — nothing
 // reaches a party without passing the gate.
 func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, qaReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a case-staff or QA role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.queryRows(r, `
 		SELECT id, case_id, artifact, channel, subject, status, drafted_by, created_at
@@ -346,6 +352,10 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, qaReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a case-staff or QA role"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	qid := chi.URLParam(r, "qaId")
 	rows, err := s.queryRows(r, `
@@ -376,7 +386,15 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(),
 		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
 		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact)
-	if err != nil || status != "PENDING" {
+	// APPROVED (not yet SENT) + a fresh APPROVE decision is a retry of a
+	// previously failed send -- status only reaches APPROVED-without-SENT
+	// when sendMail below failed last time, and the response used to claim
+	// "stays APPROVED so the reviewer can retry" with no actual way to do
+	// that (calling this again always 409'd). REJECT still requires PENDING
+	// -- rejecting something already approved isn't a retry, it's reversing
+	// a decision, which this endpoint doesn't support.
+	isRetry := status == "APPROVED" && in.Decision == "APPROVE"
+	if err != nil || (status != "PENDING" && !isRetry) {
 		http.Error(w, `{"error":"not pending"}`, http.StatusConflict)
 		return
 	}
@@ -399,7 +417,12 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"forbidden: requires %s, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, qaRole), http.StatusForbidden)
 			return
 		}
-	} else if !hasAnyRole(p, "CASE_MANAGER", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		// ARBITRATOR added: the portal's own QA Gate nav link already shows
+		// to ARBITRATOR (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY",
+		// ...)), and a federal determination letter's QA review -- which
+		// lands here, not in the qa_role branch above -- is exactly the kind
+		// of review an arbitrator needs to approve before it goes out.
+	} else if !hasAnyRole(p, "CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
@@ -414,32 +437,49 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	var to, cc []string
 	_ = json.Unmarshal(toJ, &to)
 	_ = json.Unmarshal(ccJ, &cc)
+	deliveryError := ""
 	if in.Decision == "APPROVE" {
 		// The narrative's send-safety rule (drafts saved without addresses) ends
 		// here: addresses enter only at QA-approved send time, and delivery goes
 		// through the configured SMTP relay. Failure keeps status APPROVED (not
 		// SENT) so the reviewer can retry — nothing is marked sent that wasn't.
+		//
+		// A failed send used to hard-502 the whole request here (an early
+		// return before the QA_DECISION audit line below) -- confirmed live:
+		// the approval itself WAS saved (the UPDATE above already ran), but
+		// the reviewer saw an opaque Cloudflare 502 with no indication their
+		// decision had actually gone through, and no audit trail existed for
+		// that approval at all -- exactly the record a 502-looking "did this
+		// even work?" moment most needs. Approval and delivery are now two
+		// separate facts: the decision always succeeds and is always
+		// audited; delivery failure is reported back in the 200 response
+		// instead of standing in for the whole request's status.
 		if err := s.sendMail(to, cc, subject, body); err != nil {
+			deliveryError = err.Error()
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
-			http.Error(w, `{"error":"smtp delivery failed — draft stays APPROVED for retry"}`, http.StatusBadGateway)
-			return
+		} else {
+			_, _ = s.db.Exec(r.Context(),
+				`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
+			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
+			s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
+				fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
+			// Notification is a fact now — the checklist follows.
+			s.autoChecklist(r, tenant, caseID)
 		}
-		_, _ = s.db.Exec(r.Context(),
-			`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
-		s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
-		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
-			fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
-		// Notification is a fact now — the checklist follows.
-		s.autoChecklist(r, tenant, caseID)
 	} else {
 		s.logActivity(r.Context(), tenant, caseID, "QA_REJECTED",
 			fmt.Sprintf("Draft rejected in QA by %s: %s%s", p.Subject, subject, orDash(" — "+in.Note)))
 	}
 	s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
 		"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note,
+		"email_delivery_error": deliveryError,
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": newStatus})
+	out := map[string]any{"status": newStatus}
+	if deliveryError != "" {
+		out["email_delivery_error"] = deliveryError
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *server) logCorrespondence(r *http.Request, tenant, caseID, direction, template, subject, body string, to, cc []string, actor string) {
