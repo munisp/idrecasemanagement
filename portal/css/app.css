@@ -116,7 +116,7 @@ pre{background:var(--n900);color:#d6e2ff;padding:12px;border-radius:10px;overflo
 .badge{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:var(--radius-chip);font-size:11.5px;font-weight:600;background:var(--surface-sunken);color:var(--text-secondary);white-space:nowrap}
 .s-closed-paid,.s-determined,.s-active,.s-analyzed,.s-ok,.s-approved,.s-completed,.s-settled-in-negotiation{background:var(--success-bg);color:var(--success-fg)}
 .s-rejected,.s-rejected-auto,.s-error,.s-expired,.s-closed-dismissed{background:var(--danger-bg);color:var(--danger-fg)}
-.s-payment-pending,.s-pending-approval,.s-pending-docs,.s-analyzed-with-findings,.s-queued{background:var(--warning-bg);color:var(--warning-fg)}
+.s-payment-pending,.s-pending-approval,.s-pending-docs,.s-analyzed-with-findings,.s-queued,.s-received{background:var(--warning-bg);color:var(--warning-fg)}
 .s-initiated,.s-offer-window-open,.s-open,.s-new,.s-in-progress{background:var(--info-bg);color:var(--info-fg)}
 .s-in-review,.s-negotiation-tracked,.s-converted,.s-unassigned{background:var(--attention-bg);color:var(--attention-fg)}
 .s-offers-sealed,.s-sealed,.s-offers-revealed{background:var(--sealed-bg);color:var(--sealed-fg)}
