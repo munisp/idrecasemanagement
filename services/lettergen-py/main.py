@@ -215,6 +215,29 @@ def main() -> None:
             consumer.commit(msg)  # commit only after the letter exists
         except Exception as e:  # noqa: BLE001 — poison event: log, skip once committed offsets move past
             print(f"[lettergen] ERROR {e}", file=sys.stderr, flush=True)
+            # Previously silent: a reviewer who clicked "Generate letter" saw
+            # it go QUEUED and then nothing, ever, with no error, no retry,
+            # no explanation (confirmed live -- a missing template .docx hit
+            # exactly this path). Surface the failure the same way a real
+            # letter's success is surfaced: a case activity note and a
+            # notification, so staff know to re-upload the template or
+            # escalate instead of waiting on a letter that will never arrive.
+            try:
+                tenant, case_id, key = evt.get("tenant"), evt.get("case_id"), evt.get("template")
+                if tenant and case_id:
+                    with psycopg.connect(DSN, autocommit=True) as c:
+                        c.execute(
+                            """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                               VALUES (%s,%s,'LETTER_GENERATION_FAILED',%s)""",
+                            (tenant, case_id, f"Letter template {key!r} failed to generate: {e}"),
+                        )
+                        c.execute(
+                            """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+                               VALUES (%s,'*','LETTER_GENERATION_FAILED',%s,%s)""",
+                            (tenant, f"Letter {key} failed to generate on case — {e}", f"#/cases/{case_id}"),
+                        )
+            except Exception as notify_exc:  # noqa: BLE001 — failure visibility must never mask the original error
+                print(f"[lettergen] ERROR could not record failure: {notify_exc}", file=sys.stderr, flush=True)
             consumer.commit(msg)
     consumer.close()
 
