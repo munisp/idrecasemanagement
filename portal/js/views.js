@@ -1646,12 +1646,37 @@ const Views = (() => {
       // that applies to this tenant and ignores the other), so the form
       // itself doesn't need to branch -- only its label does.
       const label = amtLabel(prog);
-      afterRender(() => $("#intake-form")?.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        await newIntake(ev.target);
-      }));
+      afterRender(() => {
+        $("#intake-form")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          await newIntake(ev.target);
+        });
+        // Conversational intake (step 5): the chat EXTRACTS into the form;
+        // the human reviews the filled form and files with the same button
+        // as always. The model never files.
+        window._intakeChat = { fields: {}, history: [] };
+        // Human keystrokes win over extraction: once a field is touched, the
+        // assistant never overwrites it.
+        const f0 = $("#intake-form");
+        ["email", "contact_name", "org", "amount"].forEach((n) =>
+          f0?.[n]?.addEventListener("input", () => { f0[n].dataset.touched = "1"; }));
+        $("#intake-chat-form")?.addEventListener("submit", (ev) => {
+          ev.preventDefault();
+          const msg = ev.target.message.value.trim();
+          if (msg) { ev.target.message.value = ""; intakeChatTurn(msg); }
+        });
+      });
       return `<div class="view-head"><h1>Pre-case intake</h1>
         <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
+        <details open class="card" style="margin-bottom:12px"><summary><b>✦ Describe it, I'll fill the form</b> — conversational intake (extraction only; you review and file)</summary>
+          <div id="intake-chat-thread" class="asst-thread" style="min-height:80px;max-height:30vh;margin:10px 0">
+            <div class="asst-turn asst-ai"><div class="asst-who">intake assistant</div>
+            <div class="asst-body">Describe the request in your own words — who called, provider or plan, amounts, anything else. I'll fill the form below as we go.</div></div>
+          </div>
+          <form id="intake-chat-form" class="asst-form">
+            <input name="message" autocomplete="off" placeholder="e.g. Dana from Meridian Surgical called about a $4,200 out-of-network dispute…" aria-label="Describe the intake" />
+            <button>Send</button></form>
+          <p class="muted" id="intake-chat-missing" style="margin:6px 0 0"></p></details>
         <form id="intake-form" class="inline-form">
           <input name="email" type="email" placeholder="requester email" required />
           <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
@@ -1730,6 +1755,44 @@ const Views = (() => {
         App.rerender();
       }
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // One turn of conversational intake: send the worker's words plus the
+  // fields extracted so far (client-carried state, endpoint is stateless),
+  // render the follow-up, and prefill the REAL form — filing stays manual.
+  async function intakeChatTurn(msg) {
+    const thread = document.getElementById("intake-chat-thread");
+    const add = (role, body) => thread?.insertAdjacentHTML("beforeend",
+      `<div class="asst-turn ${role === "user" ? "asst-user" : "asst-ai"}">
+         <div class="asst-who">${role === "user" ? "you" : "intake assistant"}</div>
+         <div class="asst-body">${esc(body)}</div></div>`);
+    const st = window._intakeChat || (window._intakeChat = { fields: {}, history: [] });
+    add("user", msg); add("assistant", "…");
+    try {
+      const r = await Api.program.intakeConverse(msg, st.fields, st.history);
+      thread.lastElementChild.remove();
+      add("assistant", r.reply || "");
+      st.history.push(msg);
+      st.fields = r.fields || {};
+      // Prefill the form; never overwrite text the human has typed.
+      const f = document.getElementById("intake-form");
+      if (f) {
+        if (st.fields.email && !f.email.dataset.touched) f.email.value = st.fields.email;
+        if (st.fields.contact_name && !f.contact_name.dataset.touched) f.contact_name.value = st.fields.contact_name;
+        if (st.fields.org && !f.org.dataset.touched) f.org.value = st.fields.org;
+        if (st.fields.filing_party_type) f.filing_party_type.value = st.fields.filing_party_type;
+        const cents = st.fields.disputed_amount_cents || st.fields.qpa_cents;
+        if (cents && !f.amount.dataset.touched) f.amount.value = (cents / 100).toFixed(2);
+      }
+      const miss = document.getElementById("intake-chat-missing");
+      if (miss) miss.textContent = r.ready
+        ? "✓ Ready — review the form and file when you're satisfied."
+        : (r.missing || []).length ? "Still needed: " + r.missing.join(", ") : "";
+    } catch (e) {
+      thread?.lastElementChild?.remove();
+      add("assistant", `⚠ ${e.message}`);
+    }
+    thread && (thread.scrollTop = thread.scrollHeight);
   }
 
   async function advanceIntake(id, status, sel) {
