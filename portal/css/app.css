@@ -202,7 +202,9 @@ input:focus,select:focus{outline:2px solid var(--focus-ring);outline-offset:1px;
 
 /* ---------- notifications ---------- */
 .notif-panel{position:fixed;top:60px;right:14px;width:min(420px,92vw);max-height:70vh;overflow:auto;background:var(--surface-overlay);border:1px solid var(--border-subtle);border-radius:var(--radius-card);box-shadow:var(--shadow-3);padding:12px 16px;z-index:50;color:var(--text-primary)}
-.notif-panel h3{margin:0 0 8px;font-size:13.5px}
+.notif-panel h3{margin:0 0 8px;font-size:13.5px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.notif-markall{font-size:11.5px;font-weight:500;color:var(--info-fg);text-decoration:none;white-space:nowrap}
+.notif-markall:hover{text-decoration:underline}
 .notif{padding:8px 6px;border-bottom:1px solid var(--border-subtle);cursor:pointer;font-size:13px}
 .notif:last-child{border-bottom:none}
 .notif.unread{background:var(--info-bg);border-radius:8px}

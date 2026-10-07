@@ -160,6 +160,7 @@ const Api = (() => {
       calendar: () => req("GET", `${t()}/calendar`),
       notifications: () => req("GET", `${t()}/notifications`),
       readNotif: (id) => req("POST", `${t()}/notifications/${id}/read`),
+      readAllNotifs: () => req("POST", `${t()}/notifications/read-all`),
       views: () => req("GET", `${t()}/views`),
       saveView: (p) => req("POST", `${t()}/views`, p),
       clocks: (id) => req("GET", `${t()}/cases/${id}/clocks`),

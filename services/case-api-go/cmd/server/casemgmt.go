@@ -195,9 +195,27 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// Scoped the same way listNotifications reads: own notifications plus
+	// tenant-wide broadcasts (user_sub='*') -- previously any authenticated
+	// tenant member could mark ANY other user's notification read by id.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.notifications SET read_at=now()
-		WHERE tenant=$1 AND id=$2`, tenant, chi.URLParam(r, "notifId"))
+		WHERE tenant=$1 AND id=$2 AND (user_sub=$3 OR user_sub='*')`,
+		tenant, chi.URLParam(r, "notifId"), p.Subject)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
+}
+
+// readAllNotifications: POST /notifications/read-all — clears every unread
+// notification visible to the caller (own + tenant-wide broadcasts), same
+// scope as listNotifications.
+func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	_, _ = s.db.Exec(r.Context(), `
+		UPDATE public.notifications SET read_at=now()
+		WHERE tenant=$1 AND (user_sub=$2 OR user_sub='*') AND read_at IS NULL`,
+		tenant, p.Subject)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
 }
 

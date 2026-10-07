@@ -509,6 +509,7 @@ func main() {
 		r.Get("/audit-log", s.listAuditLog)
 		r.Get("/notifications", s.listNotifications)
 		r.Post("/notifications/{notifId}/read", s.readNotification)
+		r.Post("/notifications/read-all", s.readAllNotifications)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
 		r.Get("/prefs", s.getPrefs) // server-side user preferences (source of truth)

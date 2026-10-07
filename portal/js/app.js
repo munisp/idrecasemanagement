@@ -174,7 +174,9 @@
     const n = await Api.cm.notifications().catch(() => []);
     const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
     w.className = "notif-panel";
-    w.innerHTML = `<h3>Notifications</h3>` + (n.length ? n.map((x) =>
+    w.innerHTML = `<h3>Notifications${n.length ?
+        ` <a href="javascript:void(0)" class="notif-markall" onclick="Api.cm.readAllNotifs().then(()=>location.reload())">Mark all as read</a>` : ""
+      }</h3>` + (n.length ? n.map((x) =>
       `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>location.reload())">
          <b>${x.type}</b> — ${x.body} <span class="muted">${new Date(x.at).toLocaleString()}</span></div>`).join("")
       : `<p class="muted">No notifications.</p>`);
