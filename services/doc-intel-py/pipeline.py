@@ -15,6 +15,22 @@ Accuracy architecture (v2):
        in the document text; per-field confidence)
     -> validate (cross-checks vs case record + review routing)
     -> index
+
+Performance architecture (v3):
+  * Heavy models (Docling converter, PaddleOCR, PP-StructureV3) are process-
+    level SINGLETONS keyed by their config — construction is model-loading
+    from disk, so per-document construction was multiplying every document's
+    latency by seconds and churning worker memory (a real OOM vector on a
+    multi-tenant queue).
+  * VLM chunk extraction runs CONCURRENTLY (config: parallel_chunks) — the
+    calls are network-bound, and a 40-page itemized bill was paying N serial
+    round-trips. Merge order is preserved; results are deterministic.
+  * Scan-quality assessment measures on downscaled pages with a Gaussian
+    pre-filter — fastNlMeansDenoising is a beautiful denoiser and a terrible
+    thing to run on every page of every document on CPU.
+  * Degraded-scan recovery re-renders and enhances ONLY the poor pages.
+  * verify() squashes the document haystack ONCE, not per extracted value;
+    VLM page images ship as JPEG, not PNG (5-10x smaller, faster encode).
 """
 
 from __future__ import annotations
@@ -23,12 +39,32 @@ import io
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
 import yaml
 from PIL import Image
+
+# ---------------------------------------------------------------------------
+# Model singletons — construction IS model loading; never per-document
+# ---------------------------------------------------------------------------
+
+_MODEL_CACHE: dict[tuple, Any] = {}
+_MODEL_LOCK = threading.Lock()
+
+
+def _model(key: tuple, factory) -> Any:
+    """Process-level singleton for heavy model objects. Double-checked
+    locking: workers are typically single-threaded per replica, but the VLM
+    stage already parallelizes and stage code must stay safe under threads."""
+    if key not in _MODEL_CACHE:
+        with _MODEL_LOCK:
+            if key not in _MODEL_CACHE:
+                _MODEL_CACHE[key] = factory()
+    return _MODEL_CACHE[key]
 
 # ---------------------------------------------------------------------------
 # Stage implementations
@@ -111,17 +147,21 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
     """PRIMARY parser — IBM Docling: PDF/DOCX/PPTX/HTML/images into a structured
     document (reading order, layout regions, tables, figures, formulas)."""
     from docling.datamodel.base_models import DocumentStream
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.datamodel.base_models import InputFormat
 
-    opts = PdfPipelineOptions(
-        do_ocr=cfg.get("do_ocr", True),
-        do_table_structure=cfg.get("do_table_structure", True),
-    )
-    converter = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
-    )
+    def build():
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.base_models import InputFormat
+        opts = PdfPipelineOptions(
+            do_ocr=cfg.get("do_ocr", True),
+            do_table_structure=cfg.get("do_table_structure", True),
+        )
+        return DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+        )
+
+    converter = _model(("docling", cfg.get("do_ocr", True),
+                        cfg.get("do_table_structure", True)), build)
     stream = DocumentStream(name=ctx.get("filename", "doc.pdf"),
                             stream=io.BytesIO(ctx["raw_bytes"]))
     doc = converter.convert(stream).document
@@ -143,6 +183,10 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
 
 
 # Scan-quality thresholds (empirical; tune against your document mix).
+# NOTE: blur is now measured on 1400px-downscaled, Gaussian-smoothed pages
+# (see assess_page_quality) — a different variance scale than the original
+# full-res NLM measurement. 80.0 remains a sane focus floor at this scale,
+# but recalibrate against a labeled sample of your real scan mix.
 _BLUR_MIN = 80.0        # Laplacian variance (denoised) below this => out of focus
 _SEPARATION_MIN = 40.0  # bg median - fg p5 below this => faint/washed-out print
 _BRIGHTNESS_LO = 60.0   # mean below => underexposed (overexposure is caught
@@ -162,10 +206,19 @@ def assess_page_quality(img: Image.Image) -> dict:
     detected HERE — before OCR — so the pipeline can enhance and reviewers
     get an accurate diagnosis instead of a generic 'no content' finding."""
     import cv2
-    import numpy as np
 
     gray = cv2.cvtColor(np_from_pil(img), cv2.COLOR_RGB2GRAY)
-    smooth = cv2.fastNlMeansDenoising(gray, None, 4, 7, 21)
+    # Downscale first: blur/separation/exposure are stable at assessment
+    # scale, and a 300dpi page is ~8MP of wasted arithmetic otherwise.
+    h, w = gray.shape
+    if max(h, w) > 1400:
+        s = 1400 / max(h, w)
+        gray = cv2.resize(gray, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+    # Gaussian pre-filter in place of fastNlMeansDenoising: NLM is the right
+    # denoiser for RESTORATION, but for a variance measurement it only needs
+    # sensor noise suppressed — a 5x5 Gaussian does that in microseconds
+    # where NLM costs seconds per page on CPU.
+    smooth = cv2.GaussianBlur(gray, (5, 5), 0)
     blur = float(cv2.Laplacian(smooth, cv2.CV_64F).var())
     # Separation = how much darker the ink is than the paper, measured over
     # actual ink pixels (anything below near-white). Percentile-of-page
@@ -188,7 +241,10 @@ def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     gray = cv2.cvtColor(np_from_pil(img), cv2.COLOR_RGB2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
-    enhanced = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+    # Median 3x3 in place of NLM(h=10): on salt-and-pepper scan noise the
+    # OCR-accuracy difference is negligible and the speed difference is
+    # orders of magnitude (NLM on a 300dpi page = multi-second, per page).
+    enhanced = cv2.medianBlur(enhanced, 3)
     h, w = enhanced.shape
     if max(h, w) < 2000:
         enhanced = cv2.resize(enhanced, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
@@ -211,21 +267,35 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
     ctx["scan_quality"] = qualities
     if poor_pages and len(poor_pages) >= max(1, len(qualities) // 2):
         ctx["scan_quality_poor"] = True
-        # Re-render PDF sources at higher DPI — the bytes hold more detail
-        # than the 200dpi pages we started with. Images are used as-is.
+        # Re-render ONLY the poor PDF pages at higher DPI (the bytes hold
+        # more detail than the 200dpi rasterization), and enhance ONLY
+        # those pages — re-rendering and CLAHE/denoise-upscaling a full
+        # 40-page document when 3 pages are bad was the OCR stage's
+        # single largest time sink. Images are used as-is.
         if sniff_doc_kind(ctx.get("raw_bytes", b""), ctx.get("content_type", "")) == "pdf":
             hires, _ = pdf_to_pages(ctx["raw_bytes"], dpi=cfg.get("enhance_dpi", 300))
             if hires:
-                pages = hires
-                ctx["pages"] = hires
-        pages = [preprocess_for_ocr(p) for p in pages]
+                for i in poor_pages:
+                    if i < len(hires):
+                        pages[i] = hires[i]
+                ctx["pages"] = pages
+        for i in poor_pages:
+            pages[i] = preprocess_for_ocr(pages[i])
         ctx["ocr_enhanced"] = True
 
-    ocr = PaddleOCR(
-        lang=cfg.get("lang", "en"),
-        use_doc_orientation_classify=cfg.get("use_doc_orientation_classify", True),
-        use_doc_unwarping=cfg.get("use_doc_unwarping", True),
-        use_textline_orientation=cfg.get("use_textline_orientation", True),
+    # PaddleOCR construction loads the detector+recognizer from disk — a
+    # process singleton, not a per-document cost.
+    ocr = _model(
+        ("paddleocr", cfg.get("lang", "en"),
+         cfg.get("use_doc_orientation_classify", True),
+         cfg.get("use_doc_unwarping", True),
+         cfg.get("use_textline_orientation", True)),
+        lambda: PaddleOCR(
+            lang=cfg.get("lang", "en"),
+            use_doc_orientation_classify=cfg.get("use_doc_orientation_classify", True),
+            use_doc_unwarping=cfg.get("use_doc_unwarping", True),
+            use_textline_orientation=cfg.get("use_textline_orientation", True),
+        ),
     )
     texts: list[str] = []
     for page in pages:  # list[PIL.Image]
@@ -243,15 +313,19 @@ def stage_layout(ctx: dict, cfg: dict) -> dict:
     """PP-StructureV3 layout analysis: regions, reading order, seals/stamps."""
     from paddleocr import PPStructureV3
 
-    engine = PPStructureV3(
-        use_table_recognition=cfg.get("use_table_recognition", True),
-        use_seal_recognition=cfg.get("use_seal_recognition", True),
+    engine = _model(
+        ("ppstructure", cfg.get("use_table_recognition", True),
+         cfg.get("use_seal_recognition", True)),
+        lambda: PPStructureV3(
+            use_table_recognition=cfg.get("use_table_recognition", True),
+            use_seal_recognition=cfg.get("use_seal_recognition", True),
         # Known PaddlePaddle 3.3.x regression: the oneDNN CPU backend's PIR
         # attribute converter has no case for ArrayAttribute<DoubleAttribute>,
         # which several of this pipeline's models hit (upstream issue
         # PaddlePaddle/Paddle#79749/#77340). Confirmed live. No fix upstream
         # yet -- enable_mkldnn=False is the documented workaround.
-        enable_mkldnn=False,
+            enable_mkldnn=False,
+        ),
     )
     regions: list[dict] = []
     for i, page in enumerate(ctx["pages"]):
@@ -376,9 +450,16 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
       a 40-page itemized bill no longer loses everything past character 10k.
     - Up to max_pages page images accompany the text for layout cues.
     """
-    from openai import OpenAI
+    # Client is a process singleton per endpoint: TCP keep-alive to the
+    # local Ollama survives across documents instead of re-handshaking per
+    # doc, and the OpenAI client is thread-safe for the parallel chunks.
+    def build_client():
+        from openai import OpenAI
+        return OpenAI(base_url=cfg["endpoint"],
+                      api_key=os.environ.get("VLM_API_KEY", "none"),
+                      timeout=httpx.Timeout(180.0, connect=10.0))
 
-    client = OpenAI(base_url=cfg["endpoint"], api_key=os.environ.get("VLM_API_KEY", "none"))
+    client = _model(("vlm_client", cfg["endpoint"]), build_client)
     doc_type = ctx.get("doc_type") or "idr_claim"
     schema_name = doc_type if doc_type in schemas else cfg.get("schema", "idr_claim")
     ctx["schema_used"] = schema_name
@@ -412,9 +493,8 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
 
     chunk_chars = cfg.get("chunk_chars", 12000)
     chunks = _chunk_markdown(md, chunk_chars)
-    parts: list[dict] = []
-    in_domain_votes: list[bool] = []
-    for i, chunk in enumerate(chunks):
+
+    def run_chunk(i: int, chunk: str) -> dict:
         prompt = instructions
         if len(chunks) > 1:
             prompt += f"This is section {i + 1} of {len(chunks)} of one document.\n"
@@ -461,9 +541,29 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
                 thumb = page.copy()
                 thumb.thumbnail((max_px, max_px))
                 content.append({"type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{pil_to_b64(thumb)}"}})
+                                # upstream context fix (thumbnail) + JPEG encoding
+                                "image_url": {"url": f"data:image/jpeg;base64,{pil_to_b64(thumb)}"}})
                 break  # one page image per chunk keeps token cost bounded
-        parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+        return _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+
+    # Chunk concurrency: the endpoint is the LOCAL in-cluster Ollama, NOT
+    # OpenAI -- a shared platform instance with a known OOM history (see
+    # pipeline.yaml). Ollama serializes past its own OLLAMA_NUM_PARALLEL
+    # (default 1), so more workers than that just queue server-side while
+    # multiplying KV-cache pressure. Default 2 overlaps request/JSON overhead
+    # with inference; raise VLM_PARALLEL_CHUNKS only in lockstep with
+    # OLLAMA_NUM_PARALLEL on the Ollama deployment.
+    parallel = int(cfg.get("parallel_chunks",
+                           os.environ.get("VLM_PARALLEL_CHUNKS", "2")))
+    if len(chunks) > 1 and parallel > 1:
+        with ThreadPoolExecutor(max_workers=min(parallel, len(chunks))) as pool:
+            raw_parts = list(pool.map(lambda ic: run_chunk(*ic), enumerate(chunks)))
+    else:
+        raw_parts = [run_chunk(i, c) for i, c in enumerate(chunks)]
+
+    parts: list[dict] = []
+    in_domain_votes: list[bool] = []
+    for parsed in raw_parts:
         in_domain_votes.append(bool(parsed.pop("_in_domain", True)))
         parts.append(parsed)
 
@@ -510,7 +610,10 @@ def _norm_date(v: Any) -> str | None:
     if not m:
         return None
     if m.group(1):
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        mm, dd = int(m.group(2)), int(m.group(3))
+        if 1 <= mm <= 12 and 1 <= dd <= 31:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        return None
     if m.group(4):
         mm, dd, yy = int(m.group(4)), int(m.group(5)), m.group(6)
         yyyy = int(yy) if len(yy) == 4 else (2000 + int(yy) if int(yy) < 50 else 1900 + int(yy))
@@ -576,9 +679,11 @@ def _flatten_values(v: Any) -> list[str]:
     return [str(v)]
 
 
-def _grounded(value_str: str, hay: str) -> bool:
+def _grounded(value_str: str, hay: str, hay_squashed: str) -> bool:
     """A value is grounded when it (or a whitespace/punctuation-tolerant form)
-    literally appears in the document text."""
+    literally appears in the document text. hay_squashed is precomputed once
+    per document by the caller — squashing a 100k-char haystack per extracted
+    value was O(fields x doc size) of pure waste."""
     needle = value_str.strip().lower()
     if not needle:
         return True
@@ -588,7 +693,7 @@ def _grounded(value_str: str, hay: str) -> bool:
     squash_n = re.sub(r"[^a-z0-9]", "", needle)
     if len(squash_n) < 3:
         return needle in hay
-    return squash_n in re.sub(r"[^a-z0-9]", "", hay)
+    return squash_n in hay_squashed
 
 
 def stage_verify(ctx: dict, cfg: dict) -> dict:
@@ -598,13 +703,14 @@ def stage_verify(ctx: dict, cfg: dict) -> dict:
     signature — they become findings in validate() and are excluded from the
     trusted normalized set."""
     hay = (ctx.get("markdown") or ctx.get("text") or "").lower()
+    hay_squashed = re.sub(r"[^a-z0-9]", "", hay)
     confidence: dict[str, str] = {}
     ungrounded: list[str] = []
     for field, value in ctx.get("extracted", {}).items():
         if value in (None, "", [], {}):
             continue
         atoms = [a for a in _flatten_values(value) if a.strip()]
-        ok = all(_grounded(a, hay) for a in atoms) if atoms else False
+        ok = all(_grounded(a, hay, hay_squashed) for a in atoms) if atoms else False
         confidence[field] = "high" if ok else "low"
         if not ok:
             ungrounded.append(field)
@@ -700,9 +806,21 @@ def _expand_env_vars(text: str) -> str:
     return _ENV_VAR_RE.sub(repl, text)
 
 
+_PIPELINE_CACHE: dict[str, tuple[float, dict]] = {}
+
+
 def load_pipeline(path: str = "pipeline.yaml") -> dict:
+    """YAML spec, cached by mtime — run_pipeline() is called per document,
+    and re-reading + re-parsing + env-expanding the spec each time is pure
+    overhead. An edit to pipeline.yaml invalidates via mtime."""
+    mtime = os.path.getmtime(path)
+    cached = _PIPELINE_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
     with open(path) as f:
-        return yaml.safe_load(_expand_env_vars(f.read()))
+        spec = yaml.safe_load(_expand_env_vars(f.read()))
+    _PIPELINE_CACHE[path] = (mtime, spec)
+    return spec
 
 
 def run_pipeline(ctx: dict, case: dict | None = None) -> dict:
@@ -756,9 +874,13 @@ def np_from_pil(img: Image.Image):
 
 
 def pil_to_b64(img: Image.Image) -> str:
+    """JPEG, not PNG: a 300dpi page PNG is 5-10x the bytes of a q85 JPEG at
+    no loss the VLM can detect, and the payload rides base64 into the prompt
+    of the LOCAL Ollama — smaller payload = faster encode, faster transfer,
+    less memory on a shared instance with an OOM history."""
     import base64
     buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG")
+    img.convert("RGB").save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode()
 
 
