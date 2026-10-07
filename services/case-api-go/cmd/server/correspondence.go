@@ -374,6 +374,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Decision string `json:"decision"` // APPROVE|REJECT
 		Note     string `json:"note"`
+		// EditedBody implements the EDIT prong of accept/edit/reject: when
+		// present on a PENDING row, the reviewer's text replaces the draft
+		// body before the decision lands. The edit itself is recorded so the
+		// audit trail always distinguishes model text from human text.
+		EditedBody string `json:"edited_body"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil ||
 		(in.Decision != "APPROVE" && in.Decision != "REJECT") {
@@ -381,11 +386,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	var caseID, subject, body, status, artifact string
+	var caseID, subject, body, status, artifact, channel string
 	var toJ, ccJ []byte
 	err := s.db.QueryRow(r.Context(),
-		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
-		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact)
+		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
+		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel)
 	// APPROVED (not yet SENT) + a fresh APPROVE decision is a retry of a
 	// previously failed send -- status only reaches APPROVED-without-SENT
 	// when sendMail below failed last time, and the response used to claim
@@ -393,7 +398,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	// that (calling this again always 409'd). REJECT still requires PENDING
 	// -- rejecting something already approved isn't a retry, it's reversing
 	// a decision, which this endpoint doesn't support.
-	isRetry := status == "APPROVED" && in.Decision == "APPROVE"
+	// Retry only applies to mail rows — channel 'note' rows (copilot
+	// determination rationales) are terminal at APPROVED, nothing is sent.
+	isRetry := status == "APPROVED" && in.Decision == "APPROVE" && channel != "note"
 	if err != nil || (status != "PENDING" && !isRetry) {
 		http.Error(w, `{"error":"not pending"}`, http.StatusConflict)
 		return
@@ -430,6 +437,21 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	if in.Decision == "REJECT" {
 		newStatus = "REJECTED"
 	}
+	// EDIT prong: a PENDING draft the reviewer rewrote lands with the human
+	// text, and the review note records that an edit happened (model text is
+	// never silently replaced — the QA row keeps drafted_by attribution and
+	// the note flags the human revision).
+	if in.EditedBody != "" && status == "PENDING" {
+		body = in.EditedBody
+		editMark := "[human-edited before " + in.Decision + "]"
+		if in.Note != "" {
+			in.Note = editMark + " " + in.Note
+		} else {
+			in.Note = editMark
+		}
+		_, _ = s.db.Exec(r.Context(),
+			`UPDATE public.qa_reviews SET body=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, body)
+	}
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.qa_reviews SET status=$3, reviewed_by=$4, reviewed_at=now(), review_note=$5
 		WHERE tenant=$1 AND id=$2`, tenant, qid, newStatus, p.Subject, in.Note)
@@ -438,6 +460,17 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(toJ, &to)
 	_ = json.Unmarshal(ccJ, &cc)
 	deliveryError := ""
+	if in.Decision == "APPROVE" && channel == "note" {
+		// channel 'note' (copilot determination rationale): approval files the
+		// rationale on the case timeline — nothing is emailed, ever.
+		s.logActivity(r.Context(), tenant, caseID, "DETERMINATION_RATIONALE_FILED",
+			fmt.Sprintf("Rationale approved in QA by %s:\n%s", p.Subject, truncate(body, 6000)))
+		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+			"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "channel": channel,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"status": newStatus})
+		return
+	}
 	if in.Decision == "APPROVE" {
 		// The narrative's send-safety rule (drafts saved without addresses) ends
 		// here: addresses enter only at QA-approved send time, and delivery goes

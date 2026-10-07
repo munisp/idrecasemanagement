@@ -18,7 +18,7 @@ const Api = (() => {
     const data = resp.headers.get("content-type")?.includes("json") ? await resp.json() : await resp.text();
     if (!resp.ok) {
       const msg = typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`;
-      const err = new Error(msg); err.status = resp.status;
+      const err = new Error(msg); err.status = resp.status; err.data = data;
       if (typeof data === "object" && data.details) err.details = data.details;
       throw err;
     }
@@ -189,6 +189,14 @@ const Api = (() => {
       setStatus: (caseId, p) => req("POST", `${t()}/cases/${caseId}/status`, p),
       eligibility: (caseId, p) => req("POST", `${t()}/cases/${caseId}/eligibility`, p),
       eligibilityAuto: (caseId) => req("POST", `${t()}/cases/${caseId}/eligibility/auto`),
+      copilotBrief: (caseId) => req("POST", `${t()}/cases/${caseId}/copilot/brief`),
+      copilotBriefLatest: (caseId) => req("GET", `${t()}/cases/${caseId}/copilot/brief`),
+      copilotDraft: (caseId, kind, instructions) => req("POST", `${t()}/cases/${caseId}/copilot/draft`, { kind, instructions }),
+      copilotProposeActions: (caseId) => req("POST", `${t()}/cases/${caseId}/copilot/actions`),
+      copilotListActions: (caseId) => req("GET", `${t()}/cases/${caseId}/copilot/actions`),
+      copilotDecideActions: (caseId, batchId, decision) => req("POST", `${t()}/cases/${caseId}/copilot/actions/${batchId}/decision`, { decision }),
+      copilotChat: (caseId, message) => req("POST", `${t()}/cases/${caseId}/copilot/chat`, { message }),
+      copilotChatHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/copilot/chat`),
       eligibilityHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/eligibility`),
       optOut: (caseId, eligible, rationale) => req("POST", `${t()}/cases/${caseId}/opt-out`, { eligible, rationale }),
       send: (caseId, p) => req("POST", `${t()}/cases/${caseId}/correspondence`, p),
@@ -214,7 +222,7 @@ const Api = (() => {
       importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
       qaQueue: () => req("GET", `${t()}/qa`),
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
-      qaDecision: (id, decision, note) => req("POST", `${t()}/qa/${id}/decision`, { decision, note }),
+      qaDecision: (id, decision, note, editedBody) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined }),
       intake: (opts) => req("GET", `${t()}/intake${qs(opts || {})}`),
       createIntake: (p) => req("POST", `${t()}/intake`, p),
       advanceIntake: (id, status, caseId) => req("POST", `${t()}/intake/${id}/advance`, { status, case_id: caseId }),

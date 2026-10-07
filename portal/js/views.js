@@ -550,6 +550,28 @@ const Views = (() => {
         html += `<div class="actions">` + acts.map((a, i) =>
           `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
 
+      // Copilot (Phases 1-3): grounded brief; QA-gated drafts; bounded,
+      // human-approved action batches via Temporal. Everything the model
+      // produces is advisory until a person approves it.
+      if (can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        html += `<h2>Copilot <span class="badge s-review">DRAFT · advisory</span></h2>
+          <div id="copilot"><p class="muted">Loading…</p></div>
+          <div class="actions">
+            <button class="mini" onclick="Views.copilotDraftQA('${id}','determination_rationale',this)">✍ Draft determination rationale</button>
+            <button class="mini" onclick="Views.copilotDraftQA('${id}','correspondence',this)">✉ Draft correspondence</button>
+            <button class="mini" onclick="Views.copilotPropose('${id}',this)">⚙ Propose action batch</button>
+          </div>
+          <div id="copilot-batches"></div>`;
+        Api.program.copilotBriefLatest(id).then((r) => {
+          const b = document.getElementById("copilot");
+          if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id);
+        }).catch(() => {
+          const b = document.getElementById("copilot");
+          if (b) b.innerHTML = copilotCard(null, null, id);
+        });
+        copilotLoadBatches(id);
+      }
+
       // Documents — docket grouped by folder with full metadata + RBAC controls
       const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
       html += `<h2>Docket</h2>
@@ -1549,32 +1571,46 @@ const Views = (() => {
     try {
       const d = await Api.program.qaGet(qaId);
       const to = (d.to_recipients || []).join(", ");
+      const isNote = d.channel === "note";
+      const isCopilot = (d.artifact || "").startsWith("copilot_");
+      box.dataset.channel = d.channel || "email";
+      // Copilot drafts are accept/EDIT/reject: the reviewer rewrites in place
+      // and the edited text is what gets approved (server records the edit).
+      const bodyHtml = isCopilot
+        ? `<textarea id="qa-edit" rows="14" style="width:100%">${esc(d.body)}</textarea>
+           <p class="muted">Copilot draft — edit freely; the approved text is what gets ${isNote ? "filed" : "sent"}, and the edit is recorded.</p>`
+        : `<pre class="qa-body">${esc(d.body)}</pre>`;
       box.innerHTML = `<div class="card"><h3>${esc(d.subject)}</h3>
-        <p class="muted">to: ${esc(to)} · channel ${esc(d.channel)}</p>
-        <pre class="qa-body">${esc(d.body)}</pre>
+        <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval" : `to: ${esc(to)} · channel ${esc(d.channel)}`}
+          ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
+        ${bodyHtml}
         <div class="actions">
-          <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">Approve & send</button>
+          <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
           <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Reject</button></div></div>`;
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function qaDecide(qaId, decision, el) {
     let note = "";
+    const isNote = $("#qa-detail")?.dataset.channel === "note";
+    const edited = $("#qa-edit") ? $("#qa-edit").value : "";
     if (decision === "REJECT") {
       const v = await UI.modal({ title: "Reject draft", danger: true, submitLabel: "Reject",
         fields: [{ name: "note", label: "Rejection note", type: "textarea", required: true,
           hint: "Returned to the drafter with the draft." }] });
       if (!v) return;
       note = v.note;
+    } else if (isNote) {
+      if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
     } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
     await UI.run(el, async () => {
       try {
-        const r = await Api.program.qaDecision(qaId, decision, note);
+        const r = await Api.program.qaDecision(qaId, decision, note, edited);
         if (r.email_delivery_error) {
           UI.toast(`Approved, but email delivery failed: ${r.email_delivery_error} — still APPROVED, retry once the address is fixed`,
             { kind: "warn", sticky: true });
         } else {
-          UI.toast(decision === "APPROVE" ? "Approved — sent and logged" : "Rejected");
+          UI.toast(decision === "APPROVE" ? (isNote ? "Approved — filed to case timeline" : "Approved — sent and logged") : "Rejected");
         }
         App.rerender();
       } catch (e) { UI.toast(e.message, { kind: "warn" }); }
@@ -1940,6 +1976,218 @@ const Views = (() => {
         UI.toast(`Rescan task ${r.task_ref || ""} created on the case`.trim());
       } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     }, "Creating task…");
+  }
+
+  // Copilot brief (Phase 1) — renders the latest grounded, advisory-only
+  // brief plus the (re)generate action. The server returns 502 with facts
+  // when the local model is unreachable; surface that via the catch path.
+  function copilotCard(brief, generatedAt, caseId) {
+    const genBtn = `<button class="mini" onclick="Views.copilotBrief('${caseId}', this)">↻ ${brief ? "Regenerate" : "Generate"} brief</button>`;
+    if (!brief)
+      return `<p class="muted">No brief generated yet. The copilot drafts a grounded eligibility brief, evidence comparison, and uncertainty list from platform-verified case facts only — it never changes case state.</p><p>${genBtn}</p>`;
+    return `<pre class="copilot-brief" style="white-space:pre-wrap;font:inherit;line-height:1.45">${esc(brief)}</pre>
+      <p class="muted">Generated ${generatedAt ? new Date(generatedAt).toLocaleString() : "—"} · advisory only, not a determination · audit-logged</p>
+      <p>${genBtn}</p>`;
+  }
+
+  async function copilotBrief(caseId, btn) {
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.copilotBrief(caseId);
+        const b = document.getElementById("copilot");
+        if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, caseId);
+        UI.toast("Copilot brief generated (DRAFT — advisory only)");
+      } catch (e) {
+        const b = document.getElementById("copilot");
+        if (e.data && e.data.facts) {
+          // 502 fallback: model unreachable, server returned verified facts
+          if (b) b.innerHTML = copilotCard(null, null, caseId) +
+            `<p class="muted">Model unreachable — raw verified facts returned instead.</p>
+             <pre style="white-space:pre-wrap;font:12px monospace">${esc(JSON.stringify(e.data.facts, null, 2))}</pre>`;
+          UI.toast("Copilot model unreachable — showing verified facts only", { kind: "warn" });
+        } else {
+          if (b) b.innerHTML = copilotCard(null, null, caseId);
+          UI.toast(e.message, { kind: "warn" });
+        }
+      }
+    }, "Drafting brief…");
+  }
+
+  // Phase 2: copilot drafts enter the QA gate — accept/edit/reject there.
+  async function copilotDraftQA(caseId, kind, btn) {
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.copilotDraft(caseId, kind);
+        UI.toast(`${kind === "correspondence" ? "Correspondence" : "Determination rationale"} draft queued for QA review`);
+        location.hash = "#/qa";
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Drafting for QA…");
+  }
+
+  // Phase 3: bounded action batches — propose, list, approve/reject.
+  function copilotBatchCard(caseId, b) {
+    const acts = (b.actions || []).map((a, i) => {
+      const param = a.params ? Object.values(a.params).filter((v) => typeof v === "string").join(" — ") : "";
+      const outcome = a.result ? ` <span class="ok">✓ ${esc(a.result)}</span>`
+        : a.error ? ` <span class="err">✗ ${esc(a.error)}</span>` : "";
+      return `<li><b>${esc(a.type.replace(/_/g, " "))}</b>${param ? ` — ${esc(param)}` : ""}${outcome}</li>`;
+    }).join("");
+    const pending = b.status === "PENDING_APPROVAL";
+    return `<div class="card"><p><b>Batch ${esc(b.batch_id.slice(0, 8))}…</b>
+        <span class="badge ${pending ? "s-review" : b.status === "APPLIED" ? "s-ok" : "s-closed"}">${esc(b.status)}</span></p>
+      ${b.rationale ? `<p class="muted">${esc(b.rationale)}</p>` : ""}
+      <ul>${acts || "<li class='muted'>no actions proposed</li>"}</ul>
+      <p class="muted">proposed by ${esc(b.proposed_by)} · model ${esc(b.model)}${b.decided_by ? ` · decided by ${esc(b.decided_by)}` : ""}</p>
+      ${pending ? `<div class="actions">
+        <button class="mini" onclick="Views.copilotDecideBatch('${caseId}','${b.batch_id}','APPROVE',this)">✓ Approve & execute</button>
+        <button class="mini danger" onclick="Views.copilotDecideBatch('${caseId}','${b.batch_id}','REJECT',this)">✗ Reject</button></div>` : ""}
+    </div>`;
+  }
+
+  async function copilotLoadBatches(caseId) {
+    try {
+      const r = await Api.program.copilotListActions(caseId);
+      const box = document.getElementById("copilot-batches");
+      if (!box) return;
+      box.innerHTML = (r.batches || []).length
+        ? `<h3>Action batches</h3>` + r.batches.map((b) => copilotBatchCard(caseId, b)).join("")
+        : "";
+    } catch { /* list is best-effort on load */ }
+  }
+
+  async function copilotPropose(caseId, btn) {
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.copilotProposeActions(caseId);
+        UI.toast(`Copilot proposed ${(r.actions || []).length} action(s) — review and approve below`);
+        copilotLoadBatches(caseId);
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Proposing actions…");
+  }
+
+  async function copilotDecideBatch(caseId, batchId, decision, btn) {
+    if (decision === "APPROVE" &&
+        !(await UI.confirm("Approve and execute?", "The listed actions run now via the workflow — each is applied and recorded on the case.", "Approve & execute"))) return;
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.copilotDecideActions(caseId, batchId, decision);
+        if (r.error) UI.toast(r.error, { kind: "warn", sticky: true });
+        else UI.toast(decision === "APPROVE" ? "Approved — actions executing via workflow" : "Batch rejected");
+        copilotLoadBatches(caseId);
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, decision === "APPROVE" ? "Executing…" : "Rejecting…");
+  }
+
+  // ---- Assistant (conversational surface) -----------------------------------
+  // The per-case thread over the copilot primitives: grounded Q&A in plain
+  // language, with the Phase 1-3 actions as chips — the thread advises, the
+  // chips act, and every action still passes its human gate.
+  async function assistant(caseId) {
+    if (!can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Assistant</h1></div><p class="muted">Requires a case staff role.</p>`;
+    if (!caseId) {
+      // Case picker: most recent cases first — the thread always belongs to
+      // one case, so grounding never drifts across records.
+      try {
+        const r = await Api.cases.list({ limit: 50 });
+        const rows = (r.cases || []).map((c) =>
+          `<tr class="click" onclick="location.hash='#/assistant/${c.id}'"><td class="mono">${esc(c.case_number)}</td>
+           <td>${esc(c.service_line || "")}</td><td>${badge(c.status)}</td></tr>`).join("");
+        return `<div class="view-head"><h1>Assistant</h1>
+          <span class="muted">grounded on platform-verified case facts · advisory only · every turn is on the record</span></div>
+          <p>Pick a case to open its thread:</p>
+          <table><thead><tr><th>Case</th><th>Line</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+      } catch (e) { return err(e); }
+    }
+    afterRender(async () => {
+      const thread = document.getElementById("asst-thread");
+      try {
+        const c = await Api.cases.get(caseId);
+        document.getElementById("asst-case").innerHTML =
+          `Case <a href="#/cases/${caseId}">${esc(c.case_number)}</a> · ${esc(c.status)}`;
+        const h = await Api.program.copilotChatHistory(caseId);
+        thread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") ||
+          `<div class="muted" style="padding:12px">No turns yet — ask anything about this case, or use a chip below.</div>`;
+        thread.scrollTop = thread.scrollHeight;
+      } catch (e) {
+        thread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`;
+      }
+      const form = document.getElementById("asst-form");
+      form?.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const input = form.message;
+        const msg = input.value.trim();
+        if (msg) { input.value = ""; assistantSend(caseId, msg); }
+      });
+    });
+    return `<div class="view-head"><h1>Assistant</h1>
+      <span class="muted" id="asst-case">loading case…</span></div>
+      <div id="asst-thread" class="asst-thread"></div>
+      <div class="asst-chips">
+        <button class="mini" onclick="Views.assistantChip('${caseId}','brief',this)">▤ Brief me</button>
+        <button class="mini" onclick="Views.assistantChip('${caseId}','determination_rationale',this)">✍ Draft rationale</button>
+        <button class="mini" onclick="Views.assistantChip('${caseId}','correspondence',this)">✉ Draft correspondence</button>
+        <button class="mini" onclick="Views.assistantChip('${caseId}','actions',this)">⚙ Propose actions</button>
+      </div>
+      <form id="asst-form" class="asst-form">
+        <input name="message" autocomplete="off" placeholder="Ask about this case… (e.g. what's blocking eligibility?)" aria-label="Message the assistant" />
+        <button>Send</button>
+      </form>
+      <p class="muted" style="margin-top:6px">Advisory only — the assistant cannot change case state; chips route through the same gates as the screens. Every turn is recorded.</p>`;
+  }
+
+  function asstTurnHtml(t) {
+    const who = t.role === "user" ? "you" : `assistant${t.model ? ` · ${esc(t.model)}` : ""}`;
+    return `<div class="asst-turn ${t.role === "user" ? "asst-user" : "asst-ai"}">
+      <div class="asst-who">${who}</div>
+      <div class="asst-body">${esc(t.body)}</div></div>`;
+  }
+
+  function asstAppend(caseId, role, body, model) {
+    const thread = document.getElementById("asst-thread");
+    if (!thread) return;
+    thread.insertAdjacentHTML("beforeend", asstTurnHtml({ role, body, model }));
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  async function assistantSend(caseId, msg) {
+    asstAppend(caseId, "user", msg);
+    asstAppend(caseId, "assistant", "…", "");
+    try {
+      const r = await Api.program.copilotChat(caseId, msg);
+      const thread = document.getElementById("asst-thread");
+      thread?.querySelector(".asst-turn:last-child")?.remove();
+      asstAppend(caseId, "assistant", r.reply, r.model);
+    } catch (e) {
+      const thread = document.getElementById("asst-thread");
+      thread?.querySelector(".asst-turn:last-child")?.remove();
+      asstAppend(caseId, "assistant", `⚠ ${e.message}`, "");
+    }
+  }
+
+  // Chips run the Phase 1-3 primitives and narrate the outcome into the
+  // thread — same endpoints, same gates, conversational surface.
+  async function assistantChip(caseId, kind, btn) {
+    await UI.run(btn, async () => {
+      try {
+        if (kind === "brief") {
+          asstAppend(caseId, "user", "Brief me on this case.");
+          const r = await Api.program.copilotBrief(caseId);
+          asstAppend(caseId, "assistant", r.brief, r.model || "");
+        } else if (kind === "actions") {
+          asstAppend(caseId, "user", "Propose an action batch.");
+          const r = await Api.program.copilotProposeActions(caseId);
+          const acts = (r.actions || []).map((a) => `• ${a.type.replace(/_/g, " ")}`).join("\n") || "• (none)";
+          asstAppend(caseId, "assistant",
+            `Proposed ${(r.actions || []).length} action(s) — review and approve on the case page:\n${r.rationale || ""}\n${acts}`, r.model || "");
+        } else {
+          asstAppend(caseId, "user", kind === "correspondence" ? "Draft correspondence." : "Draft a determination rationale.");
+          const r = await Api.program.copilotDraft(caseId, kind);
+          asstAppend(caseId, "assistant",
+            `Draft queued in the QA gate (${r.subject}). Approve, edit, or reject it there — nothing is sent or filed automatically.`, "");
+        }
+      } catch (e) { asstAppend(caseId, "assistant", `⚠ ${e.message}`, ""); }
+    }, "Working…");
   }
 
   async function uploadCheck(file, btn) {
@@ -2420,5 +2668,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();
