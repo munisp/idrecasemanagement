@@ -271,7 +271,7 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow(r.Context(), `
 		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by)
 		VALUES ($1,$2,$3,'email',$4,$5,$6,$7,$8,$9) RETURNING id`,
-		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, p.Subject).Scan(&qid)
+		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, displayName(p)).Scan(&qid)
 
 	if status == "PENDING" {
 		s.notify(r, tenant, "*", "QA_REVIEW",

@@ -188,9 +188,22 @@ type FeeTransfer struct {
 // ---------------------------------------------------------------------------
 
 type principal struct {
-	Subject string
-	Roles   []string
-	Tenants []string // from Keycloak group claim, e.g. /tenant/tx
+	Subject  string
+	Username string // preferred_username claim; "" for the worker-token service account
+	Roles    []string
+	Tenants  []string // from Keycloak group claim, e.g. /tenant/tx
+}
+
+// displayName prefers the human-readable username over the raw Keycloak
+// subject UUID for anything that gets shown to a reviewer (QA queue's
+// "Drafted by" column, audit trails) -- p.Subject alone is a bare UUID with
+// no way for staff to know who actually drafted something. Falls back to
+// Subject for the worker-token service principal, which carries no JWT.
+func displayName(p principal) string {
+	if p.Username != "" {
+		return p.Username
+	}
+	return p.Subject
 }
 
 type authn struct {
@@ -228,6 +241,9 @@ func (a *authn) middleware(next http.Handler) http.Handler {
 			return
 		}
 		p := principal{Subject: tok.Subject()}
+		if u, ok := tok.Get("preferred_username"); ok {
+			p.Username = fmt.Sprint(u)
+		}
 		if g, ok := tok.Get("groups"); ok {
 			if arr, ok := g.([]any); ok {
 				for _, it := range arr {

@@ -215,7 +215,7 @@ func (s *server) copilotProposeActions(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.copilot_action_batches (tenant, case_id, proposed_by, model, actions, rationale)
 		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		tenant, caseID, p.Subject, s.cfg.CopilotModel, actionsJ, rationale).Scan(&batchID); err != nil {
+		tenant, caseID, displayName(p), s.cfg.CopilotModel, actionsJ, rationale).Scan(&batchID); err != nil {
 		http.Error(w, `{"error":"batch insert failed (copilot_action_batches migrated?)"}`, http.StatusInternalServerError)
 		return
 	}
@@ -327,7 +327,7 @@ func (s *server) copilotDecideActions(w http.ResponseWriter, r *http.Request) {
 		UPDATE public.copilot_action_batches
 		SET status=$3, decided_by=$4, decided_at=now(), updated_at=now()
 		WHERE tenant=$1 AND id=$2 AND status='PENDING_APPROVAL'`,
-		tenant, batchID, newStatus, p.Subject); err != nil {
+		tenant, batchID, newStatus, displayName(p)); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}

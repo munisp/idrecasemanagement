@@ -125,7 +125,7 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	attribution := fmt.Sprintf("copilot:%s (requested by %s)", s.cfg.CopilotModel, p.Subject)
+	attribution := fmt.Sprintf("copilot:%s (requested by %s)", s.cfg.CopilotModel, displayName(p))
 	footed := draft + "\n\n———\nDRAFT — advisory only; not a determination. model=" + s.cfg.CopilotModel +
 		" generated=" + time.Now().UTC().Format(time.RFC3339) + " facts=platform-verified"
 
