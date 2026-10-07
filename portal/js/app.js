@@ -125,6 +125,7 @@
   ];
   if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
   links.push(["#/ask", "✦", "Ask the graph"]);
+  if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
   }
@@ -258,6 +259,8 @@
     [/^#\/crm\/tasks(\?.*)?$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
     [/^#\/ask$/, Views.askGraph],
+    [/^#\/assistant$/, () => Views.assistant("")],
+    [/^#\/assistant\/([\w-]+)$/, (m) => Views.assistant(m[1])],
     [/^#\/qa$/, Views.qaQueue],
     [/^#\/intake$/, Views.intake],
     [/^#\/deliverables$/, Views.deliverables],

@@ -536,14 +536,16 @@ func main() {
 
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
-		r.Post("/cases/{caseId}/program-date", s.setProgramDate)           // record clock-basis events
-		r.Post("/cases/{caseId}/status", s.setDualStatus)                  // dual internal/agency status (G5)
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)          // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)         // past reviews (G2)
-		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)      // auto-adjudicate from case+doc data (Lever 1)
-		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)            // grounded advisory brief (Phase 1 copilot)
-		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)       // latest persisted brief
-		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)            // Phase 2: QA-gated determination/correspondence drafts
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
+		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)       // grounded advisory brief (Phase 1 copilot)
+		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)  // latest persisted brief
+		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
+		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface)
+		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
 		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions) // Phase 3: bounded action-batch proposal
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal

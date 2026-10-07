@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -95,5 +99,43 @@ func TestCopilotBatchStatusRecompute(t *testing.T) {
 	if statusFor(3, 0, 3) != "APPLIED" || statusFor(2, 1, 3) != "PARTIAL" ||
 		statusFor(0, 2, 2) != "FAILED" || statusFor(1, 0, 3) != "APPROVED" {
 		t.Fatal("status ladder broken")
+	}
+}
+
+func TestCopilotChatPromptGroundsAndBounds(t *testing.T) {
+	f := copilotFacts{CaseNumber: "IDR-2026-00007", QPACents: 41200}
+	p := copilotChatPrompt(f)
+	for _, want := range []string{"ONLY the JSON facts", "not in record", "ADVISORY",
+		"cannot change case state", "under 150 words", "IDR-2026-00007", "41200"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("chat prompt missing %q", want)
+		}
+	}
+}
+
+func TestOllamaChatWithHistoryAssemblesMessages(t *testing.T) {
+	var got []map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages    []map[string]string `json:"messages"`
+			Temperature float64             `json:"temperature"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		got = req.Messages
+		if req.Temperature != 0 {
+			t.Errorf("temperature must be 0, got %v", req.Temperature)
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":" grounded reply "}}]}`))
+	}))
+	defer srv.Close()
+	reply, err := ollamaChatWithHistory(context.Background(), srv.URL, "m", "SYS",
+		[]map[string]string{{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "answer"}},
+		"now what?", 800)
+	if err != nil || reply != "grounded reply" {
+		t.Fatalf("reply=%q err=%v", reply, err)
+	}
+	if len(got) != 4 || got[0]["role"] != "system" || got[1]["content"] != "earlier" ||
+		got[2]["role"] != "assistant" || got[3]["content"] != "now what?" {
+		t.Fatalf("message order wrong: %v", got)
 	}
 }
