@@ -203,12 +203,18 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 				`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now() WHERE id=$3`, t), assignee, role, id)
 			if err == nil {
 				s.logActivity(r.Context(), tenant, id, "MILESTONE", fmt.Sprintf("Bulk-assigned to %s (%s) by %s", assignee, role, p.Subject))
+				s.logAudit(r.Context(), tenant, id, "CASE_ASSIGNED", map[string]any{
+					"by": p.Subject, "assigned_to": assignee, "role": role, "bulk": true,
+				})
 			}
 		case "status":
 			_, err = s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET status=$1, updated_at=now() WHERE id=$2`, t), in.Status, id)
 			if err == nil {
 				s.logActivity(r.Context(), tenant, id, "STATUS_CHANGE", fmt.Sprintf("Status changed to %s (bulk) by %s", in.Status, p.Subject))
+				s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
+					"by": p.Subject, "status": in.Status, "bulk": true,
+				})
 			}
 		default:
 			http.Error(w, `{"error":"action must be assign|status"}`, http.StatusBadRequest)
@@ -250,5 +256,8 @@ func (s *server) grabNext(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, id, "MILESTONE", fmt.Sprintf("Claimed from queue by %s (grab-next)", p.Subject))
 	s.notify(r, tenant, p.Subject, "ASSIGNMENT", fmt.Sprintf("You claimed %s from the queue", cn), "#/cases/"+id)
+	s.logAudit(r.Context(), tenant, id, "CASE_CLAIMED", map[string]any{
+		"by": p.Subject, "case_number": cn, "status": status, "via": "grab-next",
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"claimed": true, "case_id": id, "case_number": cn, "status": status})
 }

@@ -49,28 +49,36 @@ stages:
     config:
       # Reuses the in-cluster Ollama (OpenAI-compatible /v1 API) rather than
       # a dedicated vLLM deployment -- no such deployment exists in this
-      # cluster, and Ollama already serves qwen2.5:7b-instruct for
-      # graph-intel's EPR-KGQA. Swap via env var if a real vLLM server is
-      # ever stood up.
+      # cluster. Swap via env var if a real vLLM server is ever stood up.
       endpoint: ${VLM_ENDPOINT:-http://ollama.ollama.svc.cluster.local:11434/v1}
+      # Live deployment actually runs VLM_MODEL=qwen2.5vl:7b / VLM_VISION=
+      # true (a real vision model, pulled and in active use) -- the
+      # text-only qwen2.5:7b-instruct default below is the no-vision
+      # fallback, not what's really serving traffic. Keep both pulled.
       model: ${VLM_MODEL:-qwen2.5:7b-instruct}
-      # qwen2.5:7b-instruct is text-only -- Ollama hard-400s a multimodal
-      # request against it ("model does not support multimodal requests"),
-      # confirmed live. Flip to true (env VLM_VISION=true) only once a
-      # vision-capable model (e.g. qwen2.5vl, llava) is actually pulled.
       vision: ${VLM_VISION:-false}
       max_tokens: 2048
       max_pages: 3           # page images per chunk for layout cues
-      # Confirmed live: 12000 chars (~3000-4000 tokens for dense/technical
-      # text) plus instructions (~300 tokens) plus the chunk-0 tables_hint
-      # (up to 3000 chars) plus a page image's tokens (vision mode) pushed a
-      # real request to 4316 prompt tokens against this Ollama deployment's
-      # default 4096 context -- a hard 400 ("exceed_context_size_error"),
-      # not a graceful truncation. Cut well below that ceiling rather than
-      # raise Ollama's own context window: that's a shared platform
-      # instance other apps also use, and a larger context multiplies KV-
-      # cache memory per request on a cluster with a known OOM history.
-      chunk_chars: 6000      # long docs are extracted per chunk and merged
+      # Root cause of every past "exceeds context size" failure: with
+      # vision on, pdf_to_pages' 200-300dpi page render (1700x2200+ px)
+      # was sent to the VLM as-is, and image tokens from that are entirely
+      # separate from -- and uncounted by -- MAX_PROMPT_CHARS below, which
+      # only ever bounded the text portion. Confirmed live against this
+      # endpoint/model: a 2000-char text prompt alone costs ~1030 prompt
+      # tokens; the same request with a page image attached costs ~2095 --
+      # and that ~1065-token image cost held CONSTANT (not proportional)
+      # for every size tried from 350px to 612px on the long edge, so
+      # shrinking into that range is free fidelity-wise. vlm_extract now
+      # thumbnails to this box before encoding instead of sending the raw
+      # render. Cut well below Ollama's 4096 ceiling rather than raise it:
+      # that's a shared platform instance other apps also use, and a
+      # larger context multiplies KV-cache memory per request on a
+      # cluster with a known OOM history.
+      vlm_image_max_px: 650
+      chunk_chars: 1200      # long docs are extracted per chunk and merged -- the vlm_extract
+                             # stage's own MAX_PROMPT_CHARS hard-truncates at 2000 regardless,
+                             # so a chunk much larger than that would just get silently cut off
+                             # mid-content by that backstop; sized to actually fit instead
       schema: idr_claim      # FALLBACK schema — the classified doc_type's
                              # schema is preferred automatically (see schemas:)
 

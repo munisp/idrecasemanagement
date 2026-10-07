@@ -110,6 +110,10 @@ func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	s.logAudit(r.Context(), tenant, "", "ACCOUNT_CREATED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "account_id": id,
+		"type": in.Type, "legal_name": in.LegalName, "npi": in.NPI,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -196,6 +200,10 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	s.logAudit(r.Context(), tenant, "", "CONTACT_CREATED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "contact_id": id,
+		"account_id": in.AccountID, "name": in.Name,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -279,6 +287,10 @@ func (s *server) convertLead(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.leads SET status='CONVERTED', converted_account_id=$3
 		WHERE tenant=$1 AND id=$2`, tenant, leadID, accountID)
+	s.logAudit(r.Context(), tenant, "", "LEAD_CONVERTED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "lead_id": leadID,
+		"account_id": accountID, "type": in.Type, "legal_name": orgName,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"account_id": accountID, "status": "CONVERTED"})
 }
 
@@ -354,17 +366,29 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	// in.CaseID is "" for tasks not tied to a case -- logAudit accepts that.
+	s.logAudit(r.Context(), tenant, in.CaseID, "TASK_CREATED", map[string]any{
+		"by": p.Subject, "task_id": id, "task_ref": ref, "assignee": in.Assignee, "due_date": in.DueDate,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "task_ref": ref})
 }
 
 func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	_, err := s.db.Exec(r.Context(), `
+	taskID := chi.URLParam(r, "taskId")
+	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.tasks SET status='DONE', completed_at=now() WHERE tenant=$1 AND id=$2`,
-		tenant, chi.URLParam(r, "taskId"))
+		tenant, taskID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	// Only audit a completion that actually touched a row (unknown task ids
+	// still get the pre-existing 200 response, but nothing happened to audit).
+	if res.RowsAffected() > 0 {
+		s.logAudit(r.Context(), tenant, "", "TASK_COMPLETED", map[string]any{
+			"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "task_id": taskID,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "DONE"})
 }
@@ -413,6 +437,13 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 			INSERT INTO public.case_activities (tenant, case_id, type, body)
 			VALUES ($1,$2,'NOTE',$3)`, tenant, in.RecordID, in.Body)
 	}
+	noteCaseID := ""
+	if in.RecordType == "CASE" {
+		noteCaseID = in.RecordID
+	}
+	s.logAudit(r.Context(), tenant, noteCaseID, "NOTE_ADDED", map[string]any{
+		"by": p.Subject, "record_type": in.RecordType, "record_id": in.RecordID, "stream": in.Stream,
+	})
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
 }
 

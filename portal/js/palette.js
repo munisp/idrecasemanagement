@@ -111,8 +111,20 @@ const Palette = (() => {
   }
 
   document.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); show(); }
-    if (e.key.toLowerCase() === "c" && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !open) go("#/new");
+    // e.key is undefined for some synthetic/injected keydown events (browser
+    // extensions, autofill, some IME paths) -- unconditionally calling
+    // .toLowerCase() on it threw on every such keystroke anywhere on the
+    // page. Confirmed live.
+    const key = (e.key || "").toLowerCase();
+    if (!key) return;
+    if ((e.metaKey || e.ctrlKey) && key === "k") { e.preventDefault(); show(); }
+    // Bare "c" only -- this didn't check for modifier keys at all, so
+    // Cmd+C/Ctrl+C (copy) matched too: e.key is still "c" either way, and
+    // focus usually isn't on an input while selecting page text to copy.
+    // Confirmed live: copying any text navigated the whole app to #/new
+    // mid-selection, every time.
+    if (key === "c" && !e.metaKey && !e.ctrlKey && !e.altKey &&
+        !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !open) go("#/new");
   });
   return { show, remember };
 })();

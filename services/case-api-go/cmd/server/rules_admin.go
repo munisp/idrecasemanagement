@@ -159,6 +159,11 @@ func (s *server) putRules(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, "", "RULES_UPDATED",
 		fmt.Sprintf("Program rules updated by %s (%d rules)%s", p.Subject, len(in.Rules), orDash(" — "+in.Note)))
+	// Full before/after diff lives in public.rule_changes; the chained entry
+	// records that the change happened, by whom, and why.
+	s.logAudit(r.Context(), tenant, "", "RULES_UPDATED", map[string]any{
+		"by": p.Subject, "rule_count": len(in.Rules), "note": truncate(in.Note, 500),
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"rules": in.Rules, "saved": len(in.Rules)})
 }
 

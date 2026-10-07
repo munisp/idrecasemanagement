@@ -139,6 +139,10 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 			fmt.Sprintf("Onboarding upload %q (application %s) quarantined by program rule: %s", hdr.Filename, appID, msg))
 	}
 
+	s.logAudit(r.Context(), tenant, "", "APPLICATION_DOCUMENT_UPLOADED", map[string]any{
+		"by": p.Subject, "application_id": appID, "doc_id": docID,
+		"filename": hdr.Filename, "bytes": len(raw), "analysis": analysis,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"doc_id": docID, "bytes": len(raw), "analysis": analysis,
 	})
@@ -173,5 +177,8 @@ func (s *server) signalApplication(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return
 	}
+	s.logAudit(r.Context(), tenant, "", "APPLICATION_SIGNALED", map[string]any{
+		"by": p.Subject, "application_id": appID, "signal": body.Signal, "workflow_id": wfID,
+	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
 }

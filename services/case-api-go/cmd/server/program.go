@@ -214,6 +214,9 @@ func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logActivity(r.Context(), tenant, id, "PROGRAM_DATE", fmt.Sprintf("%s recorded as %s", in.Key, in.Value))
+	s.logAudit(r.Context(), tenant, id, "PROGRAM_DATE_SET", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "key": in.Key, "value": in.Value,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 

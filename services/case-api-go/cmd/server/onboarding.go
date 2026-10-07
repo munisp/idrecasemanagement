@@ -68,6 +68,10 @@ func (s *server) submitApplication(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"workflow start failed"}`, http.StatusBadGateway)
 		return
 	}
+	s.logAudit(r.Context(), tenant, "", "APPLICATION_SUBMITTED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "application_id": appID,
+		"type": in.Type, "legal_name": in.LegalName, "workflow_id": wfID,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"application_id": appID, "workflow_id": wfID, "status": "SUBMITTED",
 	})
@@ -123,6 +127,12 @@ func (s *server) publicApply(w http.ResponseWriter, r *http.Request) {
 	}
 	s.notify(r, tenant, "*", "ONBOARDING",
 		fmt.Sprintf("New public %s application: %s", in.Type, in.LegalName), "#/onboarding")
+	// No OIDC principal on this public route -- the actor is the anonymous
+	// landing-site submitter, identified only by source + client IP.
+	s.logAudit(r.Context(), tenant, "", "APPLICATION_SUBMITTED", map[string]any{
+		"by": "PUBLIC_LANDING", "ip": ip, "application_id": appID,
+		"type": in.Type, "legal_name": in.LegalName, "workflow_id": wfID,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"application_id": appID, "workflow_id": wfID, "status": "SUBMITTED",
 	})
@@ -198,6 +208,10 @@ func (s *server) decideApplication(w http.ResponseWriter, r *http.Request) {
 	s.notify(r, tenant, "*", "ONBOARDING_"+in.Decision,
 		fmt.Sprintf("Onboarding application %s (%s) %s — %s", appID, appType, in.Decision, truncate(in.Reason, 200)),
 		"#/onboarding")
+	s.logAudit(r.Context(), tenant, "", "APPLICATION_DECIDED", map[string]any{
+		"by": p.Subject, "application_id": appID, "type": appType,
+		"decision": in.Decision, "reason": truncate(in.Reason, 500),
+	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "decision signaled"})
 }
 

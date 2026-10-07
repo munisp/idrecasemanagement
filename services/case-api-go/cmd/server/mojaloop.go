@@ -68,8 +68,8 @@ func (s *server) checkoutMojaloop(w http.ResponseWriter, r *http.Request, tenant
 	prep, err := s.mojaloopPost(r, "/transfers", map[string]any{
 		"transferId": hex128(transferID),
 		"payeeFsp":   "idre-platform", "payerFsp": party,
-		"amount":     fmt.Sprintf("%d", amount), "currency": "USD",
-		"note":       fmt.Sprintf("invoice %s", invID),
+		"amount": fmt.Sprintf("%d", amount), "currency": "USD",
+		"note": fmt.Sprintf("invoice %s", invID),
 	})
 	if err != nil {
 		http.Error(w, `{"error":"scheme adapter unreachable"}`, http.StatusBadGateway)
@@ -77,13 +77,13 @@ func (s *server) checkoutMojaloop(w http.ResponseWriter, r *http.Request, tenant
 	}
 	if s.tb != nil {
 		res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-			ID:             transferID,
-			DebitAccountID: acctID(tenant, acctStripeClearing, ""),
+			ID:              transferID,
+			DebitAccountID:  acctID(tenant, acctStripeClearing, ""),
 			CreditAccountID: acctID(tenant, acctEscrowTrustHeld, party),
-			Amount:         tb_types.ToUint128(uint64(amount)),
-			Ledger:         tenantLedgerID(tenant),
-			Code:           ledgerCodeIDRE,
-			Flags:          tb_types.TransferFlags{Pending: true}.ToUint16(),
+			Amount:          tb_types.ToUint128(uint64(amount)),
+			Ledger:          tenantLedgerID(tenant),
+			Code:            ledgerCodeIDRE,
+			Flags:           tb_types.TransferFlags{Pending: true}.ToUint16(),
 		}})
 		if err != nil {
 			http.Error(w, `{"error":"ledger unavailable"}`, http.StatusBadGateway)
@@ -106,6 +106,11 @@ func (s *server) checkoutMojaloop(w http.ResponseWriter, r *http.Request, tenant
 	}
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amount, party,
 		hex128(transferID), "mojaloop-scheme-adapter")
+	// Mojaloop branch of createCheckout (/invoices/{invId}/checkout?provider=mojaloop).
+	s.logAudit(r.Context(), tenant, caseID, "CHECKOUT_CREATED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "provider": "mojaloop",
+		"invoice_id": invID, "transfer_id": hex128(transferID), "amount_cents": amount,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider": "mojaloop", "transfer_id": hex128(transferID),
 		"adapter_response": prep,
@@ -185,9 +190,19 @@ func (s *server) mojaloopWebhook(w http.ResponseWriter, r *http.Request) {
 			invID, "mojaloop:"+evt.TransferID)
 		s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, "", evt.TransferID, "mojaloop")
 		s.logActivity(r.Context(), tenant, caseID, "PAYMENT", "Mojaloop transfer fulfilled ("+evt.TransferID+")")
+		// Same money-movement event settleInvoice's UI-triggered PAY action
+		// audits -- this webhook settles invoices directly in SQL and never
+		// routed through that shared path, so it never got one of its own.
+		s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
+			"by": "mojaloop-webhook", "invoice_id": invID, "action": "PAY", "status": "PAID",
+			"amount_cents": amount, "remittance_ref": evt.TransferID,
+		})
 	} else {
 		s.finEvent(r, tenant, caseID, invID, "PAYMENT_FAILED", "NONE", amount, "", evt.TransferID, "mojaloop")
 		s.logActivity(r.Context(), tenant, caseID, "PAYMENT", "Mojaloop transfer aborted ("+evt.TransferID+")")
+		s.logAudit(r.Context(), tenant, caseID, "PAYMENT_FAILED", map[string]any{
+			"by": "mojaloop-webhook", "invoice_id": invID, "amount_cents": amount, "transfer_id": evt.TransferID,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }

@@ -71,6 +71,9 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, k)
 	}
 	s.logActivity(r.Context(), tenant, caseID, "DETAILS_UPDATED", "fields set: "+strings.Join(keys, ", "))
+	s.logAudit(r.Context(), tenant, caseID, "CASE_DETAILS_UPDATED", map[string]any{
+		"by": p.Subject, "fields": keys,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "fields": keys})
 }
 
@@ -224,5 +227,9 @@ func (s *server) requestAdhocDeliverable(w http.ResponseWriter, r *http.Request)
 	}
 	s.notify(r, tenant, "*", "DELIVERABLE",
 		fmt.Sprintf("Ad hoc report requested: %s — due %s (10 business days)", in.Name, due.Format("2006-01-02")), "#/deliverables")
+	s.logAudit(r.Context(), tenant, "", "DELIVERABLE_REQUESTED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "deliverable_id": id,
+		"name": in.Name, "contract_ref": in.Ref, "due_date": due.Format("2006-01-02"),
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "due_date": due.Format("2006-01-02")})
 }

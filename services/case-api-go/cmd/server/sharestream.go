@@ -296,6 +296,10 @@ func (s *server) shareCompleteUpload(w http.ResponseWriter, r *http.Request) {
 			up.filename, up.size, len(up.parts)))
 	s.notify(r, up.tenant, "*", "DOC_RECEIVED",
 		fmt.Sprintf("Document %q arrived via secure link on case %s", up.filename, up.caseID), "#/cases/"+up.caseID)
+	s.logAudit(r.Context(), up.tenant, up.caseID, "DOCUMENT_UPLOADED", map[string]any{
+		"by": "sharebox:" + token[:8], "via": "sharebox-multipart", "doc_id": docID,
+		"filename": up.filename, "folder": "PARTY_UPLOADS", "bytes": up.size,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"doc_id": docID, "bytes": up.size, "parts": len(up.parts),
 		"token_uses_remaining": g.MaxUses - g.Uses})
 }

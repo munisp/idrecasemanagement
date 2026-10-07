@@ -197,6 +197,12 @@ func (s *server) shareUpload(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("%q (%d bytes) received via secure upload link — analysis queued", hdr.Filename, len(raw)))
 	s.notify(r, g.Tenant, "*", "DOC_RECEIVED",
 		fmt.Sprintf("Document %q arrived via secure link on case %s", hdr.Filename, g.CaseID), "#/cases/"+g.CaseID)
+	// No OIDC principal on ShareBox -- the actor is the token-prefix label
+	// already used for uploaded_by (never the full bearer token).
+	s.logAudit(r.Context(), g.Tenant, g.CaseID, "DOCUMENT_UPLOADED", map[string]any{
+		"by": actor, "via": "sharebox", "doc_id": docID, "filename": hdr.Filename,
+		"folder": "PARTY_UPLOADS", "bytes": len(raw),
+	})
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

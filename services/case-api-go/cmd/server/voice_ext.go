@@ -121,6 +121,18 @@ func (s *server) outboundCall(w http.ResponseWriter, r *http.Request) {
 		tenant, in.Script, in.To, in.CaseNumber, string(respBody), status)
 	s.recordVoiceActivity(r, tenant, in.CaseNumber,
 		fmt.Sprintf("Outbound call triggered (%s) to %s", in.Script, in.To))
+	// Request carries a case_number, not an id; resolve it so the entry is
+	// filterable by case in the audit log (left "" if unknown/absent).
+	var auditCaseID string
+	if in.CaseNumber != "" {
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+			`SELECT id FROM tenant_%s.cases WHERE case_number=$1`, sanitizeTenant(tenant)),
+			in.CaseNumber).Scan(&auditCaseID)
+	}
+	s.logAudit(r.Context(), tenant, auditCaseID, "OUTBOUND_CALL_TRIGGERED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "to": in.To,
+		"script": in.Script, "case_number": in.CaseNumber, "status": status,
+	})
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": status, "platform_status": resp.StatusCode,
