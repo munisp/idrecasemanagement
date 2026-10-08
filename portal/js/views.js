@@ -2188,14 +2188,14 @@ const Views = (() => {
       // with the worker-scoped digest, narrated — the case picker sits below
       // it. The briefing is read-only and never fails: when the model is down
       // the server narrates the digest itself (fallback badge).
-      afterRender(() => {
-        // Briefing is itself a grounded LLM call (same slow Ollama backend,
-        // up to ~90s) -- confirmed live: awaiting it inline here blocked
-        // EVERYTHING below it in this same callback, including wiring the
-        // general-chat form's submit listener. Clicking Send did nothing
-        // for up to 90s because there was no listener attached yet. Fire
-        // the briefing fetch without awaiting it so it can't block anything
-        // else in this view from initializing.
+      // Wiring runs via the {html, wire} return shape, not afterRender:
+      // afterRender's setTimeout(fn, 0) races against the await below --
+      // confirmed live, the macrotask fired before view.innerHTML was ever
+      // assigned (it only gets assigned once this whole async function's
+      // returned promise resolves), so document.getElementById found
+      // nothing and the submit listener never attached. wire() is called
+      // by app.js synchronously right after the HTML lands, every time.
+      const wireHome = () => {
         (async () => {
           const box = document.getElementById("asst-briefing");
           if (!box) return;
@@ -2220,12 +2220,6 @@ const Views = (() => {
             box.innerHTML = `<p class="muted">Briefing unavailable: ${esc(e.message)}</p>`;
           }
         })();
-        // General chat (no case open): same intent router as the floating
-        // widget and the in-case thread -- my cases/my tasks/open an intake
-        // execute directly, anything else is a real LLM reply grounded on
-        // your own queue. Form wiring happens synchronously, right now, not
-        // after any fetch -- Send must work immediately regardless of how
-        // long the briefing (or anything else) takes.
         document.getElementById("asst-general-form")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const input = ev.target.message;
@@ -2242,13 +2236,13 @@ const Views = (() => {
             gthread.scrollTop = gthread.scrollHeight;
           } catch (e) { gthread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`; }
         })();
-      });
+      };
       try {
         const r = await Api.cases.list({ limit: 50 });
         const rows = (r.cases || []).map((c) =>
           `<tr class="click" onclick="location.hash='#/assistant/${c.id}'"><td class="mono">${esc(c.case_number)}</td>
            <td>${esc(c.service_line || "")}</td><td>${badge(c.status)}</td></tr>`).join("");
-        return `<div class="view-head"><h1>Assistant</h1>
+        return { html: `<div class="view-head"><h1>Assistant</h1>
           <span class="muted">grounded on platform-verified case facts · advisory only · every turn is on the record</span></div>
           <div class="asst-panel" style="margin-bottom:14px">
             <div id="asst-briefing"><p class="muted">Preparing your briefing…</p></div>
@@ -2264,10 +2258,14 @@ const Views = (() => {
           </div>
           <h2 style="margin-top:14px">Case threads</h2>
           <p class="muted">Pick a case to open its thread — private to you, shareable if you choose.</p>
-          <table><thead><tr><th>Case</th><th>Line</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+          <table><thead><tr><th>Case</th><th>Line</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`, wire: wireHome };
       } catch (e) { return err(e); }
     }
-    afterRender(async () => {
+    // Same {html, wire} shape as the no-case branch above, for the same
+    // reason -- this happened to work before only because nothing awaited
+    // between here and the old afterRender() call, which made the ordering
+    // an accident of this function's current shape rather than guaranteed.
+    const wireCase = async () => {
       const thread = document.getElementById("asst-thread");
       try {
         const c = await Api.cases.get(caseId);
@@ -2299,8 +2297,8 @@ const Views = (() => {
       });
       asstQaLoad(caseId);
       asstShareLoad(caseId);
-    });
-    return `<div class="view-head"><h1>Assistant</h1>
+    };
+    return { html: `<div class="view-head"><h1>Assistant</h1>
       <span class="muted" id="asst-case">loading case…</span></div>
       <div class="asst-panel">
         <div id="asst-share" style="margin-bottom:10px"></div>
@@ -2319,7 +2317,7 @@ const Views = (() => {
           <button>Send</button>
         </form>
         <p class="asst-foot">Chips and direct requests (create a task, open an intake, pull a report, upload a document) execute immediately — correspondence still needs a second reviewer, same as everywhere else in the app. This thread is private to you by default; share it above if you want a colleague to see it. Every turn is recorded. Replies run on local infrastructure and can take up to a couple of minutes.</p>
-      </div>`;
+      </div>`, wire: wireCase };
   }
 
   const ASST_EMPTY_HTML = `<div class="asst-empty"><span class="asst-empty-icon">❖</span>
@@ -2453,8 +2451,32 @@ const Views = (() => {
   // triggered by free text any more than there is from the chip itself --
   // the second-reviewer requirement is a property of the action, not of how
   // it was requested.
-  const ASST_INTENT_DRAFT_CORR = /\b(draft|write|send|compose)\b[^.?!]{0,15}\b(correspondence|email|letter)\b/i;
+  // "send them an upload link" has no "email"/"correspondence"/"letter"
+  // in it but is exactly a correspondence-draft request (confirmed live:
+  // this exact phrasing fell through to the ungrounded general chat,
+  // which correctly said it couldn't do it, since nothing routed it
+  // anywhere that could).
+  const ASST_INTENT_DRAFT_CORR = /\b(draft|write|send|compose)\b[^.?!]{0,15}\b(correspondence|email|letter)\b|\b(upload|share)[\s-]?link\b/i;
   const ASST_INTENT_DRAFT_RATIONALE = /\b(draft|write)\b[^.?!]{0,15}\b(rationale|determination)\b/i;
+  const ASST_CASE_NUM_RE = /\b[A-Za-z]{2,4}\d{2,4}-\d{2,6}\b/;
+
+  // Lets every caseId-gated branch below be reached from the GENERAL
+  // assistant thread (no case open) by just naming the case in the
+  // message -- confirmed live: "send them an upload link ... for case
+  // FL26-181" typed from #/assistant (no case open) had no way to reach
+  // that case's actions at all, and silently fell through to the
+  // ungrounded general chat instead. Exact case_number match only (never
+  // "closest match") -- grounding on the wrong case silently is worse
+  // than not grounding at all.
+  async function asstResolveCaseId(msg) {
+    const m = msg.match(ASST_CASE_NUM_RE);
+    if (!m) return "";
+    try {
+      const r = await Api.cases.list({ q: m[0], limit: 5 });
+      const hit = (r.cases || []).find((c) => (c.case_number || "").toUpperCase() === m[0].toUpperCase());
+      return hit ? hit.id : "";
+    } catch { return ""; }
+  }
 
   function asstAppendRich(threadId, titleHtml, rowsHtml) {
     const thread = document.getElementById(threadId);
@@ -2673,6 +2695,37 @@ const Views = (() => {
     } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
   }
 
+  // Free-text correspondence requests route through the SAME copilotDraft
+  // LLM-drafted path as the "Draft correspondence" chip -- it lands in the
+  // human QA gate exactly like a chip-triggered or human-typed draft; the
+  // second-reviewer requirement is a property of sending mail, not of how
+  // the draft was requested. Two things the chip's fixed label can't do,
+  // which free text can: pull a recipient address straight out of the
+  // message, and -- when the ask is specifically for an upload/share link --
+  // mint a REAL one first (same endpoint behind the case page's "share
+  // link" button) and hand the model the exact URL to drop in verbatim,
+  // instead of asking a small local model to either invent one or leave a
+  // placeholder. The reviewer still checks the draft before it sends,
+  // same as everywhere else.
+  async function asstDoDraftCorrespondence(threadId, caseId, msg) {
+    const to = msg.match(/[\w.+-]+@[\w-]+\.[\w.-]+/g) || [];
+    let instructions = msg;
+    if (/\b(upload|share)[\s-]?link\b/i.test(msg)) {
+      try {
+        const link = await Api.program.shareLink(caseId, "upload", 7);
+        const full = location.origin + link.path;
+        instructions += `\n\nInclude this exact secure upload link verbatim, character for character -- do not alter, shorten, or retype it: ${full}`;
+      } catch (e) {
+        instructions += `\n\n(Could not mint a real upload link -- ${e.message}. Note this for the reviewer rather than inventing a link.)`;
+      }
+    }
+    try {
+      const r = await Api.program.copilotDraft(caseId, "correspondence", instructions, to);
+      asstAppendRich(threadId,
+        `✉ Draft queued in the QA gate (${esc(r.subject || "correspondence")})${to.length ? ` — to ${esc(to.join(", "))}` : ""}. Approve, edit, or reject it there — nothing is sent automatically.`);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
   async function asstDoUpload(threadId, caseId, file) {
     asstAppend(threadId, "user", `📎 ${file.name}`);
     asstThinking(threadId);
@@ -2688,6 +2741,7 @@ const Views = (() => {
   async function handleAssistantMessage(raw, caseId, threadId) {
     const msg = raw.trim();
     if (!msg) return;
+    if (!caseId) caseId = await asstResolveCaseId(msg);
     if (ASST_INTENT_TASK_CREATE.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
       await asstDoCreateTask(threadId, msg, caseId);
@@ -2710,9 +2764,8 @@ const Views = (() => {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
       await asstAnswerMyTasks(threadId);
     } else if (ASST_INTENT_DRAFT_CORR.test(msg) && caseId) {
-      // Same chip, same UI.run(btn,...) contract -- a throwaway button
-      // satisfies it without needing a real one to exist on the page.
-      await assistantChip(caseId, "correspondence", document.createElement("button"), threadId);
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstDoDraftCorrespondence(threadId, caseId, msg);
     } else if (ASST_INTENT_DRAFT_RATIONALE.test(msg) && caseId) {
       await assistantChip(caseId, "determination_rationale", document.createElement("button"), threadId);
     } else if (caseId) {

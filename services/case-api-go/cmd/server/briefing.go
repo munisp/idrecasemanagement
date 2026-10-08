@@ -136,7 +136,7 @@ func (s *server) gatherBriefingDigest(ctx context.Context, tenant, worker string
 		SELECT c.id::text, c.case_number, c.status, %s AS lane, %s AS sla
 		FROM tenant_%s.cases c
 		LEFT JOIN (SELECT DISTINCT case_id FROM public.escalations WHERE tenant=$1) esc
-		  ON esc.case_id = c.id
+		  ON esc.case_id = c.id::text
 		WHERE c.assigned_to=$2
 		  AND c.status NOT IN ('CLOSED','DETERMINED','PAID','WITHDRAWN')
 		ORDER BY sla ASC, c.opened_at ASC LIMIT %d`,

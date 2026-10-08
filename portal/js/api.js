@@ -192,7 +192,7 @@ const Api = (() => {
       eligibilityAuto: (caseId) => req("POST", `${t()}/cases/${caseId}/eligibility/auto`),
       copilotBrief: (caseId) => req("POST", `${t()}/cases/${caseId}/copilot/brief`),
       copilotBriefLatest: (caseId) => req("GET", `${t()}/cases/${caseId}/copilot/brief`),
-      copilotDraft: (caseId, kind, instructions) => req("POST", `${t()}/cases/${caseId}/copilot/draft`, { kind, instructions }),
+      copilotDraft: (caseId, kind, instructions, to) => req("POST", `${t()}/cases/${caseId}/copilot/draft`, { kind, instructions, to }),
       copilotProposeActions: (caseId) => req("POST", `${t()}/cases/${caseId}/copilot/actions`),
       copilotListActions: (caseId) => req("GET", `${t()}/cases/${caseId}/copilot/actions`),
       copilotDecideActions: (caseId, batchId, decision) => req("POST", `${t()}/cases/${caseId}/copilot/actions/${batchId}/decision`, { decision }),
