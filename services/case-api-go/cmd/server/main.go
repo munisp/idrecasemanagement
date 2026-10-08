@@ -241,8 +241,21 @@ func (a *authn) middleware(next http.Handler) http.Handler {
 			return
 		}
 		p := principal{Subject: tok.Subject()}
-		if u, ok := tok.Get("preferred_username"); ok {
-			p.Username = fmt.Sprint(u)
+		// preferred_username isn't guaranteed present on every token (realm/
+		// client mapper config varies) -- confirmed live: a real staff
+		// member's draft showed up in the QA queue as a bare UUID, which is
+		// exactly what displayName()'s fallback was meant to reserve for the
+		// worker-token service principal (the one caller that truly has no
+		// JWT at all), not for a human whose token just omitted one claim.
+		// name/email are the next-most-standard OIDC claims before falling
+		// all the way back to the subject.
+		for _, claim := range []string{"preferred_username", "name", "email"} {
+			if u, ok := tok.Get(claim); ok {
+				if s := fmt.Sprint(u); s != "" {
+					p.Username = s
+					break
+				}
+			}
 		}
 		if g, ok := tok.Get("groups"); ok {
 			if arr, ok := g.([]any); ok {
