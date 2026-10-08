@@ -2188,42 +2188,44 @@ const Views = (() => {
       // with the worker-scoped digest, narrated — the case picker sits below
       // it. The briefing is read-only and never fails: when the model is down
       // the server narrates the digest itself (fallback badge).
-      afterRender(async () => {
-        const box = document.getElementById("asst-briefing");
-        if (!box) return;
-        try {
-          const r = await Api.program.briefing();
-          const d = r.digest || {};
-          const stat = (n, label) => n ? `<span class="chip-stat"><b>${n}</b> ${label}</span>` : "";
-          const risk = (d.at_risk_sla || []).map((c) =>
-            `<tr class="click" onclick="location.hash='#/assistant/${c.case_id}'"><td class="mono">${esc(c.case_number)}</td>
-             <td>${badge(c.status)}</td><td>${esc(c.lane)}</td><td class="sla-hot">${c.sla_days_remaining}d left</td></tr>`).join("");
-          box.innerHTML = `<div class="asst-turn asst-ai">
-            <div class="asst-who">briefing${r.model ? ` · ${esc(r.model)}` : " · structured digest"}</div>
-            <div class="asst-body">${esc(r.narration || "")}</div></div>
-            <div class="asst-chips" style="margin:8px 0 0 0">
-              ${stat(d.my_open_cases, "open assigned")}${stat((d.at_risk_sla || []).length, "SLA risk")}
-              ${stat(d.pending_qa, "at QA gate")}${stat(d.checks_in_review, "checks in review")}
-              ${stat(d.new_docs_24h, "docs analyzed 24h")}${stat((d.tasks_due || []).length, "tasks due")}
-            </div>
-            ${risk ? `<h3 style="margin:10px 0 4px">SLA risk — open a thread to act</h3>
-              <table><thead><tr><th>Case</th><th>Status</th><th>Lane</th><th>SLA</th></tr></thead><tbody>${risk}</tbody></table>` : ""}`;
-        } catch (e) {
-          box.innerHTML = `<p class="muted">Briefing unavailable: ${esc(e.message)}</p>`;
-        }
+      afterRender(() => {
+        // Briefing is itself a grounded LLM call (same slow Ollama backend,
+        // up to ~90s) -- confirmed live: awaiting it inline here blocked
+        // EVERYTHING below it in this same callback, including wiring the
+        // general-chat form's submit listener. Clicking Send did nothing
+        // for up to 90s because there was no listener attached yet. Fire
+        // the briefing fetch without awaiting it so it can't block anything
+        // else in this view from initializing.
+        (async () => {
+          const box = document.getElementById("asst-briefing");
+          if (!box) return;
+          try {
+            const r = await Api.program.briefing();
+            const d = r.digest || {};
+            const stat = (n, label) => n ? `<span class="chip-stat"><b>${n}</b> ${label}</span>` : "";
+            const risk = (d.at_risk_sla || []).map((c) =>
+              `<tr class="click" onclick="location.hash='#/assistant/${c.case_id}'"><td class="mono">${esc(c.case_number)}</td>
+               <td>${badge(c.status)}</td><td>${esc(c.lane)}</td><td class="sla-hot">${c.sla_days_remaining}d left</td></tr>`).join("");
+            box.innerHTML = `<div class="asst-turn asst-ai">
+              <div class="asst-who">briefing${r.model ? ` · ${esc(r.model)}` : " · structured digest"}</div>
+              <div class="asst-body">${esc(r.narration || "")}</div></div>
+              <div class="asst-chips" style="margin:8px 0 0 0">
+                ${stat(d.my_open_cases, "open assigned")}${stat((d.at_risk_sla || []).length, "SLA risk")}
+                ${stat(d.pending_qa, "at QA gate")}${stat(d.checks_in_review, "checks in review")}
+                ${stat(d.new_docs_24h, "docs analyzed 24h")}${stat((d.tasks_due || []).length, "tasks due")}
+              </div>
+              ${risk ? `<h3 style="margin:10px 0 4px">SLA risk — open a thread to act</h3>
+                <table><thead><tr><th>Case</th><th>Status</th><th>Lane</th><th>SLA</th></tr></thead><tbody>${risk}</tbody></table>` : ""}`;
+          } catch (e) {
+            box.innerHTML = `<p class="muted">Briefing unavailable: ${esc(e.message)}</p>`;
+          }
+        })();
         // General chat (no case open): same intent router as the floating
         // widget and the in-case thread -- my cases/my tasks/open an intake
         // execute directly, anything else is a real LLM reply grounded on
-        // your own queue. This was previously only reachable from the
-        // floating widget; the full page had no input for it at all.
-        const gthread = document.getElementById("asst-general-thread");
-        if (gthread) {
-          try {
-            const h = await Api.program.copilotGeneralChatHistory();
-            gthread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") || ASST_EMPTY_HTML;
-            gthread.scrollTop = gthread.scrollHeight;
-          } catch (e) { gthread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`; }
-        }
+        // your own queue. Form wiring happens synchronously, right now, not
+        // after any fetch -- Send must work immediately regardless of how
+        // long the briefing (or anything else) takes.
         document.getElementById("asst-general-form")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const input = ev.target.message;
@@ -2231,6 +2233,15 @@ const Views = (() => {
           input.value = "";
           if (msg.trim()) await handleAssistantMessage(msg, "", "asst-general-thread");
         });
+        (async () => {
+          const gthread = document.getElementById("asst-general-thread");
+          if (!gthread) return;
+          try {
+            const h = await Api.program.copilotGeneralChatHistory();
+            gthread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") || ASST_EMPTY_HTML;
+            gthread.scrollTop = gthread.scrollHeight;
+          } catch (e) { gthread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`; }
+        })();
       });
       try {
         const r = await Api.cases.list({ limit: 50 });
