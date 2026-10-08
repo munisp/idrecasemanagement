@@ -2304,11 +2304,22 @@ const Views = (() => {
         thread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`;
       }
       const form = document.getElementById("asst-form");
-      form?.addEventListener("submit", (e) => {
+      const fileInput = document.getElementById("asst-file");
+      fileInput?.addEventListener("change", () => {
+        form.querySelector(".asst-fab-attach")?.classList.toggle("has-file", !!fileInput.files[0]);
+      });
+      form?.addEventListener("submit", async (e) => {
         e.preventDefault();
         const input = form.message;
-        const msg = input.value.trim();
-        if (msg) { input.value = ""; assistantSend(caseId, msg); }
+        const msg = input.value;
+        input.value = "";
+        const file = fileInput?.files[0];
+        if (file) {
+          fileInput.value = "";
+          form.querySelector(".asst-fab-attach")?.classList.remove("has-file");
+          await asstDoUpload("asst-thread", caseId, file);
+        }
+        if (msg.trim()) await handleAssistantMessage(msg, caseId, "asst-thread");
       });
       asstQaLoad(caseId);
     });
@@ -2324,10 +2335,12 @@ const Views = (() => {
           <button class="mini" onclick="Views.assistantChip('${caseId}','actions',this)">⚙ Propose actions</button>
         </div>
         <form id="asst-form" class="asst-form">
-          <input name="message" autocomplete="off" placeholder="Ask about this case… (e.g. what's blocking eligibility?)" aria-label="Message the assistant" />
+          <label class="mini asst-fab-attach" title="Attach a document to this case">📎
+            <input type="file" id="asst-file" style="display:none" /></label>
+          <input name="message" autocomplete="off" placeholder="Ask about this case, or tell me to do something — create a task, open an intake, pull a report…" aria-label="Message the assistant" />
           <button>Send</button>
         </form>
-        <p class="asst-foot">Advisory only — the assistant cannot change case state; chips route through the same gates as the screens. Every turn is recorded. Replies run on local infrastructure and can take up to a couple of minutes.</p>
+        <p class="asst-foot">Chips and direct requests (create a task, open an intake, pull a report, upload a document) execute immediately — correspondence still needs a second reviewer, same as everywhere else in the app. Every turn is recorded. Replies run on local infrastructure and can take up to a couple of minutes.</p>
       </div>`;
   }
 
@@ -2444,6 +2457,17 @@ const Views = (() => {
   const ASST_INTENT_CASES = /\b(open cases|my cases|cases?.*(today|due|open)|what cases)\b/i;
   const ASST_INTENT_TASKS = /\b(my )?tasks?\b/i;
   const ASST_INTENT_LEFT = /\b(what.?s left|whats left|outstanding|still (need|required)|what.?s (missing|remaining)|checklist)\b/i;
+  // Action intents (full autonomy, user-directed): these actually WRITE --
+  // create a task, complete one, open an intake, pull a report -- executed
+  // directly on send, no separate confirm click. Checked before
+  // ASST_INTENT_TASKS (list) so "create a task" doesn't get read as "show
+  // my tasks". Deliberately NOT extended to anything needing a second
+  // reviewer by platform design (sending correspondence) -- that gate
+  // exists independent of who/what drafts it, so it stays in force here.
+  const ASST_INTENT_TASK_CREATE = /\b(create|add|log|make)\b[^.?!]{0,8}\btask\b|^remind me to\b/i;
+  const ASST_INTENT_TASK_COMPLETE = /\b(complete|finish|close|mark)\b[^.?!]{0,15}\btask\b|\btask\b[^.?!]{0,15}\b(done|complete|finished)\b/i;
+  const ASST_INTENT_INTAKE_CREATE = /\b(create|open|start|file)\b[^.?!]{0,10}\b(intake|dispute)\b|^new (dispute|intake|case)\b/i;
+  const ASST_INTENT_REPORT = /\b(report|receivables|financial summary|sla breach(es)?)\b/i;
 
   function asstAppendRich(threadId, titleHtml, rowsHtml) {
     const thread = document.getElementById(threadId);
@@ -2503,6 +2527,171 @@ const Views = (() => {
     } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
   }
 
+  // Lightweight slot extraction, not an LLM call -- a task's subject/due
+  // date are simple enough that a lookup table of trigger phrases beats
+  // paying ~60-90s of Ollama latency for something a regex gets right.
+  function extractTaskFields(msg) {
+    let subject = msg
+      .replace(/^(please\s+)?(create|add|log|make)\s+(a\s+)?task\s*(to|for|:|-)?\s*/i, "")
+      .replace(/^remind me to\s*/i, "")
+      .trim();
+    let due = null;
+    const explicit = subject.match(/\b(by|due|before)\s+(\d{4}-\d{2}-\d{2})\b/i);
+    if (explicit) {
+      due = explicit[2];
+      subject = (subject.slice(0, explicit.index) + subject.slice(explicit.index + explicit[0].length)).trim();
+    } else if (/\btomorrow\b/i.test(subject)) {
+      const d = new Date(); d.setDate(d.getDate() + 1);
+      due = d.toISOString().slice(0, 10);
+      subject = subject.replace(/\btomorrow\b/i, "").trim();
+    } else if (/\btoday\b/i.test(subject)) {
+      due = new Date().toISOString().slice(0, 10);
+      subject = subject.replace(/\btoday\b/i, "").trim();
+    }
+    subject = subject.replace(/\s{2,}/g, " ").replace(/^[-:\s]+|[-:\s]+$/g, "").trim();
+    return { subject: subject || msg.trim(), due };
+  }
+
+  async function asstDoCreateTask(threadId, msg, caseId) {
+    const { subject, due } = extractTaskFields(msg);
+    try {
+      const me = Auth.claims();
+      const r = await Api.crm.createTask({
+        subject, case_id: caseId || "", assignee: me?.sub || "", due_date: due || "",
+      });
+      asstAppendRich(threadId,
+        `✓ Task created: <b>${esc(subject)}</b>${due ? ` (due ${esc(due)})` : ""}${r.task_ref ? ` — ${esc(r.task_ref)}` : ""}`);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  async function asstDoCompleteTask(threadId, msg) {
+    try {
+      const refMatch = msg.match(/TASK-\d{4}-\d{5}/i);
+      const r = await Api.crm.tasks(true, { limit: 100 });
+      let candidates = (r.tasks || []).filter((t) => t.status !== "DONE");
+      if (refMatch) {
+        candidates = candidates.filter((t) => (t.task_ref || "").toUpperCase() === refMatch[0].toUpperCase());
+      } else {
+        const kw = msg.replace(/\b(complete|finish|close|mark|done|finished|with|the|task|my)\b/gi, "").trim().toLowerCase();
+        if (kw) candidates = candidates.filter((t) => t.subject.toLowerCase().includes(kw));
+      }
+      if (!candidates.length) {
+        asstAppendRich(threadId, "Couldn't find a matching open task of yours — try including part of its exact title or its TASK-#### reference.");
+        return;
+      }
+      if (candidates.length > 1) {
+        const rowsHtml = candidates.slice(0, 6).map((t) =>
+          `<div class="asst-fab-list-row"><span class="afr-main">${esc(t.subject)}</span><span class="afr-sub">${esc(t.task_ref)}</span></div>`).join("");
+        asstAppendRich(threadId, "Multiple open tasks match — tell me the exact reference (e.g. TASK-2026-00042):", rowsHtml);
+        return;
+      }
+      await Api.crm.completeTask(candidates[0].id);
+      asstAppendRich(threadId, `✓ Marked done: <b>${esc(candidates[0].subject)}</b> (${esc(candidates[0].task_ref)})`);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  // Multi-turn, so module-scoped: a brand-new case gets opened only once
+  // intakeConverse's own extraction says every required field is present
+  // (r.ready) -- the same completeness gate the dedicated Intake page's
+  // conversational panel uses, just auto-submitting instead of waiting for
+  // a button click.
+  let asstIntakeDraft = null;
+  async function asstDoCreateIntake(threadId, msg) {
+    if (!asstIntakeDraft) asstIntakeDraft = { fields: {}, history: [] };
+    try {
+      const r = await Api.program.intakeConverse(msg, asstIntakeDraft.fields, asstIntakeDraft.history);
+      asstIntakeDraft.history.push(msg);
+      asstIntakeDraft.fields = r.fields || {};
+      if (r.ready) {
+        const fields = asstIntakeDraft.fields;
+        asstIntakeDraft = null;
+        const created = await Api.program.createIntake({
+          email: fields.email, contact_name: fields.contact_name, org: fields.org,
+        });
+        asstAppendRich(threadId, created.programmed
+          ? `✓ Case <a href="#/cases/${created.case_id}">${esc(created.case_number)}</a> opened — filing instructions emailed to ${esc(fields.email || "")}.`
+          : "✓ Intake request opened — submission instructions queued.");
+      } else {
+        asstAppend(threadId, "assistant", r.reply || `Still need: ${(r.missing || []).join(", ")}`, "");
+      }
+    } catch (e) { asstIntakeDraft = null; asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  async function asstDoReport(threadId, msg) {
+    try {
+      let title, rowsHtml;
+      if (/receivable/i.test(msg)) {
+        const r = await Api.program.receivables();
+        const rows = r.receivables || [];
+        title = "Receivables (by party/kind/status):";
+        rowsHtml = rows.slice(0, 10).map((x) =>
+          `<div class="asst-fab-list-row"><span class="afr-main">${esc(x.party)} · ${esc(x.kind)}</span><span class="afr-sub">${esc(x.status)} · ${x.n} · $${((x.total_cents || 0) / 100).toLocaleString()}</span></div>`).join("");
+      } else if (/\bsla\b/i.test(msg)) {
+        const r = await Api.reports.sla();
+        title = `${(r || []).length} SLA breach(es) on record:`;
+        rowsHtml = (r || []).slice(0, 10).map((x) =>
+          `<div class="asst-fab-list-row"><a class="afr-main" href="#/cases/${x.case_id}">${esc(x.clock)}</a><span class="afr-sub">${esc(x.detail || "")}</span></div>`).join("");
+      } else if (/financial/i.test(msg)) {
+        const r = await Api.program.financial();
+        const k = r.kpi || {};
+        title = "Financial summary:";
+        rowsHtml = `<div class="asst-fab-list-row"><span class="afr-main">Collected</span><span class="afr-sub">$${((k.collected_cents || 0) / 100).toLocaleString()}</span></div>
+          <div class="asst-fab-list-row"><span class="afr-main">Collected (30d)</span><span class="afr-sub">$${((k.collected_30d_cents || 0) / 100).toLocaleString()}</span></div>
+          <div class="asst-fab-list-row"><span class="afr-main">Refunded</span><span class="afr-sub">$${((k.refunded_cents || 0) / 100).toLocaleString()}</span></div>
+          <div class="asst-fab-list-row"><span class="afr-main">Payments</span><span class="afr-sub">${k.payments_count || 0}</span></div>`;
+      } else {
+        const r = await Api.reports.summary();
+        title = "Case status summary:";
+        rowsHtml = (r || []).map((x) =>
+          `<div class="asst-fab-list-row"><span class="afr-main">${esc(x.status)}</span><span class="afr-sub">${x.count} · avg ${esc(x.amount_label)} $${Math.round(x.avg_amount_usd || 0).toLocaleString()}</span></div>`).join("");
+      }
+      asstAppendRich(threadId, title, rowsHtml || `<p class="muted" style="margin:0">No data.</p>`);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  async function asstDoUpload(threadId, caseId, file) {
+    asstAppend(threadId, "user", `📎 ${file.name}`);
+    asstThinking(threadId);
+    try {
+      await Api.cases.upload(caseId, file);
+      asstAppendRich(threadId, `✓ Uploaded <b>${esc(file.name)}</b> — analysis queued; fields (QPA, service line, eligibility inputs) backfill automatically once it finishes.`);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  // Shared router for BOTH surfaces (full #/assistant page and the floating
+  // widget) so action intents, file uploads, and the fallbacks behave
+  // identically no matter which one the worker is talking to.
+  async function handleAssistantMessage(raw, caseId, threadId) {
+    const msg = raw.trim();
+    if (!msg) return;
+    if (ASST_INTENT_TASK_CREATE.test(msg)) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstDoCreateTask(threadId, msg, caseId);
+    } else if (ASST_INTENT_TASK_COMPLETE.test(msg)) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstDoCompleteTask(threadId, msg);
+    } else if (ASST_INTENT_CASES.test(msg)) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstAnswerMyCases(threadId);
+    } else if (ASST_INTENT_INTAKE_CREATE.test(msg) || asstIntakeDraft) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstDoCreateIntake(threadId, msg);
+    } else if (ASST_INTENT_LEFT.test(msg) && caseId) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstAnswerWhatsLeft(threadId, caseId);
+    } else if (ASST_INTENT_REPORT.test(msg)) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstDoReport(threadId, msg);
+    } else if (ASST_INTENT_TASKS.test(msg)) {
+      asstAppend(threadId, "user", msg); asstThinking(threadId);
+      await asstAnswerMyTasks(threadId);
+    } else if (caseId) {
+      await assistantSend(caseId, msg, threadId);
+    } else {
+      await generalChatSend(msg, threadId);
+    }
+  }
+
   function mountAssistantFab() {
     if (!can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return;
     if (document.getElementById("asst-fab")) return;
@@ -2538,6 +2727,8 @@ const Views = (() => {
           <button type="button" class="mini" id="asst-fab-actions">⚙ Actions</button>
         </div>
         <form id="asst-fab-form" class="asst-form">
+          <label class="mini asst-fab-attach" title="Attach a document to the open case">📎
+            <input type="file" id="asst-fab-file" style="display:none" /></label>
           <input name="message" autocomplete="off" placeholder="Ask anything — e.g. my open cases, what's left here…" aria-label="Message the assistant" />
           <button>Send</button>
         </form>
@@ -2608,26 +2799,7 @@ const Views = (() => {
     }
 
     async function handleMessage(raw) {
-      const msg = raw.trim();
-      if (!msg) return;
-      const threadId = "asst-fab-thread";
-      if (ASST_INTENT_CASES.test(msg)) {
-        asstAppend(threadId, "user", msg);
-        asstThinking(threadId);
-        await asstAnswerMyCases(threadId);
-      } else if (ASST_INTENT_LEFT.test(msg) && currentCaseId) {
-        asstAppend(threadId, "user", msg);
-        asstThinking(threadId);
-        await asstAnswerWhatsLeft(threadId, currentCaseId);
-      } else if (ASST_INTENT_TASKS.test(msg)) {
-        asstAppend(threadId, "user", msg);
-        asstThinking(threadId);
-        await asstAnswerMyTasks(threadId);
-      } else if (currentCaseId) {
-        await assistantSend(currentCaseId, msg, threadId);
-      } else {
-        await generalChatSend(msg, threadId);
-      }
+      await handleAssistantMessage(raw, currentCaseId, "asst-fab-thread");
     }
 
     fab.addEventListener("click", () => setOpen(!open));
@@ -2645,12 +2817,24 @@ const Views = (() => {
       else if (btn.dataset.q === "tasks") handleMessage("my tasks");
       else if (btn.dataset.q === "left") handleMessage("what's left on this case");
     });
-    document.getElementById("asst-fab-form").addEventListener("submit", (e) => {
+    const fabFileInput = document.getElementById("asst-fab-file");
+    fabFileInput.addEventListener("change", () => {
+      document.getElementById("asst-fab-form").querySelector(".asst-fab-attach")
+        .classList.toggle("has-file", !!fabFileInput.files[0]);
+    });
+    document.getElementById("asst-fab-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const input = e.target.message;
       const msg = input.value;
       input.value = "";
-      handleMessage(msg);
+      const file = fabFileInput.files[0];
+      if (file) {
+        fabFileInput.value = "";
+        document.getElementById("asst-fab-form").querySelector(".asst-fab-attach").classList.remove("has-file");
+        if (!currentCaseId) asstAppendRich("asst-fab-thread", "Open a case first — documents upload to a specific case.");
+        else await asstDoUpload("asst-fab-thread", currentCaseId, file);
+      }
+      if (msg.trim()) await handleMessage(msg);
     });
 
     // Re-ground on the new case whenever navigation changes it. General
