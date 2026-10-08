@@ -2211,6 +2211,26 @@ const Views = (() => {
         } catch (e) {
           box.innerHTML = `<p class="muted">Briefing unavailable: ${esc(e.message)}</p>`;
         }
+        // General chat (no case open): same intent router as the floating
+        // widget and the in-case thread -- my cases/my tasks/open an intake
+        // execute directly, anything else is a real LLM reply grounded on
+        // your own queue. This was previously only reachable from the
+        // floating widget; the full page had no input for it at all.
+        const gthread = document.getElementById("asst-general-thread");
+        if (gthread) {
+          try {
+            const h = await Api.program.copilotGeneralChatHistory();
+            gthread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") || ASST_EMPTY_HTML;
+            gthread.scrollTop = gthread.scrollHeight;
+          } catch (e) { gthread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`; }
+        }
+        document.getElementById("asst-general-form")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const input = ev.target.message;
+          const msg = input.value;
+          input.value = "";
+          if (msg.trim()) await handleAssistantMessage(msg, "", "asst-general-thread");
+        });
       });
       try {
         const r = await Api.cases.list({ limit: 50 });
@@ -2221,6 +2241,15 @@ const Views = (() => {
           <span class="muted">grounded on platform-verified case facts · advisory only · every turn is on the record</span></div>
           <div class="asst-panel" style="margin-bottom:14px">
             <div id="asst-briefing"><p class="muted">Preparing your briefing…</p></div>
+            <div id="asst-general-thread" class="asst-thread" style="margin-top:10px"><p class="muted" style="padding:12px">Loading…</p></div>
+            <div class="asst-chips">
+              <button class="mini" type="button" onclick="Views.handleAssistantMessage('my open cases','','asst-general-thread')">📂 My open cases</button>
+              <button class="mini" type="button" onclick="Views.handleAssistantMessage('my tasks','','asst-general-thread')">✓ My tasks</button>
+            </div>
+            <form id="asst-general-form" class="asst-form">
+              <input name="message" autocomplete="off" placeholder="Ask anything — my open cases, my tasks, open a new intake…" aria-label="Message the assistant" />
+              <button>Send</button>
+            </form>
           </div>
           <h2 style="margin-top:14px">Case threads</h2>
           <p class="muted">Pick a case to open its thread — private to you, shareable if you choose.</p>
@@ -3428,5 +3457,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, asstQaDecide, asstShareAdd, asstShareRemove, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();
