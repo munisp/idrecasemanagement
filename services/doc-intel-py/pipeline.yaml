@@ -106,10 +106,10 @@ schemas:
   idr_claim:
     fields: [claim_number, cpt_hcpcs_codes, service_date, billed_amount_usd,
              qpa_usd, provider_name, provider_tin, provider_npi, payer_name,
-             member_id, place_of_service]
+             member_id, place_of_service, network_status]
   determination_letter:
     fields: [case_number, idre_entity, prevailing_party, awarded_amount_usd,
              rationale_summary, signature_present, determination_date]
   eob:
     fields: [claim_number, allowed_amount_usd, patient_responsibility_usd,
-             denial_codes, service_lines]
+             denial_codes, service_lines, network_status]

@@ -495,13 +495,32 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     pages = ensure_pages(ctx) if cfg.get("vision") else ctx.get("pages", [])
     max_pages = cfg.get("max_pages", 3)
 
+    # Confirmed live against this exact endpoint/model: a page thumbnailed to
+    # vlm_image_max_px (650px, sized for token cost -- see config comment
+    # above) shrinks a normal page of body text to a few px tall, illegible
+    # to the vision model. Given a prompt with BOTH clear transcribed text
+    # AND that illegible thumbnail, the model let the blurry image override
+    # its own correct reading of the text -- _in_domain:false and every
+    # field nulled, on a document whose text-only extraction (same prompt,
+    # no image) was perfect. The image-caveat line below is what fixes it;
+    # only added when vision is actually on (no image attached => nothing
+    # to caveat, and prompt budget is the one resource genuinely scarce
+    # here per MAX_PROMPT_CHARS below).
+    image_caveat = (
+        "A small page thumbnail is also attached for layout/seal/stamp cues "
+        "only -- it may be too low-resolution to read in full; never let a "
+        "blurry or hard-to-read image override what the transcribed text "
+        "below clearly states. "
+    ) if cfg.get("vision") else ""
     instructions = (
         "You are an IDR (No Surprises Act dispute) document analyst. "
+        "The transcribed text below is the authoritative content of this document. "
+        f"{image_caveat}"
         "FIRST decide whether this document is related to medical billing, health "
         "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
-        'set "_in_domain" true or false. A resume, menu, tax form, legal contract, '
-        "photograph with no document content, or any other unrelated material is "
-        "false. When false, set every other field null and stop. "
+        'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, '
+        "legal contract, photograph with no document content, or any other "
+        "unrelated material is false. When false, set every other field null and stop. "
         f"This document is believed to be of type '{doc_type}'. "
         f"Extract these fields as strict JSON (null when absent): {', '.join(fields)}.\n"
         "Only extract values that literally appear in the document — never invent "

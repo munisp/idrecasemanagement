@@ -188,6 +188,63 @@ _SERVICE_LINE_KEYWORDS = (
     ("RADIOLOGY", "RADIOLOGY"), ("LAB", "LAB"), ("EMERGENCY", "ER"), ("ER", "ER"),
 )
 
+# CPT/HCPCS code ranges are the AMA/CMS's own standard category boundaries
+# (Anesthesia 00100-01999, Radiology 70010-79999, Pathology & Lab 80047-
+# 89398, Emergency Dept E/M 99281-99285) -- not a guess, same standing as
+# the POS-code -> provider_type map above. This is idr_claim's own field
+# (cpt_hcpcs_codes); EOB's service_lines free-text field never has it, which
+# is why idr_claim documents -- the common case -- never got a service_line
+# backfill before even though EOB's keyword match existed.
+_CPT_AIR_AMBULANCE = {"A0430", "A0431", "A0435", "A0436"}
+
+
+def _service_line_from_cpt(codes_raw: str | None) -> str | None:
+    m = re.search(r"\b([A-Z]\d{4}|\d{5})\b", str(codes_raw or "").upper())
+    if not m:
+        return None
+    code = m.group(1)
+    if code in _CPT_AIR_AMBULANCE:
+        return "AIR_AMBULANCE"
+    if not code.isdigit():
+        return None
+    n = int(code)
+    if 99281 <= n <= 99285:
+        return "ER"
+    if 100 <= n <= 1999:
+        return "ANESTHESIA"
+    if 70010 <= n <= 79999:
+        return "RADIOLOGY"
+    if 80047 <= n <= 89398:
+        return "LAB"
+    return None
+
+# CMS place-of-service codes unambiguous enough to map to an eligibility
+# provider_type without guessing: 21 (Inpatient Hospital) and 22/19 (on/off
+# -campus Outpatient Hospital) are explicit facility-type statements; 11
+# (Office) is the standard code for a physician/dentist practice. Anything
+# else -- including "rural hospital", which isn't a POS code at all -- is
+# left for a human, same miss-don't-guess rule as the dollar fields below.
+_POS_PROVIDER_TYPE = {
+    "21": "hospital_inpatient",
+    "22": "hospital_outpatient",
+    "19": "hospital_outpatient",
+    "11": "physician_dentist",
+}
+
+
+def _contracted_from_network_status(text: str | None) -> bool | None:
+    """True/False only on an explicit in-/out-of-network statement in the
+    document; None (don't guess) for anything else, including silence."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if any(k in t for k in ("out-of-network", "out of network", "non-participating",
+                             "nonparticipating", "non-par")):
+        return False
+    if any(k in t for k in ("in-network", "in network", "participating")):
+        return True
+    return None
+
 
 def backfill_case_fields(tenant: str, case_id: str, extracted: dict) -> list[str]:
     """Fill a couple of case fields from analyzed-document facts so staff
@@ -199,24 +256,40 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict) -> list[str
     direct match. service_line is inferred from the EOB schema's
     service_lines[0] leading keyword -- a coarse category guess, safe to
     get wrong (falls through to manual, never silently wrong in a way that
-    matters). Deliberately NOT doing the equivalent for disputed_amount_cents:
-    EOB's allowed_amount_usd/patient_responsibility_usd are the insurer's
-    determination and the patient's share, neither of which IS the amount a
-    provider is disputing -- auto-filling a dollar figure into the wrong
-    financial concept on a legal dispute record would be worse than leaving
-    it blank for a human to enter.
+    matters). disputed_amount_cents (the figure programmed tenants' own
+    eligibility thresholds actually check -- qpa_cents is a federal-NSA-only
+    concept) comes from idr_claim's billed_amount_usd: the provider's own
+    stated claim amount, literally printed on the same document, same kind
+    of direct match as qpa_usd. Deliberately still NOT sourcing it from
+    EOB's allowed_amount_usd/patient_responsibility_usd -- those are the
+    INSURER's determination and the patient's share, neither of which IS
+    the amount a provider is disputing, and unlike billed_amount_usd they'd
+    require guessing which side of the payer's math the provider is even
+    contesting.
+
+    provider_type/contracted (eligibility-review inputs) land in details
+    jsonb, the same bag deriveEligibilityInput (case-api triage.go) already
+    reads -- so a case that's had a document analyzed can go straight to
+    autoEligibility with no manual form entry, which today NEVER happens any
+    other way: nothing else in the platform persists these two fields.
     """
     changed: list[str] = []
     qpa_usd = extracted.get("qpa_usd")
+    billed_amount_usd = extracted.get("billed_amount_usd")
     service_lines = extracted.get("service_lines") or []
+    pos_match = re.match(r"\s*(\d{1,2})", str(extracted.get("place_of_service") or ""))
+    provider_type = _POS_PROVIDER_TYPE.get(pos_match.group(1)) if pos_match else None
+    contracted = _contracted_from_network_status(extracted.get("network_status"))
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
-            f"SELECT qpa_cents, service_line FROM tenant_{tenant}.cases WHERE id=%s",
+            f"SELECT qpa_cents, service_line, details, disputed_amount_cents "
+            f"FROM tenant_{tenant}.cases WHERE id=%s",
             (case_id,),
         ).fetchone()
         if not row:
             return changed
-        cur_qpa, cur_service_line = row
+        cur_qpa, cur_service_line, details, cur_disputed = row
+        details = details or {}
         if qpa_usd and not cur_qpa:
             try:
                 cents = round(float(qpa_usd) * 100)
@@ -225,13 +298,37 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict) -> list[str
             if cents > 0:
                 c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))
                 changed.append(f"QPA ${cents / 100:,.2f}")
-        if not cur_service_line and service_lines:
-            first = str(service_lines[0]).upper()
-            for kw, canon in _SERVICE_LINE_KEYWORDS:
-                if kw in first:
-                    c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (canon, case_id))
-                    changed.append(f"service line {canon}")
-                    break
+        if billed_amount_usd and not cur_disputed:
+            try:
+                cents = round(float(billed_amount_usd) * 100)
+            except (TypeError, ValueError):
+                cents = 0
+            if cents > 0:
+                c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s", (cents, case_id))
+                changed.append(f"disputed amount ${cents / 100:,.2f}")
+        if not cur_service_line:
+            service_line = _service_line_from_cpt(extracted.get("cpt_hcpcs_codes"))
+            if not service_line and service_lines:
+                first = str(service_lines[0]).upper()
+                for kw, canon in _SERVICE_LINE_KEYWORDS:
+                    if kw in first:
+                        service_line = canon
+                        break
+            if service_line:
+                c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (service_line, case_id))
+                changed.append(f"service line {service_line}")
+        if provider_type and "provider_type" not in details:
+            c.execute(
+                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                (json.dumps({"provider_type": provider_type}), case_id),
+            )
+            changed.append(f"provider type {provider_type}")
+        if contracted is not None and "contracted" not in details:
+            c.execute(
+                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                (json.dumps({"contracted": contracted}), case_id),
+            )
+            changed.append(f"contracted={contracted}")
     return changed
 
 
