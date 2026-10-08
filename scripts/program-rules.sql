@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS public.qa_reviews (
 );
 CREATE INDEX IF NOT EXISTS qa_reviews_case ON public.qa_reviews (tenant, case_id);
 CREATE INDEX IF NOT EXISTS qa_reviews_queue ON public.qa_reviews (tenant, status);
+-- drafted_by is a free-text display-name string ("copilot:... (requested by
+-- Jane Doe)"), not a Keycloak sub -- there was no machine-readable way to
+-- notify the person who ASKED for a draft once a second reviewer decides
+-- its fate later (approve/reject/send-failure), often in a different
+-- session entirely. requested_by_sub closes that: qaDecision notifies this
+-- user directly on outcome instead of the requester only ever finding out
+-- by checking back on the QA queue themselves.
+ALTER TABLE public.qa_reviews ADD COLUMN IF NOT EXISTS requested_by_sub text;
 
 -- Correspondence log: what actually went out (replaces the Excel Inquiries Log).
 CREATE TABLE IF NOT EXISTS public.correspondence_log (

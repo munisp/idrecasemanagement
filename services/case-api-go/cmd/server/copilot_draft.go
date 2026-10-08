@@ -149,9 +149,9 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 	ccJ, _ := json.Marshal(in.CC)
 	var qid string
 	if err := s.db.QueryRow(r.Context(), `
-		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9) RETURNING id`,
-		tenant, caseID, artifact, channel, truncate(subject, 400), footed, toJ, ccJ, attribution).Scan(&qid); err != nil {
+		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, requested_by_sub)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10) RETURNING id`,
+		tenant, caseID, artifact, channel, truncate(subject, 400), footed, toJ, ccJ, attribution, p.Subject).Scan(&qid); err != nil {
 		http.Error(w, `{"error":"qa gate insert failed"}`, http.StatusInternalServerError)
 		return
 	}

@@ -269,9 +269,9 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	// which made it impossible for qaDecision to ever look up which role's
 	// approval a pending draft actually needed.
 	_ = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by)
-		VALUES ($1,$2,$3,'email',$4,$5,$6,$7,$8,$9) RETURNING id`,
-		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, displayName(p)).Scan(&qid)
+		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, requested_by_sub)
+		VALUES ($1,$2,$3,'email',$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, displayName(p), p.Subject).Scan(&qid)
 
 	if status == "PENDING" {
 		s.notify(r, tenant, "*", "QA_REVIEW",
@@ -404,11 +404,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	var caseID, subject, body, status, artifact, channel, draftedBy string
+	var caseID, subject, body, status, artifact, channel, draftedBy, requestedBySub string
 	var toJ, ccJ []byte
 	err := s.db.QueryRow(r.Context(),
-		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'), coalesce(drafted_by,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
-		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &draftedBy)
+		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'), coalesce(drafted_by,''), coalesce(requested_by_sub,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
+		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &draftedBy, &requestedBySub)
 	// APPROVED (not yet SENT) + a fresh APPROVE decision is a retry of a
 	// previously failed send -- status only reaches APPROVED-without-SENT
 	// when sendMail below failed last time, and the response used to claim
@@ -498,6 +498,10 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
 			"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "channel": channel,
 		})
+		if requestedBySub != "" {
+			s.notify(r, tenant, requestedBySub,
+				"DRAFT_APPROVED", fmt.Sprintf("Your draft %q was approved and filed on the case.", subject), "#/cases/"+caseID)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": newStatus})
 		return
 	}
@@ -521,6 +525,15 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			deliveryError = err.Error()
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
+			// The reviewer who clicked Approve already sees this in the
+			// response; the person who ASKED for the draft in the first
+			// place (often a different person, often not watching this
+			// screen at all -- that's the whole point of a QA gate) had no
+			// way to learn their mail never actually went out.
+			if requestedBySub != "" {
+				s.notify(r, tenant, requestedBySub, "DRAFT_SEND_FAILED",
+					fmt.Sprintf("Your correspondence draft %q was approved but failed to send: %s", subject, deliveryError), "#/qa")
+			}
 		} else {
 			_, _ = s.db.Exec(r.Context(),
 				`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
@@ -530,12 +543,20 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			}
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 				fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
+			if requestedBySub != "" {
+				s.notify(r, tenant, requestedBySub, "DRAFT_SENT",
+					fmt.Sprintf("Your correspondence draft %q was approved and sent to %d recipient(s).", subject, len(to)), "#/cases/"+caseID)
+			}
 			// Notification is a fact now — the checklist follows.
 			s.autoChecklist(r, tenant, caseID)
 		}
 	} else {
 		s.logActivity(r.Context(), tenant, caseID, "QA_REJECTED",
 			fmt.Sprintf("Draft rejected in QA by %s: %s%s", p.Subject, subject, orDash(" — "+in.Note)))
+		if requestedBySub != "" {
+			s.notify(r, tenant, requestedBySub, "DRAFT_REJECTED",
+				fmt.Sprintf("Your correspondence draft %q was rejected%s", subject, orDash(" — "+in.Note)), "#/cases/"+caseID)
+		}
 	}
 	s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
 		"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note,
