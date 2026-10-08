@@ -385,7 +385,12 @@ button:active,.button:active{transform:translateY(1px)}
 .inline-form input,.inline-form select,.inline-form textarea{padding:7px 10px;border:1px solid var(--border-default);border-radius:8px;background:var(--surface-base);color:inherit;font:inherit;min-width:140px}
 .inline-form textarea{flex-basis:100%}
 .inline-form button{padding:8px 14px}
-.qa-body{white-space:pre-wrap;background:var(--surface-sunken);border-radius:8px;padding:12px;font-size:13px;margin:10px 0}
+/* Overrides the bare pre{} rule above (line 73): that one is styled for a
+   dark code-block background (color:#d6e2ff on var(--n900)) -- .qa-body
+   overrode the background to the light surface but never its own color,
+   so the draft text rendered light-on-light, readable only by selecting
+   it. Confirmed live on a real QA draft. */
+.qa-body{white-space:pre-wrap;background:var(--surface-sunken);color:var(--text-primary);border-radius:8px;padding:12px;font-size:13px;margin:10px 0}
 
 /* financial dashboard */
 .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:14px 0}
@@ -426,7 +431,10 @@ th.sorted{color:var(--accent-fg);font-weight:700}
 .rule-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
 .rule-cols h4{margin:0 0 4px;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-secondary)}
 .rule-cols ul{margin:0;padding-left:16px;font-size:12.5px}
-.rule-diff{max-height:300px;overflow:auto;font-size:11px;background:var(--surface-sunken);padding:8px;border-radius:8px}
+/* Same bare-pre color leak as .qa-body above -- background overridden to
+   the light surface, color never redeclared, so it inherited the light
+   text meant for the dark code-block background instead. */
+.rule-diff{max-height:300px;overflow:auto;font-size:11px;background:var(--surface-sunken);color:var(--text-primary);padding:8px;border-radius:8px}
 button.mini.danger{color:#991b1b;border-color:#fecaca}
 @media(max-width:720px){.rule-cols{grid-template-columns:1fr}}
 
