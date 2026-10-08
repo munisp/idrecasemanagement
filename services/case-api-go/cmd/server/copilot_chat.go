@@ -162,6 +162,19 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
+	// Persist the user's turn NOW, before calling the model -- private by
+	// default, shareable (copilotShareThread) rather than automatically
+	// visible to every other worker on the case. This used to happen only
+	// after a successful reply: a slow or failed model call (confirmed
+	// live: ~90s timeouts on this model aren't rare) meant the question
+	// itself was never saved anywhere, so it silently vanished the next
+	// time the thread reloaded from the server -- reported live as "the
+	// current chat keeps clearing". The user's own words are never lost
+	// now, even on a call that times out or 502s.
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.copilot_threads (tenant, case_id, role, body, user_sub) VALUES ($1,$2,'user',$3,$4)`,
+		tenant, caseID, in.Message, p.Subject)
+
 	reply, err := ollamaChatWithHistory(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel,
 		copilotChatPrompt(facts), history, in.Message, 800)
 	if err != nil {
@@ -172,12 +185,6 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist both directions, owned by the asker -- private by default,
-	// shareable (copilotShareThread) rather than automatically visible to
-	// every other worker on the case.
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.copilot_threads (tenant, case_id, role, body, user_sub) VALUES ($1,$2,'user',$3,$4)`,
-		tenant, caseID, in.Message, p.Subject)
 	_, _ = s.db.Exec(r.Context(), `
 		INSERT INTO public.copilot_threads (tenant, case_id, role, body, model, user_sub) VALUES ($1,$2,'assistant',$3,$4,$5)`,
 		tenant, caseID, reply, s.cfg.CopilotModel, p.Subject)

@@ -173,6 +173,15 @@ func (s *server) copilotGeneralChat(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
+	// Persist the user's turn NOW, before calling the model -- same reasoning
+	// as copilotChat (copilot_chat.go): saving only on a successful reply
+	// meant a slow/failed model call (confirmed live: ~90s timeouts aren't
+	// rare) silently dropped the question itself, which read as "the chat
+	// keeps clearing" on the next reload rather than as a failed reply.
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body) VALUES ($1,$2,'user',$3)`,
+		tenant, p.Subject, in.Message)
+
 	reply, err := ollamaChatWithHistory(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel,
 		copilotGeneralChatPrompt(facts), history, in.Message, 500)
 	if err != nil {
@@ -183,9 +192,6 @@ func (s *server) copilotGeneralChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body) VALUES ($1,$2,'user',$3)`,
-		tenant, p.Subject, in.Message)
 	_, _ = s.db.Exec(r.Context(), `
 		INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body, model) VALUES ($1,$2,'assistant',$3,$4)`,
 		tenant, p.Subject, reply, s.cfg.CopilotModel)
