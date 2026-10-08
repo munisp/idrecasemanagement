@@ -156,7 +156,7 @@ func (s *server) copilotGeneralChat(w http.ResponseWriter, r *http.Request) {
 	facts, _ := s.gatherGeneralCopilotFacts(r, tenant, p)
 
 	rows, err := s.db.Query(r.Context(), `
-		SELECT role, body FROM (SELECT role, body FROM public.copilot_general_threads
+		SELECT role, body FROM (SELECT role, body, created_at FROM public.copilot_general_threads
 		  WHERE tenant=$1 AND user_sub=$2 ORDER BY created_at DESC LIMIT $3) t
 		ORDER BY created_at`, tenant, p.Subject, copilotChatMaxHistory)
 	if err != nil {

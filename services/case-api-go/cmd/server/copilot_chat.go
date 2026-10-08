@@ -121,8 +121,15 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Thread context: the last N turns, oldest first, as prior messages.
+	// created_at has to survive into the inner subquery's own SELECT list --
+	// confirmed live: the outer ORDER BY can't resolve a column the derived
+	// table t(role, body) never exposed, SQLSTATE 42703, on every single
+	// POST this endpoint has ever received (0 rows doesn't save it; column
+	// resolution happens at parse time). Chip-driven turns (brief/draft/
+	// actions) never hit this query at all, which is the only reason this
+	// endpoint's free-text path looked untested rather than broken.
 	rows, err := s.db.Query(r.Context(), `
-		SELECT role, body FROM (SELECT role, body FROM public.copilot_threads
+		SELECT role, body FROM (SELECT role, body, created_at FROM public.copilot_threads
 		  WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC LIMIT $3) t
 		ORDER BY created_at`, tenant, caseID, copilotChatMaxHistory)
 	if err != nil {
