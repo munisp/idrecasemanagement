@@ -580,3 +580,12 @@ button.mini.danger{color:#991b1b;border-color:#fecaca}
 .chip-stat{background:var(--surface-raised,#fff);border:1px solid var(--border-subtle);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--text-secondary)}
 .chip-stat b{color:var(--text-primary)}
 .sla-hot{color:var(--danger,#c92a2a);font-weight:600}
+
+/* Conversational intake: chat left, live-prefilled form right */
+.conv-intake-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:24px;align-items:start}
+@media (max-width:860px){.conv-intake-grid{grid-template-columns:1fr}}
+.conv-intake-h{margin:0 0 4px;font-size:15px}
+.conv-intake-form .form{box-shadow:none;border:none;padding:0;background:none;margin:0;max-width:none}
+.conv-intake-form label{position:relative}
+.ci-prov{position:absolute;top:0;right:0;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--accent-fg);background:var(--accent-bg);padding:1px 7px;border-radius:999px;opacity:.9;font-weight:700}

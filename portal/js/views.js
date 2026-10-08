@@ -1668,8 +1668,12 @@ const Views = (() => {
         // Human keystrokes win over extraction: once a field is touched, the
         // assistant never overwrites it.
         const f0 = $("#intake-form");
-        ["email", "contact_name", "org", "amount"].forEach((n) =>
-          f0?.[n]?.addEventListener("input", () => { f0[n].dataset.touched = "1"; }));
+        ["email", "contact_name", "org"].forEach((n) =>
+          f0?.[n]?.addEventListener("input", () => {
+            f0[n].dataset.touched = "1";
+            const b = document.getElementById(`ci-prov-${n}`);
+            if (b) b.hidden = true; // now human-authored, not "from chat"
+          }));
         $("#intake-chat-form")?.addEventListener("submit", (ev) => {
           ev.preventDefault();
           const msg = ev.target.message.value.trim();
@@ -1683,15 +1687,36 @@ const Views = (() => {
       });
       return `<div class="view-head"><h1>Pre-case intake</h1>
         <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
-        <details open class="card" style="margin-bottom:12px"><summary><b>✦ Describe it, I'll fill the form</b> — conversational intake (extraction only; you review and file)</summary>
-          <div id="intake-chat-thread" class="asst-thread" style="min-height:80px;max-height:30vh;margin:10px 0">
-            <div class="asst-turn asst-ai"><div class="asst-who">intake assistant</div>
-            <div class="asst-body">Describe the request in your own words — who called, provider or plan, amounts, anything else. I'll fill the form below as we go.</div></div>
+        <div class="card conv-intake" style="margin-bottom:12px">
+          <div class="conv-intake-grid">
+            <div class="conv-intake-chat">
+              <h3 class="conv-intake-h">✦ Describe it, I'll fill the form</h3>
+              <p class="muted" style="margin:0 0 10px;font-size:12.5px">Plain language in — I extract the filing party's contact details; you review and file.</p>
+              <div id="intake-chat-thread" class="asst-thread" style="min-height:180px;max-height:380px">
+                <div class="asst-turn asst-ai"><div class="asst-who">intake assistant</div>
+                <div class="asst-body">Describe the request in your own words — who called, provider or plan, contact details. I'll fill the form as we go.</div></div>
+              </div>
+              <form id="intake-chat-form" class="asst-form">
+                <input name="message" autocomplete="off" placeholder="e.g. Dana from Meridian Surgical called about a dispute, email dana@meridiansurgical.example…" aria-label="Describe the intake" />
+                <button>Send</button></form>
+              <p class="muted" id="intake-chat-missing" style="margin:6px 0 0"></p>
+            </div>
+            <div class="conv-intake-form">
+              <h3 class="conv-intake-h">Intake form <span class="muted" style="font-weight:400;font-size:11.5px">— prefilled by conversation</span></h3>
+              <form id="intake-form" class="form">
+                <label>Requester email<span class="ci-prov" id="ci-prov-email" hidden>from chat</span>
+                  <input name="email" type="email" required /></label>
+                <label>Contact name<span class="ci-prov" id="ci-prov-contact_name" hidden>from chat</span>
+                  <input name="contact_name" /></label>
+                <label>Organization<span class="ci-prov" id="ci-prov-org" hidden>from chat</span>
+                  <input name="org" /></label>
+                <button>New intake request</button>
+              </form>
+              <p class="muted" style="margin-top:8px;font-size:11.5px">Filing party defaults to Provider. Fields you type yourself are never overwritten by the conversation. Everything else — amount, service line,
+                eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them.</p>
+            </div>
           </div>
-          <form id="intake-chat-form" class="asst-form">
-            <input name="message" autocomplete="off" placeholder="e.g. Dana from Meridian Surgical called about a $4,200 out-of-network dispute…" aria-label="Describe the intake" />
-            <button>Send</button></form>
-          <p class="muted" id="intake-chat-missing" style="margin:6px 0 0"></p></details>
+        </div>
         <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
             <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
@@ -1700,14 +1725,7 @@ const Views = (() => {
           <p class="muted">Header row required: <code>email, contact_name, org, filing_party_type, amount, external_ref, notes</code>
             (amount in dollars; filing_party_type PROVIDER or HEALTH_PLAN). Resubmitting the same batch reference replays the receipt — nothing files twice.</p>
           <div id="intake-bulk-preview"></div>
-          <div id="intake-bulk-result"></div></details>
-        <form id="intake-form" class="inline-form">
-          <input name="email" type="email" placeholder="requester email" required />
-          <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
-          <button>New intake request</button></form>
-        <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
-          eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
-          not manual entry here.</p>` +
+          <div id="intake-bulk-result"></div></details>` +
         (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
@@ -1862,42 +1880,34 @@ const Views = (() => {
   // fields extracted so far (client-carried state, endpoint is stateless),
   // render the follow-up, and prefill the REAL form — filing stays manual.
   async function intakeChatTurn(msg) {
-    const thread = document.getElementById("intake-chat-thread");
-    const add = (role, body) => thread?.insertAdjacentHTML("beforeend",
-      `<div class="asst-turn ${role === "user" ? "asst-user" : "asst-ai"}">
-         <div class="asst-who">${role === "user" ? "you" : "intake assistant"}</div>
-         <div class="asst-body">${esc(body)}</div></div>`);
+    const threadId = "intake-chat-thread";
     const st = window._intakeChat || (window._intakeChat = { fields: {}, history: [] });
-    add("user", msg); add("assistant", "…");
+    asstAppend(threadId, "user", msg);
+    asstThinking(threadId);
     try {
       const r = await Api.program.intakeConverse(msg, st.fields, st.history);
-      thread.lastElementChild.remove();
-      add("assistant", r.reply || "");
+      asstAppend(threadId, "assistant", r.reply || "");
       st.history.push(msg);
       st.fields = r.fields || {};
-      // Prefill the form; never overwrite text the human has typed.
+      // Prefill the form; never overwrite text the human has typed. Each
+      // freshly-filled field surfaces a "from chat" badge so it's visually
+      // clear which values came from the conversation.
       const f = document.getElementById("intake-form");
-      if (f) {
-        if (st.fields.email && !f.email.dataset.touched) f.email.value = st.fields.email;
-        if (st.fields.contact_name && !f.contact_name.dataset.touched) f.contact_name.value = st.fields.contact_name;
-        if (st.fields.org && !f.org.dataset.touched) f.org.value = st.fields.org;
-        // filing_party_type/amount are no longer fields on this form (intake
-        // was simplified to email/contact/org -- everything else comes from
-        // the uploaded packet, not typed here or extracted into here); guard
-        // both since the extraction can still surface them in st.fields even
-        // though there's nowhere on the form to put them now.
-        if (st.fields.filing_party_type && f.filing_party_type) f.filing_party_type.value = st.fields.filing_party_type;
-        const cents = st.fields.disputed_amount_cents || st.fields.qpa_cents;
-        if (cents && f.amount && !f.amount.dataset.touched) f.amount.value = (cents / 100).toFixed(2);
-      }
+      const prov = (name, val) => {
+        if (!val || !f?.[name] || f[name].dataset.touched) return;
+        f[name].value = val;
+        const b = document.getElementById(`ci-prov-${name}`);
+        if (b) b.hidden = false;
+      };
+      if (f) { prov("email", st.fields.email); prov("contact_name", st.fields.contact_name); prov("org", st.fields.org); }
       const miss = document.getElementById("intake-chat-missing");
       if (miss) miss.textContent = r.ready
         ? "✓ Ready — review the form and file when you're satisfied."
         : (r.missing || []).length ? "Still needed: " + r.missing.join(", ") : "";
     } catch (e) {
-      thread?.lastElementChild?.remove();
-      add("assistant", `⚠ ${e.message}`);
+      asstAppendRich(threadId, `⚠ ${esc(e.message)}`);
     }
+    const thread = document.getElementById(threadId);
     thread && (thread.scrollTop = thread.scrollHeight);
   }
 
@@ -2285,9 +2295,11 @@ const Views = (() => {
            <td>${esc(c.service_line || "")}</td><td>${badge(c.status)}</td></tr>`).join("");
         return `<div class="view-head"><h1>Assistant</h1>
           <span class="muted">grounded on platform-verified case facts · advisory only · every turn is on the record</span></div>
-          <div id="asst-briefing"><p class="muted">Preparing your briefing…</p></div>
+          <div class="asst-panel" style="margin-bottom:14px">
+            <div id="asst-briefing"><p class="muted">Preparing your briefing…</p></div>
+          </div>
           <h2 style="margin-top:14px">Case threads</h2>
-          <p>Pick a case to open its thread:</p>
+          <p class="muted">Pick a case to open its thread — private to you, shareable if you choose.</p>
           <table><thead><tr><th>Case</th><th>Line</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
       } catch (e) { return err(e); }
     }
