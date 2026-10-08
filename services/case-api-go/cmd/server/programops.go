@@ -70,8 +70,8 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_ISSUED",
 		fmt.Sprintf("Invoice %s issued to %s for $%d.%02d (%s, %d-day terms) by %s",
-			caseNumber, in.Party, in.AmountCents/100, in.AmountCents%100, in.Kind, in.DueDays, p.Subject))
-	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", in.AmountCents, in.Party, caseNumber, p.Subject)
+			caseNumber, in.Party, in.AmountCents/100, in.AmountCents%100, in.Kind, in.DueDays, displayName(p)))
+	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", in.AmountCents, in.Party, caseNumber, displayName(p))
 	s.logAudit(r.Context(), tenant, caseID, "INVOICE_ISSUED", map[string]any{
 		"by": p.Subject, "invoice_id": invID, "party": in.Party, "kind": in.Kind, "amount_cents": in.AmountCents,
 	})
@@ -170,10 +170,14 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	} else if in.Action == "REFUND" {
 		kind, dir = "REFUND_ISSUED", "OUT"
 	}
-	actor := r.Context().Value(ctxPrincipal{}).(principal).Subject
-	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, actor)
+	// finEvent's actor is shown to reviewers (financial-report transaction
+	// stream) and gets displayName(); logAudit's "by" stays the stable
+	// subject ID -- a tamper-evident compliance record should point at the
+	// permanent account identity, not a display name that could change.
+	actorP := r.Context().Value(ctxPrincipal{}).(principal)
+	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, displayName(actorP))
 	s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
-		"by": actor, "invoice_id": invID, "action": in.Action, "status": status,
+		"by": actorP.Subject, "invoice_id": invID, "action": in.Action, "status": status,
 		"amount_cents": amount, "party": party, "remittance_ref": in.RemittanceRef,
 	})
 	// Money moved — the case status and checklist follow the fact.

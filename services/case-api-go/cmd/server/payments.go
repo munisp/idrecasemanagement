@@ -172,7 +172,7 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 		ON CONFLICT (session_id) DO UPDATE SET updated_at=now()
 		RETURNING id`, tenant, caseID, invID, sessID, amount, raw).Scan(&payID)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amount, party, sessID,
-		r.Context().Value(ctxPrincipal{}).(principal).Subject)
+		displayName(r.Context().Value(ctxPrincipal{}).(principal)))
 	s.logAudit(r.Context(), tenant, caseID, "CHECKOUT_CREATED", map[string]any{
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "provider": "stripe",
 		"invoice_id": invID, "payment_id": payID, "session_id": sessID, "amount_cents": amount,
