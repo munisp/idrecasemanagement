@@ -30,23 +30,35 @@ spec:
       endpointAddress: "otel-collector.otel.svc.cluster.local:4317"
       isSecure: false
       protocol: grpc
+  # metric (Dapr <=1.12) and metrics (1.13+) are the same spec under two
+  # names, kept for version compatibility; neither has a `port` field --
+  # confirmed against this cluster's installed CRD schema (the file
+  # previously set metrics.port: 9090, which the apiserver rejects with a
+  # strict-decoding error, so this Configuration could never be applied at
+  # all). The sidecar's metrics port is a pod annotation
+  # (dapr.io/metrics-port), not a Configuration field.
   metric:
     enabled: true
     rules: []                   # default low-cardinality Dapr metrics only
   metrics:
     enabled: true
-    port: 9090
   mtls:
     enabled: true               # sidecar-to-sidecar encryption stays ON
     workloadCertTTL: "24h"
     allowedClockSkew: "15m"
-  features:
-    - name: ProxySupport        # WASM/proxy passthrough off unless needed
+  # ProxySupport dropped entirely rather than declared with enabled: false
+  # -- the CRD requires both name AND enabled per entry (strict-decoding
+  # error otherwise), and "off unless needed" means not declaring it at
+  # all, same practical effect as the Dapr default.
   accessControl:
     defaultAction: deny         # app allowlists (see app-policies)
     trustDomain: "idre.local"
+  # version/configuration are required by the CRD even for the built-in
+  # kubernetes resolver, which takes no component-specific config.
   nameResolution:
     component: "kubernetes"
+    version: "v1"
+    configuration: {}
 # Sidecar resource + throughput annotations belong on each app's Deployment:
 #   dapr.io/sidecar-cpu-request: "100m"
 #   dapr.io/sidecar-cpu-limit: "1"
