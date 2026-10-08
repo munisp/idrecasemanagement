@@ -224,24 +224,41 @@
   (() => {
     const gq = document.getElementById("gq"), drop = document.getElementById("gq-drop");
     const escHtml = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-    const linkFor = (h) => h.kind === "case" ? `#/cases/${h.id}`
+    // "page" hits carry their own href/icon directly (set when matched
+    // below) rather than deriving them from kind, same way document hits
+    // already carry case_id -- no backend round-trip needed, this is just
+    // the same role-filtered `links` array the rail itself renders from.
+    const linkFor = (h) => h.kind === "page" ? h.id
+      : h.kind === "case" ? `#/cases/${h.id}`
       : h.kind === "document" ? `#/cases/${h.case_id || ""}`
       : h.kind === "task" ? (h.case_id ? `#/cases/${h.case_id}` : "#/crm/tasks")
       : h.kind === "invoice" ? (h.case_id ? `#/cases/${h.case_id}` : "#/finance")
       : h.kind === "account" ? `#/crm/accounts/${h.id}`
       : h.kind === "lead" ? "#/crm/leads" : "#/crm/accounts";
-    const iconFor = (h) => h.kind === "case" ? "▦" : h.kind === "document" ? "🗎"
+    const iconFor = (h) => h.kind === "page" ? h.icon
+      : h.kind === "case" ? "▦" : h.kind === "document" ? "🗎"
       : h.kind === "task" ? "☑" : h.kind === "invoice" ? "🧾" : "◈";
     let timer = 0, items = [], sel = -1;
     const closeDrop = () => { drop.hidden = true; items = []; sel = -1; };
     async function refresh() {
       const q = gq.value.trim();
       if (q.length < 2) { closeDrop(); return; }
-      let hits = [];
-      try { hits = (await Api.crm.search(q)).slice(0, 8); } catch { hits = []; }
+      // Page matches first: typing "pipeline" should offer the Pipeline
+      // PAGE, not just records that happen to mention the word -- search
+      // only ever covered data rows, never the app's own screens, which
+      // read as "search doesn't find pipeline" even though cases named
+      // Pipeline-something would have. Client-side, instant, and already
+      // role-filtered since it's the exact array the rail itself uses.
+      const ql = q.toLowerCase();
+      const pageHits = links
+        .filter(([, , label]) => label.toLowerCase().includes(ql))
+        .slice(0, 4)
+        .map(([href, icon, label]) => ({ kind: "page", id: href, icon, label, detail: "page" }));
+      let dataHits = [];
+      try { dataHits = (await Api.crm.search(q)).slice(0, 8 - pageHits.length); } catch { dataHits = []; }
       if (gq.value.trim() !== q) return; // a newer keystroke owns the box
-      items = hits; sel = -1;
-      drop.innerHTML = hits.map((h, i) =>
+      items = [...pageHits, ...dataHits]; sel = -1;
+      drop.innerHTML = items.map((h, i) =>
         `<div class="palette-item gq-item" data-i="${i}" role="option">
            <span class="ri">${iconFor(h)}</span><span class="pl">${escHtml(h.label)}</span>
            ${h.detail ? `<span class="pd">${escHtml(h.detail)}</span>` : ""}</div>`).join("") ||
