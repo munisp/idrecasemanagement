@@ -226,9 +226,12 @@
     const escHtml = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
     const linkFor = (h) => h.kind === "case" ? `#/cases/${h.id}`
       : h.kind === "document" ? `#/cases/${h.case_id || ""}`
+      : h.kind === "task" ? (h.case_id ? `#/cases/${h.case_id}` : "#/crm/tasks")
+      : h.kind === "invoice" ? (h.case_id ? `#/cases/${h.case_id}` : "#/finance")
       : h.kind === "account" ? `#/crm/accounts/${h.id}`
       : h.kind === "lead" ? "#/crm/leads" : "#/crm/accounts";
-    const iconFor = (h) => h.kind === "case" ? "▦" : h.kind === "document" ? "🗎" : "◈";
+    const iconFor = (h) => h.kind === "case" ? "▦" : h.kind === "document" ? "🗎"
+      : h.kind === "task" ? "☑" : h.kind === "invoice" ? "🧾" : "◈";
     let timer = 0, items = [], sel = -1;
     const closeDrop = () => { drop.hidden = true; items = []; sel = -1; };
     async function refresh() {
@@ -261,6 +264,18 @@
       }
     });
     gq.addEventListener("blur", () => setTimeout(closeDrop, 150)); // mousedown lands first
+    // The box's own placeholder has promised "(⌘K)" the whole time with
+    // nothing wired to it -- confirmed live, no listener anywhere bound
+    // the shortcut it advertises. ⌘K (Mac) / Ctrl+K (Windows/Linux) jumps
+    // in from anywhere, matching the placeholder instead of silently
+    // doing nothing.
+    addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        gq.focus();
+        gq.select();
+      }
+    });
   })();
   document.getElementById("lo").onclick = Auth.logout;
 

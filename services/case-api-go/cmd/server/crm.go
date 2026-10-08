@@ -523,7 +523,7 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		ID     string `json:"id"`
 		Label  string `json:"label"`
 		Detail string `json:"detail"`
-		CaseID string `json:"case_id,omitempty"` // document hits: parent case for linking
+		CaseID string `json:"case_id,omitempty"` // document/task/invoice hits: parent case for linking
 	}
 	out := []hit{}
 	queries := []struct {
@@ -533,16 +533,25 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		// provider or payer name returned "No matches" even when the case
 		// was right there, which read as "search is broken". Now matches
 		// the identifiers AND the party name fields (column + details bag).
-		{"case", fmt.Sprintf(`SELECT id, case_number, status FROM tenant_%s.cases
+		// 4th column is case_id for every kind, so the scan below is
+		// uniform; for a case hit it's just its own id again.
+		{"case", fmt.Sprintf(`SELECT id, case_number, status, id::text FROM tenant_%s.cases
 			WHERE case_number ILIKE $1 OR provider_id ILIKE $1 OR payer_id ILIKE $1
 			   OR details->>'provider_name' ILIKE $1 OR details->>'payer_name' ILIKE $1
 			   OR details->>'patient_name' ILIKE $1 LIMIT 10`, sanitizeTenant(tenant))},
-		{"account", `SELECT id::text, legal_name, type FROM public.accounts
+		{"account", `SELECT id::text, legal_name, type, '' FROM public.accounts
 			WHERE tenant=$1 AND legal_name ILIKE $2 LIMIT 10`},
-		{"contact", `SELECT id::text, name, COALESCE(role_title,'') FROM public.contacts
+		{"contact", `SELECT id::text, name, COALESCE(role_title,''), '' FROM public.contacts
 			WHERE tenant=$1 AND name ILIKE $2 LIMIT 10`},
-		{"lead", `SELECT id::text, COALESCE(name,organization,'(unnamed)'), status FROM public.leads
+		{"lead", `SELECT id::text, COALESCE(name,organization,'(unnamed)'), status, '' FROM public.leads
 			WHERE tenant=$1 AND (name ILIKE $2 OR organization ILIKE $2 OR summary ILIKE $2) LIMIT 10`},
+		// Tasks/invoices were previously unsearchable at all — "find the
+		// task about X" or "find invoice INV-..." both returned nothing,
+		// not even a "no matches" (the box just never queried them).
+		{"task", `SELECT id::text, subject, status, coalesce(case_id,'') FROM public.tasks
+			WHERE tenant=$1 AND subject ILIKE $2 LIMIT 10`},
+		{"invoice", `SELECT id::text, invoice_no, status, case_id FROM public.invoices
+			WHERE tenant=$1 AND invoice_no ILIKE $2 LIMIT 10`},
 	}
 	for _, qd := range queries {
 		var rows interface {
@@ -561,7 +570,7 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		for rows.Next() {
 			var h hit
-			if rows.Scan(&h.ID, &h.Label, &h.Detail) == nil {
+			if rows.Scan(&h.ID, &h.Label, &h.Detail, &h.CaseID) == nil {
 				h.Kind = qd.kind
 				out = append(out, h)
 			}

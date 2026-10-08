@@ -49,6 +49,12 @@ BEGIN
         -- Program-specific field filters on details jsonb (casefields.go).
         EXECUTE format('CREATE INDEX IF NOT EXISTS cases_details_gin
             ON %I.cases USING gin (details jsonb_path_ops)', sch);
+        -- Global search (crm.go globalSearch): case_number ILIKE ''%...%''
+        -- had no index at all -- every search was a sequential scan of the
+        -- whole cases table. jsonb_path_ops above doesn't help here; it only
+        -- serves @> containment, not substring text matching.
+        EXECUTE format('CREATE INDEX IF NOT EXISTS cases_case_number_trgm
+            ON %I.cases USING gin (case_number gin_trgm_ops)', sch);
         -- HOT updates: updated_at bumps on every touch; leave room so updates
         -- stay on-page and indexes don't bloat.
         EXECUTE format('ALTER TABLE %I.cases SET (fillfactor = 90)', sch);
@@ -171,6 +177,11 @@ CREATE INDEX IF NOT EXISTS accounts_tenant_name ON public.accounts (tenant, lega
 CREATE INDEX IF NOT EXISTS accounts_name_trgm ON public.accounts USING gin (legal_name gin_trgm_ops);
 ALTER TABLE public.accounts SET (fillfactor = 90);
 
+-- global search (crm.go globalSearch): contacts.name ILIKE had no index at
+-- all -- confirmed live, this table was being searched with a sequential
+-- scan on every keystroke in the quick-search dropdown.
+CREATE INDEX IF NOT EXISTS contacts_name_trgm ON public.contacts USING gin (name gin_trgm_ops);
+
 -- leads list: ORDER BY created_at DESC, id (crm.go:216).
 CREATE INDEX IF NOT EXISTS leads_tenant_created ON public.leads (tenant, created_at DESC, id);
 
@@ -179,6 +190,10 @@ CREATE INDEX IF NOT EXISTS leads_tenant_created ON public.leads (tenant, created
 CREATE INDEX IF NOT EXISTS tasks_open_due ON public.tasks (tenant, due_date)
     WHERE status = 'OPEN' AND due_date IS NOT NULL;
 ALTER TABLE public.tasks SET (fillfactor = 90);
+
+-- global search (crm.go globalSearch): tasks.subject ILIKE, newly added --
+-- same trigram treatment as every other free-text search column above.
+CREATE INDEX IF NOT EXISTS tasks_subject_trgm ON public.tasks USING gin (subject gin_trgm_ops);
 
 -- notifications — bell badge polls unread per user; unread set is tiny.
 CREATE INDEX IF NOT EXISTS notifications_unread
