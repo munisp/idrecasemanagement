@@ -181,6 +181,7 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 		)
 		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
+			s.logCorrespondenceInquiry(r, tenant, caseID, email, fmt.Sprintf("%s: %s", tpl.Key, subject), "system:ahca-intake")
 		} else {
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("Submission instructions SMTP delivery failed: %s", merr))

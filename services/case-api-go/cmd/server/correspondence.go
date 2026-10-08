@@ -286,6 +286,9 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
 		s.logCorrespondence(r, tenant, caseID, "OUT", in.Template, subject, body, in.To, in.CC, p.Subject)
+		if len(in.To) > 0 {
+			s.logCorrespondenceInquiry(r, tenant, caseID, in.To[0], fmt.Sprintf("%s: %s", in.Template, subject), p.Subject)
+		}
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 			fmt.Sprintf("%s sent to %d recipient(s) (cc %d) — template %s", subject, len(in.To), len(in.CC), in.Template))
 		if dateKeys, ok := templateDateKeys[in.Template]; ok {
@@ -507,6 +510,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			_, _ = s.db.Exec(r.Context(),
 				`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
 			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
+			if len(to) > 0 {
+				s.logCorrespondenceInquiry(r, tenant, caseID, to[0], fmt.Sprintf("%s: %s", artifact, subject), p.Subject)
+			}
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 				fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
 			// Notification is a fact now — the checklist follows.
