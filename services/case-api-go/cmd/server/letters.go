@@ -59,7 +59,12 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 	payload, _ := json.Marshal(map[string]any{
 		"type": "letter.requested", "tenant": tenant, "case_id": caseID,
 		"template": key, "case_number": caseNumber,
-		"requested_by": p.Subject, "at": time.Now().UTC(),
+		// displayName(p): this flows straight into qa_reviews.drafted_by via
+		// lettergen-py -- confirmed live, a reviewer opening the QA queue
+		// for a generated letter saw a raw Keycloak UUID with no way to
+		// tell who requested it. Same fix as the QA queue's other
+		// attribution columns.
+		"requested_by": displayName(p), "at": time.Now().UTC(),
 	})
 	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(
 		`INSERT INTO tenant_%s.outbox (topic, key, payload) VALUES ($1,$2,$3)`,
@@ -69,7 +74,7 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logActivity(r.Context(), tenant, caseID, "LETTER_REQUESTED",
-		fmt.Sprintf("Letter generation requested by %s — template %s", p.Subject, key))
+		fmt.Sprintf("Letter generation requested by %s — template %s", displayName(p), key))
 	// A determination letter request while IN_REVIEW advances the case once
 	// the rendered document lands; tick what the platform can already prove.
 	s.autoChecklist(r, tenant, caseID)
