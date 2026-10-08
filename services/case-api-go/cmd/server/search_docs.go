@@ -43,6 +43,15 @@ func osSearchBody(query string) []byte {
 				"query":  query,
 				"type":   "best_fields",
 				"fields": []string{"text^2", "doc_type^3", "normalized.*", "extracted.*"},
+				// normalized.*/extracted.* wildcards sweep in numeric-mapped
+				// fields too (e.g. extracted.billed_amount_usd) -- without
+				// this, OpenSearch 400s the WHOLE query the moment the term
+				// isn't a number ('failed to create query: For input
+				// string: "claim"'), confirmed live: every text search
+				// failed outright, not just the numeric fields. lenient
+				// skips fields a term can't be coerced into instead of
+				// failing the query.
+				"lenient": true,
 			},
 		},
 		"highlight": map[string]any{
