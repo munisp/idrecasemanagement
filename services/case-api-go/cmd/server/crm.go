@@ -372,18 +372,26 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"subject required"}`, http.StatusBadRequest)
 		return
 	}
-	var id, ref string
-	err := s.db.QueryRow(r.Context(), `
-		WITH ins AS (
-			INSERT INTO public.tasks (tenant, subject, case_id, assignee, due_date, created_by)
-			VALUES ($1,$2,NULLIF($3,''),$4,NULLIF($5,'')::date,$6) RETURNING id
-		)
-		UPDATE public.tasks t
-		SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
+	// Two statements, not one writable-CTE combo: confirmed live on this
+	// Postgres (18.6) that "WITH ins AS (INSERT ... RETURNING id) UPDATE t
+	// ... FROM ins WHERE t.id = ins.id" reproducibly updates ZERO rows --
+	// reproduced even on a bare scratch table, so it's not specific to this
+	// table or query. The INSERT alone, and the UPDATE alone, both work; it's
+	// only the chained form that silently affects nothing (no error, no
+	// rows). Root cause not fully understood; this sidesteps it.
+	var id string
+	if err := s.db.QueryRow(r.Context(), `
+		INSERT INTO public.tasks (tenant, subject, case_id, assignee, due_date, created_by)
+		VALUES ($1,$2,NULLIF($3,''),$4,NULLIF($5,'')::date,$6) RETURNING id`,
+		tenant, in.Subject, in.CaseID, in.Assignee, in.DueDate, p.Subject).Scan(&id); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	var ref string
+	if err := s.db.QueryRow(r.Context(), `
+		UPDATE public.tasks SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
 		       lpad(nextval('public.task_ref_seq')::text, 5, '0')
-		FROM ins WHERE t.id = ins.id RETURNING t.id, t.task_ref`,
-		tenant, in.Subject, in.CaseID, in.Assignee, in.DueDate, p.Subject).Scan(&id, &ref)
-	if err != nil {
+		WHERE id = $1 RETURNING task_ref`, id).Scan(&ref); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}

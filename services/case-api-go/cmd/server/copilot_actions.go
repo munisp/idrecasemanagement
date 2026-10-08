@@ -463,21 +463,27 @@ func (s *server) executeCopilotAction(r *http.Request, tenant, caseID, approvedB
 		if d, ok := a.Params["due_days"].(float64); ok && a.Type == "create_task" {
 			dueDays = int(d)
 		}
-		var id, ref string
-		err := s.db.QueryRow(r.Context(), `
-			WITH ins AS (
-				INSERT INTO public.tasks (tenant, subject, case_id, due_date, created_by)
-				VALUES ($1,$2,$3,$4,$5) RETURNING id
-			)
-			UPDATE public.tasks t
-			SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
-			       lpad(nextval('public.task_ref_seq')::text, 5, '0')
-			FROM ins WHERE t.id = ins.id RETURNING t.id, t.task_ref`,
+		// Two statements, not one writable-CTE combo -- confirmed live
+		// (createTask, crm.go) that the chained "WITH ins AS (INSERT ...
+		// RETURNING id) UPDATE t ... FROM ins WHERE t.id = ins.id" form
+		// silently updates zero rows on this Postgres (18.6), no error, so
+		// this task-creation action has likely never actually stamped a
+		// task_ref before now.
+		var id string
+		if err := s.db.QueryRow(r.Context(), `
+			INSERT INTO public.tasks (tenant, subject, case_id, due_date, created_by)
+			VALUES ($1,$2,$3,$4,$5) RETURNING id`,
 			tenant, "[copilot] "+subject, caseID,
 			time.Now().Add(time.Duration(dueDays)*24*time.Hour).Format("2006-01-02"),
-			"copilot (approved by "+approvedBy+")").Scan(&id, &ref)
-		if err != nil {
+			"copilot (approved by "+approvedBy+")").Scan(&id); err != nil {
 			return "", fmt.Errorf("task insert: %w", err)
+		}
+		var ref string
+		if err := s.db.QueryRow(r.Context(), `
+			UPDATE public.tasks SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
+			       lpad(nextval('public.task_ref_seq')::text, 5, '0')
+			WHERE id = $1 RETURNING task_ref`, id).Scan(&ref); err != nil {
+			return "", fmt.Errorf("task ref: %w", err)
 		}
 		return fmt.Sprintf("task %s created (due in %dd)", ref, dueDays), nil
 
