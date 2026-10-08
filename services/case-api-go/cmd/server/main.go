@@ -563,6 +563,8 @@ func main() {
 		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
 		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface)
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
+		r.Get("/copilot/chat", s.copilotGeneralChatHistory) // floating-widget thread, no case open
+		r.Post("/copilot/chat", s.copilotGeneralChat)
 		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions) // Phase 3: bounded action-batch proposal
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
@@ -956,6 +958,12 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	}
 	if qs := q.Get("q"); qs != "" {
 		add("c.case_number ILIKE '%%' || $%d || '%%'", qs)
+	}
+	// mine=true: same convention as listTasks (crm.go) -- assigned_to is the
+	// Keycloak sub assignCase/the auto-assign queue already writes, so this
+	// is a real, populated filter, not a new concept.
+	if q.Get("mine") == "true" {
+		add("c.assigned_to = $%d", r.Context().Value(ctxPrincipal{}).(principal).Subject)
 	}
 	// Triage lane filter (Lever 2): whitelisted, never interpolated raw.
 	if lane := q.Get("lane"); lane == "AUTO_REVIEW" || lane == "STANDARD" || lane == "COMPLEX" {

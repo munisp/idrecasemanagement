@@ -151,3 +151,19 @@ CREATE TABLE IF NOT EXISTS public.copilot_threads (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS copilot_threads_case ON public.copilot_threads (tenant, case_id, created_at);
+
+-- General (non-case-scoped) assistant threads: "my open cases", "my tasks",
+-- and casual chat that isn't grounded in any one case's record. Deliberately
+-- a separate table, not case_id=NULL on copilot_threads -- that table's own
+-- comment says "the thread is part of the case record", which a general
+-- thread categorically isn't; it's part of the USER's own assistant history.
+CREATE TABLE IF NOT EXISTS public.copilot_general_threads (
+    id         bigserial PRIMARY KEY,
+    tenant     text NOT NULL,
+    user_sub   text NOT NULL,          -- keycloak sub -- personal, not shared across staff
+    role       text NOT NULL,          -- user | assistant
+    body       text NOT NULL,
+    model      text,                   -- assistant turns only
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS copilot_general_threads_user ON public.copilot_general_threads (tenant, user_sub, created_at);
