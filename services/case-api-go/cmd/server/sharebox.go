@@ -97,8 +97,16 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 			<p class="fine">This link grants access to one specific document. Downloads are logged to the case record.</p>`,
 			escHTML(caseNumber), g.ExpiresAt.Format("Jan 2, 2006 15:04 MST"), g.MaxUses-g.Uses, g.MaxUses, escHTML(token))
 	}
+	// sharePage's <title> appends "— Secure Document Exchange" itself, so
+	// the generic "Secure exchange" passed here produced a redundant
+	// "Secure exchange — Secure Document Exchange" (confirmed live). Using
+	// the specific action reads properly either way.
+	pageTitle := "Document upload"
+	if g.Kind != "upload" {
+		pageTitle = "Document download"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, sharePage("Secure exchange", body, ""))
+	fmt.Fprint(w, sharePage(pageTitle, body, ""))
 }
 
 // shareUpload accepts a file over a token — no session required.
