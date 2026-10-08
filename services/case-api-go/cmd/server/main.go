@@ -565,6 +565,7 @@ func main() {
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
 		r.Get("/copilot/chat", s.copilotGeneralChatHistory) // floating-widget thread, no case open
 		r.Post("/copilot/chat", s.copilotGeneralChat)
+		r.Get("/assistant/briefing", s.briefing) // worker-scoped morning digest (conversation-first step 2)
 		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions) // Phase 3: bounded action-batch proposal
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
@@ -585,7 +586,10 @@ func main() {
 		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
 		r.Post("/cases/{caseId}/claims", s.importClaims)       // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
-		r.Post("/intake", s.createIntake) // pre-case intake (G12)
+		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake
+		r.Post("/intake", s.createIntake)                 // pre-case intake (G12)
+		r.Post("/intake/bulk", s.bulkIntake)              // third-party batch filing (idempotent by batch_ref)
+		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch) // batch receipt / reconciliation
 		r.Get("/intake", s.listIntake)
 		r.Post("/intake/{intakeId}/advance", s.advanceIntake) // refund window enforced
 
@@ -642,6 +646,7 @@ func main() {
 	r.Get("/api/share/{token}", s.shareLanding)
 	r.Head("/api/share/{token}", s.resolveShareLink)
 	r.Get("/api/share/{token}/meta", s.resolveShareLink)
+	r.Post("/api/share/{token}/chat", s.partyChat)                       // party voice (step 4): token-gated, no use consumed
 	r.Post("/api/share/{token}/upload", s.shareUpload)                   // one-shot, small files
 	r.Post("/api/share/{token}/uploads", s.shareCreateUpload)            // resumable: create
 	r.Head("/api/share/{token}/uploads/{uploadId}", s.shareUploadOffset) // resume probe

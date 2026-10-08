@@ -1656,12 +1656,51 @@ const Views = (() => {
       // column label needs this; the amount itself is never hand-typed --
       // it's backfilled from the filing party's uploaded documents.
       const label = amtLabel(prog);
-      afterRender(() => $("#intake-form")?.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        await newIntake(ev.target);
-      }));
+      afterRender(() => {
+        $("#intake-form")?.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          await newIntake(ev.target);
+        });
+        // Conversational intake (step 5): the chat EXTRACTS into the form;
+        // the human reviews the filled form and files with the same button
+        // as always. The model never files.
+        window._intakeChat = { fields: {}, history: [] };
+        // Human keystrokes win over extraction: once a field is touched, the
+        // assistant never overwrites it.
+        const f0 = $("#intake-form");
+        ["email", "contact_name", "org", "amount"].forEach((n) =>
+          f0?.[n]?.addEventListener("input", () => { f0[n].dataset.touched = "1"; }));
+        $("#intake-chat-form")?.addEventListener("submit", (ev) => {
+          ev.preventDefault();
+          const msg = ev.target.message.value.trim();
+          if (msg) { ev.target.message.value = ""; intakeChatTurn(msg); }
+        });
+        // Bulk intake (CSV): parse on file pick, submit posts the idempotent
+        // batch and renders the per-row receipt.
+        window._intakeBulk = { items: [] };
+        $("#intake-bulk-file")?.addEventListener("change", (ev) => bulkIntakeFile(ev.target));
+        $("#intake-bulk-btn")?.addEventListener("click", (ev) => { ev.preventDefault(); bulkIntakeSubmit(ev.target); });
+      });
       return `<div class="view-head"><h1>Pre-case intake</h1>
         <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
+        <details open class="card" style="margin-bottom:12px"><summary><b>✦ Describe it, I'll fill the form</b> — conversational intake (extraction only; you review and file)</summary>
+          <div id="intake-chat-thread" class="asst-thread" style="min-height:80px;max-height:30vh;margin:10px 0">
+            <div class="asst-turn asst-ai"><div class="asst-who">intake assistant</div>
+            <div class="asst-body">Describe the request in your own words — who called, provider or plan, amounts, anything else. I'll fill the form below as we go.</div></div>
+          </div>
+          <form id="intake-chat-form" class="asst-form">
+            <input name="message" autocomplete="off" placeholder="e.g. Dana from Meridian Surgical called about a $4,200 out-of-network dispute…" aria-label="Describe the intake" />
+            <button>Send</button></form>
+          <p class="muted" id="intake-chat-missing" style="margin:6px 0 0"></p></details>
+        <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
+            <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
+            <input id="intake-bulk-ref" placeholder="batch reference — the idempotency key" style="flex:1;min-width:220px" />
+            <button class="mini" id="intake-bulk-btn" disabled>Submit batch</button></div>
+          <p class="muted">Header row required: <code>email, contact_name, org, filing_party_type, amount, external_ref, notes</code>
+            (amount in dollars; filing_party_type PROVIDER or HEALTH_PLAN). Resubmitting the same batch reference replays the receipt — nothing files twice.</p>
+          <div id="intake-bulk-preview"></div>
+          <div id="intake-bulk-result"></div></details>
         <form id="intake-form" class="inline-form">
           <input name="email" type="email" placeholder="requester email" required />
           <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
@@ -1720,6 +1759,83 @@ const Views = (() => {
     }, "Loading…");
   }
 
+  // Minimal CSV parser: quotes, escaped quotes, CRLF. Bulk files come from
+  // filers' spreadsheets — Excel's default export is exactly this shape.
+  function bulkCsvRows(text) {
+    const rows = []; let row = [], cur = "", inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQ) {
+        if (c === '"' && text[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') inQ = false;
+        else cur += c;
+      } else if (c === '"') inQ = true;
+      else if (c === ",") { row.push(cur); cur = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (c === "\r" && text[i + 1] === "\n") i++;
+        row.push(cur); cur = "";
+        if (row.some((v) => v.trim() !== "")) rows.push(row);
+        row = [];
+      } else cur += c;
+    }
+    row.push(cur);
+    if (row.some((v) => v.trim() !== "")) rows.push(row);
+    return rows;
+  }
+
+  function bulkIntakeFile(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = bulkCsvRows(String(reader.result || ""));
+      const head = (rows.shift() || []).map((h) => h.trim().toLowerCase().replace(/^\uFEFF/, ""));
+      if (!head.includes("email")) {
+        $("#intake-bulk-preview").innerHTML = `<p class="badge warn">header row must include at least: email</p>`;
+        return;
+      }
+      const items = rows.map((r) => {
+        const cell = (name) => { const i = head.indexOf(name); return i >= 0 ? (r[i] || "").trim() : ""; };
+        const cents = cell("amount") ? Math.round(parseFloat(cell("amount").replace(/[$,]/g, "")) * 100) : 0;
+        return {
+          external_ref: cell("external_ref"), email: cell("email"),
+          contact_name: cell("contact_name"), org: cell("org"), notes: cell("notes"),
+          filing_party_type: cell("filing_party_type").toUpperCase(),
+          disputed_amount_cents: Number.isFinite(cents) ? cents : 0,
+          qpa_cents: Number.isFinite(cents) ? cents : 0,
+        };
+      }).filter((it) => it.email);
+      window._intakeBulk = { items };
+      const bad = rows.length - items.length;
+      $("#intake-bulk-preview").innerHTML =
+        `<p class="muted">${items.length} row(s) ready${bad ? ` — ${bad} row(s) skipped (no email)` : ""}${items.length > 500 ? " — <b>over the 500-row limit, split the file</b>" : ""}.</p>`;
+      $("#intake-bulk-btn").disabled = !items.length || items.length > 500;
+    };
+    reader.readAsText(file);
+  }
+
+  async function bulkIntakeSubmit(btn) {
+    const ref = ($("#intake-bulk-ref")?.value || "").trim();
+    if (!ref) { UI.toast("batch reference required — it is the idempotency key", { kind: "warn" }); return; }
+    const { items } = window._intakeBulk || { items: [] };
+    if (!items.length) return;
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.intakeBulk({ batch_ref: ref, items });
+        const rows = (r.results || []).map((x) => `<tr>
+          <td class="muted">${esc(x.external_ref || "")}</td>
+          <td>${x.status === "CREATED" ? badge("CREATED") : `<span class="badge warn">ERROR</span>`}</td>
+          <td>${x.case_number ? `<a href="#/cases/${x.case_id}">${esc(x.case_number)}</a>` : esc(x.intake_id || "")}</td>
+          <td class="muted">${esc(x.error || "")}</td></tr>`).join("");
+        $("#intake-bulk-result").innerHTML = `<div class="card" style="margin-top:10px">
+          <b>Batch ${esc(r.batch_ref || ref)}</b> — ${r.created} filed, ${r.errors} error(s)${r.idempotent_replay ? " — <b>idempotent replay</b>: this reference was already submitted; showing the recorded receipt, nothing re-filed" : ""}
+          <table style="margin-top:8px"><thead><tr><th>Row</th><th>Outcome</th><th>Intake / case</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        UI.toast(r.idempotent_replay ? "Batch already filed — receipt replayed" : `Batch filed: ${r.created} created, ${r.errors} errors`,
+          { kind: r.errors ? "warn" : "ok" });
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Filing batch…");
+  }
+
   async function newIntake(form) {
     try {
       // Only contact info is collected here -- filing_party_type defaults
@@ -1740,6 +1856,49 @@ const Views = (() => {
         App.rerender();
       }
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // One turn of conversational intake: send the worker's words plus the
+  // fields extracted so far (client-carried state, endpoint is stateless),
+  // render the follow-up, and prefill the REAL form — filing stays manual.
+  async function intakeChatTurn(msg) {
+    const thread = document.getElementById("intake-chat-thread");
+    const add = (role, body) => thread?.insertAdjacentHTML("beforeend",
+      `<div class="asst-turn ${role === "user" ? "asst-user" : "asst-ai"}">
+         <div class="asst-who">${role === "user" ? "you" : "intake assistant"}</div>
+         <div class="asst-body">${esc(body)}</div></div>`);
+    const st = window._intakeChat || (window._intakeChat = { fields: {}, history: [] });
+    add("user", msg); add("assistant", "…");
+    try {
+      const r = await Api.program.intakeConverse(msg, st.fields, st.history);
+      thread.lastElementChild.remove();
+      add("assistant", r.reply || "");
+      st.history.push(msg);
+      st.fields = r.fields || {};
+      // Prefill the form; never overwrite text the human has typed.
+      const f = document.getElementById("intake-form");
+      if (f) {
+        if (st.fields.email && !f.email.dataset.touched) f.email.value = st.fields.email;
+        if (st.fields.contact_name && !f.contact_name.dataset.touched) f.contact_name.value = st.fields.contact_name;
+        if (st.fields.org && !f.org.dataset.touched) f.org.value = st.fields.org;
+        // filing_party_type/amount are no longer fields on this form (intake
+        // was simplified to email/contact/org -- everything else comes from
+        // the uploaded packet, not typed here or extracted into here); guard
+        // both since the extraction can still surface them in st.fields even
+        // though there's nowhere on the form to put them now.
+        if (st.fields.filing_party_type && f.filing_party_type) f.filing_party_type.value = st.fields.filing_party_type;
+        const cents = st.fields.disputed_amount_cents || st.fields.qpa_cents;
+        if (cents && f.amount && !f.amount.dataset.touched) f.amount.value = (cents / 100).toFixed(2);
+      }
+      const miss = document.getElementById("intake-chat-missing");
+      if (miss) miss.textContent = r.ready
+        ? "✓ Ready — review the form and file when you're satisfied."
+        : (r.missing || []).length ? "Still needed: " + r.missing.join(", ") : "";
+    } catch (e) {
+      thread?.lastElementChild?.remove();
+      add("assistant", `⚠ ${e.message}`);
+    }
+    thread && (thread.scrollTop = thread.scrollHeight);
   }
 
   async function advanceIntake(id, status, sel) {
@@ -2091,8 +2250,34 @@ const Views = (() => {
     if (!can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
       return `<div class="view-head"><h1>Assistant</h1></div><p class="muted">Requires a case staff role.</p>`;
     if (!caseId) {
-      // Case picker: most recent cases first — the thread always belongs to
-      // one case, so grounding never drifts across records.
+      // Morning briefing (conversation-first step 2): the Assistant home opens
+      // with the worker-scoped digest, narrated — the case picker sits below
+      // it. The briefing is read-only and never fails: when the model is down
+      // the server narrates the digest itself (fallback badge).
+      afterRender(async () => {
+        const box = document.getElementById("asst-briefing");
+        if (!box) return;
+        try {
+          const r = await Api.program.briefing();
+          const d = r.digest || {};
+          const stat = (n, label) => n ? `<span class="chip-stat"><b>${n}</b> ${label}</span>` : "";
+          const risk = (d.at_risk_sla || []).map((c) =>
+            `<tr class="click" onclick="location.hash='#/assistant/${c.case_id}'"><td class="mono">${esc(c.case_number)}</td>
+             <td>${badge(c.status)}</td><td>${esc(c.lane)}</td><td class="sla-hot">${c.sla_days_remaining}d left</td></tr>`).join("");
+          box.innerHTML = `<div class="asst-turn asst-ai">
+            <div class="asst-who">briefing${r.model ? ` · ${esc(r.model)}` : " · structured digest"}</div>
+            <div class="asst-body">${esc(r.narration || "")}</div></div>
+            <div class="asst-chips" style="margin:8px 0 0 0">
+              ${stat(d.my_open_cases, "open assigned")}${stat((d.at_risk_sla || []).length, "SLA risk")}
+              ${stat(d.pending_qa, "at QA gate")}${stat(d.checks_in_review, "checks in review")}
+              ${stat(d.new_docs_24h, "docs analyzed 24h")}${stat((d.tasks_due || []).length, "tasks due")}
+            </div>
+            ${risk ? `<h3 style="margin:10px 0 4px">SLA risk — open a thread to act</h3>
+              <table><thead><tr><th>Case</th><th>Status</th><th>Lane</th><th>SLA</th></tr></thead><tbody>${risk}</tbody></table>` : ""}`;
+        } catch (e) {
+          box.innerHTML = `<p class="muted">Briefing unavailable: ${esc(e.message)}</p>`;
+        }
+      });
       try {
         const r = await Api.cases.list({ limit: 50 });
         const rows = (r.cases || []).map((c) =>
@@ -2100,6 +2285,8 @@ const Views = (() => {
            <td>${esc(c.service_line || "")}</td><td>${badge(c.status)}</td></tr>`).join("");
         return `<div class="view-head"><h1>Assistant</h1>
           <span class="muted">grounded on platform-verified case facts · advisory only · every turn is on the record</span></div>
+          <div id="asst-briefing"><p class="muted">Preparing your briefing…</p></div>
+          <h2 style="margin-top:14px">Case threads</h2>
           <p>Pick a case to open its thread:</p>
           <table><thead><tr><th>Case</th><th>Line</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
       } catch (e) { return err(e); }
@@ -2123,11 +2310,13 @@ const Views = (() => {
         const msg = input.value.trim();
         if (msg) { input.value = ""; assistantSend(caseId, msg); }
       });
+      asstQaLoad(caseId);
     });
     return `<div class="view-head"><h1>Assistant</h1>
       <span class="muted" id="asst-case">loading case…</span></div>
       <div class="asst-panel">
         <div id="asst-thread" class="asst-thread"></div>
+        <div id="asst-qa"></div>
         <div class="asst-chips">
           <button class="mini" onclick="Views.assistantChip('${caseId}','brief',this)">▤ Brief me</button>
           <button class="mini" onclick="Views.assistantChip('${caseId}','determination_rationale',this)">✍ Draft rationale</button>
@@ -2477,6 +2666,68 @@ const Views = (() => {
         else loadGeneralHistory();
       }
     });
+  }
+
+  // ---- Conversational QA gate (conversation-first step 3) -----------------
+  // Pending gate items for THIS case render inline in the thread as cards;
+  // approve / edit & approve / reject call the SAME qaDecision endpoint the
+  // QA screen uses — the gate moves into the conversation, its semantics
+  // (audit note, [human-edited] marker, send-on-approve) are untouched.
+  async function asstQaLoad(caseId) {
+    const box = document.getElementById("asst-qa");
+    if (!box) return;
+    try {
+      const r = await Api.program.qaQueue(caseId);
+      const q = r.queue || [];
+      if (!q.length) { box.innerHTML = ""; return; }
+      const cards = await Promise.all(q.map(async (i) => {
+        const d = await Api.program.qaGet(i.id);
+        const isNote = d.channel === "note";
+        const isCopilot = (d.artifact || "").startsWith("copilot_");
+        const bodyHtml = isCopilot
+          ? `<textarea id="asst-qa-edit-${d.id}" rows="10" style="width:100%">${esc(d.body)}</textarea>
+             <p class="muted">Copilot draft — edit freely; the approved text is what gets ${isNote ? "filed" : "sent"}, and the edit is recorded.</p>`
+          : `<pre class="qa-body">${esc(d.body)}</pre>`;
+        return `<div class="card asst-qa-card" data-qa="${d.id}" data-channel="${esc(d.channel || "email")}">
+          <h3>⛨ Gate: ${esc(d.subject)}</h3>
+          <p class="muted">${esc(d.drafted_by)} · ${isNote ? "determination rationale · files to timeline" : `to: ${esc((d.to_recipients || []).join(", "))}`}
+            ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
+          ${bodyHtml}
+          <div class="actions">
+            <button onclick="Views.asstQaDecide('${caseId}','${d.id}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
+            <button class="danger" onclick="Views.asstQaDecide('${caseId}','${d.id}','REJECT',this)">Reject</button></div></div>`;
+      }));
+      box.innerHTML = `<h3 style="margin:10px 0 6px">${q.length} item(s) at the QA gate for this case</h3>` + cards.join("");
+    } catch (e) { box.innerHTML = ""; }
+  }
+
+  async function asstQaDecide(caseId, qaId, decision, btn) {
+    const card = document.querySelector(`.asst-qa-card[data-qa="${qaId}"]`);
+    const isNote = card?.dataset.channel === "note";
+    const edited = document.getElementById(`asst-qa-edit-${qaId}`)?.value || "";
+    let note = "";
+    if (decision === "REJECT") {
+      const v = await UI.modal({ title: "Reject draft", danger: true, submitLabel: "Reject",
+        fields: [{ name: "note", label: "Rejection note", type: "textarea", required: true,
+          hint: "Returned to the drafter with the draft." }] });
+      if (!v) return;
+      note = v.note;
+    } else if (isNote) {
+      if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
+    } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.qaDecision(qaId, decision, note, edited);
+        card?.remove();
+        asstAppend(caseId, "assistant",
+          decision === "APPROVE"
+            ? (r.email_delivery_error ? `⚠ Approved but email failed: ${r.email_delivery_error}`
+              : isNote ? "Rationale approved and filed to the case timeline." : "Draft approved and sent — logged to correspondence.")
+            : "Draft rejected and returned to the drafter.", "");
+        const box = document.getElementById("asst-qa");
+        if (box && !box.querySelector(".asst-qa-card")) box.innerHTML = "";
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, decision === "APPROVE" ? "Approving…" : "Rejecting…");
   }
 
   async function uploadCheck(file, btn) {
@@ -2957,5 +3208,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, asstQaDecide, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();

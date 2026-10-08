@@ -574,3 +574,7 @@ button.mini.danger{color:#991b1b;border-color:#fecaca}
 .asst-fab-foot .asst-chips{margin-top:0;margin-bottom:8px}
 .asst-fab-foot .asst-form{margin-top:0}
 @media (max-width:640px){.asst-fab{right:14px;bottom:14px}.asst-fab-panel{left:14px;right:14px;width:auto;bottom:76px}}
+.asst-qa-card textarea{font:inherit;font-size:13px}
+.chip-stat{background:var(--surface-raised,#fff);border:1px solid var(--border-subtle);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--text-secondary)}
+.chip-stat b{color:var(--text-primary)}
+.sla-hot{color:var(--danger,#c92a2a);font-weight:600}
