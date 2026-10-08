@@ -2322,10 +2322,12 @@ const Views = (() => {
         if (msg.trim()) await handleAssistantMessage(msg, caseId, "asst-thread");
       });
       asstQaLoad(caseId);
+      asstShareLoad(caseId);
     });
     return `<div class="view-head"><h1>Assistant</h1>
       <span class="muted" id="asst-case">loading case…</span></div>
       <div class="asst-panel">
+        <div id="asst-share" style="margin-bottom:10px"></div>
         <div id="asst-thread" class="asst-thread"></div>
         <div id="asst-qa"></div>
         <div class="asst-chips">
@@ -2340,7 +2342,7 @@ const Views = (() => {
           <input name="message" autocomplete="off" placeholder="Ask about this case, or tell me to do something — create a task, open an intake, pull a report…" aria-label="Message the assistant" />
           <button>Send</button>
         </form>
-        <p class="asst-foot">Chips and direct requests (create a task, open an intake, pull a report, upload a document) execute immediately — correspondence still needs a second reviewer, same as everywhere else in the app. Every turn is recorded. Replies run on local infrastructure and can take up to a couple of minutes.</p>
+        <p class="asst-foot">Chips and direct requests (create a task, open an intake, pull a report, upload a document) execute immediately — correspondence still needs a second reviewer, same as everywhere else in the app. This thread is private to you by default; share it above if you want a colleague to see it. Every turn is recorded. Replies run on local infrastructure and can take up to a couple of minutes.</p>
       </div>`;
   }
 
@@ -2468,6 +2470,15 @@ const Views = (() => {
   const ASST_INTENT_TASK_COMPLETE = /\b(complete|finish|close|mark)\b[^.?!]{0,15}\btask\b|\btask\b[^.?!]{0,15}\b(done|complete|finished)\b/i;
   const ASST_INTENT_INTAKE_CREATE = /\b(create|open|start|file)\b[^.?!]{0,10}\b(intake|dispute)\b|^new (dispute|intake|case)\b/i;
   const ASST_INTENT_REPORT = /\b(report|receivables|financial summary|sla breach(es)?)\b/i;
+  // "send/write/draft correspondence" routes through the SAME copilotDraft
+  // chip logic as clicking "Draft correspondence" -- real AI-generated
+  // content grounded in case facts, landing in the QA gate exactly like a
+  // human-drafted one. There's no execute-immediately path for correspondence
+  // triggered by free text any more than there is from the chip itself --
+  // the second-reviewer requirement is a property of the action, not of how
+  // it was requested.
+  const ASST_INTENT_DRAFT_CORR = /\b(draft|write|send|compose)\b[^.?!]{0,15}\b(correspondence|email|letter)\b/i;
+  const ASST_INTENT_DRAFT_RATIONALE = /\b(draft|write)\b[^.?!]{0,15}\b(rationale|determination)\b/i;
 
   function asstAppendRich(threadId, titleHtml, rowsHtml) {
     const thread = document.getElementById(threadId);
@@ -2685,6 +2696,12 @@ const Views = (() => {
     } else if (ASST_INTENT_TASKS.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
       await asstAnswerMyTasks(threadId);
+    } else if (ASST_INTENT_DRAFT_CORR.test(msg) && caseId) {
+      // Same chip, same UI.run(btn,...) contract -- a throwaway button
+      // satisfies it without needing a real one to exist on the page.
+      await assistantChip(caseId, "correspondence", document.createElement("button"), threadId);
+    } else if (ASST_INTENT_DRAFT_RATIONALE.test(msg) && caseId) {
+      await assistantChip(caseId, "determination_rationale", document.createElement("button"), threadId);
     } else if (caseId) {
       await assistantSend(caseId, msg, threadId);
     } else {
@@ -2849,6 +2866,52 @@ const Views = (() => {
         if (id) loadCaseHistory(id);
         else loadGeneralHistory();
       }
+    });
+  }
+
+  // ---- Thread sharing (private-by-default Assistant threads) --------------
+  // Each worker's thread on a case is their own; this renders who it's
+  // currently shared with (as removable chips) and a picker to add someone
+  // from the tenant staff list the Team page already uses.
+  async function asstShareLoad(caseId) {
+    const box = document.getElementById("asst-share");
+    if (!box) return;
+    try {
+      const [shares, staff] = await Promise.all([
+        Api.program.copilotThreadShares(caseId),
+        Api.admin.listTenantStaff(Api.getTenant()).catch(() => []),
+      ]);
+      const byId = {};
+      (staff || []).forEach((s) => { byId[s.id] = s.username; });
+      const chips = (shares.shares || []).map((s) =>
+        `<span class="badge s-info" style="display:inline-flex;align-items:center;gap:5px">
+          ${esc(byId[s.shared_with_sub] || s.shared_with_sub.slice(0, 8))}
+          <button class="mini" style="padding:0 4px;min-height:auto" title="Stop sharing"
+            onclick="Views.asstShareRemove('${caseId}','${s.shared_with_sub}',this)">✕</button></span>`).join(" ");
+      box.innerHTML = `<span class="muted" style="font-size:11.5px">Your thread${chips ? " shared with: " : " is private — only you see it. "}</span>${chips}
+        <button class="mini" onclick="Views.asstShareAdd('${caseId}')">+ Share</button>`;
+    } catch { box.innerHTML = ""; }
+  }
+
+  async function asstShareAdd(caseId) {
+    try {
+      const staff = await Api.admin.listTenantStaff(Api.getTenant());
+      const me = Auth.claims()?.sub;
+      const options = (staff || []).filter((s) => s.id && s.id !== me).map((s) => [s.id, s.username]);
+      if (!options.length) { UI.toast("No other staff found on this tenant", { kind: "warn" }); return; }
+      const v = await UI.modal({ title: "Share your Assistant thread", submitLabel: "Share",
+        fields: [{ name: "user_id", label: "Share with", options, required: true }] });
+      if (!v) return;
+      await Api.program.copilotShareThread(caseId, v.user_id);
+      UI.toast("Thread shared");
+      asstShareLoad(caseId);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function asstShareRemove(caseId, userId, btn) {
+    await UI.run(btn, async () => {
+      try { await Api.program.copilotUnshareThread(caseId, userId); asstShareLoad(caseId); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
   }
 
@@ -3392,5 +3455,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, asstQaDecide, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, asstQaDecide, asstShareAdd, asstShareRemove, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();
