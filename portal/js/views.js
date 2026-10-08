@@ -1661,24 +1661,6 @@ const Views = (() => {
           ev.preventDefault();
           await newIntake(ev.target);
         });
-        // Conversational intake (step 5): the chat EXTRACTS into the form;
-        // the human reviews the filled form and files with the same button
-        // as always. The model never files.
-        window._intakeChat = { fields: {}, history: [] };
-        // Human keystrokes win over extraction: once a field is touched, the
-        // assistant never overwrites it.
-        const f0 = $("#intake-form");
-        ["email", "contact_name", "org"].forEach((n) =>
-          f0?.[n]?.addEventListener("input", () => {
-            f0[n].dataset.touched = "1";
-            const b = document.getElementById(`ci-prov-${n}`);
-            if (b) b.hidden = true; // now human-authored, not "from chat"
-          }));
-        $("#intake-chat-form")?.addEventListener("submit", (ev) => {
-          ev.preventDefault();
-          const msg = ev.target.message.value.trim();
-          if (msg) { ev.target.message.value = ""; intakeChatTurn(msg); }
-        });
         // Bulk intake (CSV): parse on file pick, submit posts the idempotent
         // batch and renders the per-row receipt.
         window._intakeBulk = { items: [] };
@@ -1687,36 +1669,6 @@ const Views = (() => {
       });
       return `<div class="view-head"><h1>Pre-case intake</h1>
         <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
-        <div class="card conv-intake" style="margin-bottom:12px">
-          <div class="conv-intake-grid">
-            <div class="conv-intake-chat">
-              <h3 class="conv-intake-h">✦ Describe it, I'll fill the form</h3>
-              <p class="muted" style="margin:0 0 10px;font-size:12.5px">Plain language in — I extract the filing party's contact details; you review and file.</p>
-              <div id="intake-chat-thread" class="asst-thread" style="min-height:180px;max-height:380px">
-                <div class="asst-turn asst-ai"><div class="asst-who">intake assistant</div>
-                <div class="asst-body">Describe the request in your own words — who called, provider or plan, contact details. I'll fill the form as we go.</div></div>
-              </div>
-              <form id="intake-chat-form" class="asst-form">
-                <input name="message" autocomplete="off" placeholder="e.g. Dana from Meridian Surgical called about a dispute, email dana@meridiansurgical.example…" aria-label="Describe the intake" />
-                <button>Send</button></form>
-              <p class="muted" id="intake-chat-missing" style="margin:6px 0 0"></p>
-            </div>
-            <div class="conv-intake-form">
-              <h3 class="conv-intake-h">Intake form <span class="muted" style="font-weight:400;font-size:11.5px">— prefilled by conversation</span></h3>
-              <form id="intake-form" class="form">
-                <label>Requester email<span class="ci-prov" id="ci-prov-email" hidden>from chat</span>
-                  <input name="email" type="email" required /></label>
-                <label>Contact name<span class="ci-prov" id="ci-prov-contact_name" hidden>from chat</span>
-                  <input name="contact_name" /></label>
-                <label>Organization<span class="ci-prov" id="ci-prov-org" hidden>from chat</span>
-                  <input name="org" /></label>
-                <button>New intake request</button>
-              </form>
-              <p class="muted" style="margin-top:8px;font-size:11.5px">Filing party defaults to Provider. Fields you type yourself are never overwritten by the conversation. Everything else — amount, service line,
-                eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them.</p>
-            </div>
-          </div>
-        </div>
         <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
             <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
@@ -1725,7 +1677,14 @@ const Views = (() => {
           <p class="muted">Header row required: <code>email, contact_name, org, filing_party_type, amount, external_ref, notes</code>
             (amount in dollars; filing_party_type PROVIDER or HEALTH_PLAN). Resubmitting the same batch reference replays the receipt — nothing files twice.</p>
           <div id="intake-bulk-preview"></div>
-          <div id="intake-bulk-result"></div></details>` +
+          <div id="intake-bulk-result"></div></details>
+        <form id="intake-form" class="inline-form">
+          <input name="email" type="email" placeholder="requester email" required />
+          <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
+          <button>New intake request</button></form>
+        <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
+          eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
+          not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>` +
         (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
@@ -1874,41 +1833,6 @@ const Views = (() => {
         App.rerender();
       }
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-  }
-
-  // One turn of conversational intake: send the worker's words plus the
-  // fields extracted so far (client-carried state, endpoint is stateless),
-  // render the follow-up, and prefill the REAL form — filing stays manual.
-  async function intakeChatTurn(msg) {
-    const threadId = "intake-chat-thread";
-    const st = window._intakeChat || (window._intakeChat = { fields: {}, history: [] });
-    asstAppend(threadId, "user", msg);
-    asstThinking(threadId);
-    try {
-      const r = await Api.program.intakeConverse(msg, st.fields, st.history);
-      asstAppend(threadId, "assistant", r.reply || "");
-      st.history.push(msg);
-      st.fields = r.fields || {};
-      // Prefill the form; never overwrite text the human has typed. Each
-      // freshly-filled field surfaces a "from chat" badge so it's visually
-      // clear which values came from the conversation.
-      const f = document.getElementById("intake-form");
-      const prov = (name, val) => {
-        if (!val || !f?.[name] || f[name].dataset.touched) return;
-        f[name].value = val;
-        const b = document.getElementById(`ci-prov-${name}`);
-        if (b) b.hidden = false;
-      };
-      if (f) { prov("email", st.fields.email); prov("contact_name", st.fields.contact_name); prov("org", st.fields.org); }
-      const miss = document.getElementById("intake-chat-missing");
-      if (miss) miss.textContent = r.ready
-        ? "✓ Ready — review the form and file when you're satisfied."
-        : (r.missing || []).length ? "Still needed: " + r.missing.join(", ") : "";
-    } catch (e) {
-      asstAppendRich(threadId, `⚠ ${esc(e.message)}`);
-    }
-    const thread = document.getElementById(threadId);
-    thread && (thread.scrollTop = thread.scrollHeight);
   }
 
   async function advanceIntake(id, status, sel) {
@@ -2615,29 +2539,66 @@ const Views = (() => {
 
   // Multi-turn, so module-scoped: a brand-new case gets opened only once
   // intakeConverse's own extraction says every required field is present
-  // (r.ready) -- the same completeness gate the dedicated Intake page's
-  // conversational panel uses, just auto-submitting instead of waiting for
-  // a button click.
+  // (r.ready) -- auto-submitting instead of waiting for a button click.
+  //
+  // The card below is read-only by design -- nobody clicks into it, every
+  // field only ever changes because the conversation said so. It renders
+  // once (stable id, keyed to the thread) and gets its innerHTML replaced
+  // in place on every turn, so filling it out reads as live rather than as
+  // a new message appearing each time you add a detail.
   let asstIntakeDraft = null;
+  function asstIntakeCardHtml(fields, bodyText, statusHtml) {
+    const row = (label, val) => `<div class="asst-fab-list-row"><span class="afr-main">${esc(label)}</span><span class="afr-sub">${val ? esc(val) : "—"}</span></div>`;
+    return `<div class="asst-who">assistant</div>
+      <div class="asst-body">${esc(bodyText)}</div>
+      <div class="asst-fab-list" style="margin-top:8px">
+        ${row("Email", fields.email)}${row("Contact", fields.contact_name)}${row("Organization", fields.org)}
+      </div>
+      ${statusHtml || ""}`;
+  }
   async function asstDoCreateIntake(threadId, msg) {
+    const cardId = `${threadId}-intake-card`;
     if (!asstIntakeDraft) asstIntakeDraft = { fields: {}, history: [] };
+    const thread = document.getElementById(threadId);
+    thread?.querySelector(".asst-turn.asst-thinking")?.remove();
+    thread?.querySelector(".asst-empty")?.remove();
+    let card = document.getElementById(cardId);
+    if (!card) {
+      thread?.insertAdjacentHTML("beforeend", `<div class="asst-turn asst-ai" id="${cardId}"></div>`);
+      card = document.getElementById(cardId);
+    }
+    const thinkingHtml = `<p class="asst-wait-hint" style="display:flex;align-items:center;gap:6px;margin:6px 0 0">
+      <span class="asst-dots"><span></span><span></span><span></span></span> thinking…</p>`;
+    card.innerHTML = asstIntakeCardHtml(asstIntakeDraft.fields,
+      "New intake — read-only, filled in from what you tell me.", thinkingHtml);
+    if (thread) thread.scrollTop = thread.scrollHeight;
     try {
       const r = await Api.program.intakeConverse(msg, asstIntakeDraft.fields, asstIntakeDraft.history);
       asstIntakeDraft.history.push(msg);
       asstIntakeDraft.fields = r.fields || {};
+      const fields = asstIntakeDraft.fields;
+      const bodyText = r.reply || "New intake — read-only, filled in from what you tell me.";
       if (r.ready) {
-        const fields = asstIntakeDraft.fields;
+        card.innerHTML = asstIntakeCardHtml(fields, bodyText, `<p class="asst-wait-hint" style="margin:6px 0 0">✓ ready — filing…</p>`);
         asstIntakeDraft = null;
         const created = await Api.program.createIntake({
           email: fields.email, contact_name: fields.contact_name, org: fields.org,
         });
-        asstAppendRich(threadId, created.programmed
+        const successMsg = created.programmed
           ? `✓ Case <a href="#/cases/${created.case_id}">${esc(created.case_number)}</a> opened — filing instructions emailed to ${esc(fields.email || "")}.`
-          : "✓ Intake request opened — submission instructions queued.");
+          : "✓ Intake request opened — submission instructions queued.";
+        card.innerHTML = asstIntakeCardHtml(fields, bodyText, `<p style="margin:6px 0 0;font-weight:600">${successMsg}</p>`);
       } else {
-        asstAppend(threadId, "assistant", r.reply || `Still need: ${(r.missing || []).join(", ")}`, "");
+        const missHtml = (r.missing || []).length
+          ? `<p class="muted" style="margin:6px 0 0;font-size:11.5px">Still needed: ${esc(r.missing.join(", "))}</p>` : "";
+        card.innerHTML = asstIntakeCardHtml(fields, bodyText, missHtml);
       }
-    } catch (e) { asstIntakeDraft = null; asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+    } catch (e) {
+      card.innerHTML = asstIntakeCardHtml(asstIntakeDraft?.fields || {}, "New intake",
+        `<p style="margin:6px 0 0;color:var(--danger-fg)">⚠ ${esc(e.message)}</p>`);
+      asstIntakeDraft = null;
+    }
+    if (thread) thread.scrollTop = thread.scrollHeight;
   }
 
   async function asstDoReport(threadId, msg) {
