@@ -431,7 +431,25 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	// that decision's paperwork, not a second judgment call needing a
 	// different reviewer. displayName(p) != "" guards strings.Contains(x,
 	// "") always being true -- an empty name must never match everything.
-	if name := displayName(p); name != "" && !strings.Contains(draftedBy, "batch approved by") && strings.Contains(draftedBy, name) {
+	//
+	// Also skipped when the draft is copilot-originated AND the approver is
+	// the exact person who asked for it (requested_by_sub, not a
+	// drafted_by name-match): a human composing their own correspondence
+	// still needs a genuinely independent second reviewer before it reaches
+	// a real external party, but an AI-drafted item never had a second
+	// human in the loop at creation time either -- requiring one now adds
+	// no check that wasn't already missing, and the usual review (does this
+	// say what it should, is it grounded in the facts) still happens, same
+	// reviewer, same read of the draft, just without a second account.
+	// Deliberate product decision, not a workaround: this does NOT relax
+	// the guard for human-composed (template-based) correspondence, which
+	// is exactly the case the guard exists to cover.
+	name := displayName(p)
+	nameMatch := name != "" && !strings.Contains(draftedBy, "batch approved by") && strings.Contains(draftedBy, name)
+	requesterMatch := requestedBySub != "" && requestedBySub == p.Subject
+	selfApproval := nameMatch || requesterMatch
+	copilotRequesterExempt := strings.HasPrefix(artifact, "copilot_") && requesterMatch
+	if selfApproval && !copilotRequesterExempt {
 		http.Error(w, `{"error":"forbidden: cannot approve or reject your own draft -- needs a second reviewer"}`, http.StatusForbidden)
 		return
 	}
