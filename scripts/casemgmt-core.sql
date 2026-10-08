@@ -151,6 +151,27 @@ CREATE TABLE IF NOT EXISTS public.copilot_threads (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS copilot_threads_case ON public.copilot_threads (tenant, case_id, created_at);
+-- Per-user privacy: each case worker's conversation is their own by default
+-- (user_sub NULL = a pre-privacy legacy turn, grandfathered as visible to
+-- everyone on the case rather than orphaned/hidden). A worker can
+-- deliberately share their thread with specific colleagues via
+-- copilot_thread_shares below -- sharing is opt-in, not the default,
+-- because "part of the case record" and "visible to everyone with case
+-- access" turned out to be two different properties once more than one
+-- person works a case.
+ALTER TABLE public.copilot_threads ADD COLUMN IF NOT EXISTS user_sub text;
+CREATE INDEX IF NOT EXISTS copilot_threads_user ON public.copilot_threads (tenant, case_id, user_sub);
+
+CREATE TABLE IF NOT EXISTS public.copilot_thread_shares (
+    id              bigserial PRIMARY KEY,
+    tenant          text NOT NULL,
+    case_id         uuid NOT NULL,
+    owner_sub       text NOT NULL,     -- whose thread this grants access to
+    shared_with_sub text NOT NULL,     -- who can now read it
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, case_id, owner_sub, shared_with_sub)
+);
+CREATE INDEX IF NOT EXISTS copilot_thread_shares_lookup ON public.copilot_thread_shares (tenant, case_id, shared_with_sub);
 
 -- General (non-case-scoped) assistant threads: "my open cases", "my tasks",
 -- and casual chat that isn't grounded in any one case's record. Deliberately

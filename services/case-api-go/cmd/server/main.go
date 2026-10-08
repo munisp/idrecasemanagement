@@ -561,8 +561,11 @@ func main() {
 		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)       // grounded advisory brief (Phase 1 copilot)
 		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)  // latest persisted brief
 		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
-		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface)
+		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface, private per worker)
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
+		r.Get("/cases/{caseId}/copilot/chat/shares", s.copilotListThreadShares)
+		r.Post("/cases/{caseId}/copilot/chat/shares", s.copilotShareThread)
+		r.Delete("/cases/{caseId}/copilot/chat/shares/{userId}", s.copilotUnshareThread)
 		r.Get("/copilot/chat", s.copilotGeneralChatHistory) // floating-widget thread, no case open
 		r.Post("/copilot/chat", s.copilotGeneralChat)
 		r.Get("/assistant/briefing", s.briefing) // worker-scoped morning digest (conversation-first step 2)

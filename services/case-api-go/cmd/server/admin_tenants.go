@@ -461,6 +461,7 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 }
 
 type staffMember struct {
+	ID       string   `json:"id"` // Keycloak user id -- the same value as a JWT's sub claim
 	Username string   `json:"username"`
 	Email    string   `json:"email"`
 	Enabled  bool     `json:"enabled"`
@@ -825,7 +826,7 @@ func (s *server) listTenantStaff(w http.ResponseWriter, r *http.Request) {
 	out := make([]staffMember, 0, len(kcUsers))
 	for _, u := range kcUsers {
 		out = append(out, staffMember{
-			Username: u.Username, Email: u.Email, Enabled: u.Enabled,
+			ID: u.ID, Username: u.Username, Email: u.Email, Enabled: u.Enabled,
 			Roles: s.kcUserRoles(r.Context(), tok, u.ID),
 		})
 	}
@@ -857,13 +858,14 @@ func (s *server) listFederalAdmins(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var users []struct {
+			ID       string `json:"id"`
 			Username string `json:"username"`
 			Email    string `json:"email"`
 			Enabled  bool   `json:"enabled"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&users)
 		for _, u := range users {
-			out = append(out, staffMember{Username: u.Username, Email: u.Email, Enabled: u.Enabled, Roles: []string{role}})
+			out = append(out, staffMember{ID: u.ID, Username: u.Username, Email: u.Email, Enabled: u.Enabled, Roles: []string{role}})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
