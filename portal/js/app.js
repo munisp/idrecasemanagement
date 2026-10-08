@@ -119,11 +119,20 @@
 
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
   const has = (...rs) => rs.some((r) => me.roles.includes(r));
+  // "New dispute" (#/new) only fits the federal NSA process -- CMS case
+  // number format, required provider/payer IDs on file, an open-negotiation
+  // -end date. A programmed tenant (FL AHCA CDR today) has none of those
+  // concepts and files through Intake instead (email/contact/org only --
+  // the real case number, amount, and eligibility inputs all come from the
+  // uploaded packet, never typed in up front). Showing New dispute to a
+  // programmed tenant's case managers was pure confusion: a form whose
+  // required fields don't apply to any case they'd ever open.
+  const programmed = !!(await Api.program.get().catch(() => null))?.config;
   const links = [
     ["#/dashboard", "▤", "Home"], ["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
     ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"],
   ];
-  if (has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
+  if (!programmed && has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
   links.push(["#/ask", "✦", "Ask the graph"]);
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
@@ -147,6 +156,11 @@
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
+
+  // Floating assistant launcher: lives outside the router's #view swap (a
+  // real DOM element appended once to <body>) so it survives every route
+  // change instead of being a per-page thing only #/assistant has.
+  Views.mountAssistantFab();
 
   // Mobile rail: collapsed to icon-only under 860px with no way to see
   // labels or reach anything not already memorized by icon, and sign-out

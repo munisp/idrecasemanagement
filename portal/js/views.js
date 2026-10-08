@@ -1652,10 +1652,9 @@ const Views = (() => {
       window._intakePager = { next: intakeNext }; // reset on every view render
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
       // no QPA concept and use a disputed amount instead -- same split as
-      // everywhere else amounts show in this app. The amount typed here is
-      // sent as both keys (programops.go's createIntake only reads the one
-      // that applies to this tenant and ignores the other), so the form
-      // itself doesn't need to branch -- only its label does.
+      // everywhere else amounts show in this app. Only the results table's
+      // column label needs this; the amount itself is never hand-typed --
+      // it's backfilled from the filing party's uploaded documents.
       const label = amtLabel(prog);
       afterRender(() => $("#intake-form")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
@@ -1666,16 +1665,10 @@ const Views = (() => {
         <form id="intake-form" class="inline-form">
           <input name="email" type="email" placeholder="requester email" required />
           <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
-          <select name="filing_party_type" title="filing party">
-            <option value="PROVIDER">Provider files</option>
-            <option value="HEALTH_PLAN">Health plan files</option></select>
-          <select name="service_line" title="service line">
-            <option value="">Service line…</option>
-            <option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option>
-            <option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select>
-          <input name="amount" type="number" step="0.01" placeholder="${esc(label)} $" />
-          <input name="doc" type="file" accept=".pdf,.png,.jpg,.jpeg,.tiff,.webp" title="attach claim/EOB — service line fills in automatically once analyzed (programmed tenants)" />
-          <button>New intake request</button></form>` +
+          <button>New intake request</button></form>
+        <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
+          eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
+          not manual entry here.</p>` +
         (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
@@ -1729,28 +1722,21 @@ const Views = (() => {
 
   async function newIntake(form) {
     try {
-      // Sent as both keys -- createIntake (programops.go) only reads the one
-      // that applies to this tenant (qpa_cents for federal, disputed_amount_
-      // cents for programmed) and ignores the other, so the form doesn't
-      // need to know which kind of tenant it's running against.
-      const cents = form.amount.value ? Math.round(parseFloat(form.amount.value) * 100) : 0;
+      // Only contact info is collected here -- filing_party_type defaults
+      // to PROVIDER server-side (createIntake, programops.go), and amount/
+      // service_line/eligibility inputs are intentionally left unset: the
+      // filing party uploads the real claim packet via the link in their
+      // automated instructions email, and doc-intel's analysis backfills
+      // all of that from the documents (backfill_case_fields in doc-intel-
+      // py/main.py) -- never hand-typed at intake.
       const r = await Api.program.createIntake({
         email: form.email.value, contact_name: form.contact_name.value, org: form.org.value,
-        filing_party_type: form.filing_party_type.value, service_line: form.service_line.value,
-        disputed_amount_cents: cents, qpa_cents: cents,
       });
       if (r.programmed) {
-        const file = form.doc.files[0];
-        if (file) {
-          // Real case exists immediately for programmed tenants -- the doc
-          // can attach right away; analysis fills in service_line on its
-          // own shortly (see doc-intel's backfill_case_fields).
-          Api.cases.upload(r.case_id, file).catch(() => {});
-        }
         UI.toast(`Case ${r.case_number} opened — filing instructions emailed to ${esc(form.email.value)}`, { sticky: true });
         location.hash = `#/cases/${r.case_id}`;
       } else {
-        UI.toast(`Intake request opened (${form.filing_party_type.value === "HEALTH_PLAN" ? "health plan" : "provider"} filing) — submission instructions queued`);
+        UI.toast("Intake request opened — submission instructions queued");
         App.rerender();
       }
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
@@ -2125,8 +2111,7 @@ const Views = (() => {
         document.getElementById("asst-case").innerHTML =
           `Case <a href="#/cases/${caseId}">${esc(c.case_number)}</a> · ${esc(c.status)}`;
         const h = await Api.program.copilotChatHistory(caseId);
-        thread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") ||
-          `<div class="muted" style="padding:12px">No turns yet — ask anything about this case, or use a chip below.</div>`;
+        thread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") || ASST_EMPTY_HTML;
         thread.scrollTop = thread.scrollHeight;
       } catch (e) {
         thread.innerHTML = `<div class="muted" style="padding:12px">${esc(e.message)}</div>`;
@@ -2141,19 +2126,24 @@ const Views = (() => {
     });
     return `<div class="view-head"><h1>Assistant</h1>
       <span class="muted" id="asst-case">loading case…</span></div>
-      <div id="asst-thread" class="asst-thread"></div>
-      <div class="asst-chips">
-        <button class="mini" onclick="Views.assistantChip('${caseId}','brief',this)">▤ Brief me</button>
-        <button class="mini" onclick="Views.assistantChip('${caseId}','determination_rationale',this)">✍ Draft rationale</button>
-        <button class="mini" onclick="Views.assistantChip('${caseId}','correspondence',this)">✉ Draft correspondence</button>
-        <button class="mini" onclick="Views.assistantChip('${caseId}','actions',this)">⚙ Propose actions</button>
-      </div>
-      <form id="asst-form" class="asst-form">
-        <input name="message" autocomplete="off" placeholder="Ask about this case… (e.g. what's blocking eligibility?)" aria-label="Message the assistant" />
-        <button>Send</button>
-      </form>
-      <p class="muted" style="margin-top:6px">Advisory only — the assistant cannot change case state; chips route through the same gates as the screens. Every turn is recorded.</p>`;
+      <div class="asst-panel">
+        <div id="asst-thread" class="asst-thread"></div>
+        <div class="asst-chips">
+          <button class="mini" onclick="Views.assistantChip('${caseId}','brief',this)">▤ Brief me</button>
+          <button class="mini" onclick="Views.assistantChip('${caseId}','determination_rationale',this)">✍ Draft rationale</button>
+          <button class="mini" onclick="Views.assistantChip('${caseId}','correspondence',this)">✉ Draft correspondence</button>
+          <button class="mini" onclick="Views.assistantChip('${caseId}','actions',this)">⚙ Propose actions</button>
+        </div>
+        <form id="asst-form" class="asst-form">
+          <input name="message" autocomplete="off" placeholder="Ask about this case… (e.g. what's blocking eligibility?)" aria-label="Message the assistant" />
+          <button>Send</button>
+        </form>
+        <p class="asst-foot">Advisory only — the assistant cannot change case state; chips route through the same gates as the screens. Every turn is recorded. Replies run on local infrastructure and can take up to a couple of minutes.</p>
+      </div>`;
   }
+
+  const ASST_EMPTY_HTML = `<div class="asst-empty"><span class="asst-empty-icon">❖</span>
+    <span>No turns yet — ask anything about this case, or use a quick action below.</span></div>`;
 
   function asstTurnHtml(t) {
     const who = t.role === "user" ? "you" : `assistant${t.model ? ` · ${esc(t.model)}` : ""}`;
@@ -2162,51 +2152,331 @@ const Views = (() => {
       <div class="asst-body">${esc(t.body)}</div></div>`;
   }
 
-  function asstAppend(caseId, role, body, model) {
-    const thread = document.getElementById("asst-thread");
+  function asstAppend(threadId, role, body, model) {
+    const thread = document.getElementById(threadId);
     if (!thread) return;
+    thread.querySelector(".asst-empty")?.remove();
     thread.insertAdjacentHTML("beforeend", asstTurnHtml({ role, body, model }));
     thread.scrollTop = thread.scrollHeight;
   }
 
-  async function assistantSend(caseId, msg) {
-    asstAppend(caseId, "user", msg);
-    asstAppend(caseId, "assistant", "…", "");
+  // A literal "…" read as frozen/broken on a model this slow (confirmed
+  // live: a real brief took 92s) -- an animated indicator + an explicit
+  // time-expectation stops that from looking like a hang.
+  function asstThinking(threadId) {
+    const thread = document.getElementById(threadId);
+    if (!thread) return;
+    thread.querySelector(".asst-empty")?.remove();
+    thread.insertAdjacentHTML("beforeend",
+      `<div class="asst-turn asst-ai asst-thinking"><span class="asst-dots"><span></span><span></span><span></span></span>
+       <span class="asst-wait-hint">thinking — can take up to ~2 min on this model</span></div>`);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  async function assistantSend(caseId, msg, threadId = "asst-thread") {
+    asstAppend(threadId, "user", msg);
+    asstThinking(threadId);
     try {
       const r = await Api.program.copilotChat(caseId, msg);
-      const thread = document.getElementById("asst-thread");
-      thread?.querySelector(".asst-turn:last-child")?.remove();
-      asstAppend(caseId, "assistant", r.reply, r.model);
+      document.getElementById(threadId)?.querySelector(".asst-turn:last-child")?.remove();
+      asstAppend(threadId, "assistant", r.reply, r.model);
     } catch (e) {
-      const thread = document.getElementById("asst-thread");
-      thread?.querySelector(".asst-turn:last-child")?.remove();
-      asstAppend(caseId, "assistant", `⚠ ${e.message}`, "");
+      document.getElementById(threadId)?.querySelector(".asst-turn:last-child")?.remove();
+      asstAppend(threadId, "assistant", `⚠ ${e.message}`, "");
+    }
+  }
+
+  // Same shape as assistantSend, grounded on the worker's own open cases/
+  // tasks instead of one case's record (copilot_general_chat.go) — the
+  // floating widget's fallback for anything that isn't one of its fast,
+  // deterministic intents and isn't asked with a case open.
+  async function generalChatSend(msg, threadId) {
+    asstAppend(threadId, "user", msg);
+    asstThinking(threadId);
+    try {
+      const r = await Api.program.copilotGeneralChat(msg);
+      document.getElementById(threadId)?.querySelector(".asst-turn:last-child")?.remove();
+      asstAppend(threadId, "assistant", r.reply, r.model);
+    } catch (e) {
+      document.getElementById(threadId)?.querySelector(".asst-turn:last-child")?.remove();
+      asstAppend(threadId, "assistant", `⚠ ${e.message}`, "");
     }
   }
 
   // Chips run the Phase 1-3 primitives and narrate the outcome into the
-  // thread — same endpoints, same gates, conversational surface.
-  async function assistantChip(caseId, kind, btn) {
+  // thread — same endpoints, same gates, conversational surface. threadId
+  // lets the same chip logic serve both the full #/assistant page and the
+  // floating site-wide widget (mountAssistantFab) without duplicating it.
+  async function assistantChip(caseId, kind, btn, threadId = "asst-thread") {
     await UI.run(btn, async () => {
+      const chipLabel = kind === "brief" ? "Brief me on this case."
+        : kind === "actions" ? "Propose an action batch."
+        : kind === "correspondence" ? "Draft correspondence." : "Draft a determination rationale.";
+      asstAppend(threadId, "user", chipLabel);
+      asstThinking(threadId);
+      const popThinking = () => document.getElementById(threadId)?.querySelector(".asst-turn:last-child")?.remove();
       try {
         if (kind === "brief") {
-          asstAppend(caseId, "user", "Brief me on this case.");
           const r = await Api.program.copilotBrief(caseId);
-          asstAppend(caseId, "assistant", r.brief, r.model || "");
+          popThinking();
+          asstAppend(threadId, "assistant", r.brief, r.model || "");
         } else if (kind === "actions") {
-          asstAppend(caseId, "user", "Propose an action batch.");
           const r = await Api.program.copilotProposeActions(caseId);
+          popThinking();
           const acts = (r.actions || []).map((a) => `• ${a.type.replace(/_/g, " ")}`).join("\n") || "• (none)";
-          asstAppend(caseId, "assistant",
+          asstAppend(threadId, "assistant",
             `Proposed ${(r.actions || []).length} action(s) — review and approve on the case page:\n${r.rationale || ""}\n${acts}`, r.model || "");
         } else {
-          asstAppend(caseId, "user", kind === "correspondence" ? "Draft correspondence." : "Draft a determination rationale.");
           const r = await Api.program.copilotDraft(caseId, kind);
-          asstAppend(caseId, "assistant",
+          popThinking();
+          asstAppend(threadId, "assistant",
             `Draft queued in the QA gate (${r.subject}). Approve, edit, or reject it there — nothing is sent or filed automatically.`, "");
         }
-      } catch (e) { asstAppend(caseId, "assistant", `⚠ ${e.message}`, ""); }
+      } catch (e) {
+        popThinking();
+        asstAppend(threadId, "assistant", `⚠ ${e.message}`, "");
+      }
     }, "Working…");
+  }
+
+  // Floating assistant launcher — called once from app.js after login so the
+  // same thread is reachable from anywhere, not just #/assistant. Grounds on
+  // whatever case the URL currently points at (#/cases/:id or
+  // #/assistant/:id); off a case page it offers a quick case search instead
+  // of going ungrounded. Reuses assistantChip/assistantSend/asstTurnHtml via
+  // the threadId param so this is the same code path as the full page, not
+  // a parallel implementation that can drift from it.
+  // Patterns the floating widget answers itself, fast and deterministically,
+  // instead of routing to the case-scoped LLM (which is grounded on ONE
+  // case and, confirmed live, can take 60-90s+ on this hardware). "My open
+  // cases" / "my tasks" are platform-wide questions the LLM endpoint
+  // can't even answer (it has no cross-case context) -- these were never
+  // going to work as an LLM prompt, they're just REST list calls.
+  const ASST_INTENT_CASES = /\b(open cases|my cases|cases?.*(today|due|open)|what cases)\b/i;
+  const ASST_INTENT_TASKS = /\b(my )?tasks?\b/i;
+  const ASST_INTENT_LEFT = /\b(what.?s left|whats left|outstanding|still (need|required)|what.?s (missing|remaining)|checklist)\b/i;
+
+  function asstAppendRich(threadId, titleHtml, rowsHtml) {
+    const thread = document.getElementById(threadId);
+    if (!thread) return;
+    thread.querySelector(".asst-empty")?.remove();
+    thread.querySelector(".asst-turn.asst-thinking")?.remove();
+    thread.insertAdjacentHTML("beforeend", `<div class="asst-turn asst-ai">
+      <div class="asst-who">assistant</div>
+      <div class="asst-body">${titleHtml}</div>
+      ${rowsHtml ? `<div class="asst-fab-list" style="margin-top:8px">${rowsHtml}</div>` : ""}
+      </div>`);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  async function asstAnswerMyCases(threadId) {
+    try {
+      const r = await Api.cases.list({ mine: "true", sort: "sla", limit: 8 });
+      const rows = r.cases || [];
+      if (!rows.length) { asstAppendRich(threadId, "No cases are currently assigned to you."); return; }
+      const rowsHtml = rows.map((c) => `<a class="asst-fab-list-row" href="#/cases/${c.id}">
+        <span class="afr-main"><b class="mono">${esc(c.case_number)}</b>
+          <span class="afr-sub">${esc(c.service_line || "—")}</span></span>
+        ${badge(c.status)}<span class="afr-sub">${c.sla_days_remaining}d left</span></a>`).join("");
+      asstAppendRich(threadId, `${rows.length} case${rows.length === 1 ? "" : "s"} assigned to you, soonest deadline first:`, rowsHtml);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  async function asstAnswerMyTasks(threadId) {
+    try {
+      const r = await Api.crm.tasks(true, { limit: 8 });
+      const rows = (r.tasks || []).filter((t) => t.status !== "DONE");
+      if (!rows.length) { asstAppendRich(threadId, "No open tasks assigned to you."); return; }
+      const rowsHtml = rows.map((t) => `<a class="asst-fab-list-row" href="${t.case_id ? `#/cases/${t.case_id}` : "#/crm/tasks"}">
+        <span class="afr-main"><b>${esc(t.subject)}</b><span class="afr-sub">${esc(t.task_ref || "")}</span></span>
+        ${badge(t.status)}<span class="afr-sub">${t.due_date ? "due " + esc(t.due_date) : "no due date"}</span></a>`).join("");
+      asstAppendRich(threadId, `${rows.length} open task${rows.length === 1 ? "" : "s"} assigned to you:`, rowsHtml);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  async function asstAnswerWhatsLeft(threadId, caseId) {
+    if (!caseId) {
+      asstAppendRich(threadId, "Open a case first — I'll read its checklist from there.");
+      return;
+    }
+    try {
+      const items = await Api.cm.checklist(caseId);
+      const open_ = (items || []).filter((i) => !i.done);
+      if (!open_.length) { asstAppendRich(threadId, "Nothing outstanding — every checklist item on this case is done."); return; }
+      const byStage = {};
+      open_.forEach((i) => { (byStage[i.stage] ||= []).push(i); });
+      const rowsHtml = Object.entries(byStage).map(([stage, items2]) =>
+        `<div class="asst-fab-list-row" style="background:none;padding:4px 0 0"><b>${esc(stage)}</b></div>` +
+        items2.map((i) => `<div class="asst-fab-list-row"><span class="afr-main">${esc(i.item)}</span>
+          ${i.required ? badge("REQUIRED") : ""}</div>`).join("")
+      ).join("");
+      asstAppendRich(threadId, `${open_.length} outstanding checklist item${open_.length === 1 ? "" : "s"}:`, rowsHtml);
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+  }
+
+  function mountAssistantFab() {
+    if (!can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return;
+    if (document.getElementById("asst-fab")) return;
+
+    const fab = document.createElement("button");
+    fab.id = "asst-fab";
+    fab.className = "asst-fab";
+    fab.type = "button";
+    fab.setAttribute("aria-label", "Talk to the assistant");
+    fab.textContent = "❖";
+    document.body.appendChild(fab);
+
+    const panel = document.createElement("div");
+    panel.id = "asst-fab-panel";
+    panel.className = "asst-fab-panel";
+    panel.innerHTML = `
+      <div class="asst-fab-head">
+        <div class="asst-fab-title">Assistant<span class="asst-fab-case" id="asst-fab-case">no case open — ask about cases, tasks, or open one</span></div>
+        <button type="button" class="mini asst-fab-close" id="asst-fab-close" aria-label="Close assistant">✕</button>
+      </div>
+      <div class="asst-fab-quick" id="asst-fab-quick">
+        <button type="button" class="mini" data-q="cases">📂 My open cases</button>
+        <button type="button" class="mini" data-q="tasks">✓ My tasks</button>
+        <button type="button" class="mini" data-q="left" id="asst-fab-q-left" style="display:none">☑ What's left here</button>
+      </div>
+      <div class="asst-fab-body" id="asst-fab-body">
+        <div class="asst-thread" id="asst-fab-thread"
+          style="border:none;background:none;padding:0;min-height:140px;max-height:none">${ASST_EMPTY_HTML}</div>
+      </div>
+      <div class="asst-fab-foot">
+        <div class="asst-chips" id="asst-fab-case-chips" style="display:none">
+          <button type="button" class="mini" id="asst-fab-brief">▤ Brief</button>
+          <button type="button" class="mini" id="asst-fab-actions">⚙ Actions</button>
+        </div>
+        <form id="asst-fab-form" class="asst-form">
+          <input name="message" autocomplete="off" placeholder="Ask anything — e.g. my open cases, what's left here…" aria-label="Message the assistant" />
+          <button>Send</button>
+        </form>
+      </div>`;
+    document.body.appendChild(panel);
+
+    let open = false;
+    let currentCaseId = "";
+    let historyLoaded = false;
+
+    const caseIdFromHash = () => (location.hash.match(/^#\/(?:cases|assistant)\/([\w-]+)/) || [])[1] || "";
+
+    function syncCaseChrome() {
+      const caseLbl = document.getElementById("asst-fab-case");
+      const caseChips = document.getElementById("asst-fab-case-chips");
+      const leftBtn = document.getElementById("asst-fab-q-left");
+      if (currentCaseId) {
+        caseChips.style.display = "flex";
+        leftBtn.style.display = "inline-flex";
+        caseLbl.textContent = "loading case…";
+        Api.cases.get(currentCaseId).then((c) => { caseLbl.textContent = `grounded on ${c.case_number}`; }).catch(() => {});
+      } else {
+        caseChips.style.display = "none";
+        leftBtn.style.display = "none";
+        caseLbl.textContent = "no case open — ask about cases, tasks, or open one";
+      }
+    }
+
+    // Case-grounded history only loads once per case (same real thread the
+    // full #/assistant page reads) -- general Q&A (my cases/tasks/what's
+    // left) stays local to this panel and isn't persisted anywhere, since
+    // none of it is case-scoped server state.
+    async function loadCaseHistory(caseId) {
+      const thread = document.getElementById("asst-fab-thread");
+      try {
+        const h = await Api.program.copilotChatHistory(caseId);
+        thread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") || ASST_EMPTY_HTML;
+        thread.scrollTop = thread.scrollHeight;
+      } catch (e) {
+        thread.innerHTML = `<div class="muted" style="padding:8px;font-size:12px">${esc(e.message)}</div>`;
+      }
+    }
+
+    // Mirrors loadCaseHistory, reading the worker's own persisted general
+    // thread (copilot_general_threads) instead of one case's.
+    async function loadGeneralHistory() {
+      const thread = document.getElementById("asst-fab-thread");
+      try {
+        const h = await Api.program.copilotGeneralChatHistory();
+        thread.innerHTML = (h.turns || []).map(asstTurnHtml).join("") || ASST_EMPTY_HTML;
+        thread.scrollTop = thread.scrollHeight;
+      } catch (e) {
+        thread.innerHTML = `<div class="muted" style="padding:8px;font-size:12px">${esc(e.message)}</div>`;
+      }
+    }
+
+    function setOpen(next) {
+      open = next;
+      fab.dataset.open = open ? "1" : "0";
+      panel.dataset.open = open ? "1" : "0";
+      if (open && !historyLoaded) {
+        historyLoaded = true;
+        currentCaseId = caseIdFromHash();
+        syncCaseChrome();
+        if (currentCaseId) loadCaseHistory(currentCaseId);
+        else loadGeneralHistory();
+      }
+    }
+
+    async function handleMessage(raw) {
+      const msg = raw.trim();
+      if (!msg) return;
+      const threadId = "asst-fab-thread";
+      if (ASST_INTENT_CASES.test(msg)) {
+        asstAppend(threadId, "user", msg);
+        asstThinking(threadId);
+        await asstAnswerMyCases(threadId);
+      } else if (ASST_INTENT_LEFT.test(msg) && currentCaseId) {
+        asstAppend(threadId, "user", msg);
+        asstThinking(threadId);
+        await asstAnswerWhatsLeft(threadId, currentCaseId);
+      } else if (ASST_INTENT_TASKS.test(msg)) {
+        asstAppend(threadId, "user", msg);
+        asstThinking(threadId);
+        await asstAnswerMyTasks(threadId);
+      } else if (currentCaseId) {
+        await assistantSend(currentCaseId, msg, threadId);
+      } else {
+        await generalChatSend(msg, threadId);
+      }
+    }
+
+    fab.addEventListener("click", () => setOpen(!open));
+    document.getElementById("asst-fab-close").addEventListener("click", () => setOpen(false));
+    document.getElementById("asst-fab-brief").addEventListener("click", (e) => {
+      if (currentCaseId) assistantChip(currentCaseId, "brief", e.currentTarget, "asst-fab-thread");
+    });
+    document.getElementById("asst-fab-actions").addEventListener("click", (e) => {
+      if (currentCaseId) assistantChip(currentCaseId, "actions", e.currentTarget, "asst-fab-thread");
+    });
+    document.getElementById("asst-fab-quick").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-q]");
+      if (!btn) return;
+      if (btn.dataset.q === "cases") handleMessage("my open cases");
+      else if (btn.dataset.q === "tasks") handleMessage("my tasks");
+      else if (btn.dataset.q === "left") handleMessage("what's left on this case");
+    });
+    document.getElementById("asst-fab-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = e.target.message;
+      const msg = input.value;
+      input.value = "";
+      handleMessage(msg);
+    });
+
+    // Re-ground on the new case whenever navigation changes it. General
+    // Q&A keeps working regardless; this only affects "what's left"/brief/
+    // actions/open-ended-chat, which need to know which case is current.
+    addEventListener("hashchange", () => {
+      const id = caseIdFromHash();
+      if (id === currentCaseId) return;
+      currentCaseId = id;
+      if (open) {
+        syncCaseChrome();
+        if (id) loadCaseHistory(id);
+        else loadGeneralHistory();
+      }
+    });
   }
 
   async function uploadCheck(file, btn) {
@@ -2687,5 +2957,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();

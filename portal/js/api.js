@@ -198,6 +198,8 @@ const Api = (() => {
       copilotDecideActions: (caseId, batchId, decision) => req("POST", `${t()}/cases/${caseId}/copilot/actions/${batchId}/decision`, { decision }),
       copilotChat: (caseId, message) => req("POST", `${t()}/cases/${caseId}/copilot/chat`, { message }),
       copilotChatHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/copilot/chat`),
+      copilotGeneralChat: (message) => req("POST", `${t()}/copilot/chat`, { message }),
+      copilotGeneralChatHistory: () => req("GET", `${t()}/copilot/chat`),
       eligibilityHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/eligibility`),
       optOut: (caseId, eligible, rationale) => req("POST", `${t()}/cases/${caseId}/opt-out`, { eligible, rationale }),
       send: (caseId, p) => req("POST", `${t()}/cases/${caseId}/correspondence`, p),
