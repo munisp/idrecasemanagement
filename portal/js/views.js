@@ -1866,19 +1866,29 @@ const Views = (() => {
       st.history.push(msg);
       st.fields = r.fields || {};
       // Prefill the form; never overwrite text the human has typed.
+      // Chat-filled fields are tagged "from chat" so the reviewer can see
+      // exactly which values the model supplied — the mock's contract.
       const f = document.getElementById("intake-form");
       if (f) {
-        if (st.fields.email && !f.email.dataset.touched) f.email.value = st.fields.email;
-        if (st.fields.contact_name && !f.contact_name.dataset.touched) f.contact_name.value = st.fields.contact_name;
-        if (st.fields.org && !f.org.dataset.touched) f.org.value = st.fields.org;
-        if (st.fields.filing_party_type) f.filing_party_type.value = st.fields.filing_party_type;
+        const tag = (el) => { el.classList.add("from-chat"); el.title = "Prefilled from the conversation — review before filing"; };
+        if (st.fields.email && !f.email.dataset.touched) { f.email.value = st.fields.email; tag(f.email); }
+        if (st.fields.contact_name && !f.contact_name.dataset.touched) { f.contact_name.value = st.fields.contact_name; tag(f.contact_name); }
+        if (st.fields.org && !f.org.dataset.touched) { f.org.value = st.fields.org; tag(f.org); }
+        if (st.fields.filing_party_type) { f.filing_party_type.value = st.fields.filing_party_type; tag(f.filing_party_type); }
         const cents = st.fields.disputed_amount_cents || st.fields.qpa_cents;
-        if (cents && !f.amount.dataset.touched) f.amount.value = (cents / 100).toFixed(2);
+        if (cents && !f.amount.dataset.touched) { f.amount.value = (cents / 100).toFixed(2); tag(f.amount); }
       }
       const miss = document.getElementById("intake-chat-missing");
-      if (miss) miss.textContent = r.ready
-        ? "✓ Ready — review the form and file when you're satisfied."
-        : (r.missing || []).length ? "Still needed: " + r.missing.join(", ") : "";
+      if (miss) {
+        if (r.ready) {
+          // The handoff: conversation is done, the screen takes over — scroll
+          // the reviewer to the prefilled form; filing stays a human click.
+          miss.innerHTML = `✓ Ready — review the prefilled form and file when you're satisfied.
+            <button class="mini" type="button" onclick="document.getElementById('intake-form').scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('intake-form').classList.add('chat-handoff')">Review the prefilled form ↓</button>`;
+        } else {
+          miss.textContent = (r.missing || []).length ? "Still needed: " + r.missing.join(", ") : "";
+        }
+      }
     } catch (e) {
       thread?.lastElementChild?.remove();
       add("assistant", `⚠ ${e.message}`);
@@ -2196,11 +2206,15 @@ const Views = (() => {
   async function copilotLoadBatches(caseId) {
     try {
       const r = await Api.program.copilotListActions(caseId);
-      const box = document.getElementById("copilot-batches");
-      if (!box) return;
-      box.innerHTML = (r.batches || []).length
+      const html = (r.batches || []).length
         ? `<h3>Action batches</h3>` + r.batches.map((b) => copilotBatchCard(caseId, b)).join("")
         : "";
+      // Render into whichever surface is open — the case page panel and the
+      // assistant thread show the same batches off the same endpoints.
+      for (const elId of ["copilot-batches", "asst-batches"]) {
+        const box = document.getElementById(elId);
+        if (box) box.innerHTML = html;
+      }
     } catch { /* list is best-effort on load */ }
   }
 
@@ -2247,7 +2261,9 @@ const Views = (() => {
           const d = r.digest || {};
           const stat = (n, label) => n ? `<span class="chip-stat"><b>${n}</b> ${label}</span>` : "";
           const risk = (d.at_risk_sla || []).map((c) =>
-            `<tr class="click" onclick="location.hash='#/assistant/${c.case_id}'"><td class="mono">${esc(c.case_number)}</td>
+            // Deep-link both ways: the case number opens the case SCREEN
+            // (docket/documents), the row opens its conversation thread.
+            `<tr class="click" onclick="location.hash='#/assistant/${c.case_id}'"><td class="mono"><a href="#/cases/${c.case_id}" onclick="event.stopPropagation()">${esc(c.case_number)}</a></td>
              <td>${badge(c.status)}</td><td>${esc(c.lane)}</td><td class="sla-hot">${c.sla_days_remaining}d left</td></tr>`).join("");
           box.innerHTML = `<div class="asst-turn asst-ai">
             <div class="asst-who">briefing${r.model ? ` · ${esc(r.model)}` : " · structured digest"}</div>
@@ -2266,7 +2282,7 @@ const Views = (() => {
       try {
         const r = await Api.cases.list({ limit: 50 });
         const rows = (r.cases || []).map((c) =>
-          `<tr class="click" onclick="location.hash='#/assistant/${c.id}'"><td class="mono">${esc(c.case_number)}</td>
+          `<tr class="click" onclick="location.hash='#/assistant/${c.id}'"><td class="mono"><a href="#/cases/${c.id}" onclick="event.stopPropagation()">${esc(c.case_number)}</a></td>
            <td>${esc(c.service_line || "")}</td><td>${badge(c.status)}</td></tr>`).join("");
         return `<div class="view-head"><h1>Assistant</h1>
           <span class="muted">grounded on platform-verified case facts · advisory only · every turn is on the record</span></div>
@@ -2297,11 +2313,13 @@ const Views = (() => {
         if (msg) { input.value = ""; assistantSend(caseId, msg); }
       });
       asstQaLoad(caseId);
+      copilotLoadBatches(caseId); // pending action batches render inline — decide without leaving the thread
     });
     return `<div class="view-head"><h1>Assistant</h1>
       <span class="muted" id="asst-case">loading case…</span></div>
       <div id="asst-thread" class="asst-thread"></div>
       <div id="asst-qa"></div>
+      <div id="asst-batches"></div>
       <div class="asst-chips">
         <button class="mini" onclick="Views.assistantChip('${caseId}','brief',this)">▤ Brief me</button>
         <button class="mini" onclick="Views.assistantChip('${caseId}','determination_rationale',this)">✍ Draft rationale</button>
@@ -2358,7 +2376,8 @@ const Views = (() => {
           const r = await Api.program.copilotProposeActions(caseId);
           const acts = (r.actions || []).map((a) => `• ${a.type.replace(/_/g, " ")}`).join("\n") || "• (none)";
           asstAppend(caseId, "assistant",
-            `Proposed ${(r.actions || []).length} action(s) — review and approve on the case page:\n${r.rationale || ""}\n${acts}`, r.model || "");
+            `Proposed ${(r.actions || []).length} action(s) — review and approve in the batch card below, without leaving this thread:\n${r.rationale || ""}\n${acts}`, r.model || "");
+          copilotLoadBatches(caseId);
         } else {
           asstAppend(caseId, "user", kind === "correspondence" ? "Draft correspondence." : "Draft a determination rationale.");
           const r = await Api.program.copilotDraft(caseId, kind);
