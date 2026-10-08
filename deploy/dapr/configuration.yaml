@@ -27,9 +27,20 @@ spec:
     # revisit before this config is ever reused for a production tenant.
     samplingRate: "1"
     otel:
-      endpointAddress: "otel-collector.otel.svc.cluster.local:4317"
+      # http on 4318, not grpc on 4317 -- confirmed live, this cluster's two
+      # OTHER working Dapr Configurations (dapr-system's own `daprsystem`
+      # control-plane config, and 54link-dev's) both use http/4318. grpc/4317
+      # passed CRD validation (the schema only checks it's a string) and
+      # Dapr's trace SAMPLER initialized normally, but the actual OTLP
+      # EXPORTER never logged a single construction/connection line at any
+      # level including debug, and zero case-api spans ever reached Jaeger
+      # despite confirmed TCP connectivity, a correct collector pipeline,
+      # and real spans being generated (visible via tracing.stdout) -- the
+      # grpc exporter path appears to silently never construct on this
+      # Dapr 1.14.5 build. http is the one proven to actually work here.
+      endpointAddress: "otel-collector.otel.svc.cluster.local:4318"
       isSecure: false
-      protocol: grpc
+      protocol: http
   # metric (Dapr <=1.12) and metrics (1.13+) are the same spec under two
   # names, kept for version compatibility; neither has a `port` field --
   # confirmed against this cluster's installed CRD schema (the file
