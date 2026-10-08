@@ -397,6 +397,17 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		// body before the decision lands. The edit itself is recorded so the
 		// audit trail always distinguishes model text from human text.
 		EditedBody string `json:"edited_body"`
+		// To/CC let the reviewer fix recipients before sending -- confirmed
+		// live: a case with no provider/payer account linked resolves to
+		// ZERO recipients at draft time (resolveRecipients has nothing to
+		// look up), nothing caught that before the draft reached QA, and
+		// approving it reached sendMail with an empty address list, which
+		// SMTP rejects as a raw "503 need RCPT command" -- the exact error
+		// the OLD response text promised a retry could fix, with no actual
+		// way to supply one. nil (omitted) means "don't touch the stored
+		// recipients"; present (even []) means "replace them with this".
+		To *[]string `json:"to"`
+		CC *[]string `json:"cc"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil ||
 		(in.Decision != "APPROVE" && in.Decision != "REJECT") {
@@ -507,6 +518,22 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	var to, cc []string
 	_ = json.Unmarshal(toJ, &to)
 	_ = json.Unmarshal(ccJ, &cc)
+	// Reviewer-supplied recipients replace whatever was stored (or never
+	// resolved) at draft time -- persisted immediately so a retry after a
+	// delivery failure doesn't need the address re-entered twice, and so
+	// the qa_reviews row stays the source of truth for what actually sent.
+	if in.To != nil {
+		to = *in.To
+		if toJ2, err := json.Marshal(to); err == nil {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET to_recipients=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, toJ2)
+		}
+	}
+	if in.CC != nil {
+		cc = *in.CC
+		if ccJ2, err := json.Marshal(cc); err == nil {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET cc_recipients=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, ccJ2)
+		}
+	}
 	deliveryError := ""
 	if in.Decision == "APPROVE" && channel == "note" {
 		// channel 'note' (copilot determination rationale): approval files the
@@ -539,7 +566,18 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		// separate facts: the decision always succeeds and is always
 		// audited; delivery failure is reported back in the 200 response
 		// instead of standing in for the whole request's status.
-		if err := s.sendMail(to, cc, subject, body); err != nil {
+		// Fails loud and clear instead of handing an empty recipient list to
+		// SMTP -- confirmed live: that produced a raw "503 need RCPT command"
+		// protocol error with no indication of WHY (the case had no
+		// provider/payer account linked, so resolveRecipients had nothing to
+		// resolve at draft time, and nothing caught it before now).
+		var sendErr error
+		if len(to) == 0 && len(cc) == 0 {
+			sendErr = fmt.Errorf("no recipient email address on this draft -- add one above and approve again")
+		} else {
+			sendErr = s.sendMail(to, cc, subject, body)
+		}
+		if err := sendErr; err != nil {
 			deliveryError = err.Error()
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))

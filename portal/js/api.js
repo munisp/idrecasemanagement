@@ -229,7 +229,7 @@ const Api = (() => {
       importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
       qaQueue: (caseId) => req("GET", `${t()}/qa${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
-      qaDecision: (id, decision, note, editedBody) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined }),
+      qaDecision: (id, decision, note, editedBody, to, cc) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined, to, cc }),
       intake: (opts) => req("GET", `${t()}/intake${qs(opts || {})}`),
       createIntake: (p) => req("POST", `${t()}/intake`, p),
       intakeBulk: (p) => req("POST", `${t()}/intake/bulk`, p),

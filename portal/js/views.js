@@ -1582,6 +1582,7 @@ const Views = (() => {
     try {
       const d = await Api.program.qaGet(qaId);
       const to = (d.to_recipients || []).join(", ");
+      const cc = (d.cc_recipients || []).join(", ");
       const isNote = d.channel === "note";
       const isCopilot = (d.artifact || "").startsWith("copilot_");
       box.dataset.channel = d.channel || "email";
@@ -1591,9 +1592,21 @@ const Views = (() => {
         ? `<textarea id="qa-edit" rows="14" style="width:100%">${esc(d.body)}</textarea>
            <p class="muted">Copilot draft — edit freely; the approved text is what gets ${isNote ? "filed" : "sent"}, and the edit is recorded.</p>`
         : `<pre class="qa-body">${esc(d.body)}</pre>`;
+      // Recipients are editable here, not just displayed -- confirmed live:
+      // a case with no provider/payer account linked resolves to ZERO
+      // recipients at draft time, nothing caught that before the draft
+      // reached this screen, and approving it used to fail at the raw SMTP
+      // layer ("503 need RCPT command") with no way to actually supply an
+      // address and retry, despite the error text promising one.
+      const recipientsHtml = isNote ? "" : `
+        <div class="form" style="margin:8px 0">
+          <label>To <input id="qa-to" value="${esc(to)}" placeholder="recipient emails, comma-separated" /></label>
+          <label>Cc <input id="qa-cc" value="${esc(cc)}" placeholder="cc emails, comma-separated" /></label>
+        </div>`;
       box.innerHTML = `<div class="card"><h3>${esc(d.subject)}</h3>
-        <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval" : `to: ${esc(to)} · channel ${esc(d.channel)}`}
+        <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval" : `channel ${esc(d.channel)}`}
           ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
+        ${recipientsHtml}
         ${bodyHtml}
         <div class="actions">
           <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
@@ -1605,6 +1618,9 @@ const Views = (() => {
     let note = "";
     const isNote = $("#qa-detail")?.dataset.channel === "note";
     const edited = $("#qa-edit") ? $("#qa-edit").value : "";
+    const splitEmails = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const to = isNote ? undefined : splitEmails($("#qa-to")?.value);
+    const cc = isNote ? undefined : splitEmails($("#qa-cc")?.value);
     if (decision === "REJECT") {
       const v = await UI.modal({ title: "Reject draft", danger: true, submitLabel: "Reject",
         fields: [{ name: "note", label: "Rejection note", type: "textarea", required: true,
@@ -1613,12 +1629,15 @@ const Views = (() => {
       note = v.note;
     } else if (isNote) {
       if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
+    } else if (!to.length && !cc.length) {
+      UI.toast("Add at least one recipient before approving — this draft has none on file.", { kind: "warn" });
+      return;
     } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
     await UI.run(el, async () => {
       try {
-        const r = await Api.program.qaDecision(qaId, decision, note, edited);
+        const r = await Api.program.qaDecision(qaId, decision, note, edited, to, cc);
         if (r.email_delivery_error) {
-          UI.toast(`Approved, but email delivery failed: ${r.email_delivery_error} — still APPROVED, retry once the address is fixed`,
+          UI.toast(`Approved, but email delivery failed: ${r.email_delivery_error} — still APPROVED, fix the address above and approve again to retry`,
             { kind: "warn", sticky: true });
         } else {
           UI.toast(decision === "APPROVE" ? (isNote ? "Approved — filed to case timeline" : "Approved — sent and logged") : "Rejected");
