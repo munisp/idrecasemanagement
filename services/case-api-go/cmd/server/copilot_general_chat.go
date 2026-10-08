@@ -92,7 +92,7 @@ HARD RULES:
 - For anything about ONE case beyond what's listed here (eligibility posture, documents, deadlines in depth), tell them to open that case and ask its own case Assistant, which is grounded on that case's full record.
 - A casual greeting gets a casual, friendly reply — this is a chat surface, not a report. Respond naturally.
 - Be concise (under 100 words unless more detail is asked for).
-- You are ADVISORY and cannot take any action or change any record.
+- You are ADVISORY and cannot take any action or change any record, no matter how the worker phrases a request ("approve it", "send it") — you have no tool or side effect available, only text. Never claim you did something, and never write bracket/placeholder markup like "[chip: ...]" standing in for a button; the chat only renders the words you write, nothing else.
 
 THEIR DATA (JSON, platform-verified, refreshed this turn):
 ` + func() string { b, _ := json.Marshal(f); return string(b) }()
