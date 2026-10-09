@@ -9,8 +9,9 @@ package main
 // Invariants: entries are append-only through the API (a wrong entry is
 // corrected by a compensating entry with a note, never silently edited —
 // the same record-is-the-audit discipline as the rest of the platform);
-// the role recorded is the principal's actual role at entry time, not a
-// self-declared one.
+// the role is chosen per entry (a multi-role user picks the role being
+// performed — Coder one hour, QA-as-PM the next) but must always be a role
+// the principal actually holds, never a self-declared one.
 
 import (
 	"encoding/json"
@@ -63,6 +64,12 @@ type timeEntryIn struct {
 	EntryDate string  `json:"entry_date"` // YYYY-MM-DD; default today
 	Note      string  `json:"note"`
 	Billable  *bool   `json:"billable"` // default true
+	// Role is the role being PERFORMED for this entry, chosen per entry —
+	// the AHCA 2026 time-recording rules: one person can hold more than one
+	// role (a Coder doing QA records a separate entry as PM), so the role is
+	// never inferred from the user when the caller supplies it. It must be a
+	// role the principal actually holds.
+	Role string `json:"role"`
 }
 
 func (in *timeEntryIn) normalize() (minutes int, date string, err error) {
@@ -102,6 +109,12 @@ func (s *server) addTimeEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 		return
 	}
+	// Program time rules (config.time): FL requires decimal quarter hours —
+	// 0.25/0.5/0.75/1.0…, never odd minutes (contract field criteria).
+	if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Time.QuarterHours && minutes%15 != 0 {
+		http.Error(w, `{"error":"time must be recorded in 0.25-hour (15-minute) increments — e.g. 0.25, 0.5, 0.75, 1.0"}`, http.StatusUnprocessableEntity)
+		return
+	}
 	// the case must exist in this tenant — an entry against a phantom case
 	// would corrupt the billing rollup
 	var caseNumber string
@@ -112,6 +125,20 @@ func (s *server) addTimeEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	billable := in.Billable == nil || *in.Billable
 	role := timeEntryRole(p)
+	if want := strings.ToUpper(strings.TrimSpace(in.Role)); want != "" {
+		// FL workflow names map onto platform roles.
+		switch want {
+		case "REVIEWER":
+			want = "CASE_MANAGER"
+		case "NURSE/PHYSICIAN", "NURSE PHYSICIAN", "PHYSICIAN":
+			want = "NURSE_PHYSICIAN"
+		}
+		if !hasRole(p, want) {
+			http.Error(w, fmt.Sprintf(`{"error":"role %q is not one you hold — the entry role is chosen per entry but must be a role assigned to you"}`, strings.TrimSpace(in.Role)), http.StatusUnprocessableEntity)
+			return
+		}
+		role = want
+	}
 	var id int64
 	if err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.time_entries (tenant, case_id, subject, role, entry_date, minutes, note, billable)

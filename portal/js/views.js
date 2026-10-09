@@ -610,6 +610,7 @@ const Views = (() => {
         html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
             <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
+            ${timeRoleSelect()}
             <input name="entry_date" type="date" aria-label="Date worked" />
             <input name="note" placeholder="what was done" maxlength="500" />
             <label><input type="checkbox" name="billable" checked /> billable</label>
@@ -1099,6 +1100,12 @@ const Views = (() => {
         <div class="kpi kpi-danger"><span class="kpi-n" id="kpi-breaches">—</span><span class="kpi-l">SLA breaches</span></div>
         <div class="kpi"><span class="kpi-n" id="kpi-collected">—</span><span class="kpi-l">Collected (30 days)</span></div>
       </div>
+      <div class="card"><h2>FL AHCA contract reports</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.flReportFn(this)">
+          <input name="from" type="date" /> <input name="to" type="date" />
+          <select name="kind"><option value="weekly">Weekly (16 cols A–P, task 2.4.2)</option><option value="monthly">Monthly (33 fields, task 2.4.3)</option></select>
+          <button class="mini">Download CSV</button></form>
+        <p class="muted">Exact contract column order; dates MM/DD/YYYY; unrecorded values render N/A; internal-only fields are never included.</p></div>
       <div class="rpt-tabs" role="tablist">
         ${RPT_TABS.map((t, i) => `<button class="rpt-tab rpt-accent-${t.accent} ${i === 0 ? "active" : ""}"
           id="rpt-tab-${t.key}" role="tab">${t.icon} ${esc(t.label)}</button>`).join("")}
@@ -1236,7 +1243,8 @@ const Views = (() => {
 
       <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
       <form id="p-send" class="inline-form">
-        <select name="template">${(cfg.correspondence?.templates || []).map((tp) =>
+        ${corrTplCache = cfg.correspondence?.templates || [], ""}
+        <select name="template" onchange="Views.corrTemplateBody(this)">${(cfg.correspondence?.templates || []).map((tp) =>
           `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
         <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
         <input name="to" placeholder="to emails (comma-separated)" required />
@@ -2890,9 +2898,10 @@ const Views = (() => {
     const tpls = prog?.config?.correspondence?.templates || [];
     if (!tpls.length)
       return `<div class="card"><h3>✉ Send mail</h3><p class="muted">This program defines no correspondence templates — use the case screen's correspondence tools.</p></div>`;
+    corrTplCache = tpls;
     return `<div class="card"><h3>✉ Send mail</h3>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.asstSendMail('${caseId}', this)">
-        <select name="template">${tpls.map((tp) =>
+        <select name="template" onchange="Views.corrTemplateBody(this)">${tpls.map((tp) =>
           `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
         <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
         <input name="to" placeholder="to emails (comma-separated)" required />
@@ -3276,6 +3285,7 @@ const Views = (() => {
     return `<div class="card"><h3>⏱ Time on this dispute — ${fmtMins(r.total_minutes)} logged</h3>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.asstTimeAdd('${caseId}', this)">
         <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required />
+        ${timeRoleSelect()}
         <input name="entry_date" type="date" />
         <input name="note" placeholder="what was done" maxlength="500" />
         <label><input type="checkbox" name="billable" checked /> billable</label>
@@ -3293,6 +3303,7 @@ const Views = (() => {
           entry_date: form.entry_date.value || "",
           note: form.note.value.trim(),
           billable: form.billable.checked,
+          role: form.role ? form.role.value : "",
         });
         asstAppend(caseId, "user", `Log ${form.hours.value}h${form.note.value.trim() ? " — " + form.note.value.trim() : ""}.`);
         asstAppend(caseId, "assistant", "Time logged against this dispute under your name and role. The entry is append-only — a correction is a compensating entry, never an edit.", "");
@@ -3302,8 +3313,33 @@ const Views = (() => {
     }, "Logging…");
   }
 
+  // Correspondence compose: pre-fill the body with the program template's
+  // standard text (FL: verbatim from the "Email Templates FL AHCA" source
+  // document). Fills only when the body is empty or still holds another
+  // template's untouched text — staff edits are never clobbered.
+  let corrTplCache = [];
+  function corrTemplateBody(sel) {
+    const form = sel.form;
+    const tp = corrTplCache.find((t) => t.key === sel.value);
+    if (!tp || !tp.body || !form || !form.body) return;
+    const ta = form.body;
+    const untouched = corrTplCache.some((t) => t.body && t.body === ta.value);
+    if (!ta.value.trim() || untouched) ta.value = tp.body;
+  }
+
   // ---- Time entries (per-role effort, per dispute) ------------------------
   const fmtMins = (m) => `${(m / 60).toFixed(m % 60 ? 2 : 0)}h`;
+
+  // AHCA 2026 time recording: the role is chosen PER ENTRY from the roles
+  // the user actually holds — one person can code one entry and QA-as-PM
+  // the next. Blank means the server records the primary role.
+  const timeRoleSelect = () => {
+    const roles = (Auth.claims()?.roles || []);
+    if (roles.length < 2) return "";
+    return `<select name="role" aria-label="Role performed" title="Role being performed for this entry">
+      <option value="">role: primary</option>
+      ${roles.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("")}</select>`;
+  };
 
   async function timeCaseBox(caseId) {
     try {
@@ -3327,6 +3363,7 @@ const Views = (() => {
           entry_date: form.entry_date.value || "",
           note: form.note.value.trim(),
           billable: form.billable.checked,
+          role: form.role ? form.role.value : "",
         });
         UI.toast("Time logged");
         form.hours.value = ""; form.note.value = "";
@@ -4512,5 +4549,12 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
+  async function flReportFn(form) {
+    try {
+      if (form.kind.value === "weekly") await Api.program.flWeeklyReport(form.from.value, form.to.value);
+      else await Api.program.flMonthlyReport(form.from.value, form.to.value);
+    } catch (e) { alert(e.message); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();
