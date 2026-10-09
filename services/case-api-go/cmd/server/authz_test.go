@@ -203,6 +203,8 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		// narrower set (not crmStaffRoles) is a safe superset of the UI.
 		{"caseStaff: CODER allowed", []string{"CODER"}, caseStaffRoles, true},
 		{"caseStaff: NURSE_PHYSICIAN allowed", []string{"NURSE_PHYSICIAN"}, caseStaffRoles, true},
+		{"caseStaff: DOCTOR satisfies clinical grant", []string{"DOCTOR"}, caseStaffRoles, true},
+		{"caseStaff: NURSE satisfies clinical grant", []string{"NURSE"}, caseStaffRoles, true},
 		{"caseStaff: PARTY rejected", []string{"PARTY"}, caseStaffRoles, false},
 		{"caseStaff: FINANCE rejected", []string{"FINANCE"}, caseStaffRoles, false},
 		// crmStaffRoles: relateCases/createAccount/createContact/createTask/

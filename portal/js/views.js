@@ -603,6 +603,21 @@ const Views = (() => {
       } else html += `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
 
+      // Time — per-role effort ledger on this dispute. Append-only; the
+      // role stamped is the logger's real role. Eligibility decides whether
+      // the work is billable; this records that it happened.
+      if (can("CASE_MANAGER", "PM", "CODER", "DOCTOR", "NURSE", "NURSE_PHYSICIAN", "ARBITRATOR", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
+            <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
+            <input name="entry_date" type="date" aria-label="Date worked" />
+            <input name="note" placeholder="what was done" maxlength="500" />
+            <label><input type="checkbox" name="billable" checked /> billable</label>
+            <button class="mini">Log time</button>
+            <span class="muted">recorded under your name and role — corrections are compensating entries, never edits</span></form>`;
+        timeCaseBox(id).then((h) => { const b = document.getElementById("time-box"); if (b) b.innerHTML = h; });
+      }
+
       // Program panels (per-state rules: eligibility, correspondence/QA,
       // invoices, claims, dual status, program dates, opt-out) — rendered
       // only when the tenant runs a custom program.
@@ -2618,6 +2633,80 @@ const Views = (() => {
     }, "Clearing…");
   }
 
+  // ---- Time entries (per-role effort, per dispute) ------------------------
+  const fmtMins = (m) => `${(m / 60).toFixed(m % 60 ? 2 : 0)}h`;
+
+  async function timeCaseBox(caseId) {
+    try {
+      const r = await Api.cases.timeList(caseId);
+      const rows = (r.entries || []).map((e) => `<tr>
+        <td>${esc(e.entry_date)}</td><td>${esc(e.subject)}</td><td>${badge(e.role)}</td>
+        <td>${fmtMins(e.minutes)}</td><td>${e.billable ? "✓" : "—"}</td><td class="muted">${esc(e.note || "")}</td></tr>`).join("");
+      return rows
+        ? `<p><b>${fmtMins(r.total_minutes)}</b> logged on this dispute</p>
+           <table><thead><tr><th>Date</th><th>Who</th><th>Role</th><th>Time</th><th>Billable</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<p class="muted">No time logged yet.</p>`;
+    } catch (e) { return `<p class="muted">${esc(e.message)}</p>`; }
+  }
+
+  async function timeAdd(caseId, form) {
+    const btn = form.querySelector("button");
+    await UI.run(btn, async () => {
+      try {
+        await Api.cases.timeAdd(caseId, {
+          hours: parseFloat(form.hours.value),
+          entry_date: form.entry_date.value || "",
+          note: form.note.value.trim(),
+          billable: form.billable.checked,
+        });
+        UI.toast("Time logged");
+        form.hours.value = ""; form.note.value = "";
+        const h = await timeCaseBox(caseId);
+        const b = document.getElementById("time-box");
+        if (b) b.innerHTML = h;
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Logging…");
+  }
+
+  // Weekly (per dispute) and monthly (whole team, per dispute) rollups —
+  // the billing-review tables.
+  async function timeReport() {
+    if (!can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Team time</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    const now = new Date();
+    const defMonth = now.toISOString().slice(0, 7);
+    return `<div class="view-head"><h1>Team time</h1>
+      <span class="muted">hours worked per dispute — weekly and monthly rollups for billing review</span></div>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.timeReportRun(this)">
+        <label>Week containing <input name="week" type="date" /></label>
+        <label>or month <input name="month" type="month" value="${defMonth}" /></label>
+        <button>Run report</button></form>
+      <div id="time-rpt"></div>`;
+  }
+
+  async function timeReportRun(form) {
+    const box = document.getElementById("time-rpt");
+    const btn = form.querySelector("button");
+    box.innerHTML = `<p class="muted">Computing…</p>`;
+    await UI.run(btn, async () => {
+      try {
+        const opts = form.week.value ? { week: form.week.value } : { month: form.month.value };
+        const r = await Api.program.timeReport(opts);
+        const caseRows = (r.by_case || []).map((c) => `<tr>
+          <td class="mono"><a href="#/cases/${c.case_id}">${esc(c.case_number || c.case_id.slice(0, 8) + "…")}</a></td>
+          <td>${fmtMins(c.minutes)}</td><td>${fmtMins(c.billable_minutes)}</td><td>${c.people}</td></tr>`).join("");
+        const personRows = (r.by_person || []).map((p) => `<tr>
+          <td>${esc(p.case_number)}</td><td>${fmtMins(p.minutes)}</td><td>${fmtMins(p.billable_minutes)}</td></tr>`).join("");
+        box.innerHTML = `<h2>${esc(r.period)}</h2>
+          <p><b>${fmtMins(r.total_minutes)}</b> total · <b>${fmtMins(r.billable_minutes)}</b> billable</p>
+          <h3>By dispute</h3>
+          ${caseRows ? `<table><thead><tr><th>Case</th><th>Hours</th><th>Billable</th><th>People</th></tr></thead><tbody>${caseRows}</tbody></table>` : `<p class="muted">No time logged in this period.</p>`}
+          <h3>By team member</h3>
+          ${personRows ? `<table><thead><tr><th>Who</th><th>Hours</th><th>Billable</th></tr></thead><tbody>${personRows}</tbody></table>` : ""}`;
+      } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
+    }, "Computing…");
+  }
+
   async function uploadCheck(file, btn) {
     if (!file) { UI.toast("Choose a check image first", { kind: "warn" }); return; }
     await UI.run(btn, async () => {
@@ -2878,7 +2967,7 @@ const Views = (() => {
         { name: "email", label: "First user — email" },
         { name: "role", label: "First user — role", value: "CASE_MANAGER", options: [
           ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
-          ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse/Physician"], ["ATTORNEY", "Attorney"],
+          ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
       ],
     });
@@ -3012,7 +3101,7 @@ const Views = (() => {
         { name: "email", label: "Email", required: true },
         { name: "role", label: "Role", value: "CASE_MANAGER", options: [
           ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
-          ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse/Physician"], ["ATTORNEY", "Attorney"],
+          ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
       ],
     });
@@ -3096,5 +3185,5 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
 })();

@@ -3,14 +3,21 @@ package main
 // Public pre-case intake for programmed tenants (FL AHCA CDR today, any
 // future state that adopts program_rules the same way). Mirrors
 // publicApply's shape (per-IP throttle, tenant validated) but produces a
-// real case row in PENDING_INTAKE instead of a stakeholder_applications
-// row: AHCA's Filing Party needs upload/download links before any case
-// exists, and the share-link system is hard-wired to a case_id that must
-// already exist. Decision (scoped with the user): create the case row
-// immediately rather than fork a parallel intake-scoped document system --
-// this reuses ShareBox, documents, notes, and correspondence completely
-// unmodified. An abandoned shell case with no packet is closed
-// CLOSED_REFUNDED by AhcaDisputeWorkflow's own 7-day refund-window wait.
+// real case row instead of a stakeholder_applications row: AHCA's Filing
+// Party needs upload/download links before any case exists, and the
+// share-link system is hard-wired to a case_id that must already exist.
+// Decision (scoped with the user): create the case row immediately rather
+// than fork a parallel intake-scoped document system -- this reuses
+// ShareBox, documents, notes, and correspondence completely unmodified.
+//
+// PAYMENT GATE: when the program charges an initial review fee, the case is
+// created in AWAITING_PAYMENT and the party receives only a payment link;
+// the case number, filing instructions, and upload link are released by
+// activatePaidIntake the moment the fee settles (Stripe webhook or offline
+// settlement), and shareUpload refuses AWAITING_PAYMENT cases outright.
+// With no fee configured the intake completes immediately (PENDING_INTAKE).
+// An abandoned shell case with no packet is closed CLOSED_REFUNDED by
+// AhcaDisputeWorkflow's own 7-day refund-window wait.
 
 import (
 	"crypto/rand"
@@ -77,6 +84,19 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 		return
 	}
+	// A payment-gated intake must not disclose the case identifiers to the
+	// public caller — the party learns the case number only in the
+	// post-payment email.
+	var status string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
+	if status == "AWAITING_PAYMENT" {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": "AWAITING_PAYMENT", "payment_required": true,
+			"message": "A secure payment link for the initial review fee has been emailed to you. Your case number and upload link follow once payment is confirmed.",
+		})
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "case_number": caseNumber, "status": "PENDING_INTAKE", "filing_party_type": fpt,
 	})
@@ -133,29 +153,97 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 		return caseID, caseNumber, werr
 	}
 
-	// Filing-instructions download link + an upload-only link for the filing
-	// packet, same ShareBox primitives the Reviewer uses for every later
-	// stage (G9) -- works immediately because the case already exists.
-	downloadToken := s.mintShareLink(r, tenant, caseID, "download", "", 30)
-	uploadToken := s.mintShareLink(r, tenant, caseID, "upload", "", 30)
-
-	// The docs are explicit that the FIRST email includes the initial fee
-	// payment link ("Capitol Bridge requires the ... fee to be paid in full
-	// ... click the link below"), not a later one -- issue the invoice and
-	// open its Stripe Checkout session now, same party assumption the
-	// source docs themselves make ("every document assumes the provider
-	// files"), degrading gracefully (no link, not a failed request) when
-	// Stripe isn't configured for this deployment.
-	paymentLine := "A payment link for the initial review fee will follow once your packet is received."
+	// PAYMENT-GATED INTAKE: when the program charges an initial review fee,
+	// the case is created in AWAITING_PAYMENT and the party receives ONLY a
+	// payment link. The case number, filing instructions, and the secure
+	// upload link are released exclusively by activatePaidIntake once the fee
+	// settles (Stripe webhook or offline settlement) — and the share-upload
+	// endpoint independently refuses AWAITING_PAYMENT cases, so documents
+	// cannot reach the docket before payment by any path.
 	if cfg.Fees.InitialFeeCents > 0 {
-		if checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents); cerr == nil {
-			paymentLine = fmt.Sprintf("Pay the initial review fee ($%d.%02d) here: %s",
-				cfg.Fees.InitialFeeCents/100, cfg.Fees.InitialFeeCents%100, checkoutURL)
+		checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
+		if cerr == nil {
+			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
+				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
+				sanitizeTenant(tenant)), caseID); uerr == nil {
+				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
+					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents,
+				})
+				body := fmt.Sprintf(
+					"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
+						"One step remains before your dispute is opened: payment of the initial review fee ($%d.%02d).\n\n"+
+						"Pay securely here: %s\n\n"+
+						"Once your payment is confirmed you will receive your case number, the filing "+
+						"instructions and packet, and your secure document-upload link. Documents cannot "+
+						"be accepted before payment.",
+					cfg.Fees.InitialFeeCents/100, cfg.Fees.InitialFeeCents%100, checkoutURL)
+				if merr := s.sendMail([]string{email}, nil, "Claims dispute — payment required to open your case", body); merr == nil {
+					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake")
+				} else {
+					s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
+						fmt.Sprintf("Payment-required email SMTP delivery failed: %s", merr))
+				}
+				s.notify(r, tenant, "*", "AHCA_INTAKE",
+					fmt.Sprintf("Intake awaiting fee payment: %s (%s)", org, email), "#/cases/"+caseID)
+				return caseID, caseNumber, nil
+			}
 		} else {
 			s.logActivity(r.Context(), tenant, caseID, "CHECKOUT_FAILED",
 				fmt.Sprintf("Initial fee checkout session could not be created: %s", cerr))
 		}
 	}
+
+	// No initial fee configured (or Stripe unavailable for this deployment) —
+	// the intake completes immediately, links included, exactly as before.
+	s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
+
+	s.notify(r, tenant, "*", "AHCA_INTAKE",
+		fmt.Sprintf("New filing instructions request: %s (%s)", org, email), "#/cases/"+caseID)
+	return caseID, caseNumber, nil
+}
+
+// activatePaidIntake releases a payment-gated intake: the ONLY producer of
+// the case number, filing instructions, and upload link for an
+// AWAITING_PAYMENT case. Idempotent — the status guard makes a duplicate
+// webhook replay a no-op. Called from the Stripe webhook and from
+// settleInvoice's offline PAY path (check/ACH).
+func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
+	tbl := sanitizeTenant(tenant)
+	res, err := s.db.Exec(r.Context(), fmt.Sprintf(
+		`UPDATE tenant_%s.cases SET status='PENDING_INTAKE', updated_at=now()
+		 WHERE id=$1 AND status='AWAITING_PAYMENT'`, tbl), caseID)
+	if err != nil || res.RowsAffected() == 0 {
+		return // not payment-gated, or already activated
+	}
+	var caseNumber string
+	var details []byte
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT case_number, coalesce(details,'{}'::jsonb) FROM tenant_%s.cases WHERE id=$1`, tbl),
+		caseID).Scan(&caseNumber, &details); err != nil {
+		return
+	}
+	var d map[string]any
+	_ = json.Unmarshal(details, &d)
+	email, _ := d["requester_email"].(string)
+	s.logAudit(r.Context(), tenant, caseID, "INTAKE_ACTIVATED", map[string]any{
+		"case_number": caseNumber, "trigger": "fee payment settled",
+	})
+	s.logActivity(r.Context(), tenant, caseID, "INTAKE_ACTIVATED",
+		"Initial review fee paid — case number and secure upload link released to the filing party")
+	if email != "" {
+		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
+	}
+	s.notify(r, tenant, "*", "AHCA_INTAKE",
+		fmt.Sprintf("Fee paid — intake activated: %s", caseNumber), "#/cases/"+caseID)
+}
+
+// sendIntakeLinks mints the filing-instructions download link and the
+// upload-only packet link and emails them (with the case number) via the
+// submission_instructions template. Shared by the no-fee immediate path and
+// by activatePaidIntake's payment-gated release.
+func (s *server) sendIntakeLinks(r *http.Request, tenant, caseID, caseNumber, email string) {
+	downloadToken := s.mintShareLink(r, tenant, caseID, "download", "", 30)
+	uploadToken := s.mintShareLink(r, tenant, caseID, "upload", "", 30)
 
 	// submission_instructions has no qa_role in config (sends immediately,
 	// per draftCorrespondence's own semantics for a template with none) --
@@ -175,9 +263,8 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 			"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
 				"Case number: %s\n\n"+
 				"Download the filing instructions and packet: https://idre.newfire.app/api/share/%s\n"+
-				"Upload your completed filing packet: https://idre.newfire.app/api/share/%s\n\n"+
-				"%s",
-			caseNumber, downloadToken, uploadToken, paymentLine,
+				"Upload your completed filing packet: https://idre.newfire.app/api/share/%s",
+			caseNumber, downloadToken, uploadToken,
 		)
 		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
@@ -186,10 +273,6 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 				fmt.Sprintf("Submission instructions SMTP delivery failed: %s", merr))
 		}
 	}
-
-	s.notify(r, tenant, "*", "AHCA_INTAKE",
-		fmt.Sprintf("New filing instructions request: %s (%s)", org, email), "#/cases/"+caseID)
-	return caseID, caseNumber, nil
 }
 
 // mintShareLink is createShareLink's logic without the HTTP/RBAC wrapper,

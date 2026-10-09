@@ -155,6 +155,9 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
 	if status == "PAID" {
 		s.maybeMarkDecidedInvoicePaid(r, tenant, caseID)
+		// Offline settlement (check/ACH/manual) releases a payment-gated
+		// intake exactly like the Stripe webhook path does.
+		s.activatePaidIntake(r, tenant, caseID)
 		// Program rules (invoice.settled) — offline settlement path
 		// (check/ACH/manual); same semantics as the Stripe webhook path.
 		s.fireEventRules(r, tenant, "invoice.settled", map[string]any{

@@ -79,7 +79,11 @@
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
-          msg.textContent = `Case ${data.case_number} opened — check your email for filing instructions and an upload link.`;
+          if (data.payment_required) {
+            msg.textContent = "One step left: a secure payment link for the initial review fee has been emailed to you. Once payment is confirmed, you'll receive your case number, filing instructions, and a secure upload link — documents can't be accepted before payment.";
+          } else {
+            msg.textContent = `Case ${data.case_number} opened — check your email for filing instructions and an upload link.`;
+          }
           e.target.reset();
         } else {
           msg.classList.add("err");

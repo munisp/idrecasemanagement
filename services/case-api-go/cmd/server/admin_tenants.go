@@ -61,7 +61,7 @@ func generateTempPassword() (string, error) {
 
 var validTenantRoles = map[string]bool{
 	"CASE_MANAGER": true, "ARBITRATOR": true, "PM": true, "CODER": true,
-	"NURSE_PHYSICIAN": true, "ATTORNEY": true, "FINANCE": true,
+	"NURSE_PHYSICIAN": true, "DOCTOR": true, "NURSE": true, "ATTORNEY": true, "FINANCE": true,
 	"STATE_AUDITOR": true, "PARTY": true,
 }
 
@@ -266,7 +266,7 @@ func (s *server) createTenant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !validTenantRoles[in.FirstUser.Role] {
-			http.Error(w, `{"error":"first_user.role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"first_user.role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
 			return
 		}
 	}
@@ -424,7 +424,7 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !validTenantRoles[in.Role] {
-		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
 		return
 	}
 	var exists bool

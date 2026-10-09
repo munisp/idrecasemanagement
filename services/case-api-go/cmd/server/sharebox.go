@@ -114,6 +114,15 @@ func (s *server) shareUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"link expired or invalid"}`, http.StatusGone)
 		return
 	}
+	// Payment-gated intake: defense in depth. Upload links are only minted
+	// after the initial fee settles, but even a valid link must not accept
+	// documents while the case awaits payment.
+	var caseStatus string
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(g.Tenant)), g.CaseID).Scan(&caseStatus); err == nil && caseStatus == "AWAITING_PAYMENT" {
+		http.Error(w, `{"error":"the initial review fee must be paid before documents can be uploaded"}`, http.StatusPaymentRequired)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
 	if err := r.ParseMultipartForm(maxDocBytes); err != nil {
 		http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
