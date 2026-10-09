@@ -461,3 +461,42 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
 }
 $$::jsonb)
 ON CONFLICT (tenant) DO UPDATE SET config=EXCLUDED.config, program=EXCLUDED.program, updated_at=now();
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Program-config protection (2026): fees, billing, and reconciliation
+-- subtrees are MIGRATION-ONLY. The API's DB role can update {rules} and
+-- {manifest} at runtime, but any change to config->'fees', ->'billing', or
+-- ->'reconciliation' is rejected unless the session explicitly opts in:
+--     SET LOCAL app.config_migration = 'on';   -- migrations only
+-- Every config change (guarded or not) is written to
+-- program_config_history — the tamper-evident trail for direct-SQL edits
+-- that bypass the application's own audit path.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.program_config_history (
+  id         bigserial PRIMARY KEY,
+  tenant     text NOT NULL,
+  changed_by text NOT NULL DEFAULT current_user,
+  changed_at timestamptz NOT NULL DEFAULT now(),
+  old_config jsonb,
+  new_config jsonb
+);
+
+CREATE OR REPLACE FUNCTION public.guard_program_config() RETURNS trigger AS $$
+BEGIN
+  IF current_setting('app.config_migration', true) IS DISTINCT FROM 'on' AND (
+       NEW.config->'fees'           IS DISTINCT FROM OLD.config->'fees'
+    OR NEW.config->'billing'        IS DISTINCT FROM OLD.config->'billing'
+    OR NEW.config->'reconciliation' IS DISTINCT FROM OLD.config->'reconciliation') THEN
+    RAISE EXCEPTION 'program fees/billing/reconciliation are migration-only: SET LOCAL app.config_migration = ''on'' inside a migration transaction';
+  END IF;
+  IF NEW.config IS DISTINCT FROM OLD.config THEN
+    INSERT INTO public.program_config_history (tenant, old_config, new_config)
+    VALUES (OLD.tenant, OLD.config, NEW.config);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS program_config_guard ON public.program_rules;
+CREATE TRIGGER program_config_guard BEFORE UPDATE ON public.program_rules
+  FOR EACH ROW EXECUTE FUNCTION public.guard_program_config();
