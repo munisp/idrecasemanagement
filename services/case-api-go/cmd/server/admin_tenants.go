@@ -62,7 +62,7 @@ func generateTempPassword() (string, error) {
 var validTenantRoles = map[string]bool{
 	"CASE_MANAGER": true, "ARBITRATOR": true, "PM": true, "CODER": true,
 	"NURSE_PHYSICIAN": true, "DOCTOR": true, "NURSE": true, "ATTORNEY": true, "FINANCE": true,
-	"STATE_AUDITOR": true, "PARTY": true,
+	"STATE_AUDITOR": true, "PARTY": true, "TPA": true,
 }
 
 type createTenantRequest struct {

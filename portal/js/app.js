@@ -140,6 +140,12 @@
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
+  if (has("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+    links.push(["#/billing", "🧾", "Billing"]);
+    links.push(["#/arap", "⚖", "AR / AP"]);
+    links.push(["#/recon", "⇄", "Reconciliation"]);
+  }
+  if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
@@ -276,6 +282,7 @@
     [/^#\/billing$/, Views.billingInvoices],
     [/^#\/arap$/, Views.arapView],
     [/^#\/recon$/, Views.reconView],
+    [/^#\/tpa$/, Views.tpaView],
     [/^#\/rules$/, Views.rulesAdmin],
     [/^#\/team$/, Views.teamAdmin],
     [/^#\/audit$/, Views.auditLog],

@@ -40,6 +40,22 @@
       <button class="btn solid lg" type="submit" id="f-submit">Start my dispute</button>
       <p id="f-msg" class="form-msg" role="status"></p>
     </form>
+    <hr style="margin:2.5rem 0" />
+    <h2>Filing on behalf of providers or health plans?</h2>
+    <p class="muted">Third-party administrators (revenue-cycle firms, legal representatives, plan
+      delegates) can register once, then file, pay, and track disputes on behalf of all their
+      client organizations from the portal. Registration is immediate — you'll get a one-time
+      claim code to link your portal account.</p>
+    <form id="tpa-form" class="apply-form" novalidate>
+      <label>State program * <select id="t-state" required></select></label>
+      <label>TPA organization name * <input id="t-org" maxlength="200" required placeholder="Your organization" /></label>
+      <div class="grid2">
+        <label>Contact name <input id="t-contact" maxlength="120" /></label>
+        <label>Contact email * <input id="t-email" type="email" required maxlength="200" /></label>
+      </div>
+      <button class="btn solid" type="submit" id="t-submit">Register as a TPA</button>
+      <p id="t-msg" class="form-msg" role="status"></p>
+    </form>
   </main>
 
   <footer class="site-foot"><div class="wrap">
@@ -93,6 +109,42 @@
         msg.classList.add("err"); msg.textContent = "Network error — please try again.";
       } finally {
         btn.disabled = false; btn.textContent = "Start my dispute";
+      }
+    });
+    const tsel = document.getElementById("t-state");
+    tsel.innerHTML = sel.innerHTML;
+    if (pre) tsel.value = pre.toLowerCase();
+    document.getElementById("tpa-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById("t-msg"), btn = document.getElementById("t-submit");
+      msg.className = "form-msg"; msg.textContent = "";
+      const body = {
+        tenant: tsel.value,
+        name: document.getElementById("t-org").value.trim(),
+        contact_name: document.getElementById("t-contact").value.trim(),
+        contact_email: document.getElementById("t-email").value.trim(),
+      };
+      if (!body.tenant || !body.name || !body.contact_email) {
+        msg.classList.add("err"); msg.textContent = "State, organization name, and email are required."; return;
+      }
+      btn.disabled = true; btn.textContent = "Registering…";
+      try {
+        const resp = await fetch("/api/public/tpa/register", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          msg.classList.add("ok");
+          msg.textContent = `Registered! Your one-time claim code is ${data.claim_code} — save it now, it is shown only once. Then log in to the portal, open TPA, and enter this code to link your organization.`;
+          e.target.reset();
+        } else {
+          msg.classList.add("err");
+          msg.textContent = data.error || `Registration failed (${resp.status}).`;
+        }
+      } catch {
+        msg.classList.add("err"); msg.textContent = "Network error — please try again.";
+      } finally {
+        btn.disabled = false; btn.textContent = "Register as a TPA";
       }
     });
   </script>

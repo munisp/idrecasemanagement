@@ -376,3 +376,58 @@ CREATE TABLE IF NOT EXISTS public.billing_payment_allocations (
 );
 CREATE INDEX IF NOT EXISTS billing_alloc_case ON public.billing_payment_allocations (tenant, case_id);
 CREATE INDEX IF NOT EXISTS billing_alloc_payment ON public.billing_payment_allocations (payment_id);
+
+-- ============================================================
+-- Third-party administrators (tpa.go): organizations that file,
+-- pay, and track disputes on behalf of initiating parties.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.tpas (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant        text NOT NULL,
+    name          text NOT NULL,
+    contact_name  text,
+    contact_email text NOT NULL,
+    claim_code    text UNIQUE,             -- one-time, burned on claim
+    status        text NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE|SUSPENDED (self-serve onboarding; states suspend)
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, contact_email)
+);
+
+-- Portal users linked to their TPA org (via one-time claim code).
+CREATE TABLE IF NOT EXISTS public.tpa_users (
+    tenant    text NOT NULL,
+    user_sub  text NOT NULL,
+    tpa_id    uuid NOT NULL REFERENCES public.tpas(id),
+    linked_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, user_sub)
+);
+
+-- Initiating parties a TPA acts for (providers and/or health plans).
+CREATE TABLE IF NOT EXISTS public.tpa_clients (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant        text NOT NULL,
+    tpa_id        uuid NOT NULL REFERENCES public.tpas(id),
+    party_name    text NOT NULL,
+    party_type    text NOT NULL DEFAULT 'PROVIDER',  -- PROVIDER|HEALTH_PLAN
+    contact_email text,
+    status        text NOT NULL DEFAULT 'ACTIVE',
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, tpa_id, party_name)
+);
+
+-- Per-dispute origin: who the case belongs to (initiating party) vs who
+-- filed/paid on their behalf (TPA). Financial attribution joins here.
+CREATE TABLE IF NOT EXISTS public.case_origin (
+    tenant                 text NOT NULL,
+    case_id                text NOT NULL,
+    tpa_id                 uuid NOT NULL REFERENCES public.tpas(id),
+    client_id              uuid NOT NULL REFERENCES public.tpa_clients(id),
+    initiating_party_name  text NOT NULL,
+    initiating_party_type  text NOT NULL,
+    filed_by_email         text NOT NULL,
+    created_at             timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, case_id)
+);
+CREATE INDEX IF NOT EXISTS case_origin_tpa ON public.case_origin (tenant, tpa_id);
+CREATE INDEX IF NOT EXISTS case_origin_client ON public.case_origin (client_id);

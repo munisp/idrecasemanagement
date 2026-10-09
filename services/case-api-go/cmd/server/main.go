@@ -564,6 +564,18 @@ func main() {
 		r.Post("/arap/payables/{payableId}/{action}", s.settlePayable) // settle|void
 		r.Get("/arap/summary", s.arapSummary)                         // AR vs AP net position
 		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
+
+		// Third-party administrators (tpa.go): file/pay/track on behalf of
+		// multiple initiating parties (providers or health plans).
+		r.Post("/tpa/claim", s.claimTPA)                    // burn a one-time claim code, bind user -> TPA
+		r.Get("/tpa/me", s.tpaMe)                           // my TPA org + clients
+		r.Post("/tpa/clients", s.tpaAddClient)              // add an initiating party I represent
+		r.Get("/tpa/clients", s.tpaListClients)
+		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
+		r.Post("/tpa/intake", s.tpaIntake)                  // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)             // status of all my clients' disputes
+		r.Get("/admin/tpas", s.adminListTPAs)               // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus) // suspend|reactivate
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
@@ -670,6 +682,7 @@ func main() {
 
 	// Public pre-case intake for programmed tenants (no OIDC; per-IP throttled).
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
+	r.Post("/api/public/tpa/register", s.registerTPA)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
 	// intakes to INELIGIBLE and raises staff notifications for the letters.
