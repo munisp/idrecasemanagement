@@ -83,6 +83,7 @@ type ProgramConfig struct {
 	} `json:"correspondence"`
 	Billing        BillingConfig `json:"billing"`        // service-fee invoicing engine (billing.go)
 	Reconciliation ReconConfig   `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
+	Bank           BankConfig    `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.

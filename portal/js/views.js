@@ -3455,7 +3455,10 @@ const Views = (() => {
           <input name="case_id" placeholder="case id (optional)" />
           <input name="due_date" type="date" />
           <button class="mini">Record obligation</button></form>` : ""}
-        <div id="arap-ap"><p class="muted">Loading…</p></div></div>`;
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<p><button class="mini" onclick="Views.arapNacha()">Generate ACH (NACHA) payout file</button>
+          <span class="muted"> from open payables that carry bank destinations</span></p>` : ""}
+        <div id="arap-ap"><p class="muted">Loading…</p></div>
+        <div id="arap-nacha"></div></div>`;
   }
 
   async function arapSummaryBox() {
@@ -3504,7 +3507,43 @@ const Views = (() => {
       const ag = r.aging || {};
       box.innerHTML = `<p>${["current", "1-30", "31-60", "61-90", "90+"].map((b) => `<span class="chip">${b}: <b>${usdC(ag[b] || 0)}</b></span> `).join("")}</p>
         ${rows ? `<table class="tbl"><thead><tr><th>Payee</th><th>Source</th><th>Amount</th><th>Case</th><th>Basis</th><th>Days</th><th>Bucket</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No open obligations.</p>'}`;
+      nachaBatchesBox();
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  function saveTextFile(name, text) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    a.download = name; a.click(); URL.revokeObjectURL(a.href);
+  }
+
+  async function arapNacha() {
+    const box = document.getElementById("arap-nacha");
+    try {
+      const r = await Api.program.nachaPayout({});
+      saveTextFile(r.filename, r.file);
+      box.innerHTML = `<p class="ok">Batch ${esc(r.batch_id.slice(0, 8))}… — ${r.entry_count} entries, ${usdC(r.total_cents)} — file <b>${esc(r.filename)}</b> downloaded. Upload it to your bank portal.</p>`;
+      arapApBox();
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function nachaBatchesBox() {
+    const box = document.getElementById("arap-nacha");
+    if (!box || box.dataset.busy) return;
+    try {
+      const r = await Api.program.payoutBatches();
+      const bs = r.batches || [];
+      if (!bs.length) return;
+      box.innerHTML = `<h3>ACH payout batches</h3>` + bs.map((b) => `<span class="chip">${esc(b.file_reference)} · ${b.entry_count} entries · ${usdC(b.total_cents)} · ${badge(b.status)}
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<a href="#" onclick="event.preventDefault(); Views.arapNachaFile('${b.id}')">download</a>` : ""}</span> `).join(" ");
+    } catch { /* batches are supplementary */ }
+  }
+
+  async function arapNachaFile(id) {
+    try {
+      const r = await Api.program.payoutBatchFile(id);
+      saveTextFile(r.filename, r.file);
+    } catch (e) { alert(e.message); }
   }
 
   async function arapRecord(form) {
@@ -3761,5 +3800,5 @@ const Views = (() => {
     catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();

@@ -52,6 +52,7 @@ type reconAdapter interface {
 var reconAdapters = map[string]reconAdapter{
 	"csv_generic": csvReconAdapter{},
 	"http_json":   httpJSONReconAdapter{},
+	"bai2":        bai2ReconAdapter{}, // bank prior-day statement (bank.go rail 3)
 }
 
 // ReconConfig is the tenant-tunable block on ProgramConfig.

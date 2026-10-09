@@ -563,6 +563,9 @@ func main() {
 		r.Post("/arap/payables", s.createPayable)                     // FINANCE records an obligation
 		r.Post("/arap/payables/{payableId}/{action}", s.settlePayable) // settle|void
 		r.Get("/arap/summary", s.arapSummary)                         // AR vs AP net position
+		r.Post("/arap/payouts/nacha", s.createNachaPayout)     // FINANCE: ACH file from open payables
+		r.Get("/arap/payouts", s.listPayoutBatches)
+		r.Get("/arap/payouts/{batchId}/file", s.payoutBatchFile)
 		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
@@ -675,6 +678,7 @@ func main() {
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
+	r.Post("/api/webhooks/lockbox/{tenant}", s.lockboxWebhook) // bank deposit confirmation (HMAC)
 	r.Post("/api/webhooks/mojaloop", s.mojaloopWebhook)
 
 	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
