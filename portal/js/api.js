@@ -211,6 +211,8 @@ const Api = (() => {
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
       timeReport: (opts) => req("GET", `${t()}/reports/time${qs(opts || {})}`),
+      timeRates: () => req("GET", `${t()}/reports/time/rates`),
+      timeRateSet: (role, rate_cents_per_hour) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour }),
       opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
