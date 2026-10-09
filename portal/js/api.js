@@ -30,6 +30,15 @@ const Api = (() => {
   // exactly why "download" and the documents.zip link both 403'd with
   // "missing bearer token" when clicked directly. Fetch with the token,
   // then hand the browser a blob: URL to save instead.
+  async function blobURL(path) {
+    const tok = await Auth.token();
+    if (!tok) throw new Error("unauthenticated");
+    const resp = await fetch(window.IDRE_CONFIG.apiBase + path, { headers: { Authorization: `Bearer ${tok}` } });
+    if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
+    if (!resp.ok) throw new Error(`fetch failed (HTTP ${resp.status})`);
+    return URL.createObjectURL(await resp.blob());
+  }
+
   async function download(path, fallbackName) {
     const tok = await Auth.token();
     if (!tok) throw new Error("unauthenticated");
@@ -257,6 +266,7 @@ const Api = (() => {
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
+      checkImage: (checkId) => blobURL(`${t()}/checks/${checkId}/image`),
       uploadCheck: (file) => {
         const fd = new FormData();
         fd.append("check", file);

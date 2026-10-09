@@ -144,6 +144,7 @@
     links.push(["#/billing", "🧾", "Billing"]);
     links.push(["#/arap", "⚖", "AR / AP"]);
     links.push(["#/recon", "⇄", "Reconciliation"]);
+    links.push(["#/checks", "◧", "Checks"]);
   }
   if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
@@ -282,6 +283,7 @@
     [/^#\/billing$/, Views.billingInvoices],
     [/^#\/arap$/, Views.arapView],
     [/^#\/recon$/, Views.reconView],
+    [/^#\/checks$/, Views.checksView],
     [/^#\/tpa$/, Views.tpaView],
     [/^#\/rules$/, Views.rulesAdmin],
     [/^#\/team$/, Views.teamAdmin],

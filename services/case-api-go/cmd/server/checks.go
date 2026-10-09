@@ -291,3 +291,40 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"checks": rows,
 		"total": total, "next_offset": nextOffset(offset, limit, total)})
 }
+
+// checkImage streams the vault-unsealed check scan for the portal preview.
+// Same financial-read gate as listChecks — the image carries full MICR data.
+func (s *server) checkImage(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
+	checkID := chi.URLParam(r, "checkId")
+	var key, ct string
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT object_key, content_type FROM public.checks WHERE id=$1 AND tenant=$2`,
+		checkID, tenant).Scan(&key, &ct); err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		http.Error(w, `{"error":"storage"}`, http.StatusBadGateway)
+		return
+	}
+	defer obj.Close()
+	sealed, err := io.ReadAll(obj)
+	if err != nil {
+		http.Error(w, `{"error":"storage"}`, http.StatusBadGateway)
+		return
+	}
+	img, err := s.vaultOpenDoc(r, tenant, key, sealed)
+	if err != nil {
+		http.Error(w, `{"error":"unseal failed"}`, http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.Write(img)
+}

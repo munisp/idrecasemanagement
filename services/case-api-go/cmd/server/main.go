@@ -498,6 +498,7 @@ func main() {
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/checks", s.uploadCheck)                                // physical check photo/scan intake
 		r.Get("/checks", s.listChecks)                                  // review queue
+		r.Get("/checks/{checkId}/image", s.checkImage)                 // vault-unsealed scan for portal preview
 		r.Post("/checks/{checkId}/clear", s.clearCheck)                 // funds-cleared settlement
 		r.Post("/internal/checks/{checkId}/result", s.checkResult)      // worker-token: doc-intel OCR
 		r.Post("/internal/copilot/actions/apply", s.copilotApplyAction) // worker-token: Phase 3 batch executor

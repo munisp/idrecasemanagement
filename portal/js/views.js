@@ -3800,5 +3800,96 @@ const Views = (() => {
     catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
+  // ── Physical check intake + scan preview ───────────────────────────
+  function checksView() {
+    if (!can(...finRoles))
+      return `<div class="view-head"><h1>Checks</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    afterRender(() => checksBox(""));
+    return `<div class="view-head"><h1>Checks</h1>
+      <span class="muted">photo/scan → MICR + OCR extraction → invoice match → clearing</span></div>
+      <div class="card"><h2>Deposit a check</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.checkUploadFn(this)">
+          <input name="check" type="file" accept="image/jpeg,image/png,image/tiff,image/webp" required />
+          <button class="mini">Upload & scan</button></form>
+        <div id="check-upload-result"></div></div>
+      <div class="card"><h2>Scanned checks</h2>
+        <p>${["", "RECEIVED", "PROCESSED", "MATCHED", "REVIEW", "CLEARED", "REJECTED"].map((st) =>
+          `<button class="mini" onclick="Views.checksFilter('${st}')">${st || "All"}</button>`).join(" ")}</p>
+        <div id="checks-list"><p class="muted">Loading…</p></div></div>
+      <div class="card" id="check-detail-card" style="display:none"><h2>Scan preview</h2>
+        <div id="check-detail"></div></div>`;
+  }
+
+  async function checksBox(status) {
+    const box = document.getElementById("checks-list");
+    try {
+      const r = await Api.program.checks(status);
+      const cs = r.checks || [];
+      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Received</th><th>Status</th><th>Amount</th><th>Payer</th><th>Check #</th><th>Invoice</th><th>Confidence</th><th></th></tr></thead><tbody>
+        ${cs.map((c) => `<tr class="${c.amount_mismatch ? "row-breach" : ""}">
+          <td>${esc((c.created_at || "").slice(0, 10))}</td><td>${badge(c.status)}</td>
+          <td>${usdC(c.courtesy_amount_cents)}</td><td>${esc(c.payer_name || "—")}</td>
+          <td>${esc(c.check_number || "—")}</td>
+          <td>${c.invoice_id ? esc(c.invoice_id.slice(0, 8)) + "…" : "—"}</td>
+          <td>${badge(c.confidence || "—")}${c.amount_mismatch ? " ⚠ mismatch" : ""}</td>
+          <td><button class="mini" onclick="Views.checkOpen('${c.id}')">Preview</button></td></tr>`).join("")}</tbody></table>`
+        : '<p class="muted">No checks scanned yet.</p>';
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function checkUploadFn(form) {
+    const out = document.getElementById("check-upload-result");
+    const f = form.check.files[0];
+    if (!f) return;
+    out.innerHTML = '<p class="muted">Uploading — extraction runs asynchronously…</p>';
+    try {
+      const r = await Api.program.uploadCheck(f);
+      out.innerHTML = `<p class="ok">Received (${esc(r.check_id.slice(0, 8))}…) — scan queued. Refresh in a few seconds to see the extraction.</p>`;
+      form.reset();
+      setTimeout(() => checksBox(""), 4000);
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function checkOpen(id) {
+    const card = document.getElementById("check-detail-card"), box = document.getElementById("check-detail");
+    card.style.display = "";
+    box.innerHTML = '<p class="muted">Loading scan…</p>';
+    card.scrollIntoView({ behavior: "smooth" });
+    try {
+      const r = await Api.program.checks("");
+      const c = (r.checks || []).find((x) => x.id === id);
+      const imgUrl = await Api.program.checkImage(id).catch(() => null);
+      const mask = (v) => v ? "••••" + esc(String(v).slice(-4)) : "—";
+      box.innerHTML = `
+        ${imgUrl ? `<p><img src="${imgUrl}" alt="check scan" style="max-width:100%;border:1px solid var(--line,#ccc);border-radius:8px" /></p>` : '<p class="muted">Image unavailable.</p>'}
+        ${c ? `<div class="stat-grid">
+          <div class="stat"><div class="stat-num">${usdC(c.courtesy_amount_cents)}</div><div class="muted">Courtesy amount</div></div>
+          <div class="stat"><div class="stat-num">${usdC(c.legal_amount_cents)}</div><div class="muted">Legal amount</div></div>
+          <div class="stat"><div class="stat-num">${badge(c.confidence || "—")}</div><div class="muted">Confidence</div></div></div>
+        <table class="tbl"><tbody>
+          <tr><td>Status</td><td>${badge(c.status)}${c.amount_mismatch ? ' <span class="error">⚠ courtesy/legal mismatch — REVIEW</span>' : ""}</td></tr>
+          <tr><td>Routing</td><td class="mono">${mask(c.routing_number)}</td></tr>
+          <tr><td>Account</td><td class="mono">${mask(c.account_number)}</td></tr>
+          <tr><td>Check #</td><td>${esc(c.check_number || "—")}</td></tr>
+          <tr><td>Date</td><td>${esc(c.check_date || "—")}</td></tr>
+          <tr><td>Payer</td><td>${esc(c.payer_name || "—")}</td></tr>
+          <tr><td>Memo</td><td>${esc(c.memo || "—")}</td></tr>
+          <tr><td>Matched invoice</td><td>${c.invoice_id ? esc(c.invoice_id) : "—"}</td></tr>
+          <tr><td>Case</td><td>${c.case_id ? `<a href="#/cases/${c.case_id}">${esc(c.case_id.slice(0, 8))}…</a>` : "—"}</td></tr></tbody></table>
+        ${c.status === "MATCHED" && can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.checkClearFn('${c.id}', this)">
+            <input name="ref" placeholder="bank deposit / lockbox ref" />
+            <button class="mini">Confirm cleared</button></form>` : ""}` : '<p class="error">check metadata not found</p>'}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function checkClearFn(id, form) {
+    try {
+      await Api.program.clearCheck(id, form.ref.value || "");
+      document.getElementById("check-detail-card").style.display = "none";
+      checksBox("");
+    } catch (e) { alert(e.message); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();
