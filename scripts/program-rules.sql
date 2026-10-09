@@ -321,7 +321,7 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "ineligibility_reasons": ["late_payment_only","interest_only","medicare_grievance","plan_not_fl_regulated","provider_not_fl_licensed","medicaid_fair_hearing","pending_court_action","over_12_months","pre_2000_binding_process","below_threshold","internal_process_not_exhausted"]
   },
   "time": {"quarter_hours": true},
-  "fees": {"initial_fee_cents": 12359, "refund_window_days": 7, "invoice_due_days": null, "invoice_number_equals_case_number": true},
+  "fees": {"initial_fee_cents": 12359, "refund_window_days": 7, "invoice_due_days": null, "invoice_number_equals_case_number": true, "invoiced_filer_orgs": []},
   "escalation": {"amount_trigger_cents": 100000000, "route_role": "PM", "reasons": ["fraud_waste_abuse","over_1m"]},
   "notes_streams": ["internal","coder","clinical","legal","external_agency"],
   "correspondence": {
@@ -388,8 +388,8 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "line_of_business": ["Medicaid","Commercial","Medicare","Medicare Advantage","Marketplace","Other"],
     "disputed_issue": ["Medicaid Medical Necessity","Underpayment","Overpayment","Denial","Other"],
     "out_of_network": ["Yes","No"],
-    "case_outcome": ["TBD - case in process","Withdrawn","Dismissed","Provider Default Award","Provider Full Award","Provider Partial Award","Provider No Award","Other"],
-    "party_billed": ["Health Plan","Provider","Both Parties","N/A"],
+    "case_outcome": ["TBD – case in process","Withdrawn","Dismissed","Provider Default Award","Provider Full Award","Provider Partial Award","Provider No Award","Other"],
+    "party_billed": ["Health Plan","Provider","Both","N/A"],
     "withdrawal_dismissed_reason": ["Dismissed-Timeliness eligibility failed","Member plan is not regulated by Florida","Self-Funded Plan","Provider No Response","Withdrawal-Claim Resolved","Other","N/A"],
     "internal_status_terminal": ["Plan Opt-Out","Ineligible","Dismissed","Withdrawn"]
   },

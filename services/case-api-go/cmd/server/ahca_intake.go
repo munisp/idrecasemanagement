@@ -111,6 +111,16 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 // them by phone or email). Both produce the exact same real case, links,
 // invoice, and email -- only the trigger differs.
 func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64) (caseID, caseNumber string, err error) {
+	return s.startAhcaCaseOpt(r, tenant, cfg, email, contactName, org, filingPartyType, disputedAmountCents, false)
+}
+
+// startAhcaCaseOpt adds the bulk-invoicing-arrangement switch: when deferFee
+// is true (filer org is on config.fees.invoiced_filer_orgs and the intake came
+// through the bulk path), the dispute opens immediately on acceptance and the
+// initial fee is raised as an OPEN invoice to be collected later — the second
+// opening path in the AHCA 2026 "Payment before submission" rules. Every
+// other filer still pays before the dispute exists.
+func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, deferFee bool) (caseID, caseNumber string, err error) {
 	caseNumber = s.nextCaseNumber(r, tenant, cfg)
 	// requester_* lands in details so the pre-case intake list can show who
 	// asked and search by email/org -- previously nothing persisted this on
@@ -151,6 +161,29 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 		"tenant": tenant, "case_id": caseID, "case_number": caseNumber,
 	}); werr != nil {
 		return caseID, caseNumber, werr
+	}
+
+	// BULK INVOICING ARRANGEMENT: an approved bulk filer's dispute is opened
+	// by the acceptance itself (Date Received starts now); the initial review
+	// fee becomes an OPEN invoice settled under the arrangement. The upload
+	// link is issued because the bulk acceptance — not a card payment — is
+	// what opens this dispute.
+	if deferFee && cfg.Fees.InitialFeeCents > 0 {
+		if _, ierr := s.db.Exec(r.Context(), `
+			INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
+			VALUES ($1,$2,$3,$4,'INITIAL_FEE',$5, (now() + make_interval(days => 30))::date)
+			ON CONFLICT (tenant, case_id, party, kind) DO NOTHING`,
+			tenant, caseID, caseNumber, filingPartyType, cfg.Fees.InitialFeeCents); ierr != nil {
+			return caseID, caseNumber, ierr
+		}
+		s.logAudit(r.Context(), tenant, caseID, "INTAKE_FEE_DEFERRED", map[string]any{
+			"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents,
+			"basis": "bulk invoicing arrangement", "org": org,
+		})
+		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
+		s.notify(r, tenant, "*", "AHCA_INTAKE",
+			fmt.Sprintf("Bulk-accepted intake (fee invoiced): %s (%s)", org, email), "#/cases/"+caseID)
+		return caseID, caseNumber, nil
 	}
 
 	// PAYMENT-GATED INTAKE: when the program charges an initial review fee,

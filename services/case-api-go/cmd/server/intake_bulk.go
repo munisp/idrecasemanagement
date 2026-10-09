@@ -51,8 +51,12 @@ type bulkIntakeResult struct {
 	// PaymentRequired is true when the case was created AWAITING_PAYMENT:
 	// the filing party must settle the initial review fee before the case
 	// number is released to them and document upload unlocks.
-	PaymentRequired bool   `json:"payment_required,omitempty"`
-	Error           string `json:"error,omitempty"`
+	PaymentRequired bool `json:"payment_required,omitempty"`
+	// FeeDeferred is true when the filer is accepted under a bulk invoicing
+	// arrangement: the dispute opened immediately and the initial fee was
+	// raised as an invoice instead of collected up front.
+	FeeDeferred bool   `json:"fee_deferred,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // validateBulkIntakeItem is the pure per-row gate — same rules as
@@ -86,7 +90,17 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 		fpt = "PROVIDER"
 	}
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
-		caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, it.Email, it.ContactName, it.Org, fpt, it.DisputedAmountCents)
+		// Bulk invoicing arrangement (AHCA 2026, "Payment before submission"):
+		// a filer org on config.fees.invoiced_filer_orgs has its disputes
+		// opened by the bulk acceptance itself; the fee is invoiced later.
+		deferFee := false
+		for _, approved := range cfg.Fees.InvoicedFilerOrgs {
+			if strings.EqualFold(strings.TrimSpace(approved), strings.TrimSpace(it.Org)) && strings.TrimSpace(it.Org) != "" {
+				deferFee = true
+				break
+			}
+		}
+		caseID, caseNumber, err := s.startAhcaCaseOpt(r, tenant, cfg, it.Email, it.ContactName, it.Org, fpt, it.DisputedAmountCents, deferFee)
 		if err != nil {
 			res.Status = "ERROR"
 			if isUniqueViolation(err) {
@@ -97,6 +111,7 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 			return res
 		}
 		res.Status, res.CaseID, res.CaseNumber = "CREATED", caseID, caseNumber
+		res.FeeDeferred = deferFee
 		// startAhcaCase applies the payment gate when the program charges an
 		// initial fee — surface that on the receipt so the filer knows the
 		// party must pay before upload unlocks.

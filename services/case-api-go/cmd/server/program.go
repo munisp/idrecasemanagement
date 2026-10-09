@@ -65,6 +65,13 @@ type ProgramConfig struct {
 		InitialFeeCents  int64 `json:"initial_fee_cents"`
 		RefundWindowDays int   `json:"refund_window_days"`
 		InvoiceDueDays   *int  `json:"invoice_due_days"`
+		// InvoicedFilerOrgs are filing organizations accepted under a bulk
+		// invoicing arrangement (AHCA 2026 workflow, "Payment before
+		// submission"): their disputes open immediately on bulk acceptance
+		// and the initial fee is invoiced later instead of collected up
+		// front. Membership in this list is a fee-config change, so it is
+		// protected by the migration-only guard trigger like the fee itself.
+		InvoicedFilerOrgs []string `json:"invoiced_filer_orgs"`
 	} `json:"fees"`
 	Escalation struct {
 		AmountTriggerCents int64    `json:"amount_trigger_cents"`

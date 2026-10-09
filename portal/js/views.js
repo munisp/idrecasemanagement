@@ -610,6 +610,7 @@ const Views = (() => {
         html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
             <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
+            ${timeRoleSelect()}
             <input name="entry_date" type="date" aria-label="Date worked" />
             <input name="note" placeholder="what was done" maxlength="500" />
             <label><input type="checkbox" name="billable" checked /> billable</label>
@@ -2661,6 +2662,7 @@ const Views = (() => {
     return `<div class="card"><h3>⏱ Time on this dispute — ${fmtMins(r.total_minutes)} logged</h3>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.asstTimeAdd('${caseId}', this)">
         <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required />
+        ${timeRoleSelect()}
         <input name="entry_date" type="date" />
         <input name="note" placeholder="what was done" maxlength="500" />
         <label><input type="checkbox" name="billable" checked /> billable</label>
@@ -2678,6 +2680,7 @@ const Views = (() => {
           entry_date: form.entry_date.value || "",
           note: form.note.value.trim(),
           billable: form.billable.checked,
+          role: form.role ? form.role.value : "",
         });
         asstAppend(caseId, "user", `Log ${form.hours.value}h${form.note.value.trim() ? " — " + form.note.value.trim() : ""}.`);
         asstAppend(caseId, "assistant", "Time logged against this dispute under your name and role. The entry is append-only — a correction is a compensating entry, never an edit.", "");
@@ -2689,6 +2692,17 @@ const Views = (() => {
 
   // ---- Time entries (per-role effort, per dispute) ------------------------
   const fmtMins = (m) => `${(m / 60).toFixed(m % 60 ? 2 : 0)}h`;
+
+  // AHCA 2026 time recording: the role is chosen PER ENTRY from the roles
+  // the user actually holds — one person can code one entry and QA-as-PM
+  // the next. Blank means the server records the primary role.
+  const timeRoleSelect = () => {
+    const roles = (Auth.claims()?.roles || []);
+    if (roles.length < 2) return "";
+    return `<select name="role" aria-label="Role performed" title="Role being performed for this entry">
+      <option value="">role: primary</option>
+      ${roles.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("")}</select>`;
+  };
 
   async function timeCaseBox(caseId) {
     try {
@@ -2712,6 +2726,7 @@ const Views = (() => {
           entry_date: form.entry_date.value || "",
           note: form.note.value.trim(),
           billable: form.billable.checked,
+          role: form.role ? form.role.value : "",
         });
         UI.toast("Time logged");
         form.hours.value = ""; form.note.value = "";
