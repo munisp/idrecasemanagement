@@ -48,7 +48,11 @@ type bulkIntakeResult struct {
 	IntakeID    string `json:"intake_id,omitempty"`
 	CaseID      string `json:"case_id,omitempty"`
 	CaseNumber  string `json:"case_number,omitempty"`
-	Error       string `json:"error,omitempty"`
+	// PaymentRequired is true when the case was created AWAITING_PAYMENT:
+	// the filing party must settle the initial review fee before the case
+	// number is released to them and document upload unlocks.
+	PaymentRequired bool   `json:"payment_required,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // validateBulkIntakeItem is the pure per-row gate — same rules as
@@ -93,6 +97,13 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 			return res
 		}
 		res.Status, res.CaseID, res.CaseNumber = "CREATED", caseID, caseNumber
+		// startAhcaCase applies the payment gate when the program charges an
+		// initial fee — surface that on the receipt so the filer knows the
+		// party must pay before upload unlocks.
+		var st string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+			`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
+		res.PaymentRequired = st == "AWAITING_PAYMENT"
 		return res
 	}
 	var id string

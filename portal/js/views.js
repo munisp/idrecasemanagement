@@ -1829,9 +1829,9 @@ const Views = (() => {
         const r = await Api.program.intakeBulk({ batch_ref: ref, items });
         const rows = (r.results || []).map((x) => `<tr>
           <td class="muted">${esc(x.external_ref || "")}</td>
-          <td>${x.status === "CREATED" ? badge("CREATED") : `<span class="badge warn">ERROR</span>`}</td>
+          <td>${x.status === "CREATED" ? badge("CREATED") : `<span class="badge warn">ERROR</span>`}${x.payment_required ? ` <span class="badge warn" title="Party must pay the initial review fee before the case number is released and upload unlocks">fee due</span>` : ""}</td>
           <td>${x.case_number ? `<a href="#/cases/${x.case_id}">${esc(x.case_number)}</a>` : esc(x.intake_id || "")}</td>
-          <td class="muted">${esc(x.error || "")}</td></tr>`).join("");
+          <td class="muted">${esc(x.error || "")}${x.payment_required ? "Payment link emailed to the filing party — case activates on settlement." : ""}</td></tr>`).join("");
         $("#intake-bulk-result").innerHTML = `<div class="card" style="margin-top:10px">
           <b>Batch ${esc(r.batch_ref || ref)}</b> — ${r.created} filed, ${r.errors} error(s)${r.idempotent_replay ? " — <b>idempotent replay</b>: this reference was already submitted; showing the recorded receipt, nothing re-filed" : ""}
           <table style="margin-top:8px"><thead><tr><th>Row</th><th>Outcome</th><th>Intake / case</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
