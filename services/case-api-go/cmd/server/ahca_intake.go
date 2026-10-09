@@ -171,13 +171,14 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 	}
 	if tpl != nil {
 		subject := s.renderTemplate(r, tenant, caseID, tpl.Subject)
+		shareBase := strings.TrimRight(s.cfg.PortalBaseURL, "/")
 		body := fmt.Sprintf(
 			"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
 				"Case number: %s\n\n"+
-				"Download the filing instructions and packet: https://idre.newfire.app/api/share/%s\n"+
-				"Upload your completed filing packet: https://idre.newfire.app/api/share/%s\n\n"+
+				"Download the filing instructions and packet: %s/api/share/%s\n"+
+				"Upload your completed filing packet: %s/api/share/%s\n\n"+
 				"%s",
-			caseNumber, downloadToken, uploadToken, paymentLine,
+			caseNumber, shareBase, downloadToken, shareBase, uploadToken, paymentLine,
 		)
 		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
