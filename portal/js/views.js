@@ -1088,6 +1088,12 @@ const Views = (() => {
         <div class="kpi kpi-danger"><span class="kpi-n" id="kpi-breaches">—</span><span class="kpi-l">SLA breaches</span></div>
         <div class="kpi"><span class="kpi-n" id="kpi-collected">—</span><span class="kpi-l">Collected (30 days)</span></div>
       </div>
+      <div class="card"><h2>FL AHCA contract reports</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.flReportFn(this)">
+          <input name="from" type="date" /> <input name="to" type="date" />
+          <select name="kind"><option value="weekly">Weekly (16 cols A–P, task 2.4.2)</option><option value="monthly">Monthly (33 fields, task 2.4.3)</option></select>
+          <button class="mini">Download CSV</button></form>
+        <p class="muted">Exact contract column order; dates MM/DD/YYYY; unrecorded values render N/A; internal-only fields are never included.</p></div>
       <div class="rpt-tabs" role="tablist">
         ${RPT_TABS.map((t, i) => `<button class="rpt-tab rpt-accent-${t.accent} ${i === 0 ? "active" : ""}"
           id="rpt-tab-${t.key}" role="tab">${t.icon} ${esc(t.label)}</button>`).join("")}
@@ -3891,5 +3897,12 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
+  async function flReportFn(form) {
+    try {
+      if (form.kind.value === "weekly") await Api.program.flWeeklyReport(form.from.value, form.to.value);
+      else await Api.program.flMonthlyReport(form.from.value, form.to.value);
+    } catch (e) { alert(e.message); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();

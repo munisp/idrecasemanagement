@@ -248,6 +248,8 @@ const Api = (() => {
       payablesList: (status, asOf) => req("GET", `${t()}/arap/payables${qs({ status: status || "OPEN", ...(asOf ? { as_of: asOf } : {}) })}`),
       payableCreate: (body) => req("POST", `${t()}/arap/payables`, body),
       payableAct: (id, action, body) => req("POST", `${t()}/arap/payables/${id}/${action}`, body || {}),
+      flWeeklyReport: (from, to) => download(`${t()}/reports/fl/weekly${qs({ from: from || "", to: to || "" })}`, "fl-weekly.csv"),
+      flMonthlyReport: (from, to) => download(`${t()}/reports/fl/monthly${qs({ from: from || "", to: to || "" })}`, "fl-monthly.csv"),
       arapSummary: (asOf) => req("GET", `${t()}/arap/summary${qs(asOf ? { as_of: asOf } : {})}`),
       nachaPayout: (body) => req("POST", `${t()}/arap/payouts/nacha`, body || {}),
       payoutBatches: () => req("GET", `${t()}/arap/payouts`),

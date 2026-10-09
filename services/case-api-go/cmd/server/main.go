@@ -607,6 +607,8 @@ func main() {
 		r.Get("/payments", s.listPayments)                     // payment history (tenant)
 		r.Get("/cases/{caseId}/payments", s.listPayments)      // payment history (case)
 		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
+		r.Get("/reports/fl/weekly", s.flWeeklyReport)          // contract 2.4.2: 16-col A-P CSV
+		r.Get("/reports/fl/monthly", s.flMonthlyReport)        // contract 2.4.3: 33-field CSV
 		r.Post("/cases/{caseId}/claims", s.importClaims)       // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
 		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake
