@@ -25,7 +25,7 @@ import (
 // generation) that the portal's own UI already restricts to case-management
 // roles -- as opposed to tighter gates for money (FINANCE/PM) or
 // management-only actions (CASE_MANAGER/PM).
-var caseStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+var caseStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 // crmStaffRoles: CRM (accounts/contacts/tasks/notes/leads) and case-relating
 // actions -- the portal's nav shows Accounts/Leads/Tasks to every
@@ -33,7 +33,7 @@ var caseStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", 
 // (ARBITRATOR and FINANCE included, unlike caseStaffRoles) minus PARTY,
 // which has no portal login to lose access to today but shouldn't get
 // internal CRM write access if that ever changes.
-var crmStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+var crmStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 // financialReadRoles: checks/invoices/payments/financial-report reads --
 // these were reachable by ANY authenticated tenant member via direct URL

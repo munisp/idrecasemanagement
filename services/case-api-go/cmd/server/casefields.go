@@ -70,6 +70,10 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 	for k := range in {
 		keys = append(keys, k)
 	}
+	// Award recorded/changed/cleared -> keep the AP subledger in step.
+	if _, ok := in["final_amount_awarded_cents"]; ok {
+		s.syncAwardPayable(r, tenant, caseID, in, p.Subject)
+	}
 	s.logActivity(r.Context(), tenant, caseID, "DETAILS_UPDATED", "fields set: "+strings.Join(keys, ", "))
 	s.logAudit(r.Context(), tenant, caseID, "CASE_DETAILS_UPDATED", map[string]any{
 		"by": p.Subject, "fields": keys,
@@ -92,7 +96,7 @@ func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, object_key, coalesce(filename, id::text), sealed, size_bytes, parts
 		FROM tenant_%s.documents WHERE case_id=$1 AND scan_status='CLEAN'
-		ORDER BY folder, created_at`, sanitizeTenant(tenant)), caseID)
+		ORDER BY folder, created_at DESC`, sanitizeTenant(tenant)), caseID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

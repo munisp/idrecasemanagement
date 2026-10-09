@@ -527,6 +527,7 @@ func main() {
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/checks", s.uploadCheck)                                // physical check photo/scan intake
 		r.Get("/checks", s.listChecks)                                  // review queue
+		r.Get("/checks/{checkId}/image", s.checkImage)                 // vault-unsealed scan for portal preview
 		r.Post("/checks/{checkId}/clear", s.clearCheck)                 // funds-cleared settlement
 		r.Post("/internal/checks/{checkId}/result", s.checkResult)      // worker-token: doc-intel OCR
 		r.Post("/internal/copilot/actions/apply", s.copilotApplyAction) // worker-token: Phase 3 batch executor
@@ -568,6 +569,47 @@ func main() {
 		r.Get("/program", s.getProgram)
 		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
 		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/time", s.addTimeEntry)               // per-role effort on the dispute
+		r.Get("/cases/{caseId}/time", s.listTimeEntries)
+		r.Get("/reports/time", s.timeReport)                          // weekly per-dispute + monthly team rollup
+		r.Get("/reports/time/rates", s.getTimeRates)                  // role billable rates (view: PM/FINANCE/admin)
+		r.Put("/reports/time/rates", s.putTimeRate)                   // set rates (PM/admin only)
+		// Service-fee invoicing engine (time ledger x rates -> invoices)
+		r.Post("/billing/invoices", s.generateInvoice)                // generate DRAFT for week/month/custom range
+		r.Get("/billing/invoices", s.listBillingInvoices)
+		r.Get("/billing/invoices/{invoiceId}", s.getBillingInvoice)
+		r.Post("/billing/invoices/{invoiceId}/{action}", s.transitionInvoice) // approve|issue|void
+		r.Post("/billing/invoices/{invoiceId}/payments", s.recordInvoicePayment) // FINANCE
+		r.Get("/billing/invoices/{invoiceId}/export", s.exportInvoiceCSV)        // accounting import CSV
+		// Reconciliation engine + accounting adapters
+		r.Post("/recon/import", s.reconImport)                        // CSV upload / configured http_json feed
+		r.Post("/recon/batches/{batchId}/match", s.reconRunMatch)     // deterministic auto-match
+		r.Get("/recon/batches", s.reconListBatches)
+		r.Get("/recon/batches/{batchId}", s.reconGetBatch)
+		r.Post("/recon/items/{itemId}/resolve", s.reconResolveItem)   // manual match|exception|ignore|unmatch
+		r.Get("/recon/summary", s.reconSummary)                       // platform vs external drift for a period
+		// AR/AP subledger (arap.go)
+		r.Get("/arap/receivables", s.listReceivables)                 // open AR derived live from invoice stores
+		r.Get("/arap/payables", s.listPayables)
+		r.Post("/arap/payables", s.createPayable)                     // FINANCE records an obligation
+		r.Post("/arap/payables/{payableId}/{action}", s.settlePayable) // settle|void
+		r.Get("/arap/summary", s.arapSummary)                         // AR vs AP net position
+		r.Post("/arap/payouts/nacha", s.createNachaPayout)     // FINANCE: ACH file from open payables
+		r.Get("/arap/payouts", s.listPayoutBatches)
+		r.Get("/arap/payouts/{batchId}/file", s.payoutBatchFile)
+		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
+
+		// Third-party administrators (tpa.go): file/pay/track on behalf of
+		// multiple initiating parties (providers or health plans).
+		r.Post("/tpa/claim", s.claimTPA)                    // burn a one-time claim code, bind user -> TPA
+		r.Get("/tpa/me", s.tpaMe)                           // my TPA org + clients
+		r.Post("/tpa/clients", s.tpaAddClient)              // add an initiating party I represent
+		r.Get("/tpa/clients", s.tpaListClients)
+		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
+		r.Post("/tpa/intake", s.tpaIntake)                  // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)             // status of all my clients' disputes
+		r.Get("/admin/tpas", s.adminListTPAs)               // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus) // suspend|reactivate
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
@@ -672,6 +714,7 @@ func main() {
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
+	r.Post("/api/webhooks/lockbox/{tenant}", s.lockboxWebhook) // bank deposit confirmation (HMAC)
 	r.Post("/api/webhooks/mojaloop", s.mojaloopWebhook)
 
 	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
@@ -679,6 +722,7 @@ func main() {
 
 	// Public pre-case intake for programmed tenants (no OIDC; per-IP throttled).
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
+	r.Post("/api/public/tpa/register", s.registerTPA)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
 	// intakes to INELIGIBLE and raises staff notifications for the letters.
@@ -1175,6 +1219,11 @@ const (
 	acctAdminRemittance  uint32 = 3000
 	acctIdreCompensation uint32 = 4000
 	acctRefundPayable    uint32 = 5000
+	acctSvcReceivable    uint32 = 7000 // service-fee invoices issued, awaiting payment (AR)
+	acctSvcRevenue       uint32 = 7001 // IDRE professional-services revenue
+	acctOperatingCash    uint32 = 7002 // invoice payments received (operating, not escrow)
+	acctAccountsPayable  uint32 = 7003 // open obligations (awards, vendor, refunds)
+	acctProgramExpense   uint32 = 7004 // expense recognition when a payable is recorded
 	ledgerCodeIDRE       uint16 = 700 // platform code; ledger id = tenantLedgerID(tenant)
 )
 

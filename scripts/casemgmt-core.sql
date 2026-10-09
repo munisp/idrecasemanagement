@@ -221,3 +221,268 @@ CREATE TABLE IF NOT EXISTS public.intake_batches (
     UNIQUE (tenant, submitter, batch_ref)
 );
 CREATE INDEX IF NOT EXISTS intake_batches_tenant_created ON public.intake_batches (tenant, created_at DESC);
+
+-- Time entries (per-role effort on each dispute): append-only through the
+-- API; role is the principal's real role at entry time. Weekly per-dispute
+-- and monthly team rollups are computed by /reports/time. Billable is the
+-- link back to eligibility: only eligible cases' time should be billed.
+CREATE TABLE IF NOT EXISTS public.time_entries (
+    id          bigserial PRIMARY KEY,
+    tenant      text NOT NULL,
+    case_id     uuid NOT NULL,
+    subject     text NOT NULL,
+    role        text NOT NULL,
+    entry_date  date NOT NULL,
+    minutes     int  NOT NULL CHECK (minutes > 0 AND minutes <= 1440),
+    note        text NOT NULL DEFAULT '',
+    billable    boolean NOT NULL DEFAULT true,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS time_entries_tenant_case ON public.time_entries (tenant, case_id);
+CREATE INDEX IF NOT EXISTS time_entries_tenant_date ON public.time_entries (tenant, entry_date);
+
+-- Billable rates per role per tenant: managed by PM/FEDERAL_ADMIN/
+-- PLATFORM_ADMIN only. Reports multiply minutes by the rate of the role the
+-- entry was logged under; entries whose role has no rate report hours with
+-- no amount (never a guessed rate).
+CREATE TABLE IF NOT EXISTS public.time_rates (
+    tenant              text NOT NULL,
+    role                text NOT NULL,
+    rate_cents_per_hour int  NOT NULL CHECK (rate_cents_per_hour >= 0),
+    updated_by          text NOT NULL,
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, role)
+);
+
+-- ============================================================
+-- Service-fee invoicing engine (billing.go) + reconciliation
+-- engine with accounting adapters (recon.go).
+-- ============================================================
+
+-- Invoices generated from the time ledger (time_entries x time_rates) over a
+-- parameterized period. Rates are snapshotted onto lines at generation time;
+-- invoices are immutable once ISSUED (void, never edit).
+CREATE TABLE IF NOT EXISTS public.billing_invoices (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant         text NOT NULL,
+    invoice_no     text NOT NULL,
+    period_start   date NOT NULL,
+    period_end     date NOT NULL,              -- exclusive, same convention as /reports/time
+    case_id        text,                       -- NULL = consolidated period invoice
+    bill_to_name   text NOT NULL,
+    bill_to_email  text,
+    status         text NOT NULL DEFAULT 'DRAFT', -- DRAFT|APPROVED|ISSUED|PAID|VOID
+    subtotal_cents bigint NOT NULL,
+    tax_cents      bigint NOT NULL DEFAULT 0,
+    total_cents    bigint NOT NULL,
+    currency       text NOT NULL DEFAULT 'usd',
+    due_date       date,
+    memo           text,
+    created_by     text NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, invoice_no)
+);
+-- Idempotency: at most one ACTIVE (non-VOID) invoice per period + case scope.
+CREATE UNIQUE INDEX IF NOT EXISTS billing_invoices_period_uniq
+    ON public.billing_invoices (tenant, period_start, period_end, coalesce(case_id, ''))
+    WHERE status <> 'VOID';
+CREATE INDEX IF NOT EXISTS billing_invoices_tenant ON public.billing_invoices (tenant, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.billing_invoice_lines (
+    id                  bigserial PRIMARY KEY,
+    invoice_id          uuid NOT NULL REFERENCES public.billing_invoices(id),
+    tenant              text NOT NULL,
+    case_id             text NOT NULL,
+    case_number         text,
+    role                text NOT NULL,
+    minutes             bigint NOT NULL,
+    rate_cents_per_hour bigint NOT NULL,       -- snapshot at generation time
+    amount_cents        bigint NOT NULL,
+    description         text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS billing_lines_invoice ON public.billing_invoice_lines (invoice_id);
+
+-- Payments recorded against issued invoices (FINANCE). ref carries the
+-- remittance/bank reference the reconciliation engine keys on.
+CREATE TABLE IF NOT EXISTS public.billing_invoice_payments (
+    id           bigserial PRIMARY KEY,
+    invoice_id   uuid NOT NULL REFERENCES public.billing_invoices(id),
+    tenant       text NOT NULL,
+    amount_cents bigint NOT NULL CHECK (amount_cents > 0),
+    method       text NOT NULL,                -- ach|wire|check|card
+    ref          text,
+    received_at  date NOT NULL,
+    recorded_by  text NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS billing_payments_invoice ON public.billing_invoice_payments (invoice_id);
+
+-- Per-invoice event trail (generation, transitions, payments).
+CREATE TABLE IF NOT EXISTS public.billing_invoice_events (
+    id         bigserial PRIMARY KEY,
+    invoice_id uuid NOT NULL REFERENCES public.billing_invoices(id),
+    tenant     text NOT NULL,
+    event      text NOT NULL,                  -- GENERATED|APPROVED|ISSUED|VOIDED|PAYMENT_RECORDED
+    actor      text NOT NULL,
+    detail     jsonb NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS billing_events_invoice ON public.billing_invoice_events (invoice_id);
+
+-- Per-tenant, per-year invoice number sequence (atomic allocation).
+CREATE TABLE IF NOT EXISTS public.billing_sequences (
+    tenant text NOT NULL,
+    year   int  NOT NULL,
+    next   bigint NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant, year)
+);
+
+-- Reconciliation: one batch per external feed import (accounting platform
+-- export or bank statement), items are the external transactions.
+CREATE TABLE IF NOT EXISTS public.recon_batches (
+    id           bigserial PRIMARY KEY,
+    tenant       text NOT NULL,
+    source       text NOT NULL,                -- csv:quickbooks | csv:xero | http:<feed> | ...
+    period_start date NOT NULL,
+    period_end   date NOT NULL,                -- exclusive
+    status       text NOT NULL DEFAULT 'IMPORTED', -- IMPORTED|MATCHED|CLOSED
+    total_items  int  NOT NULL DEFAULT 0,
+    matched      int  NOT NULL DEFAULT 0,
+    unmatched    int  NOT NULL DEFAULT 0,
+    exceptions   int  NOT NULL DEFAULT 0,
+    imported_by  text NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS recon_batches_tenant ON public.recon_batches (tenant, id DESC);
+
+CREATE TABLE IF NOT EXISTS public.recon_items (
+    id               bigserial PRIMARY KEY,
+    batch_id         bigint NOT NULL REFERENCES public.recon_batches(id),
+    tenant           text NOT NULL,
+    txn_date         date NOT NULL,
+    amount_cents     bigint NOT NULL,          -- signed: + received, - disbursed
+    reference        text,
+    description      text,
+    status           text NOT NULL DEFAULT 'UNMATCHED', -- UNMATCHED|MATCHED|EXCEPTION|IGNORED
+    matched_event_id bigint REFERENCES public.financial_events(id),
+    match_kind       text,                     -- exact_ref|tolerance|manual
+    matched_by       text,
+    matched_at       timestamptz,
+    note             text
+);
+CREATE INDEX IF NOT EXISTS recon_items_batch ON public.recon_items (batch_id, status);
+CREATE INDEX IF NOT EXISTS recon_items_tenant_date ON public.recon_items (tenant, txn_date);
+
+-- Accounts payable subledger (arap.go). Obligations are explicit records:
+-- created by the determination-award hook (syncAwardPayable) or by FINANCE,
+-- settled with method + remittance ref (which recon matches to bank feeds).
+CREATE TABLE IF NOT EXISTS public.payables (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant        text NOT NULL,
+    case_id       text,
+    payee         text NOT NULL,
+    source        text NOT NULL DEFAULT 'other',  -- award|refund|vendor|tax|other
+    amount_cents  bigint NOT NULL CHECK (amount_cents > 0),
+    due_date      date,
+    status        text NOT NULL DEFAULT 'OPEN',   -- OPEN|SETTLED|VOID
+    settled_at    date,
+    settle_method text,
+    settle_ref    text,                           -- recon keys on this
+    note          text,
+    created_by    text NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+-- One OPEN award payable per case (upserted by the award hook).
+CREATE UNIQUE INDEX IF NOT EXISTS payables_award_uniq
+    ON public.payables (tenant, case_id) WHERE source = 'award' AND status = 'OPEN';
+CREATE INDEX IF NOT EXISTS payables_tenant ON public.payables (tenant, status, created_at DESC);
+
+-- Payment -> dispute allocation: every dollar recorded against a billing
+-- invoice is split across its case lines (explicit or proportional split),
+-- so receivables and collections roll up per dispute.
+CREATE TABLE IF NOT EXISTS public.billing_payment_allocations (
+    id          bigserial PRIMARY KEY,
+    payment_id  bigint NOT NULL REFERENCES public.billing_invoice_payments(id),
+    invoice_id  uuid   NOT NULL REFERENCES public.billing_invoices(id),
+    tenant      text   NOT NULL,
+    case_id     text   NOT NULL,
+    amount_cents bigint NOT NULL CHECK (amount_cents >= 0)
+);
+CREATE INDEX IF NOT EXISTS billing_alloc_case ON public.billing_payment_allocations (tenant, case_id);
+CREATE INDEX IF NOT EXISTS billing_alloc_payment ON public.billing_payment_allocations (payment_id);
+
+-- ============================================================
+-- Third-party administrators (tpa.go): organizations that file,
+-- pay, and track disputes on behalf of initiating parties.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.tpas (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant        text NOT NULL,
+    name          text NOT NULL,
+    contact_name  text,
+    contact_email text NOT NULL,
+    claim_code    text UNIQUE,             -- one-time, burned on claim
+    status        text NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE|SUSPENDED (self-serve onboarding; states suspend)
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, contact_email)
+);
+
+-- Portal users linked to their TPA org (via one-time claim code).
+CREATE TABLE IF NOT EXISTS public.tpa_users (
+    tenant    text NOT NULL,
+    user_sub  text NOT NULL,
+    tpa_id    uuid NOT NULL REFERENCES public.tpas(id),
+    linked_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, user_sub)
+);
+
+-- Initiating parties a TPA acts for (providers and/or health plans).
+CREATE TABLE IF NOT EXISTS public.tpa_clients (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant        text NOT NULL,
+    tpa_id        uuid NOT NULL REFERENCES public.tpas(id),
+    party_name    text NOT NULL,
+    party_type    text NOT NULL DEFAULT 'PROVIDER',  -- PROVIDER|HEALTH_PLAN
+    contact_email text,
+    status        text NOT NULL DEFAULT 'ACTIVE',
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, tpa_id, party_name)
+);
+
+-- Per-dispute origin: who the case belongs to (initiating party) vs who
+-- filed/paid on their behalf (TPA). Financial attribution joins here.
+CREATE TABLE IF NOT EXISTS public.case_origin (
+    tenant                 text NOT NULL,
+    case_id                text NOT NULL,
+    tpa_id                 uuid NOT NULL REFERENCES public.tpas(id),
+    client_id              uuid NOT NULL REFERENCES public.tpa_clients(id),
+    initiating_party_name  text NOT NULL,
+    initiating_party_type  text NOT NULL,
+    filed_by_email         text NOT NULL,
+    created_at             timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, case_id)
+);
+CREATE INDEX IF NOT EXISTS case_origin_tpa ON public.case_origin (tenant, tpa_id);
+CREATE INDEX IF NOT EXISTS case_origin_client ON public.case_origin (client_id);
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Bank rails (bank.go): payables gain ACH destinations + batch linkage;
+-- NACHA payout batches persist their generated file for re-download.
+-- ─────────────────────────────────────────────────────────────────────
+ALTER TABLE public.payables ADD COLUMN IF NOT EXISTS destination jsonb;      -- {routing_number, account_number, account_type, name}
+ALTER TABLE public.payables ADD COLUMN IF NOT EXISTS payout_batch_id uuid;
+CREATE TABLE IF NOT EXISTS public.bank_payout_batches (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant         text NOT NULL,
+  file_reference text NOT NULL,
+  entry_count    int  NOT NULL,
+  total_cents    bigint NOT NULL,
+  status         text NOT NULL DEFAULT 'GENERATED',  -- GENERATED | UPLOADED | CONFIRMED | RETURNED
+  created_by     text NOT NULL DEFAULT '',
+  file_body      text NOT NULL,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (tenant, file_reference)
+);

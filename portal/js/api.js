@@ -30,6 +30,15 @@ const Api = (() => {
   // exactly why "download" and the documents.zip link both 403'd with
   // "missing bearer token" when clicked directly. Fetch with the token,
   // then hand the browser a blob: URL to save instead.
+  async function blobURL(path) {
+    const tok = await Auth.token();
+    if (!tok) throw new Error("unauthenticated");
+    const resp = await fetch(window.IDRE_CONFIG.apiBase + path, { headers: { Authorization: `Bearer ${tok}` } });
+    if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
+    if (!resp.ok) throw new Error(`fetch failed (HTTP ${resp.status})`);
+    return URL.createObjectURL(await resp.blob());
+  }
+
   async function download(path, fallbackName) {
     const tok = await Auth.token();
     if (!tok) throw new Error("unauthenticated");
@@ -103,6 +112,8 @@ const Api = (() => {
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
+      timeAdd: (id, p) => req("POST", `${t()}/cases/${id}/time`, p),
+      timeList: (id) => req("GET", `${t()}/cases/${id}/time`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       retryAnalysis: (id, docId) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/retry`),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
@@ -214,10 +225,54 @@ const Api = (() => {
       settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
+      timeReport: (opts) => req("GET", `${t()}/reports/time${qs(opts || {})}`),
+      timeRates: () => req("GET", `${t()}/reports/time/rates`),
+      timeRateSet: (role, rate_cents_per_hour) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour }),
       opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
+      caseFinancials: (caseId) => req("GET", `${t()}/cases/${caseId}/financials`),
+      // Service-fee invoicing engine
+      billingGenerate: (params, body) => req("POST", `${t()}/billing/invoices${qs(params || {})}`, body || {}),
+      billingList: (opts) => req("GET", `${t()}/billing/invoices${qs(opts || {})}`),
+      billingGet: (id) => req("GET", `${t()}/billing/invoices/${id}`),
+      billingAct: (id, action) => req("POST", `${t()}/billing/invoices/${id}/${action}`, {}),
+      billingPay: (id, body) => req("POST", `${t()}/billing/invoices/${id}/payments`, body),
+      billingExport: async (id) => download(`${t()}/billing/invoices/${id}/export`, "invoice.csv"),
+      // Reconciliation engine + adapters
+      reconImportCsv: (mapping, file) => {
+        const fd = new FormData();
+        fd.append("source", "csv_generic"); fd.append("mapping", mapping); fd.append("file", file);
+        return req("POST", `${t()}/recon/import`, fd, true);
+      },
+      reconFetch: (feed) => req("POST", `${t()}/recon/import`, { source: "http_json", feed }),
+      reconMatch: (id) => req("POST", `${t()}/recon/batches/${id}/match`, {}),
+      reconBatches: () => req("GET", `${t()}/recon/batches`),
+      reconBatch: (id) => req("GET", `${t()}/recon/batches/${id}`),
+      reconResolve: (itemId, body) => req("POST", `${t()}/recon/items/${itemId}/resolve`, body),
+      reconSummary: (opts) => req("GET", `${t()}/recon/summary${qs(opts || {})}`),
+      // AR/AP subledger
+      receivablesAging: (asOf) => req("GET", `${t()}/arap/receivables${qs(asOf ? { as_of: asOf } : {})}`),
+      payablesList: (status, asOf) => req("GET", `${t()}/arap/payables${qs({ status: status || "OPEN", ...(asOf ? { as_of: asOf } : {}) })}`),
+      payableCreate: (body) => req("POST", `${t()}/arap/payables`, body),
+      payableAct: (id, action, body) => req("POST", `${t()}/arap/payables/${id}/${action}`, body || {}),
+      arapSummary: (asOf) => req("GET", `${t()}/arap/summary${qs(asOf ? { as_of: asOf } : {})}`),
+      nachaPayout: (body) => req("POST", `${t()}/arap/payouts/nacha`, body || {}),
+      payoutBatches: () => req("GET", `${t()}/arap/payouts`),
+      payoutBatchFile: (id) => req("GET", `${t()}/arap/payouts/${id}/file`),
+      // Third-party administrators (file/pay/track on behalf of initiating parties)
+      tpaRegister: (body) => req("POST", "/api/public/tpa/register", body),
+      tpaClaim: (code) => req("POST", `${t()}/tpa/claim`, { code }),
+      tpaMe: () => req("GET", `${t()}/tpa/me`),
+      tpaClients: () => req("GET", `${t()}/tpa/clients`),
+      tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),
+      tpaClientStatus: (id, status) => req("POST", `${t()}/tpa/clients/${id}/status`, { status }),
+      tpaIntake: (body) => req("POST", `${t()}/tpa/intake`, body),
+      tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${qs(tpaId ? { tpa_id: tpaId } : {})}`),
+      adminTpas: () => req("GET", `${t()}/admin/tpas`),
+      adminTpaStatus: (id, status) => req("POST", `${t()}/admin/tpas/${id}/status`, { status }),
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
+      checkImage: (checkId) => blobURL(`${t()}/checks/${checkId}/image`),
       uploadCheck: (file) => {
         const fd = new FormData();
         fd.append("check", file);

@@ -206,7 +206,19 @@ func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 		RemittanceRef string `json:"remittance_ref"` // bank deposit/lockbox ref
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	code, msg := s.settleClearedCheck(r, tenant, checkID, in.RemittanceRef,
+		r.Context().Value(ctxPrincipal{}).(principal).Subject)
+	if code != http.StatusOK {
+		http.Error(w, msg, code)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "CLEARED"})
+}
 
+// settleClearedCheck is the shared settlement core for staff clearCheck and
+// the bank/lockbox webhook — one path turns a matched check into money,
+// whoever confirms it. Returns (httpStatus, errorJSON).
+func (s *server) settleClearedCheck(r *http.Request, tenant, checkID, remittanceRef, actor string) (int, string) {
 	var invID, caseID string
 	var amount int64
 	err := s.db.QueryRow(r.Context(), `
@@ -215,15 +227,13 @@ func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 		RETURNING invoice_id, case_id, amount_cents`, checkID, tenant).
 		Scan(&invID, &caseID, &amount)
 	if err != nil {
-		http.Error(w, `{"error":"check not in MATCHED state"}`, http.StatusConflict)
-		return
+		return http.StatusConflict, `{"error":"check not in MATCHED state"}`
 	}
 	if _, err = s.db.Exec(r.Context(), `
 		UPDATE public.invoices SET status='PAID', paid_at=now()::date, remittance_ref=$3
 		WHERE tenant=$1 AND id=$2 AND status='OPEN'`, tenant, invID,
-		orDash(in.RemittanceRef)); err != nil {
-		http.Error(w, `{"error":"invoice settle failed"}`, http.StatusInternalServerError)
-		return
+		orDash(remittanceRef)); err != nil {
+		return http.StatusInternalServerError, `{"error":"invoice settle failed"}`
 	}
 	s.db.Exec(r.Context(), `
 		UPDATE public.payments SET status='PAID', updated_at=now()
@@ -233,20 +243,20 @@ func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 	s.postPaymentLedger(tenant, caseID, "chk:"+checkID, "", uint64(amount), false)
 
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, "",
-		orDash(in.RemittanceRef), "check-cleared")
+		orDash(remittanceRef), actor)
 	s.maybeAdvanceStatus(r, tenant, caseID) // all fees PAID => CLOSED_PAID
 	s.autoChecklist(r, tenant, caseID)
 	s.logActivity(r.Context(), tenant, caseID, "CHECK_CLEARED",
 		fmt.Sprintf("Check %s cleared — invoice %s paid ($%d.%02d)", checkID, invID, amount/100, amount%100))
 	s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
 		"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
-		"method": "check", "remittance_ref": in.RemittanceRef, "tenant": tenant,
+		"method": "check", "remittance_ref": remittanceRef, "tenant": tenant,
 	})
 	s.logAudit(r.Context(), tenant, caseID, "CHECK_CLEARED", map[string]any{
-		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "check_id": checkID,
-		"invoice_id": invID, "amount_cents": amount, "remittance_ref": in.RemittanceRef,
+		"by": actor, "check_id": checkID,
+		"invoice_id": invID, "amount_cents": amount, "remittance_ref": remittanceRef,
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "CLEARED"})
+	return http.StatusOK, ""
 }
 
 // listChecks: review queue + status filtering for staff.
@@ -280,4 +290,41 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"checks": rows,
 		"total": total, "next_offset": nextOffset(offset, limit, total)})
+}
+
+// checkImage streams the vault-unsealed check scan for the portal preview.
+// Same financial-read gate as listChecks — the image carries full MICR data.
+func (s *server) checkImage(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires a financial/management role"}`, http.StatusForbidden)
+		return
+	}
+	checkID := chi.URLParam(r, "checkId")
+	var key, ct string
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT object_key, content_type FROM public.checks WHERE id=$1 AND tenant=$2`,
+		checkID, tenant).Scan(&key, &ct); err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		http.Error(w, `{"error":"storage"}`, http.StatusBadGateway)
+		return
+	}
+	defer obj.Close()
+	sealed, err := io.ReadAll(obj)
+	if err != nil {
+		http.Error(w, `{"error":"storage"}`, http.StatusBadGateway)
+		return
+	}
+	img, err := s.vaultOpenDoc(r, tenant, key, sealed)
+	if err != nil {
+		http.Error(w, `{"error":"unseal failed"}`, http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.Write(img)
 }

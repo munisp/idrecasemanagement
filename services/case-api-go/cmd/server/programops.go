@@ -155,6 +155,9 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
 	if status == "PAID" {
 		s.maybeMarkDecidedInvoicePaid(r, tenant, caseID)
+		// Offline settlement (check/ACH/manual) releases a payment-gated
+		// intake exactly like the Stripe webhook path does.
+		s.activatePaidIntake(r, tenant, caseID)
 		// Program rules (invoice.settled) — offline settlement path
 		// (check/ACH/manual); same semantics as the Stripe webhook path.
 		s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
@@ -445,8 +448,15 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 			return
 		}
+		// Reflect the payment gate honestly to staff: when the program
+		// charges an initial fee the case sits AWAITING_PAYMENT until the
+		// party settles (case number/upload link release on payment).
+		var st string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+			`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
 		writeJSON(w, http.StatusCreated, map[string]any{
-			"case_id": caseID, "case_number": caseNumber, "status": "PENDING_INTAKE",
+			"case_id": caseID, "case_number": caseNumber, "status": st,
+			"payment_required": st == "AWAITING_PAYMENT",
 			"filing_party_type": fpt, "programmed": true,
 		})
 		return

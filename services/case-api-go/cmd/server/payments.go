@@ -239,6 +239,9 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 			"amount_cents": amount, "party": party, "remittance_ref": sess.PaymentIntent,
 		})
 		s.postPaymentLedger(tenant, caseID, sess.PaymentIntent, party, uint64(amount), false) // clearing → escrow
+		// Payment-gated intake: if this case was held in AWAITING_PAYMENT, the
+		// settled INITIAL_FEE invoice releases the case number + upload link.
+		s.activatePaidIntake(r, tenant, caseID)
 		s.maybeAdvanceStatus(r, tenant, caseID)                                               // invoice PAID => case may close
 		s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED",
 			fmt.Sprintf("Card payment of $%d.%02d received via Stripe (%s) — invoice settled, ledger posted", amount/100, amount%100, sess.PaymentIntent))
@@ -484,7 +487,8 @@ func (s *server) ledgerBalances(w http.ResponseWriter, r *http.Request) {
 		party string
 	}
 	var refs []acctRef
-	for _, c := range []uint32{acctAdminRemittance, acctIdreCompensation, acctRefundPayable, acctStripeClearing} {
+	for _, c := range []uint32{acctAdminRemittance, acctIdreCompensation, acctRefundPayable, acctStripeClearing,
+		acctSvcReceivable, acctSvcRevenue, acctOperatingCash, acctAccountsPayable, acctProgramExpense} {
 		refs = append(refs, acctRef{c, ""})
 	}
 	for _, p := range parties {

@@ -603,6 +603,29 @@ const Views = (() => {
       } else html += `<p class="muted">No documents yet.</p>`;
       html += `<div id="analysis"></div>`;
 
+      // Time — per-role effort ledger on this dispute. Append-only; the
+      // role stamped is the logger's real role. Eligibility decides whether
+      // the work is billable; this records that it happened.
+      if (can("CASE_MANAGER", "PM", "CODER", "DOCTOR", "NURSE", "NURSE_PHYSICIAN", "ARBITRATOR", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
+            <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
+            <input name="entry_date" type="date" aria-label="Date worked" />
+            <input name="note" placeholder="what was done" maxlength="500" />
+            <label><input type="checkbox" name="billable" checked /> billable</label>
+            <button class="mini">Log time</button>
+            <span class="muted">recorded under your name and role — corrections are compensating entries, never edits</span></form>`;
+        timeCaseBox(id).then((h) => { const b = document.getElementById("time-box"); if (b) b.innerHTML = h; });
+      }
+
+      // Financials — every dollar tied to this dispute: fee invoices and
+      // payments, service-fee lines and allocated payments, payables
+      // (awards), and the raw event stream.
+      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        html += `<h2>Financials</h2><div id="fin-box"><p class="muted">Loading…</p></div>`;
+        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
+      }
+
       // Program panels (per-state rules: eligibility, correspondence/QA,
       // invoices, claims, dual status, program dates, opt-out) — rendered
       // only when the tenant runs a custom program.
@@ -1820,9 +1843,9 @@ const Views = (() => {
         const r = await Api.program.intakeBulk({ batch_ref: ref, items });
         const rows = (r.results || []).map((x) => `<tr>
           <td class="muted">${esc(x.external_ref || "")}</td>
-          <td>${x.status === "CREATED" ? badge("CREATED") : `<span class="badge warn">ERROR</span>`}</td>
+          <td>${x.status === "CREATED" ? badge("CREATED") : `<span class="badge warn">ERROR</span>`}${x.payment_required ? ` <span class="badge warn" title="Party must pay the initial review fee before the case number is released and upload unlocks">fee due</span>` : ""}</td>
           <td>${x.case_number ? `<a href="#/cases/${x.case_id}">${esc(x.case_number)}</a>` : esc(x.intake_id || "")}</td>
-          <td class="muted">${esc(x.error || "")}</td></tr>`).join("");
+          <td class="muted">${esc(x.error || "")}${x.payment_required ? "Payment link emailed to the filing party — case activates on settlement." : ""}</td></tr>`).join("");
         $("#intake-bulk-result").innerHTML = `<div class="card" style="margin-top:10px">
           <b>Batch ${esc(r.batch_ref || ref)}</b> — ${r.created} filed, ${r.errors} error(s)${r.idempotent_replay ? " — <b>idempotent replay</b>: this reference was already submitted; showing the recorded receipt, nothing re-filed" : ""}
           <table style="margin-top:8px"><thead><tr><th>Row</th><th>Outcome</th><th>Intake / case</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -1845,7 +1868,9 @@ const Views = (() => {
         email: form.email.value, contact_name: form.contact_name.value, org: form.org.value,
       });
       if (r.programmed) {
-        UI.toast(`Case ${r.case_number} opened — filing instructions emailed to ${esc(form.email.value)}`, { sticky: true });
+        UI.toast(r.payment_required
+          ? `Case ${r.case_number} created — AWAITING PAYMENT: fee link emailed to ${esc(form.email.value)}; case number and upload link release on payment`
+          : `Case ${r.case_number} opened — filing instructions emailed to ${esc(form.email.value)}`, { sticky: true });
         location.hash = `#/cases/${r.case_id}`;
       } else {
         UI.toast("Intake request opened — submission instructions queued");
@@ -2337,6 +2362,7 @@ const Views = (() => {
           <button class="mini" onclick="Views.assistantTool('${caseId}','checklist')">☑ Stage checklist</button>
           <button class="mini" onclick="Views.assistantTool('${caseId}','mail')">✉ Send mail</button>
           <button class="mini" onclick="Views.assistantTool('${caseId}','checks')">🧾 Manual checks</button>
+          <button class="mini" onclick="Views.assistantTool('${caseId}','time')">⏱ Log time</button>
         </div>
         <div class="asst-chips">
           <button class="mini" onclick="Views.assistantChip('${caseId}','brief',this)">▤ Brief me</button>
@@ -2788,6 +2814,7 @@ const Views = (() => {
       else if (tool === "checklist") box.innerHTML = await asstChecklistHtml(caseId);
       else if (tool === "mail") box.innerHTML = await asstMailHtml(caseId);
       else if (tool === "checks") box.innerHTML = await asstChecksHtml();
+      else if (tool === "time") box.innerHTML = await asstTimeHtml(caseId);
     } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
   }
 
@@ -3239,165 +3266,161 @@ const Views = (() => {
     }, decision === "APPROVE" ? "Approving…" : "Rejecting…");
   }
 
-  // ---- Thread tools: the conversation reaches the case screens ------------
-  // Documents, stage checklist, mail, and manual checks render inline in the
-  // thread and call the SAME endpoints the screens use — same roles, same
-  // audit, same timeline. The conversation is a second surface over the case
-  // record, never a parallel state store. Uploading, moving, and deep
-  // inspection stay on the case screen (one deep-link away); the thread
-  // covers status, requests, and human-gated actions.
-  async function assistantTool(caseId, tool) {
-    const box = document.getElementById("asst-tools");
-    if (!box) return;
-    if (box.dataset.open === tool) { box.innerHTML = ""; box.dataset.open = ""; return; }
-    box.dataset.open = tool;
-    box.innerHTML = `<p class="muted">Loading…</p>`;
-    try {
-      if (tool === "docs") box.innerHTML = await asstDocsHtml(caseId);
-      else if (tool === "checklist") box.innerHTML = await asstChecklistHtml(caseId);
-      else if (tool === "mail") box.innerHTML = await asstMailHtml(caseId);
-      else if (tool === "checks") box.innerHTML = await asstChecksHtml();
-    } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
+  // Log time from the thread — same POST /cases/{id}/time endpoint the case
+  // screen's Time section uses; role stamping is server-side either way.
+  async function asstTimeHtml(caseId) {
+    const r = await Api.cases.timeList(caseId);
+    const recent = (r.entries || []).slice(0, 10).map((e) => `<tr>
+      <td>${esc(e.entry_date)}</td><td>${esc(e.subject)}</td><td>${badge(e.role)}</td>
+      <td>${fmtMins(e.minutes)}</td><td class="muted">${esc(e.note || "")}</td></tr>`).join("");
+    return `<div class="card"><h3>⏱ Time on this dispute — ${fmtMins(r.total_minutes)} logged</h3>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.asstTimeAdd('${caseId}', this)">
+        <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required />
+        <input name="entry_date" type="date" />
+        <input name="note" placeholder="what was done" maxlength="500" />
+        <label><input type="checkbox" name="billable" checked /> billable</label>
+        <button class="mini">Log</button></form>
+      ${recent ? `<table><thead><tr><th>Date</th><th>Who</th><th>Role</th><th>Time</th><th>Note</th></tr></thead><tbody>${recent}</tbody></table>` : `<p class="muted">No entries yet.</p>`}
+      <p class="muted">Append-only, recorded under your name and role — <a href="#/time">team weekly/monthly rollups ↗</a></p></div>`;
   }
 
-  // Documents: docket status at a glance, per-document download, and the
-  // party-request flow (mint a secure upload link) — upload/move/deep
-  // inspection stay on the case screen via the deep-link.
-  async function asstDocsHtml(caseId) {
-    const docs = await Api.cases.documents(caseId);
-    const byFolder = {};
-    (docs || []).forEach((d) => { byFolder[d.folder || "GENERAL"] = (byFolder[d.folder || "GENERAL"] || 0) + 1; });
-    const pending = (docs || []).filter((d) => d.analysis_status && !["COMPLETE", "FAILED", "SKIPPED", ""].includes(d.analysis_status));
-    const rows = (docs || []).map((d) => `<tr>
-      <td class="mono">${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</td>
-      <td>${esc(d.folder || "GENERAL")}</td>
-      <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : badge(d.analysis_status || "—")}</td>
-      <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${caseId}','${d.doc_id}')">download</a></td></tr>`).join("");
-    return `<div class="card"><h3>📄 Documents — ${(docs || []).length} on the docket</h3>
-      <p class="muted">${Object.entries(byFolder).map(([f, n]) => `${esc(f)} ${n}`).join(" · ") || "none yet"}${pending.length ? ` · ⚠ ${pending.length} awaiting analysis` : ""}</p>
-      ${rows ? `<table><thead><tr><th>File</th><th>Folder</th><th>Analysis</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : ""}
-      <div class="actions">
-        <button class="mini" onclick="Views.asstRequestUpload('${caseId}',this)">🔗 Request party upload link</button>
-        <a class="button mini" href="#/cases/${caseId}">Open full docket ↗</a>
-      </div></div>`;
-  }
-
-  // Mint the upload link and narrate it into the thread so the worker can
-  // paste it into correspondence (or use {share_link} in Send mail below).
-  async function asstRequestUpload(caseId, btn) {
-    await UI.run(btn, async () => {
-      try {
-        const r = await Api.program.shareLink(caseId, "upload", 7);
-        const full = location.origin + r.url;
-        asstAppend(caseId, "user", "Request a party upload link.");
-        asstAppend(caseId, "assistant", `Secure upload link minted (expires in 7 days):\n${full}\n\nSend it via Send mail — the {share_link} placeholder mints one automatically on send.`, "");
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    }, "Minting link…");
-  }
-
-  // Stage checklist: same items as the case screen, checkable in place via
-  // the same checkItem endpoint — the thread never rerenders away.
-  async function asstChecklistHtml(caseId) {
-    const items = await Api.cm.checklist(caseId);
-    const stages = {};
-    (items || []).forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
-    const total = (items || []).length, done = (items || []).filter((i) => i.done).length;
-    const canCheck = can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN");
-    return `<div class="card"><h3>☑ Stage checklists — ${done} of ${total} complete</h3>` +
-      Object.entries(stages).map(([stage, its]) =>
-        `<h4 style="margin:10px 0 4px">${esc(stage)}</h4><ul class="checklist">` + its.map((i) =>
-          `<li>${i.done ? "✅" : canCheck
-            ? `<button class="mini" onclick="Views.asstCheck('${caseId}','${i.id}',this)">check</button>` : "⬜"}
-            ${esc(i.item)}${i.required ? " *" : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
-        `</ul>`).join("") + `</div>`;
-  }
-
-  async function asstCheck(caseId, itemId, btn) {
-    await UI.run(btn, async () => {
-      try {
-        await Api.cm.checkItem(itemId);
-        const box = document.getElementById("asst-tools");
-        if (box) box.innerHTML = await asstChecklistHtml(caseId);
-        UI.toast("Checklist item completed — recorded on the case");
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    }, "Recording…");
-  }
-
-  // Mail: compose in the thread against the program's live templates; send
-  // routes through the SAME correspondence endpoint — QA-flagged templates
-  // land in the gate (whose card renders inline above) and nothing sends
-  // without the human approve.
-  async function asstMailHtml(caseId) {
-    const prog = await Api.program.get().catch(() => null);
-    const tpls = prog?.config?.correspondence?.templates || [];
-    if (!tpls.length)
-      return `<div class="card"><h3>✉ Send mail</h3><p class="muted">This program defines no correspondence templates — use the case screen's correspondence tools.</p></div>`;
-    return `<div class="card"><h3>✉ Send mail</h3>
-      <form class="inline-form" onsubmit="event.preventDefault(); Views.asstSendMail('${caseId}', this)">
-        <select name="template">${tpls.map((tp) =>
-          `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
-        <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
-        <input name="to" placeholder="to emails (comma-separated)" required />
-        <input name="cc" placeholder="cc emails" />
-        <textarea name="body" rows="3" placeholder="message body — {share_link} mints a secure upload link on send, {download_link} a link to the latest generated document" required></textarea>
-        <label><input type="checkbox" name="auto_share" checked /> Attach secure upload link</label>
-        <label><input type="checkbox" name="auto_download" /> Attach latest-document link</label>
-        <button>Send / submit for QA</button></form>
-      <p class="muted">Same endpoint as the case screen — QA-flagged templates wait in the gate above until a human approves.</p></div>`;
-  }
-
-  async function asstSendMail(caseId, form) {
-    const split = (s) => (s || "").split(",").map((x) => x.trim()).filter(Boolean);
+  async function asstTimeAdd(caseId, form) {
     const btn = form.querySelector("button");
     await UI.run(btn, async () => {
       try {
-        const r = await Api.program.send(caseId, {
-          template: form.template.value, body: form.body.value,
-          to: split(form.to.value), cc: split(form.cc.value),
-          rfi_to: form.rfi_to.value, auto_share: form.auto_share.checked, auto_download: form.auto_download.checked,
+        await Api.cases.timeAdd(caseId, {
+          hours: parseFloat(form.hours.value),
+          entry_date: form.entry_date.value || "",
+          note: form.note.value.trim(),
+          billable: form.billable.checked,
         });
-        asstAppend(caseId, "user", `Send mail: ${form.template.value} to ${form.to.value}.`);
-        asstAppend(caseId, "assistant",
-          r.queued_for_qa ? `Submitted — the draft is waiting in the QA gate above. Approve it there and it sends; nothing goes out automatically.`
-            : `Sent and logged to correspondence.`, "");
-        form.body.value = "";
-        asstQaLoad(caseId); // a QA-gated template appears inline immediately
+        asstAppend(caseId, "user", `Log ${form.hours.value}h${form.note.value.trim() ? " — " + form.note.value.trim() : ""}.`);
+        asstAppend(caseId, "assistant", "Time logged against this dispute under your name and role. The entry is append-only — a correction is a compensating entry, never an edit.", "");
+        const box = document.getElementById("asst-tools");
+        if (box) box.innerHTML = await asstTimeHtml(caseId);
       } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    }, "Sending…");
+    }, "Logging…");
   }
 
-  // Manual checks: the OCR/ICR review queue, reachable without leaving the
-  // conversation. Clearing calls the same clearCheck endpoint as finance —
-  // a human matches the remittance; the thread just removes the navigation.
-  async function asstChecksHtml() {
-    const r = await Api.program.checks("REVIEW", { limit: 50 });
-    const ck = r.checks || [];
-    if (!ck.length)
-      return `<div class="card"><h3>🧾 Manual checks</h3><p class="muted">No checks awaiting review — the OCR queue is clear.</p></div>`;
-    const rows = ck.map((c) => `<tr>
-      <td class="mono">${esc((c.check_id || c.id || "").slice(0, 8))}…</td>
-      <td>${esc(c.payee || "—")}</td>
-      <td>${c.courtesy_amount_cents != null ? "$" + (c.courtesy_amount_cents / 100).toLocaleString() : "—"}</td>
-      <td>${esc(c.memo || "")}</td>
-      <td><input id="asst-ck-ref-${c.check_id || c.id}" placeholder="remittance ref" style="width:130px" />
-          <button class="mini" onclick="Views.asstClearCheck('${c.check_id || c.id}',this)">clear</button></td></tr>`).join("");
-    return `<div class="card"><h3>🧾 Manual checks — ${ck.length} awaiting review</h3>
-      <p class="muted">OCR could not match these to an open invoice. Match each to its remittance and clear — or <a href="#/finance">open finance ↗</a> for the full queue.</p>
-      <table><thead><tr><th>Check</th><th>Payee</th><th>Courtesy</th><th>Memo</th><th>Clear</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  // ---- Time entries (per-role effort, per dispute) ------------------------
+  const fmtMins = (m) => `${(m / 60).toFixed(m % 60 ? 2 : 0)}h`;
+
+  async function timeCaseBox(caseId) {
+    try {
+      const r = await Api.cases.timeList(caseId);
+      const rows = (r.entries || []).map((e) => `<tr>
+        <td>${esc(e.entry_date)}</td><td>${esc(e.subject)}</td><td>${badge(e.role)}</td>
+        <td>${fmtMins(e.minutes)}</td><td>${e.billable ? "✓" : "—"}</td><td class="muted">${esc(e.note || "")}</td></tr>`).join("");
+      return rows
+        ? `<p><b>${fmtMins(r.total_minutes)}</b> logged on this dispute</p>
+           <table><thead><tr><th>Date</th><th>Who</th><th>Role</th><th>Time</th><th>Billable</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<p class="muted">No time logged yet.</p>`;
+    } catch (e) { return `<p class="muted">${esc(e.message)}</p>`; }
   }
 
-  async function asstClearCheck(checkId, btn) {
-    const ref = document.getElementById(`asst-ck-ref-${checkId}`)?.value.trim() || "";
-    if (!ref) { UI.toast("Enter the remittance reference first", { kind: "warn" }); return; }
-    if (!(await UI.confirm("Clear this check?", `Matched to remittance ${ref} — funds settle against the open invoice.`, "Clear check"))) return;
+  async function timeAdd(caseId, form) {
+    const btn = form.querySelector("button");
     await UI.run(btn, async () => {
       try {
-        await Api.program.clearCheck(checkId, ref);
-        UI.toast("Check cleared");
-        const box = document.getElementById("asst-tools");
-        if (box) box.innerHTML = await asstChecksHtml();
+        await Api.cases.timeAdd(caseId, {
+          hours: parseFloat(form.hours.value),
+          entry_date: form.entry_date.value || "",
+          note: form.note.value.trim(),
+          billable: form.billable.checked,
+        });
+        UI.toast("Time logged");
+        form.hours.value = ""; form.note.value = "";
+        const h = await timeCaseBox(caseId);
+        const b = document.getElementById("time-box");
+        if (b) b.innerHTML = h;
       } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    }, "Clearing…");
+    }, "Logging…");
+  }
+
+  // Weekly (per dispute) and monthly (whole team, per dispute) rollups —
+  // the billing-review tables.
+  async function timeReport() {
+    if (!can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Team time</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    const now = new Date();
+    const defMonth = now.toISOString().slice(0, 7);
+    // Role-based billable rates: only PM/admin may set them; only
+    // PM/FINANCE/admin ever see dollar amounts.
+    if (can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      afterRender(() => timeRatesBox());
+    return `<div class="view-head"><h1>Team time</h1>
+      <span class="muted">hours worked per dispute — weekly and monthly rollups for billing review</span></div>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.timeReportRun(this)">
+        <label>Week containing <input name="week" type="date" /></label>
+        <label>or month <input name="month" type="month" value="${defMonth}" /></label>
+        <label>or range <input name="start" type="date" /> → <input name="end" type="date" /></label>
+        <button>Run report</button></form>
+      <div id="time-rpt"></div>
+      <div id="time-rates"></div>`;
+  }
+
+  async function timeRatesBox() {
+    const box = document.getElementById("time-rates");
+    if (!box) return;
+    const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+    try {
+      const r = await Api.program.timeRates();
+      const rates = r.rates || [];
+      const rows = rates.map((x) => `<tr>
+        <td>${badge(x.role)}</td><td>${usd(x.rate_cents_per_hour)}/h</td>
+        <td class="muted">${esc(x.updated_by)} · ${fmtDate(x.updated_at)}</td></tr>`).join("");
+      const manage = r.can_manage
+        ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.timeRateSet(this)">
+            <select name="role">${["DOCTOR","NURSE","CODER","NURSE_PHYSICIAN","CASE_MANAGER","PM","ARBITRATOR","ATTORNEY","FINANCE","STATE_AUDITOR"].map((x) => `<option>${x}</option>`).join("")}</select>
+            <input name="rate" type="number" step="0.01" min="0" placeholder="$/hour" required />
+            <button class="mini">Set rate</button></form>`
+        : "";
+      box.innerHTML = `<h2>Billable rates by role</h2>
+        ${rows ? `<table><thead><tr><th>Role</th><th>Rate</th><th>Last set</th></tr></thead><tbody>${rows}</tbody></table>`
+               : `<p class="muted">No rates configured — reports show hours only until rates are set.</p>`}
+        ${manage || `<p class="muted">Rates are set by PM / administrators.</p>`}`;
+    } catch (e) { box.innerHTML = ""; }
+  }
+
+  async function timeRateSet(form) {
+    const btn = form.querySelector("button");
+    await UI.run(btn, async () => {
+      try {
+        await Api.program.timeRateSet(form.role.value, Math.round(parseFloat(form.rate.value) * 100));
+        UI.toast(`Rate set: ${form.role.value}`);
+        form.rate.value = "";
+        timeRatesBox();
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Saving…");
+  }
+
+  async function timeReportRun(form) {
+    const box = document.getElementById("time-rpt");
+    const btn = form.querySelector("button");
+    box.innerHTML = `<p class="muted">Computing…</p>`;
+    await UI.run(btn, async () => {
+      try {
+        const opts = form.start.value && form.end.value
+          ? { start: form.start.value, end: form.end.value }
+          : form.week.value ? { week: form.week.value } : { month: form.month.value };
+        const r = await Api.program.timeReport(opts);
+        const usd2 = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+        const money = r.total_amount_cents !== undefined; // server attaches amounts only to PM/FINANCE/admin
+        const caseRows = (r.by_case || []).map((c) => `<tr>
+          <td class="mono"><a href="#/cases/${c.case_id}">${esc(c.case_number || c.case_id.slice(0, 8) + "…")}</a></td>
+          <td>${fmtMins(c.minutes)}</td><td>${fmtMins(c.billable_minutes)}</td><td>${c.people}</td>
+          ${money ? `<td>${c.amount_cents != null ? usd2(c.amount_cents) : "—"}${c.unrated_billable_minutes ? ` <span class="muted" title="billable minutes with no configured role rate">+${fmtMins(c.unrated_billable_minutes)} unrated</span>` : ""}</td>` : ""}</tr>`).join("");
+        const personRows = (r.by_person || []).map((p) => `<tr>
+          <td>${esc(p.case_number)}</td><td>${fmtMins(p.minutes)}</td><td>${fmtMins(p.billable_minutes)}</td>
+          ${money ? `<td>${p.amount_cents != null ? usd2(p.amount_cents) : "—"}</td>` : ""}</tr>`).join("");
+        box.innerHTML = `<h2>${esc(r.period)}</h2>
+          <p><b>${fmtMins(r.total_minutes)}</b> total · <b>${fmtMins(r.billable_minutes)}</b> billable${money ? ` · <b>${usd2(r.total_amount_cents)}</b> billable amount` : ""}${money && r.unrated_billable_minutes ? ` · <span class="muted">${fmtMins(r.unrated_billable_minutes)} unrated</span>` : ""}</p>
+          <h3>By dispute</h3>
+          ${caseRows ? `<table><thead><tr><th>Case</th><th>Hours</th><th>Billable</th><th>People</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${caseRows}</tbody></table>` : `<p class="muted">No time logged in this period.</p>`}
+          <h3>By team member</h3>
+          ${personRows ? `<table><thead><tr><th>Who</th><th>Hours</th><th>Billable</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${personRows}</tbody></table>` : ""}`;
+      } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
+    }, "Computing…");
   }
 
   async function uploadCheck(file, btn) {
@@ -3660,7 +3683,7 @@ const Views = (() => {
         { name: "email", label: "First user — email" },
         { name: "role", label: "First user — role", value: "CASE_MANAGER", options: [
           ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
-          ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse/Physician"], ["ATTORNEY", "Attorney"],
+          ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
       ],
     });
@@ -3794,7 +3817,7 @@ const Views = (() => {
         { name: "email", label: "Email", required: true },
         { name: "role", label: "Role", value: "CASE_MANAGER", options: [
           ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
-          ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse/Physician"], ["ATTORNEY", "Attorney"],
+          ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
       ],
     });
@@ -3878,5 +3901,616 @@ const Views = (() => {
     } catch (e) { return err(e); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard };
+  // ---------- Service-fee invoicing, AR/AP, reconciliation ----------
+  const usdC = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+  const finRoles = ["CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
+
+  async function caseFinBox(caseId) {
+    try {
+      const r = await Api.program.caseFinancials(caseId);
+      const t = r.totals || {};
+      const feeRows = (r.fee_invoices || []).map((i) => `<tr><td class="mono">${esc(i.invoice_no)}</td>
+        <td>${esc(i.party)}</td><td>${esc(i.kind)}</td><td>${usdC(i.amount_cents)}</td>
+        <td>${usdC(i.paid_cents)}</td><td>${badge(i.status)}</td></tr>`).join("");
+      const svcRows = (r.service_lines || []).map((l) => `<tr><td class="mono">${esc(l.invoice_no)}</td>
+        <td>${badge(l.role)}</td><td>${fmtMins(l.minutes)}</td><td>${usdC(l.amount_cents)}</td>
+        <td>${badge(l.invoice_status)}</td></tr>`).join("");
+      const svcPays = (r.service_payments || []).map((p) => `<tr><td class="mono">${esc(p.invoice_no)}</td>
+        <td>${usdC(p.amount_cents)}</td><td>${esc(p.method)}</td><td class="mono">${esc(p.ref || "")}</td>
+        <td>${esc((p.received_at || "").slice(0, 10))}</td></tr>`).join("");
+      const apRows = (r.payables || []).map((p) => `<tr><td>${esc(p.payee)}</td><td>${badge(p.source)}</td>
+        <td>${usdC(p.amount_cents)}</td><td>${badge(p.status)}</td><td class="mono">${esc(p.settle_ref || "")}</td></tr>`).join("");
+      return `<div class="stat-grid">
+          <div class="stat"><div class="stat-num">${usdC(t.ar_due_cents)}</div><div class="muted">AR due (fees)</div></div>
+          <div class="stat"><div class="stat-num">${usdC(t.service_billed_cents)}</div><div class="muted">Service billed</div></div>
+          <div class="stat"><div class="stat-num">${usdC(t.collected_total_cents)}</div><div class="muted">Collected total</div></div>
+          <div class="stat"><div class="stat-num">${usdC(t.ap_open_cents)}</div><div class="muted">AP open (awards…)</div></div></div>
+        <h3>Fee invoices (payer/provider)</h3>
+        ${feeRows ? `<table class="tbl"><thead><tr><th>Invoice</th><th>Party</th><th>Kind</th><th>Amount</th><th>Paid</th><th>Status</th></tr></thead><tbody>${feeRows}</tbody></table>` : '<p class="muted">No fee invoices on this dispute.</p>'}
+        <h3>Service-fee lines</h3>
+        ${svcRows ? `<table class="tbl"><thead><tr><th>Invoice</th><th>Role</th><th>Time</th><th>Amount</th><th>Status</th></tr></thead><tbody>${svcRows}</tbody></table>` : '<p class="muted">No service billing on this dispute.</p>'}
+        ${svcPays ? `<h3>Service payments allocated to this dispute</h3><table class="tbl"><thead><tr><th>Invoice</th><th>Allocated</th><th>Method</th><th>Ref</th><th>Received</th></tr></thead><tbody>${svcPays}</tbody></table>` : ""}
+        <h3>Payables</h3>
+        ${apRows ? `<table class="tbl"><thead><tr><th>Payee</th><th>Source</th><th>Amount</th><th>Status</th><th>Settle ref</th></tr></thead><tbody>${apRows}</tbody></table>` : '<p class="muted">No obligations recorded.</p>'}`;
+    } catch (e) { return `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  // ===== Invoices view (#/billing) =====
+  function billingInvoices() {
+    if (!can(...finRoles))
+      return `<div class="view-head"><h1>Billing</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    afterRender(() => billingList());
+    const now = new Date().toISOString();
+    return `<div class="view-head"><h1>Billing — service-fee invoices</h1>
+      <span class="muted">generated from the time ledger × role rates; every dollar ties back to disputes</span></div>
+      <div class="card"><h2>Generate</h2>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.billingGen(this)">
+        <label>Week <input name="week" type="date" /></label>
+        <label>Month <input name="month" type="month" value="${now.slice(0, 7)}" /></label>
+        <label>Range <input name="start" type="date" /> → <input name="end" type="date" /></label>
+        <label><input type="checkbox" name="percase" /> per-case invoices</label>
+        <button>Generate DRAFT</button></form>
+      <p class="muted">Idempotent per period — an existing active invoice for the same period is reported, never duplicated. Billable time without a role rate blocks generation (configurable).</p>
+      <div id="billing-gen-out"></div></div>
+      <div id="billing-list"><p class="muted">Loading…</p></div>
+      <div id="billing-detail"></div>`;
+  }
+
+  async function billingGen(form) {
+    const out = document.getElementById("billing-gen-out");
+    const params = form.start.value && form.end.value ? { start: form.start.value, end: form.end.value }
+      : form.week.value ? { week: form.week.value } : { month: form.month.value };
+    out.innerHTML = `<p class="muted">Generating…</p>`;
+    try {
+      const r = await Api.program.billingGenerate(params, { consolidate: !form.percase.checked });
+      const made = (r.invoices || []).map((i) => `<div>✅ <b class="mono">${esc(i.invoice_no)}</b> — ${usdC(i.total_cents)} · ${i.lines} line(s) ${i.case_id ? `· case ${esc(i.case_id.slice(0, 8))}…` : "· consolidated"}</div>`).join("");
+      const skipped = (r.skipped || []).map((x) => `<div class="muted">⏭ ${esc(x.case_id || "consolidated")}: ${esc(x.reason)} ${x.existing_invoice_no ? `(existing <b class="mono">${esc(x.existing_invoice_no)}</b>)` : ""}</div>`).join("");
+      const unrated = (r.excluded_unrated || []).map((u) => `<div class="muted">⚠ unrated: ${esc(u.role)} ${fmtMins(u.billable_minutes)} on ${esc((u.case_id || "").slice(0, 8))}…</div>`).join("");
+      out.innerHTML = `<p><b>${esc(r.period)}</b></p>${made}${skipped}${unrated}` || `<p class="muted">No billable time in period.</p>`;
+      billingList();
+    } catch (e) {
+      const unr = e.data && e.data.unrated ? e.data.unrated.map((u) => `<div>⚠ ${esc(u.role)} — ${fmtMins(u.billable_minutes)} (case ${esc((u.case_id || "").slice(0, 8))}…)</div>`).join("") : "";
+      out.innerHTML = `<p class="error">${esc(e.message)}</p>${unr}`;
+    }
+  }
+
+  async function billingList(status) {
+    const box = document.getElementById("billing-list");
+    if (!box) return;
+    try {
+      const r = await Api.program.billingList(status ? { status } : {});
+      const rows = (r.invoices || []).map((i) => {
+        const due = Number(i.total_cents) - Number(i.paid_cents || 0);
+        let actions = "";
+        if (i.status === "DRAFT" && can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+          actions += `<button class="mini" onclick="Views.billingActFn('${i.id}','approve')">Approve</button> `;
+        if (i.status === "APPROVED" && can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+          actions += `<button class="mini" onclick="Views.billingActFn('${i.id}','issue')">Issue</button> `;
+        if (["DRAFT", "APPROVED", "ISSUED"].includes(i.status) && can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+          actions += `<button class="mini danger" onclick="Views.billingActFn('${i.id}','void')">Void</button> `;
+        if (i.status === "ISSUED" && can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+          actions += `<button class="mini" onclick="Views.billingPayForm('${i.id}')">Record payment</button> `;
+        actions += `<button class="mini" onclick="Views.billingDetail('${i.id}')">Detail</button>
+          <button class="mini" onclick="Views.billingExportFn('${i.id}')">CSV</button>`;
+        return `<tr><td class="mono">${esc(i.invoice_no)}</td>
+          <td>${esc(i.period_start)} → ${esc(i.period_end)}</td>
+          <td>${esc(i.bill_to_name || "")}</td><td>${usdC(i.total_cents)}</td>
+          <td>${i.status === "ISSUED" ? usdC(due) : "—"}</td>
+          <td>${badge(i.status)}</td><td>${actions}</td></tr>`;
+      }).join("");
+      box.innerHTML = `<h2>Invoices</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.billingFilter(this)">
+          <select name="status"><option value="">all statuses</option>${["DRAFT", "APPROVED", "ISSUED", "PAID", "VOID"].map((x) => `<option>${x}</option>`).join("")}</select>
+          <button class="mini">Filter</button></form>
+        ${rows ? `<table class="tbl"><thead><tr><th>Invoice</th><th>Period</th><th>Bill to</th><th>Total</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No invoices yet — generate one above.</p>'}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function billingActFn(id, action) {
+    if (action === "void" && !confirm("Void this invoice?")) return;
+    try { await Api.program.billingAct(id, action); billingList(); }
+    catch (e) { alert(e.message); }
+  }
+
+  async function billingDetail(id) {
+    const box = document.getElementById("billing-detail");
+    try {
+      const r = await Api.program.billingGet(id);
+      const inv = r.invoice || {};
+      const lines = (r.lines || []).map((l) => `<tr><td class="mono">${esc(l.case_number || "")}</td>
+        <td>${badge(l.role)}</td><td>${fmtMins(l.minutes)}</td><td>${usdC(l.rate_cents_per_hour)}/h</td>
+        <td>${usdC(l.amount_cents)}</td><td>${esc(l.description)}</td></tr>`).join("");
+      const pays = (r.payments || []).map((p) => `<tr><td>${usdC(p.amount_cents)}</td><td>${esc(p.method)}</td>
+        <td class="mono">${esc(p.ref || "")}</td><td>${esc((p.received_at || "").slice(0, 10))}</td><td>${esc(p.recorded_by)}</td></tr>`).join("");
+      const evs = (r.events || []).map((e) => `<div class="muted">${esc(e.event)} · ${esc(e.actor)} · ${fmtDate(e.created_at)}</div>`).join("");
+      box.innerHTML = `<div class="card"><h2 class="mono">${esc(inv.invoice_no)}</h2>
+        <p>${badge(inv.status)} ${esc(inv.bill_to_name || "")} · due ${esc(inv.due_date || "—")} · ${esc(inv.memo || "")}</p>
+        <table class="tbl"><thead><tr><th>Case</th><th>Role</th><th>Time</th><th>Rate</th><th>Amount</th><th>Description</th></tr></thead><tbody>${lines}</tbody></table>
+        <p><b>Subtotal ${usdC(inv.subtotal_cents)} · Tax ${usdC(inv.tax_cents)} · Total ${usdC(inv.total_cents)}</b></p>
+        ${pays ? `<h3>Payments</h3><table class="tbl"><thead><tr><th>Amount</th><th>Method</th><th>Ref</th><th>Received</th><th>By</th></tr></thead><tbody>${pays}</tbody></table>` : ""}
+        <div id="pay-form-${id}"></div><h3>Trail</h3>${evs}</div>`;
+      box.scrollIntoView({ behavior: "smooth" });
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function billingExportFn(id) {
+    try { await Api.program.billingExport(id); } catch (e) { alert(e.message); }
+  }
+
+  function billingPayForm(id) {
+    const box = document.getElementById(`pay-form-${id}`) || document.getElementById("billing-detail");
+    box.insertAdjacentHTML("beforeend", `<form class="inline-form" onsubmit="event.preventDefault(); Views.billingPayRun('${id}', this)">
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount $" required />
+      <select name="method"><option>ach</option><option>wire</option><option>check</option><option>card</option></select>
+      <input name="ref" placeholder="remittance / bank ref" />
+      <input name="received_at" type="date" />
+      <button class="mini">Record payment</button></form>
+      <p class="muted">Split across the invoice's disputes automatically (proportional), so collections roll up per case.</p>`);
+  }
+
+  async function billingPayRun(id, form) {
+    try {
+      await Api.program.billingPay(id, {
+        amount_cents: Math.round(Number(form.amount.value) * 100),
+        method: form.method.value, ref: form.ref.value,
+        received_at: form.received_at.value || undefined,
+      });
+      billingList(); billingDetail(id);
+    } catch (e) { alert(e.message); }
+  }
+
+  // ===== AR/AP view (#/arap) =====
+  function arapView() {
+    if (!can(...finRoles))
+      return `<div class="view-head"><h1>AR / AP</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    afterRender(() => { arapSummaryBox(); arapArBox(); arapApBox(); });
+    return `<div class="view-head"><h1>Receivables & payables</h1>
+      <span class="muted">AR derived live from invoice stores; AP obligations recorded and settled here</span></div>
+      <div id="arap-summary"></div>
+      <div class="card"><h2>Accounts receivable — aging</h2><div id="arap-ar"><p class="muted">Loading…</p></div></div>
+      <div class="card"><h2>Accounts payable</h2>
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.arapRecord(this)">
+          <input name="payee" placeholder="payee" required />
+          <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount $" required />
+          <select name="source"><option>award</option><option>refund</option><option>vendor</option><option>tax</option><option>other</option></select>
+          <input name="case_id" placeholder="case id (optional)" />
+          <input name="due_date" type="date" />
+          <button class="mini">Record obligation</button></form>` : ""}
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<p><button class="mini" onclick="Views.arapNacha()">Generate ACH (NACHA) payout file</button>
+          <span class="muted"> from open payables that carry bank destinations</span></p>` : ""}
+        <div id="arap-ap"><p class="muted">Loading…</p></div>
+        <div id="arap-nacha"></div></div>`;
+  }
+
+  async function arapSummaryBox() {
+    const box = document.getElementById("arap-summary");
+    try {
+      const r = await Api.program.arapSummary();
+      box.innerHTML = `<div class="stat-grid">
+        <div class="stat"><div class="stat-num">${usdC(r.ar && r.ar.total_cents)}</div><div class="muted">Open receivables</div></div>
+        <div class="stat"><div class="stat-num">${usdC(r.ap && r.ap.open_cents)}</div><div class="muted">Open payables</div></div>
+        <div class="stat"><div class="stat-num">${usdC(r.net_position_cents)}</div><div class="muted">Net position</div></div></div>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  function agingTable(rows, partyLabel) {
+    if (!rows || !rows.length) return '<p class="muted">Nothing open.</p>';
+    return `<table class="tbl"><thead><tr><th>${partyLabel}</th><th>Ref</th><th>Case</th><th>Amount</th><th>Due</th><th>Basis</th><th>Days</th><th>Bucket</th></tr></thead><tbody>
+      ${rows.map((x) => `<tr class="${x.bucket === "90+" ? "row-breach" : ""}">
+        <td>${esc(x.party)}</td><td class="mono">${esc(x.number || x.kind || "")}</td>
+        <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_id.slice(0, 8))}…</a>` : "—"}</td>
+        <td>${usdC(x.amount_cents)}</td><td><b>${usdC(x.due_cents)}</b></td>
+        <td>${esc(x.basis_date)}</td><td>${x.days_outstanding}</td><td>${badge(x.bucket)}</td></tr>`).join("")}</tbody></table>`;
+  }
+
+  async function arapArBox() {
+    const box = document.getElementById("arap-ar");
+    try {
+      const r = await Api.program.receivablesAging();
+      const ag = r.aging || {};
+      box.innerHTML = `<p>${["current", "1-30", "31-60", "61-90", "90+"].map((b) => `<span class="chip">${b}: <b>${usdC(ag[b] || 0)}</b></span> `).join("")}</p>
+        ${agingTable(r.receivables, "Owes")}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function arapApBox() {
+    const box = document.getElementById("arap-ap");
+    try {
+      const r = await Api.program.payablesList();
+      const rows = (r.payables || []).map((x) => {
+        const canWrite = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+        const acts = canWrite ? `<button class="mini" onclick="Views.arapSettle('${x.id}')">Settle</button>
+          <button class="mini danger" onclick="Views.arapVoid('${x.id}')">Void</button>` : "";
+        return `<tr><td>${esc(x.party)}</td><td>${badge(x.kind)}</td><td>${usdC(x.amount_cents)}</td>
+          <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_id.slice(0, 8))}…</a>` : "—"}</td>
+          <td>${esc(x.basis_date)}</td><td>${x.days_outstanding}</td><td>${badge(x.bucket)}</td><td>${acts}</td></tr>`;
+      }).join("");
+      const ag = r.aging || {};
+      box.innerHTML = `<p>${["current", "1-30", "31-60", "61-90", "90+"].map((b) => `<span class="chip">${b}: <b>${usdC(ag[b] || 0)}</b></span> `).join("")}</p>
+        ${rows ? `<table class="tbl"><thead><tr><th>Payee</th><th>Source</th><th>Amount</th><th>Case</th><th>Basis</th><th>Days</th><th>Bucket</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No open obligations.</p>'}`;
+      nachaBatchesBox();
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  function saveTextFile(name, text) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    a.download = name; a.click(); URL.revokeObjectURL(a.href);
+  }
+
+  async function arapNacha() {
+    const box = document.getElementById("arap-nacha");
+    try {
+      const r = await Api.program.nachaPayout({});
+      saveTextFile(r.filename, r.file);
+      box.innerHTML = `<p class="ok">Batch ${esc(r.batch_id.slice(0, 8))}… — ${r.entry_count} entries, ${usdC(r.total_cents)} — file <b>${esc(r.filename)}</b> downloaded. Upload it to your bank portal.</p>`;
+      arapApBox();
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function nachaBatchesBox() {
+    const box = document.getElementById("arap-nacha");
+    if (!box || box.dataset.busy) return;
+    try {
+      const r = await Api.program.payoutBatches();
+      const bs = r.batches || [];
+      if (!bs.length) return;
+      box.innerHTML = `<h3>ACH payout batches</h3>` + bs.map((b) => `<span class="chip">${esc(b.file_reference)} · ${b.entry_count} entries · ${usdC(b.total_cents)} · ${badge(b.status)}
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<a href="#" onclick="event.preventDefault(); Views.arapNachaFile('${b.id}')">download</a>` : ""}</span> `).join(" ");
+    } catch { /* batches are supplementary */ }
+  }
+
+  async function arapNachaFile(id) {
+    try {
+      const r = await Api.program.payoutBatchFile(id);
+      saveTextFile(r.filename, r.file);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function arapRecord(form) {
+    try {
+      await Api.program.payableCreate({
+        payee: form.payee.value, amount_cents: Math.round(Number(form.amount.value) * 100),
+        source: form.source.value, case_id: form.case_id.value || undefined,
+        due_date: form.due_date.value || undefined,
+      });
+      form.reset(); arapApBox(); arapSummaryBox();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function arapSettle(id) {
+    const method = prompt("Settle via (ach/wire/check):", "ach");
+    if (!method) return;
+    const ref = prompt("Remittance / bank reference (recon matches on this):", "");
+    try { await Api.program.payableAct(id, "settle", { method, ref: ref || "" }); arapApBox(); arapSummaryBox(); }
+    catch (e) { alert(e.message); }
+  }
+
+  async function arapVoid(id) {
+    if (!confirm("Void this obligation?")) return;
+    try { await Api.program.payableAct(id, "void", {}); arapApBox(); arapSummaryBox(); }
+    catch (e) { alert(e.message); }
+  }
+
+  // ===== Reconciliation view (#/recon) =====
+  function reconView() {
+    if (!can(...finRoles))
+      return `<div class="view-head"><h1>Reconciliation</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    afterRender(() => reconBatchList());
+    const canWrite = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    return `<div class="view-head"><h1>Reconciliation</h1>
+      <span class="muted">match accounting/bank feeds against platform money records — exact ref, then amount within tolerance and date window; ambiguity always goes to a human</span></div>
+      ${canWrite ? `<div class="card"><h2>Import external feed</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.reconImportRun(this)">
+          <select name="mapping"><option value="quickbooks">QuickBooks CSV</option><option value="xero">Xero CSV</option>
+            <option value="sage">Sage CSV</option><option value="bank_generic">Bank (generic CSV)</option></select>
+          <input name="file" type="file" accept=".csv" required />
+          <button class="mini">Import</button></form>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.reconFetchRun(this)">
+          <input name="feed" placeholder="configured http_json feed name" />
+          <button class="mini">Fetch from accounting platform</button>
+          <span class="muted">feeds are configured per tenant (reconciliation.http_feeds)</span></form>
+        <div id="recon-import-out"></div></div>` : ""}
+      <div id="recon-batches"><p class="muted">Loading…</p></div>
+      <div id="recon-detail"></div>`;
+  }
+
+  async function reconImportRun(form) {
+    const out = document.getElementById("recon-import-out");
+    out.innerHTML = `<p class="muted">Importing…</p>`;
+    try {
+      const r = await Api.program.reconImportCsv(form.mapping.value, form.file.files[0]);
+      out.innerHTML = `<p>✅ Batch #${r.batch_id} — ${r.items} items (${esc(r.period)}). Running auto-match…</p>`;
+      const m = await Api.program.reconMatch(r.batch_id);
+      out.innerHTML += `<p>Matched <b>${m.matched}</b> · exceptions <b>${m.exceptions}</b> · unmatched <b>${m.unmatched}</b></p>`;
+      reconBatchList();
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function reconFetchRun(form) {
+    const out = document.getElementById("recon-import-out");
+    try {
+      const r = await Api.program.reconFetch(form.feed.value);
+      out.innerHTML = `<p>✅ Batch #${r.batch_id} — ${r.items} items. Running auto-match…</p>`;
+      const m = await Api.program.reconMatch(r.batch_id);
+      out.innerHTML += `<p>Matched <b>${m.matched}</b> · exceptions <b>${m.exceptions}</b> · unmatched <b>${m.unmatched}</b></p>`;
+      reconBatchList();
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function reconBatchList() {
+    const box = document.getElementById("recon-batches");
+    if (!box) return;
+    try {
+      const r = await Api.program.reconBatches();
+      const rows = (r.batches || []).map((b) => `<tr><td>#${b.id}</td><td>${esc(b.source)}</td>
+        <td>${esc(b.period_start)} → ${esc(b.period_end)}</td><td>${b.total_items}</td>
+        <td>${b.matched}</td><td>${b.exceptions}</td><td>${b.unmatched}</td><td>${badge(b.status)}</td>
+        <td><button class="mini" onclick="Views.reconOpen(${b.id})">Open</button>
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" onclick="Views.reconMatchRun(${b.id})">Re-run match</button>` : ""}</td></tr>`).join("");
+      box.innerHTML = `<h2>Batches</h2>${rows ? `<table class="tbl"><thead><tr><th></th><th>Source</th><th>Period</th><th>Items</th><th>Matched</th><th>Exceptions</th><th>Unmatched</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No imports yet.</p>'}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function reconMatchRun(id) {
+    try { const m = await Api.program.reconMatch(id);
+      alert(`matched ${m.matched} · exceptions ${m.exceptions} · unmatched ${m.unmatched}`);
+      reconBatchList(); reconOpen(id);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function reconOpen(id) {
+    const box = document.getElementById("recon-detail");
+    try {
+      const r = await Api.program.reconBatch(id);
+      const rows = (r.items || []).map((it) => {
+        let act = "";
+        if (can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && it.status !== "MATCHED" && it.status !== "IGNORED")
+          act = `<button class="mini" onclick="Views.reconResolveFn(${it.id}, 'match')">Match…</button>
+            <button class="mini" onclick="Views.reconResolveFn(${it.id}, 'exception')">Exception</button>
+            <button class="mini" onclick="Views.reconResolveFn(${it.id}, 'ignore')">Ignore</button>`;
+        return `<tr class="${it.status === "EXCEPTION" ? "row-breach" : ""}">
+          <td>${esc(it.txn_date)}</td><td>${usdC(it.amount_cents)}</td><td class="mono">${esc(it.reference || "")}</td>
+          <td>${esc(it.description || "")}</td><td>${badge(it.status)}</td>
+          <td>${it.platform_kind ? `${esc(it.platform_kind)} ${usdC(it.platform_amount_cents)}` : ""} <span class="muted">${esc(it.match_kind || "")}</span></td>
+          <td class="muted">${esc(it.note || "")}</td><td>${act}</td></tr>`;
+      }).join("");
+      box.innerHTML = `<div class="card"><h2>Batch #${id} — ${esc(r.batch.source)}</h2>
+        <table class="tbl"><thead><tr><th>Date</th><th>Amount</th><th>Reference</th><th>Description</th><th>Status</th><th>Platform record</th><th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      box.scrollIntoView({ behavior: "smooth" });
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function reconResolveFn(itemId, action) {
+    try {
+      if (action === "match") {
+        const ev = prompt("Platform financial_event id to match (amounts must tie):");
+        if (!ev) return;
+        await Api.program.reconResolve(itemId, { action: "match", event_id: Number(ev) });
+      } else if (action === "exception") {
+        const note = prompt("Exception note (required):");
+        if (!note) return;
+        await Api.program.reconResolve(itemId, { action: "exception", note });
+      } else {
+        await Api.program.reconResolve(itemId, { action });
+      }
+      const det = document.querySelector("#recon-detail h2");
+      if (det) { const m = det.textContent.match(/#(\d+)/); if (m) reconOpen(Number(m[1])); }
+      reconBatchList();
+    } catch (e) { alert(e.message); }
+  }
+
+  // ── Third-party administrators ─────────────────────────────────────
+  function tpaView() {
+    if (!can("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Third-party administrators</h1></div><p class="muted">Requires a TPA, CASE_MANAGER, or FINANCE account.</p>`;
+    afterRender(tpaBoot);
+    return `<div class="view-head"><h1>Third-party administrators</h1>
+      <span class="muted">File, pay, and track disputes on behalf of your initiating parties</span></div>
+      <div id="tpa-org"></div>
+      <div id="tpa-body" style="display:none">
+        <div class="card"><h2>Initiating parties (clients)</h2>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaAddClientFn(this)">
+            <input name="party_name" placeholder="organization name" required />
+            <select name="party_type"><option value="PROVIDER">Provider</option><option value="HEALTH_PLAN">Health plan</option></select>
+            <input name="contact_email" type="email" placeholder="contact email" />
+            <button class="mini">Add</button></form>
+          <div id="tpa-clients"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>File a dispute on behalf of a client</h2>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
+            <select name="client_id" id="tpa-file-client" required></select>
+            <input name="contact_name" placeholder="client contact for this dispute" />
+            <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
+            <input name="notes" placeholder="notes" />
+            <button class="mini">File dispute</button></form>
+          <p class="muted">The payment link and upload link come to your TPA contact email — you pay and manage documents on behalf of the initiating party.</p>
+          <div id="tpa-file-result"></div></div>
+        <div class="card"><h2>Tracking — all your parties' disputes</h2>
+          <div id="tpa-rollup"></div><div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+      </div>
+      ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
+      <div class="card"><h2>State oversight — all TPAs</h2><div id="tpa-admin"><p class="muted">Loading…</p></div></div>` : ""}`;
+  }
+
+  async function tpaBoot() {
+    const orgBox = document.getElementById("tpa-org");
+    try {
+      const r = await Api.program.tpaMe();
+      orgBox.innerHTML = `<div class="stat-grid"><div class="stat"><div class="stat-num">${esc(r.tpa.name)}</div>
+        <div class="muted">${esc(r.tpa.contact_email)} · ${badge(r.tpa.status)}</div></div></div>`;
+      document.getElementById("tpa-body").style.display = "";
+      tpaClientsBox(); tpaDashBox();
+    } catch (e) {
+      orgBox.innerHTML = `<div class="card"><h2>Link your TPA organization</h2>
+        <p class="muted">Enter the one-time claim code from your TPA registration.</p>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaClaimFn(this)">
+          <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
+    }
+    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) tpaAdminBox();
+  }
+
+  async function tpaClaimFn(form) {
+    try { await Api.program.tpaClaim(form.code.value.trim()); tpaBoot(); }
+    catch (e) { alert(e.message); }
+  }
+
+  async function tpaClientsBox() {
+    const box = document.getElementById("tpa-clients");
+    try {
+      const r = await Api.program.tpaClients();
+      const cs = r.clients || [];
+      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Party</th><th>Type</th><th>Email</th><th>Cases</th><th>Status</th><th></th></tr></thead><tbody>
+        ${cs.map((c) => `<tr><td>${esc(c.party_name)}</td><td>${badge(c.party_type)}</td><td>${esc(c.contact_email || "—")}</td>
+          <td>${c.case_count}</td><td>${badge(c.status)}</td>
+          <td><button class="mini" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></td></tr>`).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one above.</p>';
+      const sel = document.getElementById("tpa-file-client");
+      if (sel) sel.innerHTML = cs.filter((c) => c.status === "ACTIVE").map((c) => `<option value="${c.id}">${esc(c.party_name)} (${esc(c.party_type)})</option>`).join("");
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaAddClientFn(form) {
+    try {
+      await Api.program.tpaAddClient({ party_name: form.party_name.value, party_type: form.party_type.value, contact_email: form.contact_email.value });
+      form.reset(); tpaClientsBox();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function tpaClientStatusFn(id, status) {
+    try { await Api.program.tpaClientStatus(id, status); tpaClientsBox(); }
+    catch (e) { alert(e.message); }
+  }
+
+  async function tpaFileFn(form) {
+    const out = document.getElementById("tpa-file-result");
+    try {
+      const r = await Api.program.tpaIntake({
+        client_id: form.client_id.value, contact_name: form.contact_name.value,
+        disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
+      });
+      out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? "Payment link sent to your TPA email." : ""}</p>`;
+      form.reset(); tpaDashBox(); tpaClientsBox();
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaDashBox(tpaId) {
+    const roll = document.getElementById("tpa-rollup"), box = document.getElementById("tpa-cases");
+    try {
+      const r = await Api.program.tpaDashboard(tpaId);
+      roll.innerHTML = (r.by_client || []).map((x) => `<span class="chip">${esc(x.initiating_party)}: <b>${x.cases}</b> cases (${x.open} open) · invoiced ${usdC(x.invoiced_cents)} · paid ${usdC(x.paid_cents)}</span> `).join("");
+      const rows = (r.cases || []).map((x) => `<tr><td>${esc(x.client_name)}</td><td>${badge(x.initiating_party_type)}</td>
+        <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
+        <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${usdC(x.invoiced_cents)}</td><td>${usdC(x.paid_cents)}</td><td>${esc(x.filed)}</td></tr>`).join("");
+      box.innerHTML = rows ? `<table class="tbl"><thead><tr><th>Initiating party</th><th>Type</th><th>Case</th><th>Status</th><th>Disputed</th><th>Invoiced</th><th>Paid</th><th>Filed</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No disputes filed yet.</p>';
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaAdminBox() {
+    const box = document.getElementById("tpa-admin");
+    if (!box) return;
+    try {
+      const r = await Api.program.adminTpas();
+      const rows = (r.tpas || []).map((t) => `<tr><td>${esc(t.name)}</td><td>${esc(t.contact_email)}</td><td>${t.clients}</td><td>${t.cases_filed}</td>
+        <td>${badge(t.status)}</td>
+        <td>${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini ${t.status === "ACTIVE" ? "danger" : ""}" onclick="Views.tpaAdminStatusFn('${t.id}','${t.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${t.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button>` : ""}</td></tr>`).join("");
+      box.innerHTML = rows ? `<table class="tbl"><thead><tr><th>TPA</th><th>Contact</th><th>Clients</th><th>Cases</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No TPAs registered.</p>';
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaAdminStatusFn(id, status) {
+    try { await Api.program.adminTpaStatus(id, status); tpaAdminBox(); }
+    catch (e) { alert(e.message); }
+  }
+
+  // ── Physical check intake + scan preview ───────────────────────────
+  function checksView() {
+    if (!can(...finRoles))
+      return `<div class="view-head"><h1>Checks</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    afterRender(() => checksBox(""));
+    return `<div class="view-head"><h1>Checks</h1>
+      <span class="muted">photo/scan → MICR + OCR extraction → invoice match → clearing</span></div>
+      <div class="card"><h2>Deposit a check</h2>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.checkUploadFn(this)">
+          <input name="check" type="file" accept="image/jpeg,image/png,image/tiff,image/webp" required />
+          <button class="mini">Upload & scan</button></form>
+        <div id="check-upload-result"></div></div>
+      <div class="card"><h2>Scanned checks</h2>
+        <p>${["", "RECEIVED", "PROCESSED", "MATCHED", "REVIEW", "CLEARED", "REJECTED"].map((st) =>
+          `<button class="mini" onclick="Views.checksFilter('${st}')">${st || "All"}</button>`).join(" ")}</p>
+        <div id="checks-list"><p class="muted">Loading…</p></div></div>
+      <div class="card" id="check-detail-card" style="display:none"><h2>Scan preview</h2>
+        <div id="check-detail"></div></div>`;
+  }
+
+  async function checksBox(status) {
+    const box = document.getElementById("checks-list");
+    try {
+      const r = await Api.program.checks(status);
+      const cs = r.checks || [];
+      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Received</th><th>Status</th><th>Amount</th><th>Payer</th><th>Check #</th><th>Invoice</th><th>Confidence</th><th></th></tr></thead><tbody>
+        ${cs.map((c) => `<tr class="${c.amount_mismatch ? "row-breach" : ""}">
+          <td>${esc((c.created_at || "").slice(0, 10))}</td><td>${badge(c.status)}</td>
+          <td>${usdC(c.courtesy_amount_cents)}</td><td>${esc(c.payer_name || "—")}</td>
+          <td>${esc(c.check_number || "—")}</td>
+          <td>${c.invoice_id ? esc(c.invoice_id.slice(0, 8)) + "…" : "—"}</td>
+          <td>${badge(c.confidence || "—")}${c.amount_mismatch ? " ⚠ mismatch" : ""}</td>
+          <td><button class="mini" onclick="Views.checkOpen('${c.id}')">Preview</button></td></tr>`).join("")}</tbody></table>`
+        : '<p class="muted">No checks scanned yet.</p>';
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function checkUploadFn(form) {
+    const out = document.getElementById("check-upload-result");
+    const f = form.check.files[0];
+    if (!f) return;
+    out.innerHTML = '<p class="muted">Uploading — extraction runs asynchronously…</p>';
+    try {
+      const r = await Api.program.uploadCheck(f);
+      out.innerHTML = `<p class="ok">Received (${esc(r.check_id.slice(0, 8))}…) — scan queued. Refresh in a few seconds to see the extraction.</p>`;
+      form.reset();
+      setTimeout(() => checksBox(""), 4000);
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function checkOpen(id) {
+    const card = document.getElementById("check-detail-card"), box = document.getElementById("check-detail");
+    card.style.display = "";
+    box.innerHTML = '<p class="muted">Loading scan…</p>';
+    card.scrollIntoView({ behavior: "smooth" });
+    try {
+      const r = await Api.program.checks("");
+      const c = (r.checks || []).find((x) => x.id === id);
+      const imgUrl = await Api.program.checkImage(id).catch(() => null);
+      const mask = (v) => v ? "••••" + esc(String(v).slice(-4)) : "—";
+      box.innerHTML = `
+        ${imgUrl ? `<p><img src="${imgUrl}" alt="check scan" style="max-width:100%;border:1px solid var(--line,#ccc);border-radius:8px" /></p>` : '<p class="muted">Image unavailable.</p>'}
+        ${c ? `<div class="stat-grid">
+          <div class="stat"><div class="stat-num">${usdC(c.courtesy_amount_cents)}</div><div class="muted">Courtesy amount</div></div>
+          <div class="stat"><div class="stat-num">${usdC(c.legal_amount_cents)}</div><div class="muted">Legal amount</div></div>
+          <div class="stat"><div class="stat-num">${badge(c.confidence || "—")}</div><div class="muted">Confidence</div></div></div>
+        <table class="tbl"><tbody>
+          <tr><td>Status</td><td>${badge(c.status)}${c.amount_mismatch ? ' <span class="error">⚠ courtesy/legal mismatch — REVIEW</span>' : ""}</td></tr>
+          <tr><td>Routing</td><td class="mono">${mask(c.routing_number)}</td></tr>
+          <tr><td>Account</td><td class="mono">${mask(c.account_number)}</td></tr>
+          <tr><td>Check #</td><td>${esc(c.check_number || "—")}</td></tr>
+          <tr><td>Date</td><td>${esc(c.check_date || "—")}</td></tr>
+          <tr><td>Payer</td><td>${esc(c.payer_name || "—")}</td></tr>
+          <tr><td>Memo</td><td>${esc(c.memo || "—")}</td></tr>
+          <tr><td>Matched invoice</td><td>${c.invoice_id ? esc(c.invoice_id) : "—"}</td></tr>
+          <tr><td>Case</td><td>${c.case_id ? `<a href="#/cases/${c.case_id}">${esc(c.case_id.slice(0, 8))}…</a>` : "—"}</td></tr></tbody></table>
+        ${c.status === "MATCHED" && can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.checkClearFn('${c.id}', this)">
+            <input name="ref" placeholder="bank deposit / lockbox ref" />
+            <button class="mini">Confirm cleared</button></form>` : ""}` : '<p class="error">check metadata not found</p>'}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function checkClearFn(id, form) {
+    try {
+      await Api.program.clearCheck(id, form.ref.value || "");
+      document.getElementById("check-detail-card").style.display = "none";
+      checksBox("");
+    } catch (e) { alert(e.message); }
+  }
+
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();

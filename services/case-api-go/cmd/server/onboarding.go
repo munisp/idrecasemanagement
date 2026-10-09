@@ -220,6 +220,13 @@ func hasRole(p principal, role string) bool {
 		if rr == role {
 			return true
 		}
+		// Clinical role split: the legacy combined NURSE_PHYSICIAN grant is
+		// satisfied by either of the two replacement roles, so every existing
+		// RBAC check (24 call sites) keeps working while new staff are
+		// granted DOCTOR or NURSE separately.
+		if role == "NURSE_PHYSICIAN" && (rr == "DOCTOR" || rr == "NURSE") {
+			return true
+		}
 	}
 	return false
 }
