@@ -81,6 +81,8 @@ type ProgramConfig struct {
 		AgencyRecipients []string       `json:"agency_recipients"`
 		Templates        []CorrTemplate `json:"templates"`
 	} `json:"correspondence"`
+	Billing        BillingConfig `json:"billing"`        // service-fee invoicing engine (billing.go)
+	Reconciliation ReconConfig   `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.

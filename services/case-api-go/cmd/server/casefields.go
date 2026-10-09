@@ -70,6 +70,10 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 	for k := range in {
 		keys = append(keys, k)
 	}
+	// Award recorded/changed/cleared -> keep the AP subledger in step.
+	if _, ok := in["final_amount_awarded_cents"]; ok {
+		s.syncAwardPayable(r, tenant, caseID, in, p.Subject)
+	}
 	s.logActivity(r.Context(), tenant, caseID, "DETAILS_UPDATED", "fields set: "+strings.Join(keys, ", "))
 	s.logAudit(r.Context(), tenant, caseID, "CASE_DETAILS_UPDATED", map[string]any{
 		"by": p.Subject, "fields": keys,

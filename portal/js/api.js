@@ -214,6 +214,32 @@ const Api = (() => {
       timeRates: () => req("GET", `${t()}/reports/time/rates`),
       timeRateSet: (role, rate_cents_per_hour) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour }),
       opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
+      caseFinancials: (caseId) => req("GET", `${t()}/cases/${caseId}/financials`),
+      // Service-fee invoicing engine
+      billingGenerate: (params, body) => req("POST", `${t()}/billing/invoices${qs(params || {})}`, body || {}),
+      billingList: (opts) => req("GET", `${t()}/billing/invoices${qs(opts || {})}`),
+      billingGet: (id) => req("GET", `${t()}/billing/invoices/${id}`),
+      billingAct: (id, action) => req("POST", `${t()}/billing/invoices/${id}/${action}`, {}),
+      billingPay: (id, body) => req("POST", `${t()}/billing/invoices/${id}/payments`, body),
+      billingExport: async (id) => download(`${t()}/billing/invoices/${id}/export`, "invoice.csv"),
+      // Reconciliation engine + adapters
+      reconImportCsv: (mapping, file) => {
+        const fd = new FormData();
+        fd.append("source", "csv_generic"); fd.append("mapping", mapping); fd.append("file", file);
+        return req("POST", `${t()}/recon/import`, fd, true);
+      },
+      reconFetch: (feed) => req("POST", `${t()}/recon/import`, { source: "http_json", feed }),
+      reconMatch: (id) => req("POST", `${t()}/recon/batches/${id}/match`, {}),
+      reconBatches: () => req("GET", `${t()}/recon/batches`),
+      reconBatch: (id) => req("GET", `${t()}/recon/batches/${id}`),
+      reconResolve: (itemId, body) => req("POST", `${t()}/recon/items/${itemId}/resolve`, body),
+      reconSummary: (opts) => req("GET", `${t()}/recon/summary${qs(opts || {})}`),
+      // AR/AP subledger
+      receivablesAging: (asOf) => req("GET", `${t()}/arap/receivables${qs(asOf ? { as_of: asOf } : {})}`),
+      payablesList: (status, asOf) => req("GET", `${t()}/arap/payables${qs({ status: status || "OPEN", ...(asOf ? { as_of: asOf } : {}) })}`),
+      payableCreate: (body) => req("POST", `${t()}/arap/payables`, body),
+      payableAct: (id, action, body) => req("POST", `${t()}/arap/payables/${id}/${action}`, body || {}),
+      arapSummary: (asOf) => req("GET", `${t()}/arap/summary${qs(asOf ? { as_of: asOf } : {})}`),
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
