@@ -64,8 +64,13 @@ func validateRules(rules []Rule) error {
 
 func (s *server) rulesAdminGuard(w http.ResponseWriter, r *http.Request) (principal, bool) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		http.Error(w, `{"error":"rules are admin-managed (FEDERAL_ADMIN or PLATFORM_ADMIN required)"}`, http.StatusForbidden)
+	// TENANT_ADMIN included deliberately: tenancy() already confines it to
+	// tenants in its own group claim, so this only ever lets a tenant admin
+	// edit their OWN tenant's rules -- cross-tenant editing stays
+	// FEDERAL_ADMIN/PLATFORM_ADMIN only, same as every other tenant-scoped
+	// role on this platform.
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
+		http.Error(w, `{"error":"rules are admin-managed (FEDERAL_ADMIN, PLATFORM_ADMIN, or TENANT_ADMIN required)"}`, http.StatusForbidden)
 		return p, false
 	}
 	// Second layer: Permify object-level permission (program_rules.edit on the

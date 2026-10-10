@@ -129,7 +129,7 @@ func (s *server) caseGraphNeighbors(w http.ResponseWriter, r *http.Request) {
 // (any case staff querying/correcting the assistant), these cost real
 // compute/time and have no per-tenant rate limit, so any authenticated
 // member being able to trigger them repeatedly is a real abuse/cost vector.
-var graphAdminRoles = []string{"FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+var graphAdminRoles = []string{"FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"}
 
 func (s *server) graphSyncNow(w http.ResponseWriter, r *http.Request) {
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, graphAdminRoles...) {

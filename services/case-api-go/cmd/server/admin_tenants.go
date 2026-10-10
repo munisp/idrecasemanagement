@@ -62,7 +62,7 @@ func generateTempPassword() (string, error) {
 var validTenantRoles = map[string]bool{
 	"CASE_MANAGER": true, "ARBITRATOR": true, "PM": true, "CODER": true,
 	"NURSE_PHYSICIAN": true, "DOCTOR": true, "NURSE": true, "ATTORNEY": true, "FINANCE": true,
-	"STATE_AUDITOR": true, "PARTY": true, "TPA": true,
+	"STATE_AUDITOR": true, "PARTY": true, "TPA": true, "TENANT_ADMIN": true,
 }
 
 type createTenantRequest struct {
@@ -417,14 +417,29 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 	// from the JWT's group claim (principal.Tenants) directly, same source
 	// tenancy() itself reads from, not a URL-derived ctxTenant that
 	// doesn't exist on this route.
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+	if !isAdmin {
+		// hasRole("CASE_MANAGER") also admits TENANT_ADMIN (the per-tenant
+		// super-admin role inherits full CASE_MANAGER-equivalent access via
+		// a hasRole quirk, same mechanism as the DOCTOR/NURSE ->
+		// NURSE_PHYSICIAN split) -- so a tenant admin can add ordinary
+		// staff to their own tenant here too, same as a case manager can.
 		if !hasRole(p, "CASE_MANAGER") || !contains(p.Tenants, in.Tenant) {
-			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or CASE_MANAGER adding staff to their own tenant"}`, http.StatusForbidden)
+			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or CASE_MANAGER/TENANT_ADMIN adding staff to their own tenant"}`, http.StatusForbidden)
 			return
 		}
 	}
 	if !validTenantRoles[in.Role] {
-		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY, TENANT_ADMIN"}`, http.StatusBadRequest)
+		return
+	}
+	// TENANT_ADMIN is deliberately the one role in validTenantRoles that
+	// still requires FEDERAL_ADMIN/PLATFORM_ADMIN specifically: a tenant
+	// admin can mint ordinary staff for their own tenant via the branch
+	// above, but minting ANOTHER tenant admin stays centralized -- avoids
+	// a self-escalating admin chain within one state.
+	if in.Role == "TENANT_ADMIN" && !isAdmin {
+		http.Error(w, `{"error":"forbidden: only FEDERAL_ADMIN/PLATFORM_ADMIN may create a TENANT_ADMIN account"}`, http.StatusForbidden)
 		return
 	}
 	var exists bool

@@ -3706,10 +3706,11 @@ const Views = (() => {
       const curLabel = pr?.tenant_label || "";
       return `<div class="view-head"><h1>Program rules</h1>
         <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
+        ${can("FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
         <p><button onclick="Views.createTenantFlow()">＋ Create tenant</button>
            <span class="muted">activates a pre-provisioned state's Keycloak group + optional first user</span></p>
         <p><button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>
-           <span class="muted">cross-tenant FEDERAL_ADMIN or PLATFORM_ADMIN account</span></p>
+           <span class="muted">cross-tenant FEDERAL_ADMIN or PLATFORM_ADMIN account</span></p>` : ""}
         <p><button onclick="Views.renameTenantFlow('${esc(curLabel)}')">✎ ${curLabel ? `Rename "${esc(curLabel)}"` : "Set display name"}</button>
            <span class="muted">shown in place of the bare "${esc(Api.getTenant().toUpperCase())}" code throughout the portal</span></p>
         <p><button id="rule-add">＋ New rule</button>
@@ -3941,7 +3942,11 @@ const Views = (() => {
         { name: "role", label: "Role", value: "CASE_MANAGER", options: [
           ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
           ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
-          ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
+          ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"],
+          // Minting a TENANT_ADMIN is federal/platform-admin-only server-side
+          // (avoids a self-escalating admin chain within one state) -- the
+          // option only appears here when the caller could actually use it.
+          ...(can("FEDERAL_ADMIN", "PLATFORM_ADMIN") ? [["TENANT_ADMIN", "Tenant Admin (super admin)"]] : [])] },
       ],
     });
     if (!v) return;
