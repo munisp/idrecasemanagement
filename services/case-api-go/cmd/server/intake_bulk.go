@@ -149,11 +149,13 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 // the recorded results with idempotent_replay: true and files nothing twice.
 func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	// BULK_SUBMITTER is the third-party-filer role: it opens intake and reads
-	// its own batches — nothing else on the platform. Staff roles keep their
-	// existing single-intake rights and gain bulk as a superset.
-	if !hasAnyRole(p, "BULK_SUBMITTER", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires BULK_SUBMITTER or staff role"}`, http.StatusForbidden)
+	// BULK_SUBMITTER and TPA are the third-party-filer roles: they open intake
+	// and read their own batches — nothing else on the platform. TPA is a
+	// first-class role filing on behalf of the initiating party; BULK_SUBMITTER
+	// remains for plain batch filers. Staff roles keep their existing
+	// single-intake rights and gain bulk as a superset.
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires TPA, BULK_SUBMITTER, or staff role"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -251,7 +253,7 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 // see only their own batches; staff see any batch in the tenant.
 func (s *server) getIntakeBatch(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "BULK_SUBMITTER", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -282,4 +284,34 @@ func (s *server) getIntakeBatch(w http.ResponseWriter, r *http.Request) {
 		"items": itemCount, "created": createdC, "errors": errorC,
 		"submitted_at": createdAt, "results": results,
 	})
+}
+
+// listIntakeBatches: GET /intake/bulk — the filer's status board. Third-party
+// filers (TPA, BULK_SUBMITTER) see only their own batches; staff may pass
+// ?submitter= to inspect a specific filer, or see all batches in the tenant.
+func (s *server) listIntakeBatches(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	staff := hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole)
+	q := `SELECT id, submitter, batch_ref, item_count, created_count, error_count, created_at::text
+	      FROM public.intake_batches WHERE tenant=$1`
+	args := []any{tenant}
+	if !staff {
+		q += ` AND submitter=$2`
+		args = append(args, p.Subject)
+	} else if sub := strings.TrimSpace(r.URL.Query().Get("submitter")); sub != "" {
+		q += ` AND submitter=$2`
+		args = append(args, sub)
+	}
+	q += ` ORDER BY id DESC LIMIT 200`
+	rows, err := s.queryRows(r, q, args...)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"batches": rows})
 }

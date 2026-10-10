@@ -10,6 +10,7 @@ package main
 // G6 (escalation auto-trigger), G11 (numbering).
 
 import (
+	"io"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -280,6 +281,24 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
 		"by": p.Subject, "internal_status": in.Internal, "agency_status": in.Agency,
 	})
+	// Warn-only eligibility gate (G2 hardening): moving past the initial
+	// review phase without an ELIGIBLE decision on record is legal risk —
+	// billing downstream of a wrong "proceed" is unlawful — so the response
+	// carries a loud warning. It does NOT block: dismissals, withdrawals and
+	// opt-outs legitimately skip eligibility, and blocking them would strand
+	// those cases.
+	var warnings []string
+	if cfg := s.loadProgram(r, tenant); cfg != nil && in.Internal != "" &&
+		pastEligibilityGate(cfg, in.Internal) && !s.hasEligibleDecision(r, tenant, id) {
+		warnings = append(warnings,
+			"No ELIGIBLE decision on record for this case — run eligibility review before proceeding further (warn-only gate; this transition was allowed)")
+		s.logActivity(r.Context(), tenant, id, "ELIGIBILITY_GATE_WARNING",
+			fmt.Sprintf("Status moved to %q with no ELIGIBLE decision on record (warn-only)", in.Internal))
+	}
+	if len(warnings) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "warnings": warnings})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -311,17 +330,51 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in eligibilityInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	var override struct {
+		Override bool   `json:"override"`
+		Reason   string `json:"override_reason"`
+	}
+	// Decode twice: the decision input, then the override envelope (separate
+	// type so eligibilityInput stays exactly the rule inputs).
+	raw, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(raw, &in); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
+	_ = json.Unmarshal(raw, &override)
 
 	// Decision + persistence both live in triage.go, shared with the
 	// auto-adjudication endpoint — one implementation, so the auto path
 	// can never drift from what a human reviewer would compute.
 	result, reason, evidence := evalEligibility(cfg, in)
-	reviewID := s.persistEligibilityOutcome(r, tenant, id, p.Subject, result, reason, evidence)
-	writeJSON(w, http.StatusOK, map[string]any{"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence})
+	opts := eligibilityPersistOpts{ruleVersion: eligibilityRuleVersion(cfg)}
+	if bl := eligibilityBorderline(cfg, in, evidence); len(bl) > 0 {
+		opts.borderline, opts.borderlineReasons = true, bl
+		evidence["borderline"] = true
+		evidence["borderline_reasons"] = bl
+	}
+	// Override: INELIGIBLE → ELIGIBLE only, with a mandatory written reason.
+	// The computed result is preserved in evidence so the record shows both
+	// what the rules said and what the human decided.
+	if override.Override && result == "INELIGIBLE" {
+		if !validOverrideReason(override.Reason) {
+			http.Error(w, `{"error":"override requires a written reason (min 10 chars) — the legal record must show why the computed result was set aside"}`, http.StatusUnprocessableEntity)
+			return
+		}
+		evidence["computed_result"] = result
+		evidence["computed_reason"] = reason
+		opts.override, opts.overrideReason = true, strings.TrimSpace(override.Reason)
+		result, reason = "ELIGIBLE", "override"
+		s.logAudit(r.Context(), tenant, id, "ELIGIBILITY_OVERRIDE", map[string]any{
+			"by": p.Subject, "computed_result": evidence["computed_result"],
+			"computed_reason": evidence["computed_reason"], "override_reason": opts.overrideReason,
+		})
+	}
+	reviewID := s.persistEligibilityOutcome(r, tenant, id, p.Subject, result, reason, evidence, opts)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence,
+		"rule_version": opts.ruleVersion, "borderline": opts.borderline, "override": opts.override,
+	})
 }
 
 // eligibilityHistory lists past reviews for a case — the UI shows how the

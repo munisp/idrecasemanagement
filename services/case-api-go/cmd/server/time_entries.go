@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -434,4 +435,171 @@ func (s *server) timeRateMap(r *http.Request, tenant string) map[string]int64 {
 		m[role] = toInt64(row["rate_cents_per_hour"])
 	}
 	return m
+}
+
+// ---- Personal timesheet (daily entry screen) -------------------------------
+//
+// The contract discipline is that time data is fully editable by its owner
+// (a timesheet is wrong until it's right), but every mutation is audit-logged
+// with the full before/after snapshot — editability never costs the
+// evidentiary trail.
+
+// myTimeEntries: GET /time/mine?from=YYYY-MM-DD&to=YYYY-MM-DD — the current
+// user's entries across ALL disputes with case numbers, newest first, plus
+// per-day totals so the screen can render the daily column without math.
+func (s *server) myTimeEntries(w http.ResponseWriter, r *http.Request) {
+	princ := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	if to == "" {
+		to = time.Now().Format("2006-01-02")
+	}
+	if from == "" {
+		if t, err := time.Parse("2006-01-02", to); err == nil {
+			from = t.AddDate(0, 0, -13).Format("2006-01-02") // default: last 14 days
+		} else {
+			http.Error(w, `{"error":"to must be YYYY-MM-DD"}`, http.StatusBadRequest)
+			return
+		}
+	}
+	rows, err := s.queryRows(r, `
+		SELECT t.id, t.case_id, c.case_number, t.role, t.entry_date::text,
+		       t.minutes, t.note, t.billable, t.created_at
+		FROM public.time_entries t
+		JOIN tenant_`+sanitizeTenant(tenant)+`.cases c ON c.id = t.case_id
+		WHERE t.tenant=$1 AND t.subject=$2 AND t.entry_date >= $3::date AND t.entry_date <= $4::date
+		ORDER BY t.entry_date DESC, t.id DESC LIMIT 1000`, tenant, princ.Subject, from, to)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	dayTotals, _ := s.queryRows(r, `
+		SELECT entry_date::text, sum(minutes) AS minutes, count(*) AS entries
+		FROM public.time_entries
+		WHERE tenant=$1 AND subject=$2 AND entry_date >= $3::date AND entry_date <= $4::date
+		GROUP BY entry_date ORDER BY entry_date DESC`, tenant, princ.Subject, from, to)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": rows, "day_totals": dayTotals, "from": from, "to": to,
+	})
+}
+
+// myTimeSummary: GET /time/summary — daily (today), weekly (current ISO
+// week), and monthly (current month) totals for the current user. Pure SQL
+// rollup; the screen renders, never computes.
+func (s *server) myTimeSummary(w http.ResponseWriter, r *http.Request) {
+	princ := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var daily, weekly, monthly int64
+	q := `SELECT coalesce(sum(minutes),0) FROM public.time_entries WHERE tenant=$1 AND subject=$2 AND %s`
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(q, `entry_date = current_date`), tenant, princ.Subject).Scan(&daily)
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(q, `date_trunc('week', entry_date) = date_trunc('week', current_date)`), tenant, princ.Subject).Scan(&weekly)
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(q, `date_trunc('month', entry_date) = date_trunc('month', current_date)`), tenant, princ.Subject).Scan(&monthly)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"today_minutes": daily, "week_minutes": weekly, "month_minutes": monthly,
+	})
+}
+
+// loadOwnTimeEntry fetches the entry for the mutation guard: the owner may
+// edit; PM/FEDERAL_ADMIN/PLATFORM_ADMIN may edit anyone's (timesheet
+// corrections after billing review). Returns nil when not found.
+func (s *server) loadTimeEntryForEdit(r *http.Request, tenant string, id int64, p principal) (map[string]any, error) {
+	rows, err := s.queryRows(r, `
+		SELECT id, subject, case_id, role, entry_date::text, minutes, note, billable
+		FROM public.time_entries WHERE tenant=$1 AND id=$2`, tenant, id)
+	if err != nil || len(rows) == 0 {
+		return nil, fmt.Errorf("not found")
+	}
+	e := rows[0]
+	owner := fmt.Sprint(e["subject"]) == p.Subject
+	if !owner && !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		return nil, fmt.Errorf("forbidden: only the owner or PM/admin may edit a time entry")
+	}
+	return e, nil
+}
+
+// updateTimeEntry: PUT /time/{entryId} — full edit (date, hours, role, note,
+// billable) with the same validation as creation, including quarter-hour
+// enforcement for programs that require it.
+func (s *server) updateTimeEntry(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	id, _ := strconv.ParseInt(chi.URLParam(r, "entryId"), 10, 64)
+	before, err := s.loadTimeEntryForEdit(r, tenant, id, p)
+	if err != nil {
+		if err.Error() == "not found" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		} else {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusForbidden)
+		}
+		return
+	}
+	var in timeEntryIn
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	minutes, date, err := in.normalize()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Time.QuarterHours && minutes%15 != 0 {
+		http.Error(w, `{"error":"time must be recorded in 0.25-hour (15-minute) increments"}`, http.StatusUnprocessableEntity)
+		return
+	}
+	role := fmt.Sprint(before["role"])
+	if want := strings.ToUpper(strings.TrimSpace(in.Role)); want != "" {
+		switch want {
+		case "REVIEWER":
+			want = "CASE_MANAGER"
+		case "NURSE/PHYSICIAN", "NURSE PHYSICIAN", "PHYSICIAN":
+			want = "NURSE_PHYSICIAN"
+		}
+		if !hasRole(p, want) {
+			http.Error(w, fmt.Sprintf(`{"error":"role %q is not one you hold"}`, in.Role), http.StatusUnprocessableEntity)
+			return
+		}
+		role = want
+	}
+	billable := fmt.Sprint(before["billable"]) == "true"
+	if in.Billable != nil {
+		billable = *in.Billable
+	}
+	if _, err := s.db.Exec(r.Context(), `
+		UPDATE public.time_entries SET entry_date=$1, minutes=$2, role=$3, note=$4, billable=$5
+		WHERE tenant=$6 AND id=$7`,
+		date, minutes, role, truncate(strings.TrimSpace(in.Note), 1000), billable, tenant, id); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logAudit(r.Context(), tenant, fmt.Sprint(before["case_id"]), "TIME_ENTRY_UPDATED", map[string]any{
+		"entry_id": id, "by": p.Subject, "before": before,
+		"after": map[string]any{"entry_date": date, "minutes": minutes, "role": role, "billable": billable},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "entry_date": date, "minutes": minutes, "role": role, "billable": billable})
+}
+
+// deleteTimeEntry: DELETE /time/{entryId} — removes the row; the audit log
+// keeps the full snapshot, so deletion is never erasure from the record.
+func (s *server) deleteTimeEntry(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	id, _ := strconv.ParseInt(chi.URLParam(r, "entryId"), 10, 64)
+	before, err := s.loadTimeEntryForEdit(r, tenant, id, p)
+	if err != nil {
+		if err.Error() == "not found" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		} else {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusForbidden)
+		}
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `DELETE FROM public.time_entries WHERE tenant=$1 AND id=$2`, tenant, id); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logAudit(r.Context(), tenant, fmt.Sprint(before["case_id"]), "TIME_ENTRY_DELETED", map[string]any{
+		"entry_id": id, "by": p.Subject, "deleted": before,
+	})
+	w.WriteHeader(http.StatusNoContent)
 }

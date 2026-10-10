@@ -135,6 +135,7 @@
   }
   if (has("FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/ops", "◔", "Ops"]);
+  links.push(["#/timesheet", "⏱", "My timesheet"]);
   links.push(["#/calendar", "▨", "Calendar"]);
   links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
@@ -279,6 +280,7 @@
     [/^#\/onboarding\/new$/, Views.onboardingNew],
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
+    [/^#\/timesheet$/, Views.myTimesheet],
     [/^#\/time$/, Views.timeReport],
     [/^#\/billing$/, Views.billingInvoices],
     [/^#\/arap$/, Views.arapView],

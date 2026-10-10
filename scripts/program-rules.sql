@@ -205,6 +205,27 @@ CREATE TABLE IF NOT EXISTS public.eligibility_reviews (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Bulletproofing (2026): every decision is pinned to the exact rule version
+-- that produced it, borderline calls are flagged for dual control, and
+-- human overrides of the computed result carry their mandatory reason.
+ALTER TABLE public.eligibility_reviews
+    ADD COLUMN IF NOT EXISTS rule_version text,
+    ADD COLUMN IF NOT EXISTS borderline boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS override boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS override_reason text;
+
+-- Append-only: a decision is a legal record. Corrections are new rows; the
+-- record is never rewritten or erased.
+CREATE OR REPLACE FUNCTION public.eligibility_reviews_append_only() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'eligibility_reviews is append-only: corrections are recorded as new rows';
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS eligibility_reviews_no_update ON public.eligibility_reviews;
+CREATE TRIGGER eligibility_reviews_no_update
+    BEFORE UPDATE OR DELETE ON public.eligibility_reviews
+    FOR EACH ROW EXECUTE FUNCTION public.eligibility_reviews_append_only();
+
 -- Plan opt-out adjudication (G14).
 CREATE TABLE IF NOT EXISTS public.opt_out_decisions (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -175,13 +175,24 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 // effects as the manual endpoint (status moves, AOR notify, workflow signal,
 // activity + audit). One helper, both callers.
 func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, decidedBy,
-	result, reason string, evidence map[string]any) string {
+	result, reason string, evidence map[string]any, opts eligibilityPersistOpts) string {
 	ev, _ := json.Marshal(evidence)
 	var reviewID string
 	_ = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.eligibility_reviews (tenant, case_id, result, reason, evidence, decided_by)
-		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		tenant, caseID, result, reason, ev, decidedBy).Scan(&reviewID)
+		INSERT INTO public.eligibility_reviews (tenant, case_id, result, reason, evidence, decided_by, rule_version, borderline, override, override_reason)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+		tenant, caseID, result, reason, ev, decidedBy,
+		opts.ruleVersion, opts.borderline, opts.override, opts.overrideReason).Scan(&reviewID)
+	if opts.borderline {
+		s.notify(r, tenant, "*", "ELIGIBILITY_BORDERLINE",
+			fmt.Sprintf("Case %s: borderline eligibility decision (%s) — PM second review required: %s",
+				caseID, result, strings.Join(opts.borderlineReasons, "; ")), "#/cases/"+caseID)
+	}
+	if opts.override {
+		s.notify(r, tenant, "*", "ELIGIBILITY_OVERRIDE",
+			fmt.Sprintf("Case %s: INELIGIBLE overridden to ELIGIBLE by %s — reason: %s",
+				caseID, decidedBy, opts.overrideReason), "#/cases/"+caseID)
+	}
 
 	switch result {
 	case "HOLD_AOR":
@@ -202,6 +213,8 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 		fmt.Sprintf("Eligibility %s%s — evidence recorded (review %s, by %s)", result, orDash(" — "+reason), reviewID, decidedBy))
 	s.logAudit(r.Context(), tenant, caseID, "ELIGIBILITY_DECIDED", map[string]any{
 		"by": decidedBy, "result": result, "reason": reason, "review_id": reviewID,
+		"rule_version": opts.ruleVersion, "borderline": opts.borderline,
+		"override": opts.override, "override_reason": opts.overrideReason,
 	})
 	return reviewID
 }
@@ -239,7 +252,10 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	result, reason, evidence := evalEligibility(cfg, in)
 	evidence["auto_inputs"] = in
 	reviewID := s.persistEligibilityOutcome(r, tenant, id,
-		"auto: case+document data", result, reason, evidence)
+		"auto: case+document data", result, reason, evidence, eligibilityPersistOpts{
+			ruleVersion: eligibilityRuleVersion(cfg),
+			borderline:  len(eligibilityBorderline(cfg, in, evidence)) > 0,
+		})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": reviewID, "result": result, "reason": reason,
 		"evidence": evidence, "auto": true,
