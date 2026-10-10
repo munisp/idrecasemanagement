@@ -546,6 +546,7 @@ func main() {
 		r.Put("/time/{entryId}", s.updateTimeEntry)       // editable entries, audited before/after
 		r.Delete("/time/{entryId}", s.deleteTimeEntry)    // deletion keeps the audit snapshot
 		r.Get("/reports/time", s.timeReport)                          // weekly per-dispute + monthly team rollup
+		r.Post("/time/report/send", s.timeReportSend)              // email the team-hours report out (PM/FINANCE/admin)
 		r.Get("/reports/time/rates", s.getTimeRates)                  // role billable rates (view: PM/FINANCE/admin)
 		r.Put("/reports/time/rates", s.putTimeRate)                   // set rates (PM/admin only)
 		// Service-fee invoicing engine (time ledger x rates -> invoices)
