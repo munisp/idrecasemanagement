@@ -339,3 +339,35 @@ def test_ocr_falls_back_to_serial_when_batch_rejected(monkeypatch):
     _stub_paddle(monkeypatch, predict)
     ctx = pl.stage_ocr(_ocr_ctx(3), {"batch_pages": 4})
     assert ctx["text"].count("serial-line") == 3
+
+
+# --- validate (all-null extraction) ------------------------------------------
+
+def test_validate_flags_all_null_extraction_even_when_classified_confidently():
+    # classify_score > 0 (type classification succeeded) but every extracted
+    # field came back null -- previously only reachable as a sub-condition
+    # of classify_score == 0, so this exact combination never flagged at all
+    # and field_confidence ended up {} (nothing to grade), identical to a
+    # clean document with nothing to flag.
+    ctx = {
+        "extracted": {"qpa_usd": None, "claim_number": "", "service_date": None},
+        "normalized": {},
+        "classify_score": 0.9,
+        "doc_type": "eob",
+    }
+    out = pl.stage_validate(ctx, {}, None)
+    assert any(f["issue"].startswith("Extraction returned no usable field values")
+               for f in out["findings"])
+    assert out["status"] == "ANALYZED_WITH_FINDINGS"
+
+
+def test_validate_does_not_flag_when_some_fields_extracted():
+    ctx = {
+        "extracted": {"qpa_usd": 123.45, "claim_number": None},
+        "normalized": {"qpa_usd": 123.45},
+        "classify_score": 0.9,
+        "doc_type": "eob",
+    }
+    out = pl.stage_validate(ctx, {}, None)
+    assert not any(f["issue"].startswith("Extraction returned no usable field values")
+                   for f in out["findings"])

@@ -208,8 +208,23 @@ class AhcaDisputeWorkflow:
             return
 
     async def _watch_agency_recommendation_clock(self, tenant: str, case_id: str) -> None:
+        # This runs concurrently with _run_stages via asyncio.gather in run(),
+        # which only completes once EVERY gathered coroutine finishes -- this
+        # one previously watched determination_sent alone, so a case that
+        # exited _run_stages early via withdrawal or an RFI lapse left the
+        # workflow "Running" for up to the full 60 days anyway, AND would
+        # fire a false "recommendation not sent" CMS breach on an
+        # already-closed case once that timeout elapsed. Confirmed live:
+        # signaling PROVIDER_WITHDRAW correctly closed the case in the DB,
+        # but the workflow execution itself stayed Running.
+        # provider_withdrawn/rfi_lapsed/INELIGIBLE are the early-return paths
+        # with an existing dedicated flag to check; DISMISSED and
+        # CLOSED_REFUNDED (Stage 1/3's other early returns) have no such
+        # flag today and are a known remaining gap, not fixed here.
         met = await workflow.wait_condition(
-            lambda: self.determination_sent, timeout=timedelta(days=60),
+            lambda: (self.determination_sent or self.provider_withdrawn
+                     or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
+            timeout=timedelta(days=60),
         )
         if not met:
             await workflow.execute_activity(

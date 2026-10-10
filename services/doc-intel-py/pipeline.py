@@ -790,6 +790,16 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
         ctx["doc_type"] = "unrelated"
     elif ctx.get("classify_score", 1) == 0 and not ex_fields and not ctx.get("scan_quality_poor"):
         findings.append({"field": None, "issue": "No IDR-relevant content detected — possible mis-upload; routed for manual review"})
+    elif not ex_fields and ex and not ctx.get("scan_quality_poor"):
+        # The comment above promises this as an INDEPENDENT trigger, but it
+        # was only ever reachable as a sub-condition of the classify_score==0
+        # branch above -- a document whose type classified fine (score > 0)
+        # but whose field extraction still came back null for every field
+        # never hit either branch, so field_confidence ended up {} (nothing
+        # to grade) and no finding ever fired. Confirmed live: an all-null
+        # extraction silently looked identical to a clean, fully-verified
+        # document with zero fields to flag.
+        findings.append({"field": None, "issue": "Extraction returned no usable field values for this document type — verify manually before relying on it as case evidence"})
     # Degraded scan: extraction ran on enhanced images but confidence in the
     # underlying text is inherently limited — say so plainly. A barely legible
     # VALID document must not be misdiagnosed as a mis-upload.
