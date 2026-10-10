@@ -98,7 +98,7 @@ func (s *server) flReportCases(r *http.Request, tenant, from, to string) ([]flCa
 		SELECT id, case_number, status, opened_at, coalesce(disputed_amount_cents,0),
 		       coalesce(details,'{}'::jsonb), coalesce(program_dates,'{}'::jsonb)
 		FROM tenant_%s.cases
-		WHERE ($2='' OR opened_at >= $2::date) AND ($3='' OR opened_at < $3::date + 1)
+		WHERE ($2='' OR opened_at >= NULLIF($2,'')::date) AND ($3='' OR opened_at < NULLIF($3,'')::date + 1)
 		ORDER BY opened_at`, sanitizeTenant(tenant)), tenant, from, to)
 	if err != nil {
 		return nil, err
