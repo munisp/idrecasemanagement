@@ -173,6 +173,18 @@ func (s *server) listTimeEntries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	var subjects []string
+	for _, row := range rows {
+		if subj, _ := row["subject"].(string); subj != "" {
+			subjects = append(subjects, subj)
+		}
+	}
+	names := s.resolveSubjectNames(r.Context(), subjects)
+	for _, row := range rows {
+		if subj, _ := row["subject"].(string); subj != "" {
+			row["subject_name"] = names[subj]
+		}
+	}
 	var total int64
 	_ = s.db.QueryRow(r.Context(),
 		`SELECT coalesce(sum(minutes),0) FROM public.time_entries WHERE tenant=$1 AND case_id=$2`,
@@ -258,11 +270,16 @@ func (s *server) timeReport(w http.ResponseWriter, r *http.Request) {
 		numbers[cid] = num
 	}
 	type acc struct {
-		CaseID     string `json:"case_id"`
-		CaseNumber string `json:"case_number"`
-		Minutes    int64  `json:"minutes"`
-		Billable   int64  `json:"billable_minutes"`
-		People     int    `json:"people"`
+		CaseID     string `json:"case_id,omitempty"`
+		CaseNumber string `json:"case_number,omitempty"`
+		People     int    `json:"people,omitempty"`
+		// Who/Role are set only on by_person rows (resolved from the raw
+		// Keycloak subject below -- Who starts as that subject and is
+		// overwritten with a display name per resolveSubjectNames).
+		Who      string `json:"who,omitempty"`
+		Role     string `json:"role,omitempty"`
+		Minutes  int64  `json:"minutes"`
+		Billable int64  `json:"billable_minutes"`
 		// Amount is attached only for rate-viewing roles (PM/FINANCE/admin);
 		// nil otherwise — money never leaks to plain viewers. Unrated tracks
 		// billable minutes whose role has no configured rate.
@@ -312,7 +329,7 @@ func (s *server) timeReport(w http.ResponseWriter, r *http.Request) {
 		}
 		key := subj + "|" + role
 		if byPerson[key] == nil {
-			byPerson[key] = &acc{CaseID: "", CaseNumber: subj}
+			byPerson[key] = &acc{Who: subj, Role: role}
 		}
 		byPerson[key].Minutes += mins
 		byPerson[key].Billable += bill
@@ -324,6 +341,14 @@ func (s *server) timeReport(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, a := range byPerson {
 		personList = append(personList, a)
+	}
+	var subjects []string
+	for _, a := range personList {
+		subjects = append(subjects, a.Who)
+	}
+	names := s.resolveSubjectNames(r.Context(), subjects)
+	for _, a := range personList {
+		a.Who = names[a.Who]
 	}
 	sort.Slice(caseList, func(i, j int) bool { return caseList[i].Minutes > caseList[j].Minutes })
 	sort.Slice(personList, func(i, j int) bool { return personList[i].Minutes > personList[j].Minutes })

@@ -523,6 +523,52 @@ func (s *server) kcFindUserByUsername(ctx context.Context, tok, username string)
 	return users[0].ID, nil
 }
 
+// kcGetUserByID resolves a Keycloak subject (the JWT "sub" claim, a UUID)
+// to its username, for display purposes only. Returns "" (no error) on any
+// non-200 -- a deleted account, a malformed id (e.g. the worker-token
+// principal's literal "service:idre-workflows"), or anything else -- so
+// callers can fall back to the raw subject without special-casing input.
+func (s *server) kcGetUserByID(ctx context.Context, tok, userID string) (string, error) {
+	resp, err := s.kcDo(ctx, http.MethodGet, "/admin/realms/idre/users/"+url.PathEscape(userID), tok, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", nil
+	}
+	var u struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+		return "", err
+	}
+	return u.Username, nil
+}
+
+// resolveSubjectNames maps raw Keycloak subject ids (as stored in
+// time_entries.subject, audit logs, etc.) to display usernames, for
+// reports/reviews where staff need to know WHO did something rather than
+// a bare UUID. Falls back to the raw subject per-id on any lookup failure
+// (deleted user, malformed id, or Keycloak admin auth itself failing) --
+// a report that can't resolve names should still render, just with ids.
+func (s *server) resolveSubjectNames(ctx context.Context, subjects []string) map[string]string {
+	out := map[string]string{}
+	for _, sub := range subjects {
+		out[sub] = sub // default/fallback
+	}
+	tok, err := s.kcAdminToken(ctx)
+	if err != nil {
+		return out
+	}
+	for sub := range out {
+		if name, err := s.kcGetUserByID(ctx, tok, sub); err == nil && name != "" {
+			out[sub] = name
+		}
+	}
+	return out
+}
+
 // kcUserInTenantGroup checks the target user's OWN group membership against
 // the claimed tenant, rather than trusting a caller-supplied tenant param --
 // a CASE_MANAGER's suspend/delete request is scoped to their own tenant, so

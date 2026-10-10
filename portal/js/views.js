@@ -3368,7 +3368,7 @@ const Views = (() => {
     try {
       const r = await Api.cases.timeList(caseId);
       const rows = (r.entries || []).map((e) => `<tr>
-        <td>${esc(e.entry_date)}</td><td>${esc(e.subject)}</td><td>${badge(e.role)}</td>
+        <td>${esc(e.entry_date)}</td><td>${esc(e.subject_name || e.subject)}</td><td>${badge(e.role)}</td>
         <td>${fmtMins(e.minutes)}</td><td>${e.billable ? "✓" : "—"}</td><td class="muted">${esc(e.note || "")}</td></tr>`).join("");
       return rows
         ? `<p><b>${fmtMins(r.total_minutes)}</b> logged on this dispute</p>
@@ -3471,14 +3471,14 @@ const Views = (() => {
           <td>${fmtMins(c.minutes)}</td><td>${fmtMins(c.billable_minutes)}</td><td>${c.people}</td>
           ${money ? `<td>${c.amount_cents != null ? usd2(c.amount_cents) : "—"}${c.unrated_billable_minutes ? ` <span class="muted" title="billable minutes with no configured role rate">+${fmtMins(c.unrated_billable_minutes)} unrated</span>` : ""}</td>` : ""}</tr>`).join("");
         const personRows = (r.by_person || []).map((p) => `<tr>
-          <td>${esc(p.case_number)}</td><td>${fmtMins(p.minutes)}</td><td>${fmtMins(p.billable_minutes)}</td>
+          <td>${esc(p.who)}</td><td>${badge(p.role)}</td><td>${fmtMins(p.minutes)}</td><td>${fmtMins(p.billable_minutes)}</td>
           ${money ? `<td>${p.amount_cents != null ? usd2(p.amount_cents) : "—"}</td>` : ""}</tr>`).join("");
         box.innerHTML = `<h2>${esc(r.period)}</h2>
           <p><b>${fmtMins(r.total_minutes)}</b> total · <b>${fmtMins(r.billable_minutes)}</b> billable${money ? ` · <b>${usd2(r.total_amount_cents)}</b> billable amount` : ""}${money && r.unrated_billable_minutes ? ` · <span class="muted">${fmtMins(r.unrated_billable_minutes)} unrated</span>` : ""}</p>
           <h3>By dispute</h3>
           ${caseRows ? `<table><thead><tr><th>Case</th><th>Hours</th><th>Billable</th><th>People</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${caseRows}</tbody></table>` : `<p class="muted">No time logged in this period.</p>`}
           <h3>By team member</h3>
-          ${personRows ? `<table><thead><tr><th>Who</th><th>Hours</th><th>Billable</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${personRows}</tbody></table>` : ""}`;
+          ${personRows ? `<table><thead><tr><th>Who</th><th>Role</th><th>Hours</th><th>Billable</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${personRows}</tbody></table>` : ""}`;
       } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
     }, "Computing…");
   }
