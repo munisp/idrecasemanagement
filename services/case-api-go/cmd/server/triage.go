@@ -68,11 +68,20 @@ func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason st
 			}
 		}
 	}
-	// threshold matrix
+	// threshold matrix. A provider_type that matches none of the configured
+	// entries (typo, free-text mismatch, or simply blank) is a data error,
+	// not "no threshold applies" -- FL's own matrix already has an explicit
+	// "other" catch-all with min_cents:0 for anything that doesn't fit the
+	// named categories, so a real submission always matches SOMETHING.
+	// Silently falling through left evalEligibility defaulting to its
+	// initial ELIGIBLE regardless of amount -- confirmed live, a malformed
+	// provider_type passed eligibility at $1.
+	knownType := false
 	for _, th := range cfg.Eligibility.Thresholds {
 		if th.ProviderType != in.ProviderType {
 			continue
 		}
+		knownType = true
 		if th.Contracted != nil && in.Contracted != nil && *th.Contracted != *in.Contracted {
 			continue
 		}
@@ -81,6 +90,9 @@ func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason st
 			return "INELIGIBLE", "below_threshold", evidence
 		}
 		break
+	}
+	if len(cfg.Eligibility.Thresholds) > 0 && !knownType {
+		return "INELIGIBLE", "unrecognized_provider_type", evidence
 	}
 	// AOR hold
 	if in.AORValid != nil && !*in.AORValid {
@@ -94,8 +106,25 @@ func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason st
 // belong to rules the program doesn't use).
 func missingEligibilityInputs(cfg *ProgramConfig, in eligibilityInput) []string {
 	var missing []string
-	if len(cfg.Eligibility.Thresholds) > 0 && in.ProviderType == "" {
-		missing = append(missing, "provider_type")
+	if len(cfg.Eligibility.Thresholds) > 0 {
+		knownType := in.ProviderType != ""
+		if knownType {
+			knownType = false
+			for _, th := range cfg.Eligibility.Thresholds {
+				if th.ProviderType == in.ProviderType {
+					knownType = true
+					break
+				}
+			}
+		}
+		// Blank AND unrecognized (typo/corrupt data) both route to a human
+		// -- evalEligibility now decides INELIGIBLE on an unrecognized type,
+		// which is the right call for a human who explicitly submitted it,
+		// but auto-adjudication shouldn't fire a closure letter off what
+		// could just be a data-entry error it has no way to tell apart.
+		if !knownType {
+			missing = append(missing, "provider_type")
+		}
 	}
 	needsContracted := false
 	for _, th := range cfg.Eligibility.Thresholds {
@@ -189,8 +218,18 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Hold', agency_status='Other', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
 		s.notify(r, tenant, "*", "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — attorney confirmation requested", caseID), "#/cases/"+caseID)
 	case "INELIGIBLE":
+		// agency_status='Closed' matches what the workflow's own equivalent
+		// transition sets (set_dual_status in ahca_workflow.py) -- this HTTP
+		// path previously left it untouched, so a case decided ineligible
+		// here (rather than via the workflow signal reaching the same
+		// branch later) stayed with a blank agency_status. Confirmed live
+		// against real data: several "Provider Closure Letter Issued" rows
+		// had no agency_status at all, which is also why a dashboard
+		// open/closed check keyed on agency_status (the only consistent
+		// "is this done" marker across FL's many internal_status labels)
+		// undercounted closed cases.
 		_, _ = s.db.Exec(r.Context(),
-			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Provider Closure Letter Issued', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
+			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Provider Closure Letter Issued', agency_status='Closed', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
 	}
 	var caseNumber string
 	if err := s.db.QueryRow(r.Context(),

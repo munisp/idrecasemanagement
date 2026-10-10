@@ -185,7 +185,15 @@ func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenan
 			dates["received_at"] = opened.Format("2006-01-02")
 		}
 	}
-	writeJSON(w, http.StatusOK, projectProgramClocks(cfg.Clocks, dates, time.Now()))
+	// Truncate to midnight -- due dates are always midnight (parsed from
+	// date-only strings / computed via AddDate on a midnight basis), so an
+	// untruncated time.Now() carrying the live time-of-day under-counts
+	// "remaining" by close to a full day depending on when the clock is
+	// checked (confirmed live: FL's 60-day AGENCY_RECOMMENDATION clock was
+	// off by one). engines.go's federal-default clock path already
+	// truncates the same way (casesClocks/caseClocks) -- this path never
+	// matched it.
+	writeJSON(w, http.StatusOK, projectProgramClocks(cfg.Clocks, dates, time.Now().Truncate(24*time.Hour)))
 	return true
 }
 

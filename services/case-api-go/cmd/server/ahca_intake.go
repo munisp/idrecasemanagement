@@ -144,6 +144,16 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 
 	s.ensureChecklist(r, tenant, caseID)
 
+	// Program escalation trigger (G6): auto-route over-threshold disputes
+	// to F&WA screening. initiateCase (the staff-only endpoint) already
+	// calls this, but the public AHCA intake form -- the actual front door
+	// for real disputes -- had its own INSERT here and never called it at
+	// all: a $1M+ filing submitted through the real intake form never
+	// escalated. Fires before the branches below so it covers every intake
+	// path (bulk-invoiced, payment-gated, immediate) regardless of which
+	// one returns early.
+	s.escalationTrigger(r, tenant, caseID, disputedAmountCents)
+
 	// Backfill pre-case calls/inquiries logged against this email before the
 	// case existed -- PLUM CRM's own documented gap was that such contacts
 	// never got linked to the case once one opened; here they do.

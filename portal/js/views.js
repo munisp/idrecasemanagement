@@ -21,6 +21,22 @@ const Views = (() => {
   // before this -- confirmed live, FL showed "QPA $0" on every open case.
   const amtField = (prog) => (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents";
   const amtLabel = (prog) => (prog && prog.config) ? "Disputed" : "QPA";
+  // Programmed tenants (FL AHCA) track progress on internal_status, not the
+  // federal status column -- summaryReport (reports.go) already coalesces
+  // to internal_status server-side; the dashboard's client-side rollup
+  // below grouped/filtered on the raw status column unconditionally,
+  // which for FL cases is mostly a stale/empty value set once at intake.
+  // Confirmed live: this is why the home dashboard's open-case count never
+  // matched the Reports page's for FL.
+  const caseStatus = (prog, c) => (prog && prog.config) ? (c.internal_status || c.status) : c.status;
+  // "Closed" is a single federal status prefix, but FL's internal_status
+  // vocabulary has no such prefix at all (its terminal labels are things
+  // like "Dismissed"/"Ineligible"/"Decided - Invoice Paid") -- a
+  // startsWith("CLOSED") check against internal_status matches nothing,
+  // so every FL case always counted as open. agency_status='Closed' is
+  // the one consistent marker the backend actually sets across every
+  // terminal internal_status (confirmed against live data).
+  const caseClosed = (prog, c) => (prog && prog.config) ? c.agency_status === "Closed" : String(c.status).startsWith("CLOSED");
 
   // Client-side CSV export: reports were read-only on screen with no way to
   // get the data out at all. Same blob+temp-<a> pattern api.js's download()
@@ -118,7 +134,8 @@ const Views = (() => {
       const amtF = amtField(prog), amtL = amtLabel(prog);
       const byStatus = {};
       cases.forEach((c) => {
-        const b = byStatus[c.status] || (byStatus[c.status] = { status: c.status, count: 0, _sum: 0 });
+        const st = caseStatus(prog, c);
+        const b = byStatus[st] || (byStatus[st] = { status: st, count: 0, _sum: 0 });
         b.count++; b._sum += (c[amtF] || 0) / 100;
       });
       const summary = Object.values(byStatus).map((b) => ({
@@ -127,7 +144,7 @@ const Views = (() => {
       html += `<div class="cards">` + summary.map((s) =>
         `<div class="card"><div class="num">${s.count}</div><div class="lbl">${badge(s.status)}</div>
          <div class="muted">avg ${esc(s.amount_label || "QPA")} $${(s.avg_amount_usd ?? 0).toFixed(0)}</div></div>`).join("") + `</div>`;
-      const open = cases.filter((c) => !String(c.status).startsWith("CLOSED"));
+      const open = cases.filter((c) => !caseClosed(prog, c));
       const attention = open.filter((c) => clocks[c.id] && clocks[c.id].length)
         .sort((a, b) => nearestClock(clocks[a.id]).remaining - nearestClock(clocks[b.id].remaining));
       html += `<h2>Needs your attention (${attention.length})</h2>`;
@@ -989,8 +1006,16 @@ const Views = (() => {
         // no QPA concept and return 0 there -- the backend picks the right
         // column server-side and tells us which one via amount_label.
         const label = rows[0]?.amount_label || "QPA";
-        const open = rows.filter((s) => !/^CLOSED|^Decided|^Dismissed|^Withdrawn|^Ineligible/.test(s.status))
-          .reduce((n, s) => n + s.count, 0);
+        // Programmed tenants (FL AHCA): agency_status='Closed' is the one
+        // consistent "done" marker across every terminal internal_status
+        // label -- a prefix/regex guess against the label text previously
+        // missed "Provider Closure Letter Issued"/"Provider - Withdrawal"
+        // entirely and overcounted open disputes (confirmed live, this is
+        // why the Reports KPI never matched the Dashboard's open count).
+        const programmed = label === "Disputed";
+        const open = programmed
+          ? rows.filter((s) => s.agency_status !== "Closed").reduce((n, s) => n + s.count, 0)
+          : rows.filter((s) => !String(s.status).startsWith("CLOSED")).reduce((n, s) => n + s.count, 0);
         document.getElementById("kpi-open").textContent = open.toLocaleString();
         document.getElementById("rpt-status-out").innerHTML = `<div class="chart-card">` +
           chartDonut(rows.map((s, i) => ({ label: s.status, value: s.count, color: RPT_PALETTE[i % RPT_PALETTE.length] }))) +
@@ -1384,9 +1409,14 @@ const Views = (() => {
               out.innerHTML = `<p class="warn-box">⚠ Can't auto-decide — missing rule inputs:
                 <b>${(r.missing || []).map(esc).join(", ")}</b>. Fill them in the form below and compute manually.</p>`;
             } else {
-              out.innerHTML = `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""}
-                <span class="muted">auto review ${esc(r.review_id)} — inputs derived from case record + analyzed documents</span></p>`;
-              loadElig();
+              // A decided result (ELIGIBLE/INELIGIBLE/HOLD_AOR) moves the
+              // case's internal/agency status server-side -- rerender so the
+              // status badge elsewhere on this page reflects it immediately
+              // instead of only updating once the user navigates away and
+              // back. Confirmed live: the DB write was always correct: this
+              // view just never asked for the new state.
+              App.rerender();
+              return;
             }
           } catch (e) { UI.toast(e.message, { kind: "warn" }); }
         }, "Evaluating…");
@@ -1402,9 +1432,11 @@ const Views = (() => {
             flags: f.flags.value ? f.flags.value.split(",").map((x) => x.trim()).filter(Boolean) : [],
             aor_valid: f.aor_valid.checked,
           });
-          document.getElementById("p-elig-out").innerHTML =
-            `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""} <span class="muted">review ${esc(r.review_id)}</span></p>`;
-          loadElig();
+          // Same as the auto-eligibility handler above: the result just
+          // moved this case's status server-side (ELIGIBLE excepted) --
+          // rerender so the status badge updates without a manual reload.
+          UI.toast(`${r.result}${r.reason ? " — " + r.reason : ""}`);
+          App.rerender();
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
       $("#p-send")?.addEventListener("submit", async (ev) => {
@@ -3356,8 +3388,16 @@ const Views = (() => {
   // AHCA 2026 time recording: the role is chosen PER ENTRY from the roles
   // the user actually holds — one person can code one entry and QA-as-PM
   // the next. Blank means the server records the primary role.
+  // Mirrors timeEntryRole's priority list in time_entries.go -- the only
+  // roles the server actually accepts for a time entry's "role performed".
+  // The dropdown used to list every role in the JWT verbatim, Keycloak
+  // system roles (offline_access, uma_authorization, etc.) included --
+  // picking one always 422'd server-side, but nothing stopped it showing
+  // as a selectable option. Confirmed live.
+  const TIME_ENTRY_ROLES = ["DOCTOR", "NURSE", "CODER", "ARBITRATOR", "ATTORNEY", "CASE_MANAGER",
+    "PM", "FINANCE", "STATE_AUDITOR", "NURSE_PHYSICIAN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
   const timeRoleSelect = () => {
-    const roles = (Auth.claims()?.roles || []);
+    const roles = (Auth.claims()?.roles || []).filter((r) => TIME_ENTRY_ROLES.includes(r));
     if (roles.length < 2) return "";
     return `<select name="role" aria-label="Role performed" title="Role being performed for this entry">
       <option value="">role: primary</option>
