@@ -333,7 +333,12 @@ func shareChatSection(token string) string {
 	  thread.insertAdjacentHTML("beforeend",
 	    '<div style="max-width:88%;padding:8px 12px;border-radius:10px;font-size:14px;white-space:pre-wrap;' +
 	    (mine ? 'align-self:flex-end;background:#123B2F;color:#fff'
-	          : 'align-self:flex-start;background:#f3f4f6;border:1px solid #e5e7eb') + '">' + esc(body) + '</div>');
+	          // color:#111827 is required, not cosmetic: :root{color-scheme:light
+	          // dark} above makes browsers in dark mode default text to near-
+	          // white, and this bubble's background is explicitly light -- without
+	          // overriding color too, replies render as invisible near-white-on-
+	          // near-white in dark mode (confirmed live).
+	          : 'align-self:flex-start;background:#f3f4f6;color:#111827;border:1px solid #e5e7eb') + '">' + esc(body) + '</div>');
 	}
 	form.onsubmit = async function(e){
 	  e.preventDefault();
