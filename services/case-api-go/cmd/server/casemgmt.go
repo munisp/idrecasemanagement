@@ -167,20 +167,37 @@ func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	// mutable display name, so the write-time convention stays as-is.
 	// Resolve it to a username for DISPLAY only, same as the Team/Time
 	// fix (resolveSubjectNames), without touching what's actually stored.
+	// pgx returns this jsonb column as raw JSON text (string/[]byte), not
+	// a decoded map, via queryRows' generic .Values() path -- confirmed
+	// live, so it needs its own json.Unmarshal here rather than a type
+	// assertion straight to map[string]any.
+	payloadBy := func(row map[string]any) string {
+		var raw []byte
+		switch v := row["payload"].(type) {
+		case string:
+			raw = []byte(v)
+		case []byte:
+			raw = v
+		default:
+			return ""
+		}
+		var payload map[string]any
+		if json.Unmarshal(raw, &payload) != nil {
+			return ""
+		}
+		by, _ := payload["by"].(string)
+		return by
+	}
 	var subjects []string
 	for _, row := range rows {
-		if payload, ok := row["payload"].(map[string]any); ok {
-			if by, _ := payload["by"].(string); by != "" {
-				subjects = append(subjects, by)
-			}
+		if by := payloadBy(row); by != "" {
+			subjects = append(subjects, by)
 		}
 	}
 	names := s.resolveSubjectNames(r.Context(), subjects)
 	for _, row := range rows {
-		if payload, ok := row["payload"].(map[string]any); ok {
-			if by, _ := payload["by"].(string); by != "" {
-				payload["by_name"] = names[by]
-			}
+		if by := payloadBy(row); by != "" {
+			row["by_name"] = names[by]
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows})

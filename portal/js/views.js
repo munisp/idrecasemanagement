@@ -3958,14 +3958,13 @@ const Views = (() => {
   function auditRows(rows) {
     if (!rows.length) return `<p class="muted">No audit entries match.</p>`;
     const rowsHtml = (list) => list.map((e) => {
-      // e.payload is a decoded object, not a string -- esc(e.payload) was
-      // calling String() on it, which renders the literal text
-      // "[object Object]" for every row. JSON.stringify it for a readable
-      // column instead. payload.by is always the raw Keycloak subject
-      // (logAudit's own stable-identity convention, unchanged); by_name
-      // is the backend's resolved display name for it, shown here instead.
+      // e.payload may come back as a decoded object or as raw JSON text
+      // depending on the column path -- handle both rather than assume.
       const payloadStr = e.payload && typeof e.payload === "object" ? JSON.stringify(e.payload) : String(e.payload || "");
-      const who = e.payload?.by_name || e.payload?.by || "—";
+      // by_name is the backend's resolved display name for payload.by (a
+      // raw Keycloak subject -- logAudit's own stable-identity convention,
+      // unchanged); falls back to "—" when payload carried no "by" at all.
+      const who = e.by_name || "—";
       return `<tr>
         <td class="muted">${fmtDate(e.created_at)}</td>
         <td>${e.case_id ? `<a href="#/cases/${esc(e.case_id)}">${esc(String(e.case_id).slice(0, 8))}…</a>` : `<span class="muted">—</span>`}</td>
