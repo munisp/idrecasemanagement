@@ -153,6 +153,7 @@
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
   if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/team", "⚉", "Team"]);
+  if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
@@ -289,6 +290,7 @@
     [/^#\/tpa$/, Views.tpaView],
     [/^#\/rules$/, Views.rulesAdmin],
     [/^#\/team$/, Views.teamAdmin],
+    [/^#\/mail$/, Views.mailLog],
     [/^#\/audit$/, Views.auditLog],
   ];
 

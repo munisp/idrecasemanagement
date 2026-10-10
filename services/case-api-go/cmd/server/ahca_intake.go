@@ -213,6 +213,7 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 				if merr := s.sendMail([]string{email}, nil, "Claims dispute — payment required to open your case", body); merr == nil {
 					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake")
 				} else {
+					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake", merr.Error())
 					s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 						fmt.Sprintf("Payment-required email SMTP delivery failed: %s", merr))
 				}
@@ -302,6 +303,7 @@ func (s *server) sendIntakeLinks(r *http.Request, tenant, caseID, caseNumber, em
 		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
 		} else {
+			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake", merr.Error())
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("Submission instructions SMTP delivery failed: %s", merr))
 		}

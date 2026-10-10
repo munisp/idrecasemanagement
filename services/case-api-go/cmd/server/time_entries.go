@@ -448,9 +448,11 @@ func (s *server) timeReportSend(w http.ResponseWriter, r *http.Request) {
 	subject := fmt.Sprintf("Team timesheet report — %s (%s)", label, strings.ToUpper(tenant))
 	fname := fmt.Sprintf("timesheet-%s-%s.csv", strings.ReplaceAll(label, " ", "_"), tenant)
 	if err := s.sendMailWithAttachment(emails, nil, subject, body.String(), fname, []byte(csv.String())); err != nil {
+		s.logCorrespondence(r, tenant, "", "OUT", "time_report", subject, body.String(), emails, nil, p.Subject, err.Error())
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, "email failed: "+err.Error()), http.StatusBadGateway)
 		return
 	}
+	s.logCorrespondence(r, tenant, "", "OUT", "time_report", subject, body.String(), emails, nil, p.Subject)
 	s.logAudit(r.Context(), tenant, "", "TIME_REPORT_SENT", map[string]any{
 		"by": p.Subject, "period": label, "recipients": emails,
 		"total_minutes": rpt["total_minutes"], "billable_minutes": rpt["billable_minutes"],
