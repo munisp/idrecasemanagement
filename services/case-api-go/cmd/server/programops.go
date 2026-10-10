@@ -139,16 +139,32 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// REFUND requires the invoice to actually be PAID first -- PAY and VOID
+	// both require OPEN (you settle or void something outstanding). Before
+	// this, all three actions shared the same `status='OPEN'` filter, so
+	// REFUND on a never-paid OPEN invoice passed the filter and jumped
+	// straight OPEN -> REFUNDED. refundCardPayment() deliberately no-ops
+	// (returns nil) when it finds no Stripe payment on file, trusting that
+	// to mean "paid offline, refund handled outside the system" -- a
+	// reasonable assumption for an invoice that really was PAID, but for
+	// one that was NEVER paid it let the code log a real "$X refund issued"
+	// ledger entry (REFUND_ISSUED/OUT) for money that never moved. Confirmed
+	// live: an unpaid invoice went OPEN -> REFUNDED with a ledger entry and
+	// no refund email.
+	requiredStatus := "OPEN"
+	if in.Action == "REFUND" {
+		requiredStatus = "PAID"
+	}
 	var caseID string
 	var amount int64
 	var party string
 	err := s.db.QueryRow(r.Context(), `
 		UPDATE public.invoices SET status=$3, remittance_ref=$4,
 		       paid_at = CASE WHEN $3='PAID' THEN now()::date ELSE paid_at END
-		WHERE tenant=$1 AND id=$2 AND status='OPEN' RETURNING case_id, amount_cents, party`,
-		tenant, invID, status, in.RemittanceRef).Scan(&caseID, &amount, &party)
+		WHERE tenant=$1 AND id=$2 AND status=$5 RETURNING case_id, amount_cents, party`,
+		tenant, invID, status, in.RemittanceRef, requiredStatus).Scan(&caseID, &amount, &party)
 	if err != nil {
-		http.Error(w, `{"error":"not open or not found"}`, http.StatusConflict)
+		http.Error(w, fmt.Sprintf(`{"error":"invoice not %s or not found"}`, strings.ToLower(requiredStatus)), http.StatusConflict)
 		return
 	}
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_"+status,

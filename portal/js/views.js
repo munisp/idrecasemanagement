@@ -675,14 +675,24 @@ const Views = (() => {
       // without the stream field, so internal/coder/clinical/legal/
       // external_agency notes were indistinguishable there. Confirmed live.
       const notes = notesRes.notes || [];
+      // Only offer streams this role can actually write — the server has
+      // enforced this for a while, but the dropdown kept listing all five
+      // regardless, so picking a blocked one just produced a confusing
+      // 403 on submit instead of not being offered at all.
+      const streamOpts = [
+        ["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"],
+        ["legal", "Legal"], ["external_agency", "External agency"],
+      ];
+      const streamRoles = prog?.config?.notes_stream_roles || {};
+      const allowedStreams = streamOpts.filter(([key]) => {
+        const roles = streamRoles[key];
+        return !roles || !roles.length || can(...roles);
+      });
       html += `<h2>Notes</h2>
         <form id="note-form" class="inline-form">
           <select name="stream" aria-label="Note stream">
-            <option value="internal">Internal</option>
-            <option value="coder">Coder</option>
-            <option value="clinical">Clinical</option>
-            <option value="legal">Legal</option>
-            <option value="external_agency">External agency</option>
+            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) =>
+              `<option value="${v}">${label}</option>`).join("")}
           </select>
           <textarea name="body" rows="2" placeholder="Add a note…" required></textarea>
           <button>Add note</button></form>` +
@@ -1259,7 +1269,7 @@ const Views = (() => {
         <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
         <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
         <input name="amount" type="number" step="0.01" placeholder="amount $" required />
-        <button>Issue invoice</button></form><div id="p-inv-list"></div>
+        <button>Issue invoice</button></form><div id="p-inv-list" data-case-id="${esc(id)}"></div>
       <form id="p-claims" class="inline-form">
         <textarea name="csv" rows="3" placeholder="claim_number,cpt,billed,paid per line (bulk import)"></textarea>
         <p class="mhint">For disputes at/crossing 100 claims (Capitol Bridge large-volume policy), add 9 more
@@ -1414,8 +1424,20 @@ const Views = (() => {
            <td class="muted">${esc(m.template || "")} · ${fmtDate(m.created_at)}</td></tr>`).join("") +
           `</tbody></table>` : "";
       }).catch(() => {});
+      // #p-inv-list's id is NOT unique across case views -- every caseDetail()
+      // render creates one with the same id, so a stale poller from a
+      // PREVIOUSLY viewed case can find a live element by that id and assume
+      // it's still its own. Confirmed live: navigating case A -> case B left
+      // A's 20s poller running, its getElementById("p-inv-list") existence
+      // check passed against B's element (same id, wrong case), and it
+      // overwrote B's invoice table with A's data -- A's invoice ids baked
+      // into the pay/mark-paid/refund links, so clicking "refund" on what
+      // LOOKED like case B's invoice acted on case A's. data-case-id lets
+      // both the poller and the renderer verify they still own the element
+      // they're about to touch, not just that AN element with this id exists.
       const renderInvoices = (r) => {
-        const el = document.getElementById("p-inv-list"); if (!el) return;
+        const el = document.getElementById("p-inv-list");
+        if (!el || el.dataset.caseId !== id) return;
         el.innerHTML = (r.invoices || []).length ? `<table><tbody>` + r.invoices.map((v) =>
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
            <td>${badge(v.status)}</td>
@@ -1429,7 +1451,8 @@ const Views = (() => {
       // Card payments settle via Stripe webhook — poll so status flips live
       // instead of requiring a manual reload.
       const invPoll = setInterval(() => {
-        if (!document.getElementById("p-inv-list")) { clearInterval(invPoll); return; }
+        const el = document.getElementById("p-inv-list");
+        if (!el || el.dataset.caseId !== id) { clearInterval(invPoll); return; }
         refreshInv();
       }, 20000);
       $("#p-inv")?.addEventListener("submit", async (ev) => {

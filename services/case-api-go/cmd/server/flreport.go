@@ -94,12 +94,22 @@ func money(c int64) string {
 // flReportCases assembles every case with its details, dates, claim counts,
 // initial fee payment, and invoices.
 func (s *server) flReportCases(r *http.Request, tenant, from, to string) ([]flCaseRow, error) {
+	// tenant is NOT a bind parameter -- it's baked into the schema name via
+	// Sprintf below, since Postgres can't parameterize an identifier. It was
+	// still being passed as a THIRD bind arg ($1) that nothing in the query
+	// text ever referenced. Confirmed live via PREPARE/EXECUTE (the exact
+	// failure a raw literal-SQL test via psql -c doesn't reproduce, since
+	// that bypasses the extended protocol's parameter-type inference
+	// entirely): binding an unreferenced parameter fails immediately with
+	// "could not determine data type of parameter $1" -- not a date-cast
+	// issue at all, despite returning the same generic {"error":"query"}.
+	// Only from/to are real bind parameters now ($1/$2).
 	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT id, case_number, status, opened_at, coalesce(disputed_amount_cents,0),
 		       coalesce(details,'{}'::jsonb), coalesce(program_dates,'{}'::jsonb)
 		FROM tenant_%s.cases
-		WHERE ($2='' OR opened_at >= NULLIF($2,'')::date) AND ($3='' OR opened_at < NULLIF($3,'')::date + 1)
-		ORDER BY opened_at`, sanitizeTenant(tenant)), tenant, from, to)
+		WHERE ($1::text='' OR opened_at >= NULLIF($1::text,'')::date) AND ($2::text='' OR opened_at < NULLIF($2::text,'')::date + 1)
+		ORDER BY opened_at`, sanitizeTenant(tenant)), from, to)
 	if err != nil {
 		return nil, err
 	}

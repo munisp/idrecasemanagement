@@ -448,7 +448,9 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	if in.Stream == "" {
 		in.Stream = "internal"
 	}
-	if prog := s.loadProgram(r, tenant); prog != nil && len(prog.NotesStreams) > 0 {
+	prog := s.loadProgram(r, tenant)
+	streamRestricted := false
+	if prog != nil && len(prog.NotesStreams) > 0 {
 		ok := false
 		for _, st := range prog.NotesStreams {
 			if st == in.Stream {
@@ -466,9 +468,12 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 		// write any stream — coder.fl wrote a Legal note and the server
 		// accepted it, even though the field criteria document treats
 		// Coder/Clinical/Legal review notes as separate per-role fields.
-		if roles, ok := prog.NotesStreamRoles[in.Stream]; ok && len(roles) > 0 && !hasAnyRole(p, roles...) {
-			http.Error(w, `{"error":"forbidden: your role cannot write to the `+in.Stream+` notes stream"}`, http.StatusForbidden)
-			return
+		if roles, ok := prog.NotesStreamRoles[in.Stream]; ok && len(roles) > 0 {
+			if !hasAnyRole(p, roles...) {
+				http.Error(w, `{"error":"forbidden: your role cannot write to the `+in.Stream+` notes stream"}`, http.StatusForbidden)
+				return
+			}
+			streamRestricted = true
 		}
 	}
 	_, err := s.db.Exec(r.Context(), `
@@ -478,8 +483,13 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	// Notes also appear on the case activity timeline.
-	if in.RecordType == "CASE" {
+	// Notes also appear on the case activity timeline — but that timeline
+	// has no stream column and nothing filters it by role, so a restricted
+	// stream's content leaking there defeats the whole point of
+	// restricting it. Confirmed live: coder.fl's Legal note was blocked by
+	// notes_stream_roles everywhere else, but still readable verbatim on
+	// the activity timeline. Only mirror notes from unrestricted streams.
+	if in.RecordType == "CASE" && !streamRestricted {
 		_, _ = s.db.Exec(r.Context(), `
 			INSERT INTO public.case_activities (tenant, case_id, type, body)
 			VALUES ($1,$2,'NOTE',$3)`, tenant, in.RecordID, in.Body)

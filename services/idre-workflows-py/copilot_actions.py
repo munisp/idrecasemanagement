@@ -45,7 +45,20 @@ class BatchInput:
 
 @activity.defn
 async def fetch_batch_action_count(tenant: str, batch_id: str) -> int:
-    """How many actions the approved batch carries (capped server-side)."""
+    """How many actions the approved batch carries (capped server-side).
+
+    Raises when the row isn't found in APPROVED state rather than returning
+    0 -- this runs immediately after the workflow received the DECISION
+    signal, so by definition a human already approved it; a 0 here doesn't
+    mean "empty batch", it means this read raced the case-api handler's
+    UPDATE and lost. Confirmed live: a batch with a real, non-empty actions
+    array got counted as 0, the workflow completed with "APPLIED: empty
+    batch" (its own return value, never written anywhere), and
+    persistCopilotActionResult was never called for any index -- the batch
+    sat at APPROVED permanently since nothing ever retried. Raising lets
+    Temporal's default retry policy (no override needed; the workflow
+    doesn't set one for this activity) try again shortly after, by which
+    point the race has resolved every time this was reproduced."""
     import psycopg
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
@@ -53,7 +66,9 @@ async def fetch_batch_action_count(tenant: str, batch_id: str) -> int:
             " WHERE tenant=%s AND id=%s AND status='APPROVED'",
             (tenant, batch_id),
         ).fetchone()
-        return int(row[0]) if row else 0
+        if row is None:
+            raise RuntimeError(f"batch {batch_id} not found in APPROVED state yet")
+        return int(row[0])
 
 
 @activity.defn
@@ -134,9 +149,14 @@ class CopilotActionBatchWorkflow:
         if decision != "APPROVE":
             return "REJECTED"
 
+        # Bounded retries: a few quick attempts cover the real race (the
+        # case-api UPDATE to APPROVED not yet visible to this activity's
+        # own fresh connection the instant the signal is processed) without
+        # retrying forever if the batch is genuinely gone/rejected/expired.
         n = await workflow.execute_activity(
             fetch_batch_action_count, args=[inp.tenant, inp.batch_id],
             start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=5),
         )
         results = []
         for i in range(min(n, MAX_ACTIONS)):
