@@ -2079,6 +2079,12 @@ const Views = (() => {
   // ---- Financial dashboard (all money movement through the platform) -------
 
   async function finance() {
+    // CASE_MANAGER deliberately excluded -- standalone finance dashboard,
+    // not case-detail info; matches the backend's financialReadRoles
+    // (access-control follow-up). Direct-URL guard: the nav link is
+    // already hidden, but the API calls below would otherwise just 403.
+    if (!can(...["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"]))
+      return `<div class="view-head"><h1>Financials</h1></div><p class="muted">Requires PM, FINANCE, or admin.</p>`;
     try {
       const FIN_PAGE = 25;
       const [fin, pays, chks] = await Promise.all([
@@ -4337,7 +4343,12 @@ const Views = (() => {
 
   // ---------- Service-fee invoicing, AR/AP, reconciliation ----------
   const usdC = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
-  const finRoles = ["CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
+  // CASE_MANAGER deliberately excluded -- these are standalone finance
+  // screens, not case-detail info (caseFinBox, below, is separate and
+  // still available to CASE_MANAGER on a case's own page). Matches the
+  // backend's billingViewRoles/arapReadRoles/reconReadRoles/
+  // financialReadRoles (access-control follow-up).
+  const finRoles = ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
 
   async function caseFinBox(caseId) {
     try {
@@ -4372,7 +4383,7 @@ const Views = (() => {
   // ===== Invoices view (#/billing) =====
   function billingInvoices() {
     if (!can(...finRoles))
-      return `<div class="view-head"><h1>Billing</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+      return `<div class="view-head"><h1>Billing</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
     afterRender(() => billingList());
     const now = new Date().toISOString();
     return `<div class="view-head"><h1>Billing — service-fee invoices</h1>
@@ -4496,7 +4507,7 @@ const Views = (() => {
   // ===== AR/AP view (#/arap) =====
   function arapView() {
     if (!can(...finRoles))
-      return `<div class="view-head"><h1>AR / AP</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+      return `<div class="view-head"><h1>AR / AP</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
     afterRender(() => { arapSummaryBox(); arapArBox(); arapApBox(); });
     return `<div class="view-head"><h1>Receivables & payables</h1>
       <span class="muted">AR derived live from invoice stores; AP obligations recorded and settled here</span></div>
@@ -4629,7 +4640,7 @@ const Views = (() => {
   // ===== Reconciliation view (#/recon) =====
   function reconView() {
     if (!can(...finRoles))
-      return `<div class="view-head"><h1>Reconciliation</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+      return `<div class="view-head"><h1>Reconciliation</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
     afterRender(() => reconBatchList());
     const canWrite = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
     return `<div class="view-head"><h1>Reconciliation</h1>
@@ -4962,7 +4973,7 @@ const Views = (() => {
   // ── Physical check intake + scan preview ───────────────────────────
   function checksView() {
     if (!can(...finRoles))
-      return `<div class="view-head"><h1>Checks</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+      return `<div class="view-head"><h1>Checks</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
     afterRender(() => checksBox(""));
     return `<div class="view-head"><h1>Checks</h1>
       <span class="muted">photo/scan → MICR + OCR extraction → invoice match → clearing</span></div>

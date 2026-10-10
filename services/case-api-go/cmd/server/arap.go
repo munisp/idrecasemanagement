@@ -42,7 +42,12 @@ func agingBucket(days int) string {
 	}
 }
 
-var arapReadRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+// CASE_MANAGER deliberately excluded: the AR/AP subledger is a standalone
+// finance screen, not case-detail info -- hidden from reviewer per the
+// access-control follow-up (visibility, not just the write actions the
+// original audit covered). caseFinancials (one case's own record) is a
+// separate, still-permitted endpoint.
+var arapReadRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 var arapWriteRoles = []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 func asOfDate(r *http.Request) (time.Time, error) {

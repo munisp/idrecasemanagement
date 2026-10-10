@@ -157,7 +157,10 @@
     links.push(["#/intake", "⇥", "Intake"]);
     links.push(["#/deliverables", "⎘", "Deliverables"]);
   }
-  if (has("FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
+  // CASE_MANAGER deliberately excluded -- Financials is a standalone
+  // dashboard, not case-detail info; matches the backend's
+  // financialReadRoles (access-control follow-up).
+  if (has("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/ops", "◔", "Ops"]);
   links.push(["#/timesheet", "⏱", "My timesheet"]);
   links.push(["#/calendar", "▨", "Calendar"]);
@@ -165,7 +168,10 @@
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
-  if (has("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+  // CASE_MANAGER deliberately excluded from all four -- standalone finance
+  // screens, not case-detail info; matches billingViewRoles/arapReadRoles/
+  // reconReadRoles/financialReadRoles (access-control follow-up).
+  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/billing", "🧾", "Billing"]);
     links.push(["#/arap", "⚖", "AR / AP"]);
     links.push(["#/recon", "⇄", "Reconciliation"]);

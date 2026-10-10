@@ -41,8 +41,11 @@ var crmStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "
 // enforced nothing), which meant a narrow specialist role with no financial
 // remit at all -- ARBITRATOR, CODER, NURSE_PHYSICIAN, ATTORNEY -- could read
 // check images' bank routing/account numbers just by typing the address.
-// Matches the portal's own Financials nav gate exactly.
-var financialReadRoles = []string{"FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole}
+// Matches the portal's own Financials nav gate exactly. CASE_MANAGER
+// removed per the access-control follow-up: Financials is a standalone
+// dashboard, not case-detail info, so reviewer loses it entirely rather
+// than just the write actions the original audit restricted.
+var financialReadRoles = []string{"FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole}
 
 // qaReadRoles: the QA review queue/detail (correspondence drafts awaiting
 // approval) -- same gap as financialReadRoles, same fix. Matches the

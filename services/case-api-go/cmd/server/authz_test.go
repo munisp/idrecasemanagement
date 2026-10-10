@@ -352,6 +352,45 @@ func TestThirdRoleAuditFloors_ReadEndpoints(t *testing.T) {
 	}
 }
 
+// Access-control follow-up: the original audit restricted CASE_MANAGER's
+// WRITE access to money-moving actions but left its READ access to the
+// standalone finance screens (Financials, Billing, AR/AP, Reconciliation,
+// Checks) untouched -- live testing found a reviewer-role account could
+// still see all of them, which was the actual original ask ("reviewer
+// shouldn't see finance"), not just a write restriction. These are
+// separate screens from a case's own embedded financial record
+// (caseFinancials), which CASE_MANAGER still needs and still has.
+func TestFourthRoleAuditFloors_FinanceVisibility(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		gate  []string
+		want  bool
+	}{
+		{"financialRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, financialReadRoles, false},
+		{"financialRead: PM still allowed", []string{"PM"}, financialReadRoles, true},
+		{"arapRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, arapReadRoles, false},
+		{"arapRead: PM still allowed", []string{"PM"}, arapReadRoles, true},
+		{"reconRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, reconReadRoles, false},
+		{"reconRead: PM still allowed", []string{"PM"}, reconReadRoles, true},
+		{"billingView: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, billingViewRoles, false},
+		{"billingView: PM still allowed", []string{"PM"}, billingViewRoles, true},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, c.gate...)
+		if got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+	// uploadCheck has its own inline gate rather than a shared role list.
+	if hasAnyRole(principal{Roles: []string{"CASE_MANAGER"}}, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		t.Error("uploadCheck gate: CASE_MANAGER should be rejected")
+	}
+	if !hasAnyRole(principal{Roles: []string{"PM"}}, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		t.Error("uploadCheck gate: PM should still be allowed")
+	}
+}
+
 // createFederalAdmin / createTenantStaff: there was previously no way to
 // create a FEDERAL_ADMIN/PLATFORM_ADMIN account at all through the app
 // (federal.admin itself was hand-seeded directly in the Keycloak realm),

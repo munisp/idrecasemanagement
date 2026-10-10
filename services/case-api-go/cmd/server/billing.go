@@ -145,7 +145,12 @@ func allocatePayment(total int64, weights []int64) []int64 {
 	return out
 }
 
-var billingViewRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+// CASE_MANAGER deliberately excluded -- the Billing screen's bulk
+// service-fee invoice generate/list/export is a standalone finance screen,
+// not case-detail info; see arapReadRoles' comment. issueInvoice (a single
+// case's own fee invoice, in programops.go) is a separate, still-permitted
+// endpoint.
+var billingViewRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // postSvcLedger posts the double-entry leg of a service-invoice event to the
 // tenant's TigerBeetle ledger:

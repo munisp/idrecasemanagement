@@ -361,7 +361,10 @@ func autoMatch(items []reconItem, events []finEvent, tolCents int64, windowDays 
 // ---------- HTTP handlers ----------
 
 var reconWriteRoles = []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
-var reconReadRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+
+// CASE_MANAGER deliberately excluded -- Reconciliation is a standalone
+// finance screen, not case-detail info; see arapReadRoles' comment.
+var reconReadRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // reconImport ingests an external feed into a recon batch.
 // multipart: file (CSV) + source (adapter) + mapping (mapping name for CSV)
