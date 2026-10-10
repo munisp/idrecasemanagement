@@ -521,9 +521,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.db.Exec(r.Context(),
 			`UPDATE public.qa_reviews SET body=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, body)
 	}
+	// displayName(p), not p.Subject -- drafted_by (same table) already uses
+	// it; reviewed_by was the one field here still showing a bare UUID.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.qa_reviews SET status=$3, reviewed_by=$4, reviewed_at=now(), review_note=$5
-		WHERE tenant=$1 AND id=$2`, tenant, qid, newStatus, p.Subject, in.Note)
+		WHERE tenant=$1 AND id=$2`, tenant, qid, newStatus, displayName(p), in.Note)
 
 	var to, cc []string
 	_ = json.Unmarshal(toJ, &to)

@@ -329,7 +329,12 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	// auto-adjudication endpoint — one implementation, so the auto path
 	// can never drift from what a human reviewer would compute.
 	result, reason, evidence := evalEligibility(cfg, in)
-	reviewID := s.persistEligibilityOutcome(r, tenant, id, p.Subject, result, reason, evidence)
+	// displayName(p), not p.Subject -- eligibility_reviews.decided_by is
+	// shown directly to staff in the review-history table (unlike
+	// logAudit's "by", which is an intentionally stable-identity audit
+	// key); the auto path's "auto: case+document data" literal below is
+	// already self-describing.
+	reviewID := s.persistEligibilityOutcome(r, tenant, id, displayName(p), result, reason, evidence)
 	writeJSON(w, http.StatusOK, map[string]any{"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence})
 }
 

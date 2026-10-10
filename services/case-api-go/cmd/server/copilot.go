@@ -48,19 +48,27 @@ type copilotDocFact struct {
 // copilotFacts is everything the brief is allowed to know. Every element is
 // platform-derived; nothing is model-generated upstream of the prompt.
 type copilotFacts struct {
-	CaseNumber          string           `json:"case_number"`
-	InternalStatus      string           `json:"internal_status"`
-	AgencyStatus        string           `json:"agency_status"`
-	DisputedAmountCents int64            `json:"disputed_amount_cents"`
-	QPACents            int64            `json:"qpa_cents"`
-	OpenedAt            string           `json:"opened_at"`
-	TriageLane          string           `json:"triage_lane"`
-	SLADaysRemaining    int              `json:"sla_days_remaining"`
-	EligibilityResult   string           `json:"eligibility_result,omitempty"`
-	EligibilityReason   string           `json:"eligibility_reason,omitempty"`
-	EligibilityMissing  []string         `json:"eligibility_missing_inputs,omitempty"`
-	Documents           []copilotDocFact `json:"documents,omitempty"`
-	RecentActivity      []string         `json:"recent_activity,omitempty"`
+	CaseNumber          string   `json:"case_number"`
+	InternalStatus      string   `json:"internal_status"`
+	AgencyStatus        string   `json:"agency_status"`
+	ServiceLine         string   `json:"service_line,omitempty"`
+	FilingPartyType     string   `json:"filing_party_type,omitempty"`
+	DisputedAmountCents int64    `json:"disputed_amount_cents"`
+	QPACents            int64    `json:"qpa_cents"`
+	OpenedAt            string   `json:"opened_at"`
+	TriageLane          string   `json:"triage_lane"`
+	SLADaysRemaining    int      `json:"sla_days_remaining"`
+	EligibilityResult   string   `json:"eligibility_result,omitempty"`
+	EligibilityReason   string   `json:"eligibility_reason,omitempty"`
+	EligibilityMissing  []string `json:"eligibility_missing_inputs,omitempty"`
+	// LastEligibilityReview is the most recent ACTUAL human/auto decision
+	// on record (eligibility_reviews), distinct from EligibilityResult
+	// above, which is a fresh re-derivation from current case/doc data --
+	// without this, the brief had no way to know a human already reviewed
+	// and decided eligibility, even when that decision was on record.
+	LastEligibilityReview string           `json:"last_eligibility_review,omitempty"`
+	Documents             []copilotDocFact `json:"documents,omitempty"`
+	RecentActivity        []string         `json:"recent_activity,omitempty"`
 }
 
 // copilotPrompt renders the system+user pair. The grounding contract is
@@ -202,17 +210,24 @@ func (s *server) gatherCopilotFacts(r *http.Request, tenant, caseID string) (cop
 	var f copilotFacts
 	var batchID, dupOf *string
 	var opened time.Time
+	var details []byte
 	err := s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT case_number, coalesce(internal_status,''), coalesce(agency_status,''),
+		        coalesce(service_line,''), coalesce(details,'{}'::jsonb),
 		        coalesce(disputed_amount_cents,0), coalesce(qpa_cents,0),
 		        opened_at, batch_id::text, duplicate_of::text
 		 FROM tenant_%s.cases WHERE id=$1`, tbl), caseID,
-	).Scan(&f.CaseNumber, &f.InternalStatus, &f.AgencyStatus,
+	).Scan(&f.CaseNumber, &f.InternalStatus, &f.AgencyStatus, &f.ServiceLine, &details,
 		&f.DisputedAmountCents, &f.QPACents, &opened, &batchID, &dupOf)
 	if err != nil {
 		return f, err
 	}
 	f.OpenedAt = opened.Format("2006-01-02")
+	var d map[string]any
+	_ = json.Unmarshal(details, &d)
+	if v, _ := d["filing_party_type"].(string); v != "" {
+		f.FilingPartyType = v
+	}
 
 	// Lane: same signal logic as listCases' triageLaneSQL, computed Go-side
 	// for one case. Escalation history escalates to COMPLEX.
@@ -244,6 +259,20 @@ func (s *server) gatherCopilotFacts(r *http.Request, tenant, caseID string) (cop
 				f.EligibilityResult, f.EligibilityReason, _ = evalEligibility(cfg, in)
 			}
 		}
+	}
+	var lastResult, lastReason, lastBy string
+	var lastAt time.Time
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT result, coalesce(reason,''), decided_by, created_at
+		FROM public.eligibility_reviews WHERE tenant=$1 AND case_id=$2
+		ORDER BY created_at DESC LIMIT 1`, tenant, caseID).
+		Scan(&lastResult, &lastReason, &lastBy, &lastAt); err == nil {
+		reasonPart := ""
+		if lastReason != "" {
+			reasonPart = " (" + lastReason + ")"
+		}
+		f.LastEligibilityReview = fmt.Sprintf("%s%s — decided by %s on %s",
+			lastResult, reasonPart, lastBy, lastAt.Format("2006-01-02"))
 	}
 
 	// Trusted document views: latest analysis per doc_type. Only the

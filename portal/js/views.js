@@ -3957,15 +3957,26 @@ const Views = (() => {
   // server-side, the nav link here is just the matching visibility.
   function auditRows(rows) {
     if (!rows.length) return `<p class="muted">No audit entries match.</p>`;
-    const rowsHtml = (list) => list.map((e) => `<tr>
+    const rowsHtml = (list) => list.map((e) => {
+      // e.payload is a decoded object, not a string -- esc(e.payload) was
+      // calling String() on it, which renders the literal text
+      // "[object Object]" for every row. JSON.stringify it for a readable
+      // column instead. payload.by is always the raw Keycloak subject
+      // (logAudit's own stable-identity convention, unchanged); by_name
+      // is the backend's resolved display name for it, shown here instead.
+      const payloadStr = e.payload && typeof e.payload === "object" ? JSON.stringify(e.payload) : String(e.payload || "");
+      const who = e.payload?.by_name || e.payload?.by || "—";
+      return `<tr>
         <td class="muted">${fmtDate(e.created_at)}</td>
         <td>${e.case_id ? `<a href="#/cases/${esc(e.case_id)}">${esc(String(e.case_id).slice(0, 8))}…</a>` : `<span class="muted">—</span>`}</td>
         <td>${badge(e.action)}</td>
-        <td class="mono" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.payload || "")}">${esc(e.payload || "")}</td>
+        <td>${esc(who)}</td>
+        <td class="mono" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(payloadStr)}">${esc(payloadStr)}</td>
         <td class="mono" title="${esc(e.hash || "")}">${esc(String(e.hash || "").slice(0, 12))}…</td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
     const { bodyHtml, pagerHtml } = initClientPager("audit", rows, rowsHtml);
-    return `<table id="audit-tb"><thead><tr><th>When</th><th>Case</th><th>Action</th><th>Payload</th><th>Hash</th></tr></thead>
+    return `<table id="audit-tb"><thead><tr><th>When</th><th>Case</th><th>Action</th><th>By</th><th>Payload</th><th>Hash</th></tr></thead>
       <tbody>${bodyHtml}</tbody></table>${pagerHtml}`;
   }
 

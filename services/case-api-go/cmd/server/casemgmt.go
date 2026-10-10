@@ -162,6 +162,27 @@ func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	// payload.by is a raw Keycloak subject on every logAudit call, by
+	// design -- an audit trail should key on the stable subject, not a
+	// mutable display name, so the write-time convention stays as-is.
+	// Resolve it to a username for DISPLAY only, same as the Team/Time
+	// fix (resolveSubjectNames), without touching what's actually stored.
+	var subjects []string
+	for _, row := range rows {
+		if payload, ok := row["payload"].(map[string]any); ok {
+			if by, _ := payload["by"].(string); by != "" {
+				subjects = append(subjects, by)
+			}
+		}
+	}
+	names := s.resolveSubjectNames(r.Context(), subjects)
+	for _, row := range rows {
+		if payload, ok := row["payload"].(map[string]any); ok {
+			if by, _ := payload["by"].(string); by != "" {
+				payload["by_name"] = names[by]
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows})
 }
 
