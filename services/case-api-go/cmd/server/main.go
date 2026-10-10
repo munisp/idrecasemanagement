@@ -574,7 +574,12 @@ func main() {
 		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
 		r.Post("/cases/{caseId}/time", s.addTimeEntry)               // per-role effort on the dispute
 		r.Get("/cases/{caseId}/time", s.listTimeEntries)
+		r.Get("/time/mine", s.myTimeEntries)              // personal timesheet (all disputes)
+		r.Get("/time/summary", s.myTimeSummary)           // today / this week / this month totals
+		r.Put("/time/{entryId}", s.updateTimeEntry)       // editable entries, audited before/after
+		r.Delete("/time/{entryId}", s.deleteTimeEntry)    // deletion keeps the audit snapshot
 		r.Get("/reports/time", s.timeReport)                          // weekly per-dispute + monthly team rollup
+		r.Post("/time/report/send", s.timeReportSend)              // email the team-hours report out (PM/FINANCE/admin)
 		r.Get("/reports/time/rates", s.getTimeRates)                  // role billable rates (view: PM/FINANCE/admin)
 		r.Put("/reports/time/rates", s.putTimeRate)                   // set rates (PM/admin only)
 		// Service-fee invoicing engine (time ledger x rates -> invoices)
@@ -632,6 +637,7 @@ func main() {
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence)                      // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
+		r.Get("/correspondence", s.listMailJournal)                          // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
 		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
@@ -652,6 +658,7 @@ func main() {
 		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake
 		r.Post("/intake", s.createIntake)                 // pre-case intake (G12)
 		r.Post("/intake/bulk", s.bulkIntake)              // third-party batch filing (idempotent by batch_ref)
+		r.Get("/intake/bulk", s.listIntakeBatches)          // filer status board (own batches; staff may filter)
 		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch) // batch receipt / reconciliation
 		r.Get("/intake", s.listIntake)
 		r.Post("/intake/{intakeId}/advance", s.advanceIntake) // refund window enforced
