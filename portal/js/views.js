@@ -4356,9 +4356,10 @@ const Views = (() => {
       const rows = (r.batches || []).map((b) => `<tr><td>#${b.id}</td><td>${esc(b.source)}</td>
         <td>${esc(b.period_start)} → ${esc(b.period_end)}</td><td>${b.total_items}</td>
         <td>${b.matched}</td><td>${b.exceptions}</td><td>${b.unmatched}</td><td>${badge(b.status)}</td>
+        <td>${esc(b.imported_by || "—")}</td>
         <td><button class="mini" onclick="Views.reconOpen(${b.id})">Open</button>
         ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" onclick="Views.reconMatchRun(${b.id})">Re-run match</button>` : ""}</td></tr>`).join("");
-      box.innerHTML = `<h2>Batches</h2>${rows ? `<table class="tbl"><thead><tr><th></th><th>Source</th><th>Period</th><th>Items</th><th>Matched</th><th>Exceptions</th><th>Unmatched</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No imports yet.</p>'}`;
+      box.innerHTML = `<h2>Batches</h2>${rows ? `<table class="tbl"><thead><tr><th></th><th>Source</th><th>Period</th><th>Items</th><th>Matched</th><th>Exceptions</th><th>Unmatched</th><th>Status</th><th>Imported by</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No imports yet.</p>'}`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
