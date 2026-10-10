@@ -274,6 +274,7 @@ const Api = (() => {
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
+      matchCheck: (checkId, body) => req("POST", `${t()}/checks/${checkId}/match`, body),
       checkImage: (checkId) => blobURL(`${t()}/checks/${checkId}/image`),
       uploadCheck: (file) => {
         const fd = new FormData();

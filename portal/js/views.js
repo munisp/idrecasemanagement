@@ -4556,12 +4556,12 @@ const Views = (() => {
     try {
       const r = await Api.program.checks(status);
       const cs = r.checks || [];
-      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Received</th><th>Status</th><th>Amount</th><th>Payer</th><th>Check #</th><th>Invoice</th><th>Confidence</th><th></th></tr></thead><tbody>
+      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Received</th><th>Status</th><th>Amount</th><th>Payer</th><th>Check #</th><th>Case</th><th>Confidence</th><th></th></tr></thead><tbody>
         ${cs.map((c) => `<tr class="${c.amount_mismatch ? "row-breach" : ""}">
           <td>${esc((c.created_at || "").slice(0, 10))}</td><td>${badge(c.status)}</td>
           <td>${usdC(c.courtesy_amount_cents)}</td><td>${esc(c.payer_name || "—")}</td>
           <td>${esc(c.check_number || "—")}</td>
-          <td>${c.invoice_id ? esc(c.invoice_id.slice(0, 8)) + "…" : "—"}</td>
+          <td>${c.case_id ? `<a href="#/cases/${c.case_id}">${esc(c.case_number || c.case_id.slice(0, 8) + "…")}</a>` : "—"}</td>
           <td>${badge(c.confidence || "—")}${c.amount_mismatch ? " ⚠ mismatch" : ""}</td>
           <td><button class="mini" onclick="Views.checkOpen('${c.id}')">Preview</button></td></tr>`).join("")}</tbody></table>`
         : '<p class="muted">No checks scanned yet.</p>';
@@ -4605,12 +4605,17 @@ const Views = (() => {
           <tr><td>Date</td><td>${esc(c.check_date || "—")}</td></tr>
           <tr><td>Payer</td><td>${esc(c.payer_name || "—")}</td></tr>
           <tr><td>Memo</td><td>${esc(c.memo || "—")}</td></tr>
-          <tr><td>Matched invoice</td><td>${c.invoice_id ? esc(c.invoice_id) : "—"}</td></tr>
-          <tr><td>Case</td><td>${c.case_id ? `<a href="#/cases/${c.case_id}">${esc(c.case_id.slice(0, 8))}…</a>` : "—"}</td></tr></tbody></table>
+          <tr><td>Case</td><td>${c.case_id ? `<a href="#/cases/${c.case_id}">${esc(c.case_number || c.case_id.slice(0, 8) + "…")}</a>` : "—"}</td></tr></tbody></table>
         ${c.status === "MATCHED" && can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.checkClearFn('${c.id}', this)">
             <input name="ref" placeholder="bank deposit / lockbox ref" />
-            <button class="mini">Confirm cleared</button></form>` : ""}` : '<p class="error">check metadata not found</p>'}`;
+            <button class="mini">Confirm cleared</button></form>` : ""}
+        ${c.status === "REVIEW" && can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.checkMatchFn('${c.id}', this)">
+            <input name="case_number" placeholder="case number (e.g. FL26-000123)" required />
+            <input name="amount_cents" type="number" step="0.01" min="0" placeholder="${c.courtesy_amount_cents ? "amount $" : "amount $ (required — not extracted)"}" />
+            <button class="mini">Link to case</button></form>
+          <p class="muted">Didn't auto-match — ${c.amount_mismatch ? "courtesy/legal amount mismatch" : !c.courtesy_amount_cents ? "amount wasn't extracted" : c.confidence === "low" ? "low OCR confidence" : "no single open invoice matched"}. Confirm the case number (and amount, if blank) to link it manually.</p>` : ""}` : '<p class="error">check metadata not found</p>'}`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -4622,6 +4627,26 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
+  async function checkMatchFn(id, form) {
+    try {
+      const body = { case_number: form.case_number.value.trim() };
+      if (form.amount_cents.value) body.amount_cents = Math.round(parseFloat(form.amount_cents.value) * 100);
+      await Api.program.matchCheck(id, body);
+      UI.toast("Check linked — now awaiting clearing");
+      document.getElementById("check-detail-card").style.display = "none";
+      checksBox("");
+    } catch (e) {
+      // 409 with "candidates" means the case has more than one open invoice --
+      // show them so staff can pick, rather than a bare error message.
+      if (e.data?.candidates?.length) {
+        const list = e.data.candidates.map((c) => `${c.party} ${c.kind}: $${((c.amount_cents || 0) / 100).toLocaleString()} (invoice ${c.invoice_id})`).join("\n");
+        alert(`${e.message}\n\n${list}\n\nRe-submit with the exact invoice_id via the API, or ask an admin.`);
+      } else {
+        alert(e.message);
+      }
+    }
+  }
+
   async function flReportFn(form) {
     try {
       if (form.kind.value === "weekly") await Api.program.flWeeklyReport(form.from.value, form.to.value);
@@ -4629,5 +4654,5 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();

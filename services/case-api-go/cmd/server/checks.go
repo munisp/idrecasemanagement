@@ -189,6 +189,115 @@ func (s *server) checkResult(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": status, "match": matchedBy, "invoice_id": invID})
 }
 
+// matchCheck lets staff manually link a REVIEW check to an invoice (and the
+// case it belongs to) when checkResult's automatic match couldn't do it
+// confidently (ambiguous amount shared by multiple open invoices, no memo
+// invoice reference, low OCR confidence, or an amount mismatch). Before
+// this, a REVIEW check had no path forward at all -- clearCheck strictly
+// requires status='MATCHED', so it sat visible in the queue permanently
+// stuck, invoice_id/case_id both NULL, with nothing a human could do about
+// it short of editing the database directly.
+//
+// Accepts either invoice_id directly, or case_number (program convention:
+// invoice_no == case_number) resolved to that case's one open invoice --
+// if the case has more than one (e.g. separate PROVIDER/HEALTH_PLAN
+// invoices), the candidates come back for the caller to disambiguate by
+// invoice_id. amount_cents is optional: it confirms/corrects the check's
+// own extracted amount (which can be NULL when OCR confidence was too low
+// to extract one at all) rather than trusting OCR's possibly-wrong read.
+func (s *server) matchCheck(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	// Same separation-of-duties floor as clearCheck: this determines which
+	// case/invoice real money (PENDING_CLEARING) attaches to.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
+	checkID := chi.URLParam(r, "checkId")
+	var in struct {
+		InvoiceID   string `json:"invoice_id"`
+		CaseNumber  string `json:"case_number"`
+		AmountCents *int64 `json:"amount_cents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	var checkAmount *int64
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT amount_cents FROM public.checks WHERE id=$1 AND tenant=$2 AND status='REVIEW'`,
+		checkID, tenant).Scan(&checkAmount); err != nil {
+		http.Error(w, `{"error":"check not found or not in REVIEW state"}`, http.StatusConflict)
+		return
+	}
+
+	invID := in.InvoiceID
+	if invID == "" {
+		if in.CaseNumber == "" {
+			http.Error(w, `{"error":"invoice_id or case_number required"}`, http.StatusBadRequest)
+			return
+		}
+		rows, err := s.queryRows(r, `
+			SELECT id::text AS invoice_id, party, kind, amount_cents FROM public.invoices
+			WHERE tenant=$1 AND invoice_no=$2 AND status='OPEN'`, tenant, in.CaseNumber)
+		if err != nil {
+			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+			return
+		}
+		if len(rows) == 0 {
+			http.Error(w, `{"error":"no open invoice found for that case"}`, http.StatusNotFound)
+			return
+		}
+		if len(rows) > 1 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "more than one open invoice for this case — specify invoice_id", "candidates": rows})
+			return
+		}
+		invID, _ = rows[0]["invoice_id"].(string)
+	}
+
+	amount := in.AmountCents
+	if amount == nil {
+		amount = checkAmount
+	}
+	if amount == nil {
+		http.Error(w, `{"error":"amount_cents required — this check's amount was never extracted"}`, http.StatusBadRequest)
+		return
+	}
+
+	var caseID, caseNumber string
+	if err := s.db.QueryRow(r.Context(), `
+		UPDATE public.checks SET invoice_id=$3, case_id=i.case_id, matched_by='manual',
+		       status='MATCHED', amount_cents=$4, updated_at=now()
+		FROM public.invoices i
+		WHERE checks.id=$1 AND checks.tenant=$2 AND checks.status='REVIEW'
+		  AND i.id=$3 AND i.tenant=$2 AND i.status='OPEN'
+		RETURNING checks.case_id, i.invoice_no`,
+		checkID, tenant, invID, *amount).Scan(&caseID, &caseNumber); err != nil {
+		http.Error(w, `{"error":"check no longer in REVIEW state, or invoice not found/not open"}`, http.StatusConflict)
+		return
+	}
+
+	// Same side effects as checkResult's auto-match branch: a PENDING_CLEARING
+	// payment row, never a settled one -- clearCheck is still the only path
+	// that turns this into real money.
+	s.db.Exec(r.Context(), `
+		INSERT INTO public.payments (tenant, case_id, invoice_id, provider, session_id, amount_cents, status)
+		VALUES ($1,$2,$3,'check',$4,$5,'PENDING_CLEARING')`,
+		tenant, caseID, invID, "chk:"+checkID, *amount)
+	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", *amount, "",
+		"chk:"+checkID, "check-manual-match")
+	s.logActivity(r.Context(), tenant, caseID, "CHECK_MATCHED",
+		fmt.Sprintf("Check %s manually linked to invoice %s (case %s)", checkID, invID, caseNumber))
+	s.logAudit(r.Context(), tenant, caseID, "CHECK_MATCHED", map[string]any{
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "check_id": checkID,
+		"matched_by": "manual", "invoice_id": invID, "amount_cents": *amount,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "MATCHED", "invoice_id": invID, "case_id": caseID, "case_number": caseNumber,
+	})
+}
+
 // clearCheck records funds cleared (staff action or bank/lockbox webhook):
 // invoice PAID + payment PAID + TB clearing→escrow leg + rules fire. This is
 // the ONLY path that turns a check image into settled money.
@@ -278,12 +387,14 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.queryRows(r, fmt.Sprintf(`
-		SELECT id, status, check_number, amount_cents AS courtesy_amount_cents, legal_amount_cents, memo,
-		       COALESCE(to_char(check_date,'YYYY-MM-DD'),'') AS check_date,
-		       routing_number, account_number, confidence, amount_mismatch,
-		       invoice_id, case_id, payer_name, created_at
-		FROM public.checks WHERE tenant=$1 AND ($2='' OR status=$2)
-		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, status)
+		SELECT c.id, c.status, c.check_number, c.amount_cents AS courtesy_amount_cents, c.legal_amount_cents, c.memo,
+		       COALESCE(to_char(c.check_date,'YYYY-MM-DD'),'') AS check_date,
+		       c.routing_number, c.account_number, c.confidence, c.amount_mismatch,
+		       c.invoice_id, c.case_id, coalesce(i.invoice_no,'') AS case_number, c.payer_name, c.created_at
+		FROM public.checks c
+		LEFT JOIN public.invoices i ON i.id = c.invoice_id AND i.tenant = c.tenant
+		WHERE c.tenant=$1 AND ($2='' OR c.status=$2)
+		ORDER BY c.created_at DESC, c.id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, status)
 	if err != nil {
 		http.Error(w, `{"error":"query"}`, http.StatusInternalServerError)
 		return
