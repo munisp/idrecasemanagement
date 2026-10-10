@@ -307,17 +307,25 @@ func (s *server) copilotDecideActions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"decision must be APPROVE or REJECT"}`, http.StatusBadRequest)
 		return
 	}
-	var status, wfID string
+	var status, wfID, proposedBy string
 	var actionsJ []byte
 	if err := s.db.QueryRow(r.Context(), `
-		SELECT status, coalesce(workflow_id,''), actions
+		SELECT status, coalesce(workflow_id,''), actions, proposed_by
 		FROM public.copilot_action_batches WHERE tenant=$1 AND id=$2 AND case_id=$3`,
-		tenant, batchID, caseID).Scan(&status, &wfID, &actionsJ); err != nil {
+		tenant, batchID, caseID).Scan(&status, &wfID, &actionsJ, &proposedBy); err != nil {
 		http.Error(w, `{"error":"batch not found"}`, http.StatusNotFound)
 		return
 	}
 	if status != "PENDING_APPROVAL" {
 		http.Error(w, `{"error":"batch already decided (`+status+`)"}`, http.StatusConflict)
+		return
+	}
+	// Maker-checker: whoever proposed the batch cannot also be the one who
+	// approves it, regardless of role — otherwise the human-gate on an
+	// AI-proposed action is theater. REJECT is exempt: killing your own
+	// bad proposal isn't a privilege-escalation risk.
+	if in.Decision == "APPROVE" && proposedBy == displayName(p) {
+		http.Error(w, `{"error":"forbidden: the proposer cannot approve their own batch — a different staff member must review it"}`, http.StatusForbidden)
 		return
 	}
 	newStatus := map[string]string{"APPROVE": "APPROVED", "REJECT": "REJECTED"}[in.Decision]

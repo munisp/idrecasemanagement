@@ -78,7 +78,8 @@ type ProgramConfig struct {
 		RouteRole          string   `json:"route_role"`
 		Reasons            []string `json:"reasons"`
 	} `json:"escalation"`
-	NotesStreams []string            `json:"notes_streams"`
+	NotesStreams     []string            `json:"notes_streams"`
+	NotesStreamRoles map[string][]string `json:"notes_stream_roles"`
 	FieldSchema  map[string][]string `json:"field_schema"`
 	Checklist    map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
 	// Correspondence was never on this struct, so getProgram's response

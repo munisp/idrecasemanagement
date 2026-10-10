@@ -332,6 +332,13 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
   "fees": {"initial_fee_cents": 12359, "refund_window_days": 7, "invoice_due_days": null, "invoice_number_equals_case_number": true, "invoiced_filer_orgs": []},
   "escalation": {"amount_trigger_cents": 100000000, "route_role": "PM", "reasons": ["fraud_waste_abuse","over_1m"]},
   "notes_streams": ["internal","coder","clinical","legal","external_agency"],
+  "notes_stream_roles": {
+    "internal": ["CASE_MANAGER","PM","FEDERAL_ADMIN","PLATFORM_ADMIN"],
+    "coder": ["CODER","PM","FEDERAL_ADMIN","PLATFORM_ADMIN"],
+    "clinical": ["NURSE_PHYSICIAN","DOCTOR","NURSE","PM","FEDERAL_ADMIN","PLATFORM_ADMIN"],
+    "legal": ["ATTORNEY","PM","FEDERAL_ADMIN","PLATFORM_ADMIN"],
+    "external_agency": ["CASE_MANAGER","PM","FEDERAL_ADMIN","PLATFORM_ADMIN"]
+  },
   "correspondence": {
     "agency_recipients": [],
     "templates": [

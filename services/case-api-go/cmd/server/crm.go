@@ -460,6 +460,16 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"stream must be one of the program notes_streams"}`, http.StatusBadRequest)
 			return
 		}
+		// Per-stream role gate: a stream with no entry in notes_stream_roles
+		// stays unrestricted (same as a program that never configured this
+		// at all). Confirmed live: before this, any case-staff role could
+		// write any stream — coder.fl wrote a Legal note and the server
+		// accepted it, even though the field criteria document treats
+		// Coder/Clinical/Legal review notes as separate per-role fields.
+		if roles, ok := prog.NotesStreamRoles[in.Stream]; ok && len(roles) > 0 && !hasAnyRole(p, roles...) {
+			http.Error(w, `{"error":"forbidden: your role cannot write to the `+in.Stream+` notes stream"}`, http.StatusForbidden)
+			return
+		}
 	}
 	_, err := s.db.Exec(r.Context(), `
 		INSERT INTO public.notes (tenant, record_type, record_id, stream, body, author)
@@ -492,6 +502,15 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 // program config.
 func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// This endpoint had NO authorization check at all (confirmed live: any
+	// authenticated caller could list every note stream for any record,
+	// including Legal/Clinical notes from roles that shouldn't see them —
+	// nurse.fl could read attorney.fl's Legal note and vice versa).
+	if !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	q := r.URL.Query()
 	recordType, recordID := q.Get("record_type"), q.Get("record_id")
 	if recordType == "" || recordID == "" {
@@ -505,6 +524,19 @@ func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	// Same per-stream role gate as addNote: a stream with no entry in
+	// notes_stream_roles stays visible to all case staff (unrestricted,
+	// same as a program that never configured this).
+	if prog := s.loadProgram(r, tenant); prog != nil && len(prog.NotesStreamRoles) > 0 {
+		visible := rows[:0]
+		for _, row := range rows {
+			stream := fmt.Sprint(row["stream"])
+			if roles, ok := prog.NotesStreamRoles[stream]; !ok || len(roles) == 0 || hasAnyRole(p, roles...) {
+				visible = append(visible, row)
+			}
+		}
+		rows = visible
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"notes": rows})
 }

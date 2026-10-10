@@ -59,7 +59,19 @@ async def fetch_batch_action_count(tenant: str, batch_id: str) -> int:
 @activity.defn
 async def apply_copilot_action(tenant: str, batch_id: str, index: int) -> str:
     """Apply ONE action via case-api's worker-authenticated executor, which
-    re-validates batch state + params and records the per-action result."""
+    re-validates batch state + params and records the per-action result.
+
+    Raises on any non-2xx so Temporal's own RetryPolicy actually gets a
+    chance at transient failures (a 404 from a mid-rollout version-skew
+    window, a connection reset, a brief 502/503) -- previously this
+    swallowed every failure into a "successful" string result, so a
+    purely transient hiccup permanently stranded the batch at APPROVED
+    with nothing to ever retry it. Confirmed live: a batch that hit a
+    mid-deploy 404 sat stuck for 20+ minutes until replayed by hand;
+    case-api's own handler never even ran, so persistCopilotActionResult
+    was never called and the row was never touched.
+    The workflow (not this activity) decides what happens once retries
+    are exhausted -- see the try/except around execute_activity below."""
     import httpx
     async with httpx.AsyncClient(base_url=CASE_API, timeout=30) as client:
         resp = await client.post(
@@ -67,10 +79,8 @@ async def apply_copilot_action(tenant: str, batch_id: str, index: int) -> str:
             json={"batch_id": batch_id, "index": index},
             headers={"Authorization": f"Bearer {os.environ.get('WORKER_TOKEN','')}"},
         )
-        # A failed action is recorded on the batch row by case-api; keep
-        # going with the rest of the batch rather than faulting the workflow.
         if resp.status_code >= 400:
-            return f"action {index} failed: HTTP {resp.status_code}"
+            raise RuntimeError(f"action {index} failed: HTTP {resp.status_code}: {resp.text[:200]}")
         return f"action {index}: {resp.json().get('result', 'applied')}"
 
 
@@ -130,12 +140,17 @@ class CopilotActionBatchWorkflow:
         )
         results = []
         for i in range(min(n, MAX_ACTIONS)):
-            res = await workflow.execute_activity(
-                apply_copilot_action, args=[inp.tenant, inp.batch_id, i],
-                start_to_close_timeout=timedelta(minutes=2),
-                # Per-action retry: transient API/DB blips shouldn't fail the
-                # batch; the executor is idempotent per index.
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+            try:
+                res = await workflow.execute_activity(
+                    apply_copilot_action, args=[inp.tenant, inp.batch_id, i],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    # Per-action retry: transient API/DB blips shouldn't fail the
+                    # batch; the executor is idempotent per index. Now that the
+                    # activity actually raises on failure (see above), these 3
+                    # attempts are real retries, not a no-op.
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:  # retries exhausted — move on, don't fault the whole batch
+                res = f"action {i} failed after retries: {e}"
             results.append(res)
         return "APPLIED: " + "; ".join(results) if results else "APPLIED: empty batch"
