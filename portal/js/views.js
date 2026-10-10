@@ -121,9 +121,9 @@ const Views = (() => {
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
     try {
       const [{ cases }, clocks, prog] = await Promise.all([Api.cases.list({ limit: 200 }), clockMap(), Api.program.get().catch(() => null)]);
-      if (prog?.config?.tenant_label) {
+      if (prog?.tenant_label) {
         html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
-          <span class="muted">tenant <b>${esc(prog.config.tenant_label)}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
+          <span class="muted">tenant <b>${esc(prog.tenant_label)}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
       }
       // Status rollup computed client-side from the case list the dashboard
       // already fetched, not Api.reports.summary() -- that endpoint is
@@ -3703,7 +3703,7 @@ const Views = (() => {
       rulesDraft = (lr.rules || []).map((r) => ({ ...r }));
       afterRender(bindRulesAdmin);
       const audit = ar.changes || [];
-      const curLabel = pr?.config?.tenant_label || "";
+      const curLabel = pr?.tenant_label || "";
       return `<div class="view-head"><h1>Program rules</h1>
         <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
         <p><button onclick="Views.createTenantFlow()">＋ Create tenant</button>
@@ -3711,7 +3711,7 @@ const Views = (() => {
         <p><button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>
            <span class="muted">cross-tenant FEDERAL_ADMIN or PLATFORM_ADMIN account</span></p>
         <p><button onclick="Views.renameTenantFlow('${esc(curLabel)}')">✎ ${curLabel ? `Rename "${esc(curLabel)}"` : "Set display name"}</button>
-           <span class="muted">shown in place of the bare "${esc(Api.getTenant().toUpperCase())}" code throughout the portal${pr?.config ? "" : " — requires this tenant to have program rules configured first"}</span></p>
+           <span class="muted">shown in place of the bare "${esc(Api.getTenant().toUpperCase())}" code throughout the portal</span></p>
         <p><button id="rule-add">＋ New rule</button>
            <button id="rules-save" class="btn-primary">Save all changes</button></p>
         <div id="rules-list">` +

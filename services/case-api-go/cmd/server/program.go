@@ -43,10 +43,7 @@ type ThresholdRule struct {
 }
 
 type ProgramConfig struct {
-	// TenantLabel is the human-readable name shown in place of the bare
-	// tenant code (e.g. "AHCA" instead of "FL") -- optional, admin-set.
-	TenantLabel string `json:"tenant_label,omitempty"`
-	CaseNumber  struct {
+	CaseNumber struct {
 		Pattern string `json:"pattern"` // e.g. "FL{yy}-{seq}"
 		SeqPad  int    `json:"seq_pad"`
 	} `json:"case_number"`
@@ -117,25 +114,30 @@ func (s *server) loadProgram(r *http.Request, tenant string) *ProgramConfig {
 
 // getProgram exposes the tenant's program config so the portal can render
 // program-specific labels, statuses, and rules without hard-coding a state.
+// tenant_label is looked up separately (public.tenant_labels, not the
+// program config) and included either way -- it applies to every tenant,
+// configured-program or Federal-NSA-default alike.
 func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	cfg := s.loadProgram(r, tenant)
+	var label string
+	_ = s.db.QueryRow(r.Context(), `SELECT label FROM public.tenant_labels WHERE tenant=$1`, tenant).Scan(&label)
 	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil})
+		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg})
+	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label})
 }
 
 // setTenantLabel: PUT /v1/tenants/{tenant}/program/label {"label":"AHCA"} --
-// FEDERAL_ADMIN/PLATFORM_ADMIN only (same guard as program rules). Only
-// updates an EXISTING program_rules row, never creates one: a tenant with
-// no custom program rules runs on Federal NSA defaults, and every
-// "programmed vs federal" branch in this codebase (summaryReport, the
-// dashboard's amount field, clock projection, ...) keys off whether that
-// row exists at all -- silently inserting one here as a side effect of
-// setting a label would flip all of that behavior for a tenant that was
-// never meant to be "programmed."
+// FEDERAL_ADMIN/PLATFORM_ADMIN only (same guard as program rules). Lives in
+// its own table, not program_rules.config: a tenant with no custom program
+// rules runs on Federal NSA defaults, and every "programmed vs federal"
+// branch in this codebase (summaryReport, the dashboard's amount field,
+// clock projection, ...) keys off whether that row exists at all --
+// storing the label there would force creating one just to hold a name,
+// silently flipping a tenant's program mode as a side effect. This way
+// works for every tenant regardless of program status.
 func (s *server) setTenantLabel(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.rulesAdminGuard(w, r)
 	if !ok {
@@ -154,16 +156,13 @@ func (s *server) setTenantLabel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"label required"}`, http.StatusBadRequest)
 		return
 	}
-	res, err := s.db.Exec(r.Context(), `
-		UPDATE public.program_rules
-		SET config = jsonb_set(coalesce(config,'{}'::jsonb), '{tenant_label}', to_jsonb($2::text)), updated_at=now()
-		WHERE tenant=$1`, tenant, label)
+	_, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.tenant_labels (tenant, label, updated_by, updated_at)
+		VALUES ($1,$2,$3,now())
+		ON CONFLICT (tenant) DO UPDATE SET label=$2, updated_by=$3, updated_at=now()`,
+		tenant, label, displayName(p))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-		return
-	}
-	if res.RowsAffected() == 0 {
-		http.Error(w, `{"error":"this tenant has no custom program configuration yet — a display label currently requires one"}`, http.StatusConflict)
 		return
 	}
 	s.logActivity(r.Context(), tenant, "", "TENANT_LABEL_UPDATED",
@@ -183,9 +182,7 @@ func (s *server) listTenantLabels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `
-		SELECT tenant, config->>'tenant_label' FROM public.program_rules
-		WHERE coalesce(config->>'tenant_label','') <> ''`)
+	rows, err := s.db.Query(r.Context(), `SELECT tenant, label FROM public.tenant_labels`)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

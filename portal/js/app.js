@@ -119,7 +119,7 @@
     Api.program.tenantLabels().then((labels) => { tenantLabels = labels || {}; paintChip(); }).catch(() => {});
   } else {
     Api.program.get().then((pr) => {
-      const label = pr?.config?.tenant_label;
+      const label = pr?.tenant_label;
       if (label) { tenantLabels[Api.getTenant()] = label; paintChip(); }
     }).catch(() => {});
   }

@@ -486,3 +486,19 @@ CREATE TABLE IF NOT EXISTS public.bank_payout_batches (
   created_at     timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant, file_reference)
 );
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Tenant display names (program.go: setTenantLabel/listTenantLabels),
+-- e.g. "AHCA" shown in place of the bare "FL" code. Deliberately its own
+-- table, not a key in program_rules.config: a tenant with no custom
+-- program rules runs on Federal NSA defaults, and every "programmed vs
+-- federal" branch in this codebase keys off whether that row exists at
+-- all -- storing the label there would force creating one just to hold a
+-- name, silently flipping a tenant's program mode as a side effect.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.tenant_labels (
+  tenant     text PRIMARY KEY,
+  label      text NOT NULL,
+  updated_by text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
