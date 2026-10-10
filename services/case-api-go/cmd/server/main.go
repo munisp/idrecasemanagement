@@ -812,8 +812,11 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	// to PARTY as self-service federal NSA filing, not just staff. Caught by
 	// cross-checking the UI's own nav gate against this handler's roles
 	// after first writing it without PARTY.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PARTY, CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// ARBITRATOR removed (access-control audit, AC-5 separation of duties):
+	// the role that decides a dispute shouldn't also be able to file one --
+	// undermines arbitrator impartiality regardless of whether it's misused.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PARTY, CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 
@@ -1298,9 +1301,13 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	// that holds even with Permify absent -- confirmed on this same endpoint
 	// in the sibling deployment (main branch) that an ARBITRATOR reached
 	// TigerBeetle and posted a transfer with no role check at all in front of it.
+	// CASE_MANAGER removed (access-control audit, AC-5 separation of
+	// duties): the same role that decides a dispute's eligibility/outcome
+	// shouldn't also be able to post the ledger transfer that moves its
+	// money -- matches the floor settleInvoice/clearCheck already use.
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		http.Error(w, `{"error":"forbidden: requires FINANCE, CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	if !hasAnyRole(p, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	// ReBAC: object-level permit on this tenant's ledger (fail-closed).

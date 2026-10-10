@@ -207,10 +207,12 @@ func (s *server) checkResult(w http.ResponseWriter, r *http.Request) {
 // to extract one at all) rather than trusting OCR's possibly-wrong read.
 func (s *server) matchCheck(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	// Same separation-of-duties floor as clearCheck: this determines which
-	// case/invoice real money (PENDING_CLEARING) attaches to.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// Same separation-of-duties floor as clearCheck/settleInvoice (access-
+	// control audit, AC-5): this determines which case/invoice real money
+	// (PENDING_CLEARING) attaches to, so it stays FINANCE/admins only, not
+	// PM.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	checkID := chi.URLParam(r, "checkId")
@@ -303,11 +305,12 @@ func (s *server) matchCheck(w http.ResponseWriter, r *http.Request) {
 // the ONLY path that turns a check image into settled money.
 func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	// Money-moving, same separation-of-duties floor as settleInvoice: FINANCE/
-	// PM/admins, not CASE_MANAGER -- the person who manages the case is not
-	// the one who gets to also confirm its money cleared.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// Money-moving, same separation-of-duties floor as settleInvoice:
+	// FINANCE/admins only. Neither CASE_MANAGER (manages the case) nor PM
+	// (holds case-adjacent QA/review powers) gets to also confirm its
+	// money cleared (access-control audit, AC-5 separation of duties).
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	checkID := chi.URLParam(r, "checkId")

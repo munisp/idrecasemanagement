@@ -112,8 +112,12 @@ func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
 // settleInvoice records a payment, void, or refund (remittance reference kept
 // for reconciliation with the payment provider).
 func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// PM removed (access-control audit, AC-5 separation of duties): PM
+	// holds case-adjacent QA/review powers, so settling real money sits
+	// with FINANCE/admins alone -- same reasoning CASE_MANAGER was already
+	// excluded for.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

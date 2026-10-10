@@ -23,6 +23,11 @@ func TestHasAnyRole(t *testing.T) {
 // before the RBAC floor existed, an ARBITRATOR token reached
 // postFeeTransfer/escalateCase/reveal with no role check at all (Permify,
 // the only other gate, allows everyone when undeployed).
+//
+// CASE_MANAGER was removed from this gate in the access-control audit
+// (AC-5 separation of duties): the role that decides a dispute's
+// eligibility/outcome shouldn't also post the ledger transfer that moves
+// its money -- same floor settleInvoice/clearCheck already used.
 func TestFeeTransferRoleFloorRejectsWrongRole(t *testing.T) {
 	cases := []struct {
 		roles []string
@@ -30,13 +35,13 @@ func TestFeeTransferRoleFloorRejectsWrongRole(t *testing.T) {
 	}{
 		{[]string{"ARBITRATOR"}, false},
 		{[]string{"PARTY"}, false},
+		{[]string{"CASE_MANAGER"}, false},
 		{[]string{"FINANCE"}, true},
-		{[]string{"CASE_MANAGER"}, true},
 		{[]string{"FEDERAL_ADMIN"}, true},
 		{[]string{"PLATFORM_ADMIN"}, true},
 	}
 	for _, c := range cases {
-		got := hasAnyRole(principal{Roles: c.roles}, "FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+		got := hasAnyRole(principal{Roles: c.roles}, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 		if got != c.want {
 			t.Errorf("roles=%v: got allowed=%v, want %v", c.roles, got, c.want)
 		}
@@ -106,11 +111,14 @@ func TestProgramLayerRoleFloors(t *testing.T) {
 		// checkEligibility: CASE_MANAGER/ATTORNEY/admins only -- not PM/CODER.
 		{"eligibility: ATTORNEY allowed", []string{"ATTORNEY"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"eligibility: PM rejected", []string{"PM"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
-		// settleInvoice: permanent policy is PM/FINANCE only -- not
+		// settleInvoice: permanent policy is FINANCE/admins only -- not
 		// CASE_MANAGER (separation of duties between the reviewer who drafts
-		// the case and whoever moves money).
-		{"settle: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
-		{"settle: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		// the case and whoever moves money), and PM was removed in the
+		// access-control audit for the same reason (PM holds case-adjacent
+		// QA/review powers, so shouldn't also settle the resulting money).
+		{"settle: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"settle: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		{"settle: PM rejected", []string{"PM"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 		// recordOptOut: permanent policy is ATTORNEY only, per the source
 		// docs ("Attorney decides if the plan may opt out") -- not even
 		// CASE_MANAGER.
@@ -177,10 +185,13 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		// initiateCase: who may open a new federal NSA case record. PARTY is
 		// allowed -- the portal's "New dispute" nav + form is self-service
 		// federal NSA filing, not staff-only (confirmed against the UI's own
-		// nav gate: has("PARTY", "CASE_MANAGER")).
-		{"initiate: ARBITRATOR allowed", []string{"ARBITRATOR"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// nav gate: has("PARTY", "CASE_MANAGER")). ARBITRATOR was removed in
+		// the access-control audit (AC-5): the role that decides a dispute
+		// shouldn't also be able to file one -- undermines impartiality
+		// regardless of whether it's ever misused.
+		{"initiate: ARBITRATOR rejected", []string{"ARBITRATOR"}, []string{"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// assignCase / bulkCases: reassignment is a management decision, not
 		// routine casework -- narrower than the broad case-staff gate.
 		{"assign: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
@@ -195,9 +206,20 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		{"uploadCheck: NURSE_PHYSICIAN rejected", []string{"NURSE_PHYSICIAN"}, []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// clearCheck: the ONLY path that turns a check image into settled
 		// money -- permanent policy is the same floor as settleInvoice,
-		// CASE_MANAGER excluded.
-		{"clearCheck: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"clearCheck: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// CASE_MANAGER and (per the access-control audit) PM both excluded.
+		{"clearCheck: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"clearCheck: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"clearCheck: PM rejected", []string{"PM"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// matchCheck: same floor as clearCheck (access-control audit) -- it
+		// determines which case/invoice real money attaches to.
+		{"matchCheck: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"matchCheck: PM rejected", []string{"PM"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// transitionInvoice "approve": converts a draft service invoice into
+		// a payable obligation. CASE_MANAGER removed in the access-control
+		// audit; PM still allowed (program-management oversight, one step
+		// short of actually settling money).
+		{"invoice approve: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"invoice approve: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 		// caseStaffRoles: generateLetter/requestLetterGen -- the portal only
 		// ever shows these buttons to CASE_MANAGER/FEDERAL_ADMIN, so this
 		// narrower set (not crmStaffRoles) is a safe superset of the UI.

@@ -1474,12 +1474,20 @@ const Views = (() => {
       const renderInvoices = (r) => {
         const el = document.getElementById("p-inv-list");
         if (!el || el.dataset.caseId !== id) return;
+        // "mark paid"/"refund" had no role gate at all here, despite
+        // settleInvoice itself always having required FINANCE/admin (PM
+        // too, until the access-control audit removed it) -- CASE_MANAGER
+        // could already see these links and get a silent 403 on click.
+        // Gated now to match the backend exactly; "pay by card" stays open
+        // to everyone who can see invoices, since it's the payer-facing
+        // checkout link, not a staff settlement action.
+        const canSettle = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
         el.innerHTML = (r.invoices || []).length ? `<table><tbody>` + r.invoices.map((v) =>
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
            <td>${badge(v.status)}</td>
-           <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.payInvoice('${v.id}')">💳 pay by card</a> ·
+           <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.payInvoice('${v.id}')">💳 pay by card</a>${canSettle ? ` ·
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY',this)">mark paid</a> ·
-             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}</td></tr>`).join("") +
+             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
       };
       const refreshInv = () => Api.program.invoices(id).then(renderInvoices).catch(() => {});
@@ -4635,11 +4643,11 @@ const Views = (() => {
           <tr><td>Payer</td><td>${esc(c.payer_name || "—")}</td></tr>
           <tr><td>Memo</td><td>${esc(c.memo || "—")}</td></tr>
           <tr><td>Case</td><td>${c.case_id ? `<a href="#/cases/${c.case_id}">${esc(c.case_number || c.case_id.slice(0, 8) + "…")}</a>` : "—"}</td></tr></tbody></table>
-        ${c.status === "MATCHED" && can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
+        ${c.status === "MATCHED" && can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.checkClearFn('${c.id}', this)">
             <input name="ref" placeholder="bank deposit / lockbox ref" />
             <button class="mini">Confirm cleared</button></form>` : ""}
-        ${c.status === "REVIEW" && can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
+        ${c.status === "REVIEW" && can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.checkMatchFn('${c.id}', this)">
             <input name="case_number" placeholder="case number (e.g. FL26-000123)" required />
             <input name="amount_cents" type="number" step="0.01" min="0" placeholder="${c.courtesy_amount_cents ? "amount $" : "amount $ (required — not extracted)"}" />

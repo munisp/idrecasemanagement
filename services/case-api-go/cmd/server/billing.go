@@ -482,8 +482,12 @@ func (s *server) transitionInvoice(w http.ResponseWriter, r *http.Request) {
 		to    string
 		roles []string
 	}
+	// "approve" excludes CASE_MANAGER deliberately (access-control audit,
+	// AC-5 separation of duties): approving converts a draft service
+	// invoice into a payable obligation, and the role that manages/decides
+	// the underlying dispute shouldn't also authorize that step.
 	rules := map[string]rule{
-		"approve": {[]string{"DRAFT"}, "APPROVED", []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
+		"approve": {[]string{"DRAFT"}, "APPROVED", []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
 		"issue":   {[]string{"APPROVED"}, "ISSUED", []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
 		"void":    {[]string{"DRAFT", "APPROVED", "ISSUED"}, "VOID", []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
 	}
