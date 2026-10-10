@@ -87,27 +87,42 @@
   const auditorOnly = me.roles.includes("STATE_AUDITOR") &&
     !["CASE_MANAGER", "ARBITRATOR", "FINANCE", "PARTY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].some((r) => me.roles.includes(r));
   const chip = document.getElementById("tenant-chip");
+  // Admin-settable display name (e.g. "AHCA" for FL) -- empty until fetched,
+  // so the chip paints with the generic "XX IDRE" fallback immediately and
+  // upgrades once the label (if any) arrives, rather than blocking the
+  // whole app's first paint on it.
+  let tenantLabels = {};
+  const labelFor = (code) => tenantLabels[code] || `${code.toUpperCase()} IDRE`;
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const paintChip = () => {
     const cur = Api.getTenant();
     document.getElementById("t-avatar").textContent = cur.slice(0, 2).toUpperCase();
     if (crossTenant || auditorOnly) {
       document.getElementById("t-name").innerHTML =
         `<select id="t-switch" class="t-select" aria-label="Switch state tenant">` +
-        STATES.map((s) => `<option value="${s}"${s === cur ? " selected" : ""}>${s.toUpperCase()} IDRE</option>`).join("") +
+        STATES.map((s) => `<option value="${s}"${s === cur ? " selected" : ""}>${esc(labelFor(s))}</option>`).join("") +
         `</select>${auditorOnly ? '<span class="badge s-audit">read-only audit</span>' : ""}`;
       document.getElementById("t-switch").addEventListener("change", (e) => {
         Api.setTenant(e.target.value);
         Prefs.push("last_tenant", e.target.value);
-        UI.toast(`Switched to ${e.target.value.toUpperCase()} tenant${auditorOnly ? " (read-only)" : ""}`);
+        UI.toast(`Switched to ${labelFor(e.target.value)} tenant${auditorOnly ? " (read-only)" : ""}`);
         paintChip();
         location.hash = "#/dashboard";
         location.reload();
       });
     } else {
-      document.getElementById("t-name").textContent = `${cur.toUpperCase()} IDRE`;
+      document.getElementById("t-name").textContent = labelFor(cur);
     }
   };
   paintChip();
+  if (crossTenant || auditorOnly) {
+    Api.program.tenantLabels().then((labels) => { tenantLabels = labels || {}; paintChip(); }).catch(() => {});
+  } else {
+    Api.program.get().then((pr) => {
+      const label = pr?.config?.tenant_label;
+      if (label) { tenantLabels[Api.getTenant()] = label; paintChip(); }
+    }).catch(() => {});
+  }
 
   // Demo-mode banner (only when the backend is stubbed)
   if (window.IDRE_DEMO) {

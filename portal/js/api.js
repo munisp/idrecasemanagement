@@ -194,6 +194,8 @@ const Api = (() => {
     },
     program: {
       get: () => req("GET", `${t()}/program`),
+      setLabel: (label) => req("PUT", `${t()}/program/label`, { label }),
+      tenantLabels: () => req("GET", `${t()}/admin/tenant-labels`),
       rules: () => req("GET", `${t()}/rules`),
       saveRules: (rules, note) => req("PUT", `${t()}/rules`, { rules, note }),
       rulesAudit: () => req("GET", `${t()}/rules/audit`),

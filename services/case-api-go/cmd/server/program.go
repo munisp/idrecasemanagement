@@ -43,7 +43,10 @@ type ThresholdRule struct {
 }
 
 type ProgramConfig struct {
-	CaseNumber struct {
+	// TenantLabel is the human-readable name shown in place of the bare
+	// tenant code (e.g. "AHCA" instead of "FL") -- optional, admin-set.
+	TenantLabel string `json:"tenant_label,omitempty"`
+	CaseNumber  struct {
 		Pattern string `json:"pattern"` // e.g. "FL{yy}-{seq}"
 		SeqPad  int    `json:"seq_pad"`
 	} `json:"case_number"`
@@ -122,6 +125,80 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg})
+}
+
+// setTenantLabel: PUT /v1/tenants/{tenant}/program/label {"label":"AHCA"} --
+// FEDERAL_ADMIN/PLATFORM_ADMIN only (same guard as program rules). Only
+// updates an EXISTING program_rules row, never creates one: a tenant with
+// no custom program rules runs on Federal NSA defaults, and every
+// "programmed vs federal" branch in this codebase (summaryReport, the
+// dashboard's amount field, clock projection, ...) keys off whether that
+// row exists at all -- silently inserting one here as a side effect of
+// setting a label would flip all of that behavior for a tenant that was
+// never meant to be "programmed."
+func (s *server) setTenantLabel(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.rulesAdminGuard(w, r)
+	if !ok {
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var in struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	label := strings.TrimSpace(in.Label)
+	if label == "" {
+		http.Error(w, `{"error":"label required"}`, http.StatusBadRequest)
+		return
+	}
+	res, err := s.db.Exec(r.Context(), `
+		UPDATE public.program_rules
+		SET config = jsonb_set(coalesce(config,'{}'::jsonb), '{tenant_label}', to_jsonb($2::text)), updated_at=now()
+		WHERE tenant=$1`, tenant, label)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	if res.RowsAffected() == 0 {
+		http.Error(w, `{"error":"this tenant has no custom program configuration yet — a display label currently requires one"}`, http.StatusConflict)
+		return
+	}
+	s.logActivity(r.Context(), tenant, "", "TENANT_LABEL_UPDATED",
+		fmt.Sprintf("Tenant display label set to %q by %s", label, displayName(p)))
+	s.logAudit(r.Context(), tenant, "", "TENANT_LABEL_UPDATED", map[string]any{"by": p.Subject, "label": label})
+	writeJSON(w, http.StatusOK, map[string]string{"tenant_label": label})
+}
+
+// listTenantLabels: GET /v1/tenants/{tenant}/admin/tenant-labels -- powers
+// the cross-tenant switcher (PLATFORM_ADMIN/FEDERAL_ADMIN/STATE_AUDITOR,
+// the same roles that see it at all) so it can show "AHCA" instead of a
+// generic "FL IDRE" for any tenant that has a label configured. The
+// {tenant} segment in the URL is unused -- this spans every tenant, same
+// convention as adminListTPAs.
+func (s *server) listTenantLabels(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PLATFORM_ADMIN", "FEDERAL_ADMIN", "STATE_AUDITOR") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	rows, err := s.db.Query(r.Context(), `
+		SELECT tenant, config->>'tenant_label' FROM public.program_rules
+		WHERE coalesce(config->>'tenant_label','') <> ''`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var tenant, label string
+		if rows.Scan(&tenant, &label) == nil {
+			out[tenant] = label
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // programDates reads the case's program-specific date bag.

@@ -121,6 +121,10 @@ const Views = (() => {
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
     try {
       const [{ cases }, clocks, prog] = await Promise.all([Api.cases.list({ limit: 200 }), clockMap(), Api.program.get().catch(() => null)]);
+      if (prog?.config?.tenant_label) {
+        html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
+          <span class="muted">tenant <b>${esc(prog.config.tenant_label)}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
+      }
       // Status rollup computed client-side from the case list the dashboard
       // already fetched, not Api.reports.summary() -- that endpoint is
       // gated to CASE_MANAGER/PM/FEDERAL_ADMIN/STATE_AUDITOR/PLATFORM_ADMIN
@@ -3695,16 +3699,19 @@ const Views = (() => {
 
   async function rulesAdmin() {
     try {
-      const [lr, ar] = await Promise.all([Api.program.rules(), Api.program.rulesAudit().catch(() => ({ changes: [] }))]);
+      const [lr, ar, pr] = await Promise.all([Api.program.rules(), Api.program.rulesAudit().catch(() => ({ changes: [] })), Api.program.get().catch(() => null)]);
       rulesDraft = (lr.rules || []).map((r) => ({ ...r }));
       afterRender(bindRulesAdmin);
       const audit = ar.changes || [];
+      const curLabel = pr?.config?.tenant_label || "";
       return `<div class="view-head"><h1>Program rules</h1>
         <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
         <p><button onclick="Views.createTenantFlow()">＋ Create tenant</button>
            <span class="muted">activates a pre-provisioned state's Keycloak group + optional first user</span></p>
         <p><button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>
            <span class="muted">cross-tenant FEDERAL_ADMIN or PLATFORM_ADMIN account</span></p>
+        <p><button onclick="Views.renameTenantFlow('${esc(curLabel)}')">✎ ${curLabel ? `Rename "${esc(curLabel)}"` : "Set display name"}</button>
+           <span class="muted">shown in place of the bare "${esc(Api.getTenant().toUpperCase())}" code throughout the portal${pr?.config ? "" : " — requires this tenant to have program rules configured first"}</span></p>
         <p><button id="rule-add">＋ New rule</button>
            <button id="rules-save" class="btn-primary">Save all changes</button></p>
         <div id="rules-list">` +
@@ -3808,6 +3815,22 @@ const Views = (() => {
         msg += ` — ${r.first_user_error}`;
       }
       UI.toast(msg, kind ? { kind, sticky: true } : { sticky: true });
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  // Sets the display name shown in place of the bare tenant code (e.g.
+  // "AHCA" instead of "FL") -- the tenant chip (app.js), cross-tenant
+  // switcher, and dashboard header all read it once set.
+  async function renameTenantFlow(curLabel) {
+    const v = await UI.modal({
+      title: "Tenant display name", submitLabel: "Save",
+      fields: [{ name: "label", label: "Display name", required: true, value: curLabel, placeholder: "AHCA" }],
+    });
+    if (!v) return;
+    try {
+      await Api.program.setLabel(v.label.trim());
+      UI.toast(`Display name set to "${v.label.trim()}"`);
+      App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
@@ -4655,5 +4678,5 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, timeReport, timeReportRun, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn };
 })();

@@ -568,6 +568,8 @@ func main() {
 
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
+		r.Put("/program/label", s.setTenantLabel)         // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
+		r.Get("/admin/tenant-labels", s.listTenantLabels) // cross-tenant switcher label map
 		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
 		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
 		r.Post("/cases/{caseId}/time", s.addTimeEntry)               // per-role effort on the dispute
