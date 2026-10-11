@@ -203,7 +203,7 @@ const TableSort = (() => {
   function enhance(table) {
     const head = table.tHead, body = table.tBodies[0];
     if (!head || !body || !head.rows.length) return;
-    if (table._sort && body.rows.length !== table._sortedRows) apply(table); // "Load more" appended rows
+    if (table._sort && body.rows.length !== table._sortedRows) apply(table); // rows changed under a sorted table
     if (table.dataset.csort) return;
     if (head.querySelector("th.sortable") || table.querySelector("td[colspan], th[colspan]")) return;
     table.dataset.csort = "1";
@@ -230,4 +230,135 @@ const TableSort = (() => {
   new MutationObserver(() => { if (!queued) { queued = true; setTimeout(scan, 50); } })
     .observe(document.body, { childList: true, subtree: true });
   return { scan };
+})();
+
+// Pages for every table in the portal: a "Rows per page" choice (default 100,
+// remembered per browser) with Previous / Next.
+//
+// Two kinds of table share the one bar:
+//   - Tables whose rows are all on the page already are paged here, in the
+//     browser, automatically -- nothing to wire.
+//   - Lists the server pages (disputes, CRM, intake, mail log, payments,
+//     checks) sit inside [data-serverpaged] and call Pager.server(), which
+//     fetches the next page instead of hiding rows.
+const Pager = (() => {
+  const SIZES = [25, 50, 100, 250, 500];
+  const KEY = "idre.pageSize";
+  function size() {
+    try { const n = Number(localStorage.getItem(KEY)); if (SIZES.includes(n)) return n; } catch {}
+    return 100;
+  }
+  function setSize(n) {
+    try { localStorage.setItem(KEY, String(n)); } catch {}
+    document.dispatchEvent(new CustomEvent("idre:pagesize", { detail: n }));
+    scan();
+  }
+  // from/to are 1-based row positions; total < 0 means "unknown".
+  function barHtml(from, to, total, page, pages) {
+    const sz = size();
+    return `<label class="muted">Rows per page
+        <select class="tp-size" aria-label="Rows per page">${SIZES.map((n) => `<option ${n === sz ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+      <span class="muted">${total ? `${from}–${to} of ${total}` : "0 rows"}</span>
+      <span class="tp-nav"><button type="button" class="mini tp-prev" ${page <= 0 ? "disabled" : ""}>‹ Previous</button>
+      <span class="muted">Page ${page + 1} of ${Math.max(1, pages)}</span>
+      <button type="button" class="mini tp-next" ${page >= pages - 1 ? "disabled" : ""}>Next ›</button></span>`;
+  }
+  function wire(bar, onPage) {
+    bar.querySelector(".tp-size").onchange = (e) => setSize(Number(e.target.value));
+    bar.querySelector(".tp-prev").onclick = () => onPage(-1);
+    bar.querySelector(".tp-next").onclick = () => onPage(1);
+  }
+
+  // ---- in-browser paging ----------------------------------------------------
+  // A row that only labels a group (class "...-head") travels with the row
+  // after it; a hidden detail row (class "row-detail") travels with the row
+  // before it. Neither counts as a record.
+  function units(body) {
+    const out = [];
+    let heads = [];
+    for (const tr of body.rows) {
+      if (tr.classList.contains("row-detail") && out.length) { out[out.length - 1].push(tr); continue; }
+      if (/(^|\s)\S*-head(\s|$)/.test(tr.className)) { heads.push(tr); continue; }
+      out.push(heads.concat(tr));
+      heads = [];
+    }
+    if (heads.length && out.length) out[out.length - 1].push(...heads);
+    return out;
+  }
+  const bars = new Set();
+  function dropBar(table) {
+    if (table._pgBar) { table._pgBar.remove(); bars.delete(table._pgBar); table._pgBar = null; }
+  }
+  function apply(table) {
+    const body = table.tBodies[0];
+    if (!table.tHead || !body || table.dataset.nopage !== undefined || table.closest("[data-serverpaged]")) return;
+    const us = units(body);
+    const total = us.length;
+    if (total <= SIZES[0]) { // fits on the smallest page: nothing to page
+      if (table._pgBar) { us.forEach((u) => u.forEach((tr) => { if (tr.hidden) tr.hidden = false; })); dropBar(table); }
+      return;
+    }
+    const sz = size();
+    const pages = Math.ceil(total / sz);
+    const st = table._pg || (table._pg = { page: 0, total });
+    if (st.total !== total) { st.page = 0; st.total = total; } // filtered or reloaded: back to the first page
+    st.page = Math.max(0, Math.min(st.page, pages - 1));
+    const start = st.page * sz, end = Math.min(total, start + sz);
+    us.forEach((u, i) => { const hide = i < start || i >= end; u.forEach((tr) => { if (tr.hidden !== hide) tr.hidden = hide; }); });
+    let bar = table._pgBar;
+    if (!bar || !bar.isConnected) {
+      bar = document.createElement("div");
+      bar.className = "pager tp";
+      bar._table = table;
+      table._pgBar = bar;
+      bars.add(bar);
+      (table.closest(".dg-wrap") || table).insertAdjacentElement("afterend", bar);
+    }
+    const sig = `${start}|${end}|${total}|${sz}`;
+    if (bar._sig !== sig) {
+      bar._sig = sig;
+      bar.innerHTML = barHtml(start + 1, end, total, st.page, pages);
+      wire(bar, (d) => { st.page += d; apply(table); table.scrollIntoView({ block: "nearest" }); });
+    }
+  }
+  let queued = false;
+  function scan() {
+    queued = false;
+    bars.forEach((b) => { if (!b._table.isConnected) { b.remove(); bars.delete(b); } });
+    document.querySelectorAll("table").forEach(apply);
+  }
+  new MutationObserver(() => { if (!queued) { queued = true; setTimeout(scan, 60); } })
+    .observe(document.body, { childList: true, subtree: true });
+
+  // ---- server paging ----------------------------------------------------------
+  // host: the element that holds the bar. first: {total, shown} of the page
+  // already rendered. load(limit, offset, page) fetches and renders one page
+  // and resolves {total, shown}. Changing the page size reloads from page 1.
+  function server(host, first, load) {
+    if (!host) return;
+    const st = { page: 0, total: first.total, shown: first.shown, busy: false };
+    const draw = () => {
+      const sz = size();
+      const from = st.page * sz + 1;
+      host.className = "pager tp";
+      host.innerHTML = barHtml(from, from + st.shown - 1, st.total, st.page, Math.ceil(st.total / sz));
+      wire(host, (d) => go(st.page + d));
+    };
+    async function go(page) {
+      if (st.busy || page < 0) return;
+      st.busy = true;
+      host.querySelectorAll("button, select").forEach((el) => (el.disabled = true));
+      try {
+        const sz = size();
+        const r = await load(sz, page * sz, page);
+        st.page = page; st.total = r.total; st.shown = r.shown;
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      st.busy = false;
+      draw();
+    }
+    const onSize = () => { if (host.isConnected) go(0); else document.removeEventListener("idre:pagesize", onSize); };
+    document.addEventListener("idre:pagesize", onSize);
+    draw();
+  }
+  return { size, server, scan, SIZES };
 })();

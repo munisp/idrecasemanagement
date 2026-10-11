@@ -9,24 +9,16 @@ const CrmViews = (() => {
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
   const can = (...rs) => Auth.can(...rs);
-  const CRM_PAGE = 100;
-  // Offset pager shared by accounts/leads/tasks: footer markup + a binder that
-  // appends the next page's rows in place (busy state on the button).
-  const pagerHtml = (id, shown, total, nextOffset) =>
-    `<p class="pager" id="${id}-pg"><span class="muted">Showing ${shown} of ${total}</span>
-      ${nextOffset >= 0 ? `<button class="mini" id="${id}-more">Load more (${Math.min(CRM_PAGE, total - shown)} remaining)</button>` : ""}</p>`;
+  // Server pager shared by accounts/leads/tasks: Pager (ui.js) draws the
+  // rows-per-page choice and Previous / Next; each page replaces the rows.
+  const pagerHtml = (id) => `<div id="${id}-pg"></div>`;
   function bindPager(id, tbodySel, state, fetchPage, rowsHtml) {
-    document.getElementById(id + "-more")?.addEventListener("click", async (ev) => {
-      await UI.run(ev.currentTarget, async () => {
-        try {
-          const r = await fetchPage(state.next);
-          state.loaded = state.loaded.concat(r.rows);
-          state.next = r.next;
-          document.querySelector(tbodySel).insertAdjacentHTML("beforeend", rowsHtml(r.rows));
-          document.getElementById(id + "-pg").outerHTML = pagerHtml(id, state.loaded.length, state.total, state.next);
-          bindPager(id, tbodySel, state, fetchPage, rowsHtml);
-        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-      }, "Loading…");
+    Pager.server(document.getElementById(id + "-pg"), { total: state.total, shown: state.loaded.length }, async (limit, offset) => {
+      const r = await fetchPage(offset, limit);
+      state.loaded = r.rows;
+      state.total = r.total ?? state.total;
+      document.querySelector(tbodySel).innerHTML = rowsHtml(r.rows);
+      return { total: state.total, shown: r.rows.length };
     });
   }
 
@@ -127,7 +119,7 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.accounts(type || null, { limit: CRM_PAGE });
+      const page = await Api.crm.accounts(type || null, { limit: Pager.size() });
       const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
             <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
@@ -135,10 +127,10 @@ const CrmViews = (() => {
         box.innerHTML = `<p class="muted">${type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
         return;
       }
-      box.innerHTML = `<table id="acc-tb"><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
-        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc", state.loaded.length, state.total, state.next);
+      box.innerHTML = `<table id="acc-tb" data-serverpaged><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc");
       bindPager("acc", "#acc-tb tbody", state,
-        (off) => Api.crm.accounts(type || null, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.accounts, next: r.next_offset })),
+        (off, limit) => Api.crm.accounts(type || null, { limit, offset: off }).then((r) => ({ rows: r.accounts, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -223,7 +215,7 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.leads({ limit: CRM_PAGE, status });
+      const page = await Api.crm.leads({ limit: Pager.size(), status });
       const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
             <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
@@ -232,10 +224,10 @@ const CrmViews = (() => {
         box.innerHTML = `<p class="muted">No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.</p>`;
         return;
       }
-      box.innerHTML = `<table id="lead-tb"><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead", state.loaded.length, state.total, state.next);
+      box.innerHTML = `<table id="lead-tb" data-serverpaged><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead");
       bindPager("lead", "#lead-tb tbody", state,
-        (off) => Api.crm.leads({ limit: CRM_PAGE, offset: off, status }).then((r) => ({ rows: r.leads, next: r.next_offset })),
+        (off, limit) => Api.crm.leads({ limit, offset: off, status }).then((r) => ({ rows: r.leads, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -289,7 +281,7 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.tasks(mine, { limit: CRM_PAGE, status });
+      const page = await Api.crm.tasks(mine, { limit: Pager.size(), status });
       const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
           <td>${esc(t.subject)}</td>
@@ -302,11 +294,11 @@ const CrmViews = (() => {
         box.innerHTML = `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
         return;
       }
-      box.innerHTML = `<table id="task-tb"><thead><tr><th>Ref</th><th>Subject</th>
+      box.innerHTML = `<table id="task-tb" data-serverpaged><thead><tr><th>Ref</th><th>Subject</th>
           ${mine ? "" : "<th>Assignee</th>"}<th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task", state.loaded.length, state.total, state.next);
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task");
       bindPager("task", "#task-tb tbody", state,
-        (off) => Api.crm.tasks(mine, { limit: CRM_PAGE, offset: off, status }).then((r) => ({ rows: r.tasks, next: r.next_offset })),
+        (off, limit) => Api.crm.tasks(mine, { limit, offset: off, status }).then((r) => ({ rows: r.tasks, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }

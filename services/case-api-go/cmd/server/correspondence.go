@@ -678,7 +678,7 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT c.id, c.case_id, COALESCE(k.case_number,'') AS case_number, c.direction, c.template,
 	             c.subject, c.body, c.recipients, c.sent_by, c.created_at,
 	             c.delivery_status, coalesce(c.delivery_error,'') AS delivery_error,
-	             c.status_updated_at
+	             c.status_updated_at, count(*) OVER() AS total_count
 	      FROM public.correspondence_log c
 	      LEFT JOIN tenant_` + sanitizeTenant(tenant) + `.cases k ON k.id::text = c.case_id
 	      WHERE c.tenant=$1`
@@ -703,13 +703,21 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 		args = append(args, to)
 		q += fmt.Sprintf(` AND c.created_at < ($%d::date + interval '1 day')`, len(args))
 	}
-	q += ` ORDER BY c.created_at DESC, c.id DESC LIMIT 200`
+	limit, offset := pageParams(r, 100, 500)
+	q += fmt.Sprintf(` ORDER BY c.created_at DESC, c.id DESC LIMIT %d OFFSET %d`, limit, offset)
 	rows, err := s.queryRows(r, q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mail": rows})
+	// The window count rides on every row; a page past the end has no rows
+	// and so reports only what it skipped.
+	total := offset
+	if len(rows) > 0 {
+		total = int(toInt64(rows[0]["total_count"]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mail": rows,
+		"total": total, "next_offset": nextOffset(offset, limit, total)})
 }
 
 // listCorrespondence: full OUT/IN trail for a case.

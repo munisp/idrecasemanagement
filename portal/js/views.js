@@ -53,51 +53,14 @@ const Views = (() => {
   }
 
   // ---- Client-side pagination --------------------------------------------------
-  // For lists the backend already returns in one shot (bounded by a server
-  // LIMIT, e.g. 200) that were previously either dumped into one long table
-  // or silently truncated with .slice(0, N) -- slices into pages in the
-  // browser. cases()/CRM accounts/leads/tasks already have real backend
-  // offset/keyset "Load more" pagination against their own endpoints; this
-  // is for the rest (intake, audit log, QA queue, onboarding, financials)
-  // where the backend has no page param to call. Only one view is ever
-  // mounted at a time in this SPA, so state keyed by a short id string is
-  // safe -- a stale entry from the previous view is just unused until
-  // overwritten on next visit.
-  const CLIENT_PAGE = 25;
-  const pagerState = {};
-  function clientPagerHtml(id, total, page) {
-    if (total <= CLIENT_PAGE) return "";
-    const totalPages = Math.max(1, Math.ceil(total / CLIENT_PAGE));
-    return `<p class="pager" id="${id}-pg">
-      <span class="muted">Page ${page + 1} of ${totalPages} (${total} total)</span>
-      <button class="mini" id="${id}-prev" ${page === 0 ? "disabled" : ""}>‹ Prev</button>
-      <button class="mini" id="${id}-next" ${page >= totalPages - 1 ? "disabled" : ""}>Next ›</button></p>`;
-  }
-  // initClientPager: call during render to get the first page's rows + pager
-  // markup. bindClientPager: call in afterRender to wire Prev/Next.
+  // Lists the backend returns in one shot are rendered whole; the shared
+  // Pager (ui.js) pages every table on the page by itself -- rows-per-page
+  // choice plus Previous / Next -- so there is nothing to wire per view.
+  // These two remain so the views that used the old 25-row pager read the same.
   function initClientPager(id, allRows, rowsHtml) {
-    pagerState[id] = { rows: allRows, page: 0, rowsHtml };
-    return { bodyHtml: rowsHtml(allRows.slice(0, CLIENT_PAGE)), pagerHtml: clientPagerHtml(id, allRows.length, 0) };
+    return { bodyHtml: rowsHtml(allRows), pagerHtml: "" };
   }
-  function renderClientPage(id, tbodySel, page, onRendered) {
-    const st = pagerState[id];
-    const totalPages = Math.max(1, Math.ceil(st.rows.length / CLIENT_PAGE));
-    st.page = Math.max(0, Math.min(page, totalPages - 1));
-    document.querySelector(tbodySel).innerHTML = st.rowsHtml(st.rows.slice(st.page * CLIENT_PAGE, (st.page + 1) * CLIENT_PAGE));
-    const pg = document.getElementById(`${id}-pg`);
-    const html = clientPagerHtml(id, st.rows.length, st.page);
-    if (pg) html ? (pg.outerHTML = html) : pg.remove();
-    bindClientPager(id, tbodySel, onRendered);
-    onRendered?.();
-  }
-  // onRendered: optional hook re-run after every page swap, for views that
-  // need more than a tbody-innerHTML replace (e.g. dashboard's caseTable()
-  // re-render needs bindGrid() re-wired for the newly-rendered rows' row
-  // clicks/checkboxes/peek buttons, not just the HTML itself).
-  function bindClientPager(id, tbodySel, onRendered) {
-    document.getElementById(`${id}-prev`)?.addEventListener("click", () => renderClientPage(id, tbodySel, pagerState[id].page - 1, onRendered));
-    document.getElementById(`${id}-next`)?.addEventListener("click", () => renderClientPage(id, tbodySel, pagerState[id].page + 1, onRendered));
-  }
+  function bindClientPager() {}
 
   // ---- Statutory clock helpers -------------------------------------------------
   const clockChip = (c) => {
@@ -376,10 +339,9 @@ const Views = (() => {
   }
 
   // ---- Disputes list -----------------------------------------------------------
-  // Server-side keyset pagination: page size 50, "Load more" appends the next
-  // page; saved-view status filters are pushed to the server so a filter never
+  // Server-side pagination: one page at a time (Pager.size() rows), Previous /
+  // Next. Saved-view status filters are pushed to the server so a filter never
   // applies to a partial page. Counts come from the server total, not the page.
-  const PAGE_SIZE = 50;
   async function cases() {
     try {
       const hq = new URLSearchParams(location.hash.split("?")[1] || "");
@@ -390,16 +352,16 @@ const Views = (() => {
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
-      const reqParams = { limit: PAGE_SIZE, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
       const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
-      let loaded = page.cases.slice();   // accumulated rows across pages
-      let cursor = page.next_cursor;     // "" when no more pages
+      let loaded = page.cases.slice();   // the rows of the page on screen
+      // The default sort pages by keyset, so going back needs the cursor each
+      // page started from: cursors[n] opens page n.
+      const cursors = ["", page.next_cursor];
       const total = page.total;
       const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${s.pinned ? "★ " : ""}${esc(s.name)}</option>`).join("");
       const density = localStorage.getItem("idre.density") || "comfortable";
       document.body.classList.toggle("density-compact", density === "compact");
-      const pager = () => `<p class="pager"><span class="muted">Showing ${loaded.length} of ${total}</span>
-        ${cursor ? `<button class="mini" id="more">Load more (${Math.min(PAGE_SIZE, total - loaded.length)} of ${total - loaded.length} remaining)</button>` : ""}</p>`;
       afterRender(() => {
         bindGrid(loaded);
         // Lever 2: lane tabs re-filter server-side; Lever 3: batch grouping
@@ -429,23 +391,18 @@ const Views = (() => {
             else UI.toast(r.message, { kind: "warn" });
           }, "Grabbing…");
         };
-        const loadMore = async (ev) => {
-          await UI.run(ev.currentTarget, async () => {
-            try {
-              const more = { limit: PAGE_SIZE, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
-              if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else more.cursor = cursor;
-              const next = await Api.cases.list(more);
-              loaded = loaded.concat(next.cases);
-              cursor = next.next_cursor;
-              document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch);
-              $("#pg").innerHTML = pager();
-              bindGrid(loaded);
-              $("#more")?.addEventListener("click", loadMore);
-              UI.toast(`Showing ${loaded.length} of ${total}`, { kind: "info" });
-            } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-          }, "Loading…");
-        };
-        $("#more")?.addEventListener("click", loadMore);
+        Pager.server($("#pg"), { total, shown: loaded.length }, async (limit, _offset, pg) => {
+          if (pg === 0) cursors.length = 1; // also the page-size change path: old cursors are stale
+          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+          const cursor = cursors[pg] || "";
+          if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else if (cursor) more.cursor = cursor;
+          const next = await Api.cases.list(more);
+          loaded = next.cases;
+          cursors[pg + 1] = next.next_cursor;
+          document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch);
+          bindGrid(loaded);
+          return { total: next.total ?? total, shown: loaded.length };
+        });
       });
       return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
 
@@ -462,7 +419,7 @@ const Views = (() => {
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
           ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` +
-        caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch) + `<div id="pg">${pager()}</div>`;
+        `<div data-serverpaged>` + caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch) + `</div><div id="pg"></div>`;
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
@@ -1976,27 +1933,30 @@ const Views = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const [r, prog] = await Promise.all([Api.program.intake({ limit: 50, status }), Api.program.get().catch(() => null)]);
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
-      const intakeNext = r.next_offset ?? -1;
       const intakeTotal = r.total ?? rows.length;
-      window._intakePager = { next: intakeNext, status }; // reset on every box render
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
       // no QPA concept and use a disputed amount instead -- same split as
       // everywhere else amounts show in this app. Only the results table's
       // column label needs this; the amount itself is never hand-typed --
       // it's backfilled from the filing party's uploaded documents.
       const label = amtLabel(prog);
-      box.innerHTML = (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
+      box.innerHTML = (rows.length ? `<table id="intake-tb" data-serverpaged><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
           `</tbody></table>` : `<p class="muted">No intake requests${status ? ` with status ${status}` : ""}.</p>`) +
-        (intakeNext >= 0 ? `<p class="pager" id="intake-pg"><span class="muted">Showing ${rows.length} of ${intakeTotal}</span>
-          <button class="mini" onclick="Views.intakeMore(this)">Load more (${Math.min(50, intakeTotal - rows.length)} remaining)</button></p>` : "");
+        (rows.length ? `<div id="intake-pg"></div>` : "");
+      Pager.server(document.getElementById("intake-pg"), { total: intakeTotal, shown: rows.length }, async (limit, offset) => {
+        const pr = await Api.program.intake({ limit, offset, status });
+        const prows = pr.intake || [];
+        document.querySelector("#intake-tb tbody").innerHTML = prows.map(intakeRowHtml).join("");
+        return { total: pr.total ?? intakeTotal, shown: prows.length };
+      });
     } catch (e) { box.innerHTML = err(e); }
   }
   function intakeFilter(status) { intakeBox(status); }
 
-  // Shared by intake()'s initial render and intakeMore()'s appended page --
+  // Shared by intake()'s initial render and every later page --
   // a real-case row (origin:"case", from startAhcaCase) has no intake
   // lifecycle left to advance and no outreach-based day-13 clock; only
   // legacy intake_requests rows get those. The amount cell reads whichever
@@ -2020,23 +1980,6 @@ const Views = (() => {
           <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
           <option>PAID</option><option>CONVERTED</option>
           <option>INELIGIBLE</option><option>CLOSED_REFUNDED</option></select>` : ""}</td></tr>`;
-  }
-
-  async function intakeMore(btn) {
-    const st = window._intakePager || { next: 50, status: "" };
-    await UI.run(btn, async () => {
-      try {
-        const r = await Api.program.intake({ limit: 50, offset: st.next, status: st.status });
-        const rows = r.intake || [];
-        st.next = r.next_offset ?? -1;
-        window._intakePager = st;
-        const body = document.querySelector("#intake-pg")?.previousElementSibling?.querySelector("tbody");
-        if (body) body.insertAdjacentHTML("beforeend", rows.map(intakeRowHtml).join(""));
-        const pg = document.getElementById("intake-pg");
-        if (pg && st.next < 0) pg.outerHTML = "";
-        else if (pg) pg.querySelector("button").textContent = "Load more";
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    }, "Loading…");
   }
 
   // Minimal CSV parser: quotes, escaped quotes, CRLF. Bulk files come from
@@ -2232,13 +2175,13 @@ const Views = (() => {
     if (!can(...["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"]))
       return `<div class="view-head"><h1>Financials</h1></div><p class="muted">Requires PM, FINANCE, or admin.</p>`;
     try {
-      const FIN_PAGE = 25;
+      const FIN_PAGE = Pager.size();
       const [fin, pays, chks] = await Promise.all([
         Api.program.financial(),
         Api.program.payments(null, { limit: FIN_PAGE }).catch(() => ({ payments: [] })),
         Api.program.checks("", { limit: FIN_PAGE }).catch(() => ({ checks: [] })),
       ]);
-      // accumulated rows + server offsets for the "Load more" pagers
+      // first page of each server-paged list
       finPager = {
         checks: { rows: chks.checks || [], next: chks.next_offset ?? -1, total: chks.total ?? (chks.checks || []).length },
         payments: { rows: pays.payments || [], next: pays.next_offset ?? -1, total: pays.total ?? (pays.payments || []).length },
@@ -2308,22 +2251,18 @@ const Views = (() => {
           <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
           <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
-        (ck.length ? `<table><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
+        (ck.length ? `<table data-serverpaged><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
           ck.map(checkRow).join("") + `</tbody></table>` +
           (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
           `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`) +
-        (finPager.checks.next >= 0
-          ? `<p class="pager" id="fin-ck-pg"><span class="muted">Showing ${ck.length} of ${finPager.checks.total}</span>
-             <button class="mini" onclick="Views.financeMore('checks', this)">Load more (${Math.min(FIN_PAGE, finPager.checks.total - ck.length)} remaining)</button></p>` : "");
+        (ck.length ? `<div id="fin-ck-pg"></div>` : "");
 
       // Card payments
       const plist = finPager.payments.rows;
       if (plist.length)
-        html += `<h2>Card payments</h2><table><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
+        html += `<h2>Card payments</h2><table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
           plist.map(payRow).join("") + `</tbody></table>` +
-          (finPager.payments.next >= 0
-            ? `<p class="pager" id="fin-pay-pg"><span class="muted">Showing ${plist.length} of ${finPager.payments.total}</span>
-               <button class="mini" onclick="Views.financeMore('payments', this)">Load more (${Math.min(FIN_PAGE, finPager.payments.total - plist.length)} remaining)</button></p>` : "");
+          `<div id="fin-pay-pg"></div>`;
 
       // Unified event stream
       const ev = fin.events || [];
@@ -2340,7 +2279,20 @@ const Views = (() => {
         html += `<h2>Transaction stream</h2><p class="muted">No financial events yet — issue an invoice to start the stream.</p>`;
       }
       afterRender(() => {
-        bindClientPager("txn", "#txn-tb tbody");
+        for (const kind of ["checks", "payments"]) {
+          const st = finPager[kind];
+          Pager.server(document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"),
+            { total: st.total, shown: st.rows.length }, async (limit, offset) => {
+              const r = kind === "checks"
+                ? await Api.program.checks("", { limit, offset })
+                : await Api.program.payments(null, { limit, offset });
+              st.rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
+              st.total = r.total ?? st.total;
+              document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body").innerHTML =
+                st.rows.map(kind === "checks" ? checkRow : payRow).join("");
+              return { total: st.total, shown: st.rows.length };
+            });
+        }
       });
       return html;
     } catch (e) { return err(e); }
@@ -2349,31 +2301,6 @@ const Views = (() => {
   // finance() pager state — survives only for the rendered page
   let finPager = null;
   let checkRow = null, payRow = null; // row renderers set by finance()
-
-  async function financeMore(kind, btn) {
-    const st = finPager?.[kind];
-    if (!st || st.next < 0) return;
-    await UI.run(btn, async () => {
-      try {
-        const limit = 25;
-        const r = kind === "checks"
-          ? await Api.program.checks("", { limit, offset: st.next })
-          : await Api.program.payments(null, { limit, offset: st.next });
-        const rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
-        st.rows = st.rows.concat(rows);
-        st.next = r.next_offset ?? -1;
-        st.total = r.total ?? st.total;
-        const body = document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body");
-        const render = kind === "checks" ? checkRow : payRow;
-        if (body && render) body.insertAdjacentHTML("beforeend", rows.map(render).join(""));
-        const pg = document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg");
-        if (pg) pg.outerHTML = st.next >= 0
-          ? `<p class="pager" id="${kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"}"><span class="muted">Showing ${st.rows.length} of ${st.total}</span>
-             <button class="mini" onclick="Views.financeMore('${kind}', this)">Load more (${Math.min(25, st.total - st.rows.length)} remaining)</button></p>`
-          : `<p class="pager"><span class="muted">Showing ${st.rows.length} of ${st.total}</span></p>`;
-      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-    }, "Loading…");
-  }
 
   async function requestRescan(checkId, caseId, btn) {
     await UI.run(btn, async () => {
@@ -4006,9 +3933,9 @@ const Views = (() => {
     const box = document.getElementById("mail-log");
     if (!box) return;
     try {
-      const r = await Api.program.mailJournal(mailLogFilterState);
+      const r = await Api.program.mailJournal({ ...mailLogFilterState, limit: Pager.size() });
       const ms = r.mail || [];
-      const rows = ms.map((m) => {
+      const rowsHtml = (list) => list.map((m) => {
         const rc = m.recipients || {};
         const who = m.direction === "IN" ? (rc.from || m.sent_by || "") : (rc.to || []).join(", ");
         return `<tr>
@@ -4019,11 +3946,17 @@ const Views = (() => {
           <td>${mailStatusBadge(m)}</td>
           <td class="muted">${fmtDate(m.created_at)}</td>
           <td><button class="mini ghost" onclick="Views.mailLogBody(${m.id})">View</button></td></tr>
-          <tr id="mail-body-${m.id}" style="display:none"><td colspan="7"><pre style="white-space:pre-wrap;max-height:16em;overflow:auto">${esc(m.body || "")}</pre></td></tr>`;
+          <tr id="mail-body-${m.id}" class="row-detail" style="display:none"><td colspan="7"><pre style="white-space:pre-wrap;max-height:16em;overflow:auto">${esc(m.body || "")}</pre></td></tr>`;
       }).join("");
       box.innerHTML = ms.length
-        ? `<table><thead><tr><th>Dir</th><th>Case</th><th>Subject</th><th>From / To</th><th>Delivery</th><th>When</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        ? `<table id="mail-tb" data-serverpaged><thead><tr><th>Dir</th><th>Case</th><th>Subject</th><th>From / To</th><th>Delivery</th><th>When</th><th></th></tr></thead><tbody>${rowsHtml(ms)}</tbody></table><div id="mail-pg"></div>`
         : `<p class="muted">No mail recorded for this filter.</p>`;
+      Pager.server(document.getElementById("mail-pg"), { total: r.total ?? ms.length, shown: ms.length }, async (limit, offset) => {
+        const pr = await Api.program.mailJournal({ ...mailLogFilterState, limit, offset });
+        const pm = pr.mail || [];
+        document.querySelector("#mail-tb tbody").innerHTML = rowsHtml(pm);
+        return { total: pr.total ?? pm.length, shown: pm.length };
+      });
     } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
   }
 
@@ -4536,13 +4469,13 @@ const Views = (() => {
     // nothing happens. Almost certainly what "audit log isn't functional"
     // actually was.
     try {
-      const r = await Api.auditLog.list({ limit: 200 });
+      const r = await Api.auditLog.list({ limit: 500 });
       afterRender(() => {
         $("#al-filter")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = Object.fromEntries(new FormData(ev.target));
           try {
-            const rf = await Api.auditLog.list({ limit: 200, case_id: f.case_id, action: f.action });
+            const rf = await Api.auditLog.list({ limit: 500, case_id: f.case_id, action: f.action });
             document.getElementById("al-list").innerHTML = auditRows(rf.entries || []);
             bindClientPager("audit", "#audit-tb tbody");
           } catch (e) { UI.toast(e.message, { kind: "warn" }); }
@@ -5267,7 +5200,7 @@ const Views = (() => {
         ${bs.map((b) => `<tr><td class="mono">${esc(b.batch_ref)}</td><td>${esc(String(b.created_at || "").slice(0, 16).replace("T", " "))}</td>
           <td>${b.item_count}</td><td>${b.created_count}</td><td>${b.error_count ? `<span class="badge warn">${b.error_count}</span>` : "0"}</td>
           <td><button class="mini ghost" onclick="Views.tpaBatchDetail(${b.id})">Receipt</button></td></tr>
-          <tr id="tpa-batch-${b.id}" style="display:none"><td colspan="6"></td></tr>`).join("")}</tbody></table>`
+          <tr id="tpa-batch-${b.id}" class="row-detail" style="display:none"><td colspan="6"></td></tr>`).join("")}</tbody></table>`
         : '<p class="muted">No batches yet — upload a CSV above.</p>';
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -5362,7 +5295,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
   async function checksBox(status) {
     const box = document.getElementById("checks-list");
     try {
-      const r = await Api.program.checks(status);
+      const r = await Api.program.checks(status, { limit: 500 });
       const cs = r.checks || [];
       box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Received</th><th>Status</th><th>Amount</th><th>Payer</th><th>Check #</th><th>Case</th><th>Confidence</th><th></th></tr></thead><tbody>
         ${cs.map((c) => `<tr class="${c.amount_mismatch ? "row-breach" : ""}">
@@ -5395,7 +5328,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     box.innerHTML = '<p class="muted">Loading scan…</p>';
     card.scrollIntoView({ behavior: "smooth" });
     try {
-      const r = await Api.program.checks("");
+      const r = await Api.program.checks("", { limit: 500 });
       const c = (r.checks || []).find((x) => x.id === id);
       const imgUrl = await Api.program.checkImage(id).catch(() => null);
       const mask = (v) => v ? "••••" + esc(String(v).slice(-4)) : "—";
@@ -5462,5 +5395,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
 })();

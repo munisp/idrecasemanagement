@@ -415,6 +415,8 @@ th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
 th.sortable:hover{color:var(--accent-fg)}
 th.sorted{color:var(--accent-fg);font-weight:700}
 .pager{display:flex;align-items:center;gap:12px;margin:10px 2px;font-size:12.5px}
+.pager.tp{flex-wrap:wrap}.pager.tp select{margin-left:6px;padding:2px 6px}.pager.tp .tp-nav{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
+tr[hidden]{display:none !important}
 .s-analyzed-with-findings,.s-failed{background:var(--warning-bg,#fdf3e0);color:var(--warning-fg)}
 
 /* ---------- case facts + warn badge (FL lifecycle) ---------- */

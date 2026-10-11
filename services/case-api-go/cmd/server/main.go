@@ -1022,7 +1022,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit := 50
 	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
-		limit = min(n, 200)
+		limit = min(n, 500)
 	}
 	// Sort: default opened_at DESC uses keyset pagination; any explicit column
 	// sort switches to offset mode (keyset over arbitrary columns isn't stable).
