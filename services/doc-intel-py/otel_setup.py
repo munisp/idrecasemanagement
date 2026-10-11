@@ -96,7 +96,10 @@ def temporal_interceptors() -> list:
         return []
     try:
         from temporalio.contrib.opentelemetry import TracingInterceptor
-        return [TracingInterceptor()]
+        # always_create_workflow_spans: without it a workflow span is only
+        # recorded when the starter/signaller passed a trace in, and case-api's
+        # Temporal client does not -- so nothing was recorded at all.
+        return [TracingInterceptor(always_create_workflow_spans=True)]
     except Exception as exc:  # noqa: BLE001 - optional
         print(f"[otel] temporal tracing unavailable: {exc}", flush=True)
         return []
