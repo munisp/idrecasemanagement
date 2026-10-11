@@ -437,6 +437,10 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"subject required"}`, http.StatusBadRequest)
 		return
 	}
+	if lock := s.caseLockedForRequest(r, tenant, in.CaseID); lock != "" {
+		writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+		return
+	}
 	// Two statements, not one writable-CTE combo: confirmed live on this
 	// Postgres (18.6) that "WITH ins AS (INSERT ... RETURNING id) UPDATE t
 	// ... FROM ins WHERE t.id = ins.id" reproducibly updates ZERO rows --

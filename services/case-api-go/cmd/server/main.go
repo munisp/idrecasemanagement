@@ -481,7 +481,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, tenancy)
+		r.Use(a.middleware, tenancy, s.caseLockGuard)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
@@ -1157,6 +1157,9 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 		"id": c.ID, "case_number": c.CaseNumber, "tenant": c.Tenant, "status": c.Status,
 		"service_line": c.ServiceLine, "qpa_cents": c.QPA, "disputed_amount_cents": c.DisputedAmount, "opened_at": c.OpenedAt,
 		"internal_status": internal, "agency_status": agency, "details": dj, "program_dates": pd,
+		// "" | AWAITING_PAYMENT | INELIGIBLE -- the portal freezes everything
+		// but correspondence on a locked case (caselock.go).
+		"lock": s.caseLock(r.Context(), c.Tenant, c.ID),
 	})
 }
 

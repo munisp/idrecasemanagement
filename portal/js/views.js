@@ -182,6 +182,40 @@ const Views = (() => {
   const laneChip = (lane) => lane === "AUTO_REVIEW" ? `<span class="chip lane-auto" title="Everything needed for a one-click confirm is present">AUTO</span>`
     : lane === "COMPLEX" ? `<span class="chip lane-complex" title="Batched, duplicated, escalated, or high-dollar">COMPLEX</span>`
     : `<span class="chip lane-std">STANDARD</span>`;
+  // A frozen case (awaiting payment, or found ineligible) allows only
+  // correspondence -- the API enforces that (cmd/server/caselock.go); this
+  // disables the controls so they are not offered in the first place.
+  // Sections load at different moments, so it keeps watching the page.
+  const FROZEN_OK_SECTIONS = ["correspondence", "call log", "inquiries log"];
+  const FROZEN_OK_HANDLERS = /download|showAnalysis|peek|letter\(|mailLog|Filter\(|sort|App\.rerender|location\.hash/;
+  function freezeCasePage(lock) {
+    const view = document.getElementById("view");
+    if (!view) return;
+    const marker = view.querySelector(".case-lock");
+    const allowed = (el) => {
+      if (el.closest(".case-lock, .tabs, .pager, .view-head")) return true;
+      const sec = el.closest("details.prog-sec");
+      if (sec) {
+        const title = (sec.querySelector("summary")?.textContent || "").trim().toLowerCase();
+        if (FROZEN_OK_SECTIONS.includes(title)) return true;
+        if (lock === "INELIGIBLE" && title === "eligibility review") return true;
+      }
+      if (el.type === "search" || el.matches("summary, details")) return true;
+      return FROZEN_OK_HANDLERS.test(el.getAttribute("onclick") || "") || FROZEN_OK_HANDLERS.test(el.getAttribute("onchange") || "");
+    };
+    const sweep = () => {
+      if (!marker.isConnected) { obs.disconnect(); return; }
+      view.querySelectorAll("button, input, select, textarea").forEach((el) => {
+        if (el.dataset.frozen || allowed(el)) return;
+        el.dataset.frozen = "1"; el.disabled = true;
+        el.title = "Not available while this case is frozen — only correspondence is allowed";
+      });
+    };
+    const obs = new MutationObserver(sweep);
+    obs.observe(view, { childList: true, subtree: true });
+    sweep();
+  }
+
   // Plain-language labels for the program's ineligibility reason codes (the
   // SOP's exclusion list). An unlisted code falls back to the code itself.
   const ELIG_REASON_LABELS = {
@@ -561,6 +595,13 @@ const Views = (() => {
       let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>
         ${badge(c.status)}</div>
         <p class="muted">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
+      if (c.lock) {
+        html += `<div class="case-lock" role="status"><b>${c.lock === "AWAITING_PAYMENT" ? "Awaiting payment" : "Ineligible"} — this case is frozen.</b>
+          ${c.lock === "AWAITING_PAYMENT"
+            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Correspondence, letters, call and inquiry log) to send payment reminders."
+            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Correspondence, letters, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
+        afterRender(() => freezeCasePage(c.lock));
+      }
 
       // Statutory clock cluster (server-projected)
       if (clocks.length)

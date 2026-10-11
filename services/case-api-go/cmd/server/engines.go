@@ -195,6 +195,11 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 	results := []map[string]any{}
 	for _, id := range in.CaseIDs {
 		res := map[string]any{"case_id": id}
+		if lock := s.caseLockedForRequest(r, tenant, id); lock != "" {
+			res["ok"], res["error"] = false, caseLockMessage(lock)
+			results = append(results, res)
+			continue
+		}
 		var err error
 		switch in.Action {
 		case "assign":

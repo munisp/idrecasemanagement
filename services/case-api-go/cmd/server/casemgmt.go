@@ -417,6 +417,12 @@ func (s *server) relateCases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rel_type must be BATCH | PARENT_CHILD | DUPLICATE"}`, http.StatusBadRequest)
 		return
 	}
+	for _, id := range []string{in.CaseID, in.RelatedID} {
+		if lock := s.caseLockedForRequest(r, tenant, id); lock != "" {
+			writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+			return
+		}
+	}
 	_, err := s.db.Exec(r.Context(), `
 		INSERT INTO public.case_relationships (tenant, case_id, related_case_id, rel_type)
 		VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,

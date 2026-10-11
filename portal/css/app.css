@@ -601,3 +601,5 @@ th.sortable:focus-visible{outline:2px solid var(--accent-fg);outline-offset:-2px
 .elig-flags{border:1px solid var(--line,#ddd);border-radius:8px;padding:8px 12px;margin:8px 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:4px 16px}
 .elig-flags legend{font-size:.85em;padding:0 6px}
 .elig-flags label{display:flex;gap:6px;align-items:flex-start;font-weight:400}
+.case-lock{border:1px solid #c0392b;background:rgba(192,57,43,.08);border-radius:8px;padding:10px 14px;margin:8px 0 14px;line-height:1.45}
+[data-frozen]{opacity:.45;cursor:not-allowed}
