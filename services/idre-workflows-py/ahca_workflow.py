@@ -20,6 +20,7 @@ sequence happens to be in when the RFI goes out.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
 
 from temporalio import workflow
@@ -62,6 +63,31 @@ class AhcaDisputeWorkflow:
         # Templates of the letters that have really gone out (case-api
         # signals each send). The stage gates in _run_stages wait on these.
         self.letters_sent: set[str] = set()
+        self._rfi_round = 0  # numbers each RFI wait (see _wait's `site`)
+
+    async def _wait(self, cond, timeout: timedelta, site: str) -> bool:
+        """Wait for cond, at most `timeout`. True: it happened. False: time ran out.
+
+        wait_condition returns None when the condition is met and raises
+        asyncio.TimeoutError when the time runs out. This workflow used to
+        read that None as "timed out", so every deadline was backwards: a
+        case decided on day 2 was flagged as a 10-day breach, a plan that
+        answered got its day 13/14/15 chasers, an RFI that was answered
+        dismissed the case -- and a deadline that really passed raised out of
+        the workflow and stalled it.
+
+        The patched() call sits AFTER the wait on purpose. A history that
+        already recorded the old, wrong branch replays it (no marker ->
+        False); a wait that finishes from now on returns the truth. `site`
+        must be unique per wait, because patched() remembers its answer per
+        id for the whole run. The timeout branch needs no marker: the old
+        code never got past it, so no history holds anything after it.
+        """
+        try:
+            await workflow.wait_condition(cond, timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return workflow.patched(f"wait-result-{site}")
 
     # ---- signals -------------------------------------------------------
     @workflow.signal(name="PACKET_COMPLETE")
@@ -183,9 +209,9 @@ class AhcaDisputeWorkflow:
                 set_dual_status, args=[tenant, case_id, status, agency],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            responded = await workflow.wait_condition(
-                lambda: self.rfi_response_received, timeout=timedelta(days=15),
-            )
+            self._rfi_round += 1
+            responded = await self._wait(
+                lambda: self.rfi_response_received, timedelta(days=15), f"rfi-{self._rfi_round}")
             if responded:
                 self.rfi_pending = False
                 self.rfi_response_received = False
@@ -229,11 +255,10 @@ class AhcaDisputeWorkflow:
         # with an existing dedicated flag to check; DISMISSED and
         # CLOSED_REFUNDED (Stage 1/3's other early returns) have no such
         # flag today and are a known remaining gap, not fixed here.
-        met = await workflow.wait_condition(
+        met = await self._wait(
             lambda: (self.determination_sent or self.provider_withdrawn
                      or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
-            timeout=timedelta(days=60),
-        )
+            timedelta(days=60), "agency-recommendation")
         if not met:
             await workflow.execute_activity(
                 flag_cms_breach,
@@ -260,9 +285,7 @@ class AhcaDisputeWorkflow:
                 set_program_date, args=[tenant, case_id, "outreach_at", today],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            completed = await workflow.wait_condition(
-                lambda: self.packet_complete, timeout=timedelta(days=7),
-            )
+            completed = await self._wait(lambda: self.packet_complete, timedelta(days=7), "refund-window")
             if not completed:
                 await workflow.execute_activity(
                     set_dual_status, args=[tenant, case_id, "Closed-Refunded", "Closed"],
@@ -279,9 +302,8 @@ class AhcaDisputeWorkflow:
             set_dual_status, args=[tenant, case_id, "Initial Review Pending", "Pending Initial Review"],
             start_to_close_timeout=timedelta(seconds=30),
         )
-        decided = await workflow.wait_condition(
-            lambda: self.eligibility_result is not None, timeout=timedelta(days=10),
-        )
+        decided = await self._wait(
+            lambda: self.eligibility_result is not None, timedelta(days=10), "initial-review")
         if not decided:
             await workflow.execute_activity(
                 flag_cms_breach, args=[tenant, case_id, "INITIAL_REVIEW", "Eligibility not decided within 10 calendar days"],
@@ -332,10 +354,9 @@ class AhcaDisputeWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
             )
             # PROVIDER_PERMISSION: 15cd, day-13 follow-up (call_and_reply_all).
-            got_followup = await workflow.wait_condition(
+            got_followup = await self._wait(
                 lambda: self.estimate_permission is not None or self.provider_withdrawn or self.rfi_lapsed,
-                timeout=timedelta(days=13),
-            )
+                timedelta(days=13), "permission-day13")
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             if self.rfi_lapsed:
@@ -346,10 +367,9 @@ class AhcaDisputeWorkflow:
                     args=[tenant, case_id, "call_and_reply_all", "Day 13 — provider permission not yet received, deadline is day 15"],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
-                await workflow.wait_condition(
+                await self._wait(
                     lambda: self.estimate_permission is not None or self.provider_withdrawn or self.rfi_lapsed,
-                    timeout=timedelta(days=2),
-                )
+                    timedelta(days=2), "permission-day15")
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             if self.rfi_lapsed:
@@ -367,10 +387,9 @@ class AhcaDisputeWorkflow:
                               "Day 15 — no permission to proceed received. Final 3 business days before the case is dismissed."],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
-                    await workflow.wait_condition(
+                    await self._wait(
                         lambda: self.estimate_permission is not None or self.provider_withdrawn,
-                        timeout=timedelta(days=grace_days),
-                    )
+                        timedelta(days=grace_days), "dismissal-grace")
                     if self.provider_withdrawn:
                         return await self._withdraw(tenant, case_id)
                 if self.estimate_permission is not True:
@@ -442,10 +461,9 @@ class AhcaDisputeWorkflow:
         ]
         prev_day = 0
         for day, action, detail in plan_followups:
-            reached = await workflow.wait_condition(
+            reached = await self._wait(
                 lambda: self.plan_response_received or self.plan_opted_out is not None or self.rfi_lapsed,
-                timeout=timedelta(days=day - prev_day),
-            )
+                timedelta(days=day - prev_day), f"plan-day{day}")
             prev_day = day
             if reached:
                 break

@@ -26,7 +26,7 @@ import (
 func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	// The PM creates invoices (SOP); the Reviewer does not.
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: invoices are created by the PM"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
