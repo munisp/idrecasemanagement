@@ -15,6 +15,12 @@
   </header>
 
   <main class="wrap apply-wrap">
+    <div class="tab-bar" role="tablist" aria-label="What would you like to do?">
+      <button type="button" role="tab" id="tab-file" aria-controls="panel-file" aria-selected="true" data-tab="file">File a dispute</button>
+      <button type="button" role="tab" id="tab-tpa" aria-controls="panel-tpa" aria-selected="false" data-tab="tpa" tabindex="-1">Register as a TPA</button>
+    </div>
+
+    <section id="panel-file" role="tabpanel" aria-labelledby="tab-file">
     <h1>File a dispute</h1>
     <p class="muted">No account needed. This opens a real case with the state program right away —
       you'll get an email with filing instructions, a secure upload link for your packet, and
@@ -40,12 +46,17 @@
       <button class="btn solid lg" type="submit" id="f-submit">Start my dispute</button>
       <p id="f-msg" class="form-msg" role="status"></p>
     </form>
-    <hr style="margin:2.5rem 0" />
-    <h2>Filing on behalf of providers or health plans?</h2>
-    <p class="muted">Third-party administrators (revenue-cycle firms, legal representatives, plan
-      delegates) can register once, then file, pay, and track disputes on behalf of all their
-      client organizations from the portal. Registration is immediate — you'll get a one-time
-      claim code to link your portal account.</p>
+    <p class="muted tab-hint">Filing for several providers or health plans?
+      <a href="#register-tpa" data-goto="tpa">Register as a third-party administrator</a> instead.</p>
+    </section>
+
+    <section id="panel-tpa" role="tabpanel" aria-labelledby="tab-tpa" hidden>
+    <h1>Register as a TPA</h1>
+    <p class="muted">For third-party administrators — revenue-cycle firms, legal representatives and
+      plan delegates who file on behalf of providers or health plans. Register once, then file, pay
+      and track disputes for all your client organizations from the portal.</p>
+    <p class="muted">This does not file a dispute. We'll email your portal username and a temporary
+      password to the contact email below; nothing is shown on this page.</p>
     <form id="tpa-form" class="apply-form" novalidate>
       <label>State program * <select id="t-state" required></select></label>
       <label>TPA organization name * <input id="t-org" maxlength="200" required placeholder="Your organization" /></label>
@@ -56,6 +67,9 @@
       <button class="btn solid" type="submit" id="t-submit">Register as a TPA</button>
       <p id="t-msg" class="form-msg" role="status"></p>
     </form>
+    <p class="muted tab-hint">Just need to file one dispute for your own organization?
+      <a href="#file" data-goto="file">File a dispute</a> — no account needed.</p>
+    </section>
   </main>
 
   <footer class="site-foot"><div class="wrap">
@@ -111,6 +125,33 @@
         btn.disabled = false; btn.textContent = "Start my dispute";
       }
     });
+    // Two separate tasks, one visible at a time. The tab is in the URL
+    // (#file / #register-tpa) so each can be linked to directly.
+    const TABS = { file: "File a dispute", tpa: "Register as a TPA" };
+    function showTab(name, focus) {
+      if (!TABS[name]) name = "file";
+      for (const t of Object.keys(TABS)) {
+        const on = t === name, btn = document.getElementById("tab-" + t);
+        btn.setAttribute("aria-selected", on ? "true" : "false");
+        btn.tabIndex = on ? 0 : -1;
+        document.getElementById("panel-" + t).hidden = !on;
+        if (on && focus) btn.focus();
+      }
+      document.title = TABS[name] + " — Federal IDRE Platform";
+      const hash = name === "tpa" ? "#register-tpa" : "#file";
+      if (location.hash !== hash) history.replaceState(null, "", hash);
+    }
+    const tabFromHash = () => (location.hash === "#register-tpa" || location.hash === "#tpa" ? "tpa" : "file");
+    document.querySelectorAll(".tab-bar [data-tab]").forEach((b) => {
+      b.addEventListener("click", () => showTab(b.dataset.tab));
+      b.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); showTab(b.dataset.tab === "file" ? "tpa" : "file", true); }
+      });
+    });
+    document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); showTab(a.dataset.goto, true); window.scrollTo(0, 0); }));
+    window.addEventListener("hashchange", () => showTab(tabFromHash()));
+    showTab(tabFromHash());
+
     const tsel = document.getElementById("t-state");
     tsel.innerHTML = sel.innerHTML;
     if (pre) tsel.value = pre.toLowerCase();
@@ -135,7 +176,7 @@
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
-          msg.textContent = `Registered! Your portal login — username: ${data.username}, password: ${data.temporary_password} — save this now, it is shown only once. Sign in at the portal with it (you'll be asked to set a new password); your organization is already linked, ready to add clients and file on their behalf.`;
+          msg.textContent = `Registered. We've emailed your username and a temporary password to ${data.emailed_to || body.contact_email}. Sign in at the portal with them (you'll be asked to set a new password); your organization is already linked, ready to add clients and file on their behalf. If it doesn't arrive in a few minutes, check your spam folder.`;
           e.target.reset();
         } else {
           msg.classList.add("err");

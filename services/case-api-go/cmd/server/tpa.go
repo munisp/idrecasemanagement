@@ -22,6 +22,7 @@ package main
 // correctly per dispute AND per TPA.
 
 import (
+	"log/slog"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -99,6 +100,17 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := strings.ToLower(in.Tenant)
 
+	// Public and it sends email: same per-address throttle as the public
+	// dispute form, so it cannot be used to flood a mailbox or mint accounts.
+	ip := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	if !s.rateLimit("tpa-register:"+ip, 10, 3600) {
+		http.Error(w, `{"error":"too many registrations from this address — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	tok, err := s.kcAdminToken(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak admin auth failed: " + err.Error()})
@@ -156,14 +168,61 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The login goes to the registered mailbox only -- never back to the
+	// browser. Showing it on the page handed a working account to whoever
+	// typed an email address, whether or not they owned it; emailing it also
+	// proves the address is real.
+	tempPassword, _ := result["temporary_password"].(string)
+	subject, body := tpaWelcomeMail(in.Name, in.ContactName, username, tempPassword, s.cfg.PortalBaseURL)
+	_, logBody := tpaWelcomeMail(in.Name, in.ContactName, username, "", s.cfg.PortalBaseURL)
+	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
+		// Without the email nobody holds the password, so the account would
+		// be unusable and the address could not be registered again. Undo
+		// the registration and let the person retry.
+		s.logCorrespondence(r, tenant, "", "OUT", "tpa_welcome", subject, logBody, []string{in.ContactEmail}, nil, "system:tpa-register", merr.Error())
+		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.tpa_users WHERE tenant=$1 AND tpa_id=$2`, tenant, id)
+		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.tpas WHERE tenant=$1 AND id=$2`, tenant, id)
+		if derr := s.kcDeleteUser(r.Context(), tok, userID); derr != nil {
+			slog.Error("TPA registration rollback: could not delete the Keycloak user", "user_id", userID, "err", derr)
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "we could not send the sign-in email to that address, so nothing was registered. Check the email address and try again.",
+		})
+		return
+	}
+	// The mail log keeps the message without the password.
+	s.logCorrespondence(r, tenant, "", "OUT", "tpa_welcome", subject, logBody, []string{in.ContactEmail}, nil, "system:tpa-register")
 	s.logAudit(r.Context(), tenant, "", "TPA_REGISTERED", map[string]any{
-		"tpa_id": id, "name": in.Name, "username": username, "user_id": userID,
+		"tpa_id": id, "name": in.Name, "username": username, "user_id": userID, "credentials_emailed_to": in.ContactEmail,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"tpa_id": id, "status": "ACTIVE",
-		"username": username, "temporary_password": result["temporary_password"],
-		"next": "Sign in to the portal with the username and password above (you'll be asked to set a new password) — your organization is already linked. Then add your initiating parties and file on their behalf.",
+		"tpa_id": id, "status": "ACTIVE", "emailed_to": in.ContactEmail,
+		"next": "Your username and a temporary password have been emailed to " + in.ContactEmail + ". Sign in to the portal with them (you'll be asked to set a new password) — your organization is already linked.",
 	})
+}
+
+// tpaWelcomeMail builds the sign-in email for a newly registered TPA. With
+// an empty password it returns the copy kept in the mail log, where the
+// password is replaced by a placeholder.
+func tpaWelcomeMail(orgName, contactName, username, tempPassword, portalBase string) (subject, body string) {
+	greeting := "Hello,"
+	if strings.TrimSpace(contactName) != "" {
+		greeting = "Hello " + strings.TrimSpace(contactName) + ","
+	}
+	pw := tempPassword
+	if pw == "" {
+		pw = "[temporary password — sent to the recipient, not stored here]"
+	}
+	subject = "Your TPA portal account — " + orgName
+	body = greeting + "\n\n" +
+		orgName + " is now registered as a third-party administrator. Your portal account is ready and already linked to your organization.\n\n" +
+		"Sign in:   " + strings.TrimRight(portalBase, "/") + "/app.html\n" +
+		"Username:  " + username + "\n" +
+		"Password:  " + pw + "\n\n" +
+		"This password is temporary: you will be asked to choose a new one the first time you sign in.\n\n" +
+		"Once signed in, open TPA in the menu to add the organizations you act for, then file, pay and track disputes on their behalf.\n\n" +
+		"If you did not register, you can ignore this email — the account cannot be used without this message."
+	return subject, body
 }
 
 // claimTPA links the authenticated TPA user to their org via the claim code.

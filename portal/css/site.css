@@ -76,3 +76,12 @@ a { color: var(--pine-2); }
   .nav-links a:not(.btn) { display: none; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+/* dispute.html: two tasks, one visible at a time */
+.tab-bar { display: flex; gap: 4px; border-bottom: 2px solid rgba(0,0,0,.12); margin-bottom: 28px; }
+.tab-bar [role="tab"] { appearance: none; background: none; border: 0; border-bottom: 3px solid transparent; margin-bottom: -2px;
+  padding: 12px 18px; font: inherit; font-size: 16px; font-weight: 600; color: inherit; opacity: .6; cursor: pointer; }
+.tab-bar [role="tab"]:hover { opacity: .85; }
+.tab-bar [role="tab"][aria-selected="true"] { opacity: 1; color: var(--pine); border-bottom-color: var(--pine); }
+.tab-bar [role="tab"]:focus-visible { outline: 2px solid var(--pine-2); outline-offset: 2px; }
+.tab-hint { margin-top: 28px; font-size: 14px; }
