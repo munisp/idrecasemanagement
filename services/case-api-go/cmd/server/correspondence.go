@@ -682,6 +682,14 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 		q += fmt.Sprintf(` AND (c.subject ILIKE $%d OR c.body ILIKE $%d OR k.case_number ILIKE $%d)`, len(args)+1, len(args)+1, len(args)+1)
 		args = append(args, "%"+term+"%")
 	}
+	if from := r.URL.Query().Get("from"); from != "" {
+		args = append(args, from)
+		q += fmt.Sprintf(` AND c.created_at >= $%d::date`, len(args))
+	}
+	if to := r.URL.Query().Get("to"); to != "" {
+		args = append(args, to)
+		q += fmt.Sprintf(` AND c.created_at < ($%d::date + interval '1 day')`, len(args))
+	}
 	q += ` ORDER BY c.created_at DESC, c.id DESC LIMIT 200`
 	rows, err := s.queryRows(r, q, args...)
 	if err != nil {

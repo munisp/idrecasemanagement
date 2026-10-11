@@ -3883,6 +3883,8 @@ const Views = (() => {
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
         <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="OUT">Outbound</option></select>
         <input name="q" placeholder="search subject / body / case number" style="min-width:18em" />
+        <label class="muted">From <input name="from" type="date" /></label>
+        <label class="muted">To <input name="to" type="date" /></label>
         <button class="mini">Search</button></form>
       <div id="mail-log"><p class="muted">Loading…</p></div>`;
   }
@@ -3890,7 +3892,8 @@ const Views = (() => {
   let mailLogFilterState = {};
 
   function mailLogFilter(form) {
-    mailLogFilterState = { direction: form.direction.value || "", q: form.q.value.trim() || "" };
+    mailLogFilterState = { direction: form.direction.value || "", q: form.q.value.trim() || "",
+      from: form.from.value || "", to: form.to.value || "" };
     mailLogBox();
   }
 
@@ -4525,11 +4528,12 @@ const Views = (() => {
     }
   }
 
-  async function billingList(status) {
+  async function billingList(opts) {
+    opts = opts || {};
     const box = document.getElementById("billing-list");
     if (!box) return;
     try {
-      const r = await Api.program.billingList(status ? { status } : {});
+      const r = await Api.program.billingList(opts);
       const rows = (r.invoices || []).map((i) => {
         const due = Number(i.total_cents) - Number(i.paid_cents || 0);
         let actions = "";
@@ -4551,7 +4555,9 @@ const Views = (() => {
       }).join("");
       box.innerHTML = `<h2>Invoices</h2>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.billingFilter(this)">
-          <select name="status"><option value="">all statuses</option>${["DRAFT", "APPROVED", "ISSUED", "PAID", "VOID"].map((x) => `<option>${x}</option>`).join("")}</select>
+          <select name="status"><option value="">all statuses</option>${["DRAFT", "APPROVED", "ISSUED", "PAID", "VOID"].map((x) => `<option ${x === (opts.status || "") ? "selected" : ""}>${x}</option>`).join("")}</select>
+          <label class="muted">Period from <input name="start" type="date" value="${esc(opts.start || "")}" /></label>
+          <label class="muted">to <input name="end" type="date" value="${esc(opts.end || "")}" /></label>
           <button class="mini">Filter</button></form>
         ${rows ? `<table class="tbl"><thead><tr><th>Invoice</th><th>Period</th><th>Bill to</th><th>Total</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No invoices yet — generate one above.</p>'}`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -4658,13 +4664,32 @@ const Views = (() => {
         <td>${esc(x.basis_date)}</td><td>${x.days_outstanding}</td><td>${badge(x.bucket)}</td></tr>`).join("")}</tbody></table>`;
   }
 
+  function arapArResultsHtml(rows, bucket, q) {
+    let shown = rows || [];
+    if (bucket) shown = shown.filter((x) => x.bucket === bucket);
+    if (q) shown = shown.filter((x) => (x.party || "").toLowerCase().includes(q));
+    return agingTable(shown, "Owes");
+  }
+  function arapArFilter() {
+    const bucket = document.getElementById("arap-ar-bucket")?.value || "";
+    const q = (document.getElementById("arap-ar-q")?.value || "").trim().toLowerCase();
+    const box = document.getElementById("arap-ar-results");
+    if (box) box.innerHTML = arapArResultsHtml(window._arapAr || [], bucket, q);
+  }
+
   async function arapArBox() {
     const box = document.getElementById("arap-ar");
     try {
       const r = await Api.program.receivablesAging();
+      window._arapAr = r.receivables || [];
       const ag = r.aging || {};
-      box.innerHTML = `<p>${["current", "1-30", "31-60", "61-90", "90+"].map((b) => `<span class="chip">${b}: <b>${usdC(ag[b] || 0)}</b></span> `).join("")}</p>
-        ${agingTable(r.receivables, "Owes")}`;
+      const buckets = ["current", "1-30", "31-60", "61-90", "90+"];
+      box.innerHTML = `<p>${buckets.map((b) => `<span class="chip">${b}: <b>${usdC(ag[b] || 0)}</b></span> `).join("")}</p>
+        ${window._arapAr.length ? `<p>
+          <select id="arap-ar-bucket" onchange="Views.arapArFilter()"><option value="">All buckets</option>
+            ${buckets.map((b) => `<option value="${b}">${b}</option>`).join("")}</select>
+          <input id="arap-ar-q" placeholder="Filter by party…" oninput="Views.arapArFilter()" /></p>` : ""}
+        <div id="arap-ar-results">${arapArResultsHtml(window._arapAr, "", "")}</div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -5285,5 +5310,5 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
 })();
