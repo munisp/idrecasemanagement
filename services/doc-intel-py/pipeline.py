@@ -45,6 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
+import otel_setup
 import yaml
 from PIL import Image
 
@@ -232,6 +233,14 @@ def assess_page_quality(img: Image.Image) -> dict:
             "brightness": round(brightness, 1), "poor": poor}
 
 
+def _skew_angle(raw_angle: float) -> float:
+    """Fold a minAreaRect angle into (-45, 45]. OpenCV builds disagree on the
+    raw range ([-90, 0) before 4.5.1, (0, 90] after); handling only one of
+    them read a 5-degree skew as 85 degrees on the other, which is outside
+    the correctable range -- so deskew silently did nothing."""
+    return ((raw_angle + 45) % 90) - 45
+
+
 def deskew_image(img: Image.Image) -> Image.Image:
     """Estimate and correct page skew via the ink pixels' minimum-area
     rectangle. Scanners and phone photos routinely land 1-5 degrees off, and
@@ -247,9 +256,7 @@ def deskew_image(img: Image.Image) -> Image.Image:
     coords = np.column_stack(np.where(ink > 0))
     if len(coords) < 200:
         return img
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle >= 45:
-        angle -= 90
+    angle = _skew_angle(cv2.minAreaRect(coords)[-1])
     if abs(angle) < 0.3 or abs(angle) > 15:
         return img
     # minAreaRect's angle sign convention shifts with the rectangle's aspect
@@ -260,8 +267,7 @@ def deskew_image(img: Image.Image) -> Image.Image:
         c = np.column_stack(np.where(g < 128))
         if len(c) < 200:
             return 0.0
-        a = cv2.minAreaRect(c)[-1]
-        return a - 90 if a >= 45 else a
+        return _skew_angle(cv2.minAreaRect(c)[-1])
 
     h, w = gray.shape
     raw = np_from_pil(img)
@@ -1009,6 +1015,23 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     return ctx
 
 
+def _index_safe_extracted(extracted: dict, normalized: dict) -> dict:
+    """Copy of `extracted` safe for the search index. OpenSearch maps the
+    date fields as `date`, and a raw value as printed on the document
+    ("06/15/2026") is rejected there -- which failed the WHOLE document's
+    indexing, so it never became searchable. Dates go in as their normalized
+    ISO form, or are left out when they could not be parsed; the raw string
+    is still stored with the analysis itself."""
+    out = {}
+    for k, v in (extracted or {}).items():
+        if "date" in k:
+            if normalized.get(k):
+                out[k] = normalized[k]
+            continue
+        out[k] = v
+    return out
+
+
 def stage_index(ctx: dict, cfg: dict) -> dict:
     """Build the OpenSearch document body. main.persist() performs the actual
     index call (it owns the client); this stage decides WHAT is searchable:
@@ -1016,7 +1039,7 @@ def stage_index(ctx: dict, cfg: dict) -> dict:
     ctx["index_body"] = {
         "doc_type": ctx.get("doc_type"),
         "text": ctx.get("text", "")[:100000],
-        "extracted": ctx.get("extracted", {}),
+        "extracted": _index_safe_extracted(ctx.get("extracted", {}), ctx.get("normalized", {})),
         "normalized": ctx.get("normalized", {}),
         "field_confidence": ctx.get("field_confidence", {}),
         "status": ctx.get("status"),
@@ -1077,15 +1100,17 @@ def run_pipeline(ctx: dict, case: dict | None = None, schema_overrides: dict | N
             continue
         name, cfg = st["name"], st.get("config", {})
         try:
-            if name == "vlm_extract":
-                ctx = stage_vlm_extract(ctx, cfg, schemas)
-            elif name == "validate":
-                ctx = stage_validate(ctx, cfg, case)
-            else:
-                fn = globals().get(f"stage_{name}")
-                if fn is None:
-                    raise RuntimeError(f"pipeline stage not implemented: {name}")
-                ctx = fn(ctx, cfg)
+            with otel_setup.span(f"stage {name}") as _sp:
+                if name == "vlm_extract":
+                    ctx = stage_vlm_extract(ctx, cfg, schemas)
+                elif name == "validate":
+                    ctx = stage_validate(ctx, cfg, case)
+                else:
+                    fn = globals().get(f"stage_{name}")
+                    if fn is None:
+                        raise RuntimeError(f"pipeline stage not implemented: {name}")
+                    ctx = fn(ctx, cfg)
+                _sp.set_attribute("idre.doc_type", str(ctx.get("doc_type") or ""))
         except Exception as exc:
             # docling is the primary parser -- if it fails there is no usable
             # text/markdown/tables at all, so that failure stays fatal (same

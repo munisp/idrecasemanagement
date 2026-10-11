@@ -3,11 +3,16 @@ vault reveal calls, notifications). Workflows stay deterministic."""
 
 from __future__ import annotations
 
+
 import os
 
 import httpx
 import psycopg
 from temporalio import activity
+# Same switch as case-api/doc-intel/lettergen: two deployments on one Kafka
+# broker need different prefixes or they read each other's events.
+TOPIC_PREFIX = os.environ.get("TOPIC_PREFIX", "idre")
+
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
@@ -97,7 +102,7 @@ async def flag_cms_breach(tenant: str, case_id: str, clock: str, detail: str) ->
         c.execute(f"SET search_path TO tenant_{tenant}, public")
         c.execute(
             "INSERT INTO outbox (topic, key, payload) VALUES (%s,%s,%s::jsonb)",
-            (f"idre.{tenant}.audit", case_id, _json.dumps({
+            (f"{TOPIC_PREFIX}.{tenant}.audit", case_id, _json.dumps({
                 "type": "sla.breach", "tenant": tenant, "case_id": case_id,
                 "clock": clock, "detail": detail})),
         )
@@ -149,7 +154,7 @@ async def export_ledger_snapshot(tenant: str) -> int:
         c.execute(f"SET search_path TO tenant_{tenant}, public")
         c.execute(
             "INSERT INTO outbox (topic, key, payload) VALUES (%s,%s,%s::jsonb)",
-            (f"idre.{tenant}.fees", f"ledger-snapshot-{tenant}", _json.dumps(payload)),
+            (f"{TOPIC_PREFIX}.{tenant}.fees", f"ledger-snapshot-{tenant}", _json.dumps(payload)),
         )
     return len(accounts)
 
@@ -242,7 +247,7 @@ async def reconcile_ledger(tenant: str) -> dict:
             c.execute(f"SET search_path TO tenant_{tenant}, public")
             c.execute(
                 "INSERT INTO outbox (topic, key, payload) VALUES (%s,%s,%s::jsonb)",
-                (f"idre.{tenant}.audit", "ledger-reconciliation", _json.dumps({
+                (f"{TOPIC_PREFIX}.{tenant}.audit", "ledger-reconciliation", _json.dumps({
                     "type": "sla.breach", "tenant": tenant, "case_id": "-",
                     "clock": "LEDGER_RECONCILIATION",
                     "detail": "Postgres/TigerBeetle drift detected"})),

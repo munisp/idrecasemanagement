@@ -894,6 +894,9 @@ const Views = (() => {
   function onboardingFilter(status) { onboardingBox(status); }
 
   function onboardingNew() {
+    // Reviewer has no "Start application" button and the API refuses the
+    // submit; don't render a form that can only fail if the URL is typed in.
+    if (can("CASE_MANAGER") && !can("TENANT_ADMIN")) return `<h1>New application</h1><p class="muted">Your role reviews applications; it can't start one.</p>`;
     afterRender(() => $("#ob").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const f = Object.fromEntries(new FormData(ev.target));

@@ -405,6 +405,7 @@ func resolveTBAddresses(addrs []string) ([]string, error) {
 func main() {
 	cfg := configFromEnv()
 	ctx := context.Background()
+	stopTelemetry := initTelemetry(ctx)
 
 	// Connection pool sized for throughput: 50 in-flight queries per replica
 	// (PgBouncer txn-pooling fronts Postgres in-cluster, so 50/replica is safe).
@@ -421,6 +422,7 @@ func main() {
 	pcfg.MaxConnLifetime = 30 * time.Minute
 	pcfg.MaxConnIdleTime = 5 * time.Minute
 	pcfg.HealthCheckPeriod = 30 * time.Second
+	tracePool(pcfg)
 	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	must(err)
 	defer pool.Close()
@@ -473,7 +475,7 @@ func main() {
 		permify: envOr("PERMIFY_URL", "")}
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID, chimw.RealIP, chimw.Logger, chimw.Recoverer)
+	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, chimw.Logger, chimw.Recoverer)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
@@ -782,6 +784,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
+		stopTelemetry(ctx)
 	}()
 
 	slog.Info("case-api listening", "addr", cfg.Addr)
@@ -1407,6 +1410,9 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) publish(ctx context.Context, tenant, domain string, event map[string]any) {
 	topic := fmt.Sprintf("%s.%s.%s", s.cfg.TopicPrefix, tenant, domain)
+	if tp := traceparentOf(ctx); tp != "" {
+		event["traceparent"] = tp
+	}
 	url := fmt.Sprintf("%s/v1.0/publish/idre-pubsub/%s", s.cfg.DaprHTTP, topic)
 	body, _ := json.Marshal(event)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))

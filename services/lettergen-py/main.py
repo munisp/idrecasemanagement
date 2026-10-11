@@ -30,6 +30,7 @@ import tempfile
 from datetime import date
 
 import httpx
+import otel_setup
 import psycopg
 from confluent_kafka import Consumer
 from docx import Document
@@ -202,6 +203,7 @@ CONSUMER_GROUP = "lettergen" if TOPIC_PREFIX == "idre" else f"lettergen-{TOPIC_P
 
 
 def main() -> None:
+    otel_setup.init("idre-lettergen")
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BROKERS", "localhost:9092"),
         "group.id": CONSUMER_GROUP,
@@ -227,7 +229,10 @@ def main() -> None:
             continue
         try:
             evt = json.loads(msg.value())
-            handle(evt)
+            with otel_setup.span("letter.requested process", traceparent=evt.get("traceparent"), consumer=True,
+                                 **{"idre.tenant": evt.get("tenant"), "idre.case_id": evt.get("case_id"),
+                                    "idre.template": evt.get("template"), "messaging.system": "kafka"}):
+                handle(evt)
             consumer.commit(msg)  # commit only after the letter exists
         except Exception as e:  # noqa: BLE001 — poison event: log, skip once committed offsets move past
             print(f"[lettergen] ERROR {e}", file=sys.stderr, flush=True)

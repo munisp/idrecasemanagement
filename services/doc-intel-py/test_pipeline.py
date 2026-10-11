@@ -459,9 +459,7 @@ def test_deskew_corrects_small_rotation():
     fixed = pl.deskew_image(Image.fromarray(rotated))
     gray = cv2.cvtColor(np.array(fixed), cv2.COLOR_RGB2GRAY)
     coords = np.column_stack(np.where(gray < 128))
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle >= 45:
-        angle -= 90
+    angle = pl._skew_angle(cv2.minAreaRect(coords)[-1])
     assert abs(angle) < 1.5  # 5 degrees in, sub-1.5 out
 
 
@@ -509,3 +507,17 @@ def test_vlm_rejection_with_image_is_rechecked_text_only(monkeypatch):
     assert calls == [2, 1]
     assert ctx["in_domain"] is True
     assert ctx["extracted"]["billed_amount_usd"] == 1850.0
+
+
+def test_index_body_dates_are_iso_or_omitted():
+    body = pl._index_safe_extracted(
+        {"determination_date": "06/15/2026", "service_date": "sometime", "claim_number": "C-1"},
+        {"determination_date": "2026-06-15"})
+    assert body == {"determination_date": "2026-06-15", "claim_number": "C-1"}
+
+
+def test_skew_angle_folds_both_opencv_conventions():
+    assert abs(pl._skew_angle(-85.0) - 5.0) < 1e-9   # pre-4.5.1 range [-90, 0)
+    assert abs(pl._skew_angle(5.0) - 5.0) < 1e-9     # post-4.5.1 range (0, 90]
+    assert abs(pl._skew_angle(90.0)) < 1e-9
+    assert abs(pl._skew_angle(-90.0)) < 1e-9

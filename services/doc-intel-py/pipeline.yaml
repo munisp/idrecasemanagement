@@ -121,5 +121,9 @@ schemas:
     fields: [case_number, idre_entity, prevailing_party, awarded_amount_usd,
              rationale_summary, signature_present, determination_date]
   eob:
+    # service_date/determination_date: the eligibility filing window runs
+    # from the last EOB/determination date, and without these an EOB could
+    # never supply it (only a determination letter could).
     fields: [claim_number, allowed_amount_usd, patient_responsibility_usd,
-             denial_codes, service_lines, network_status]
+             denial_codes, service_lines, network_status, service_date,
+             determination_date]

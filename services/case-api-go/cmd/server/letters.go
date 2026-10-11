@@ -65,6 +65,7 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 		// tell who requested it. Same fix as the QA queue's other
 		// attribution columns.
 		"requested_by": displayName(p), "at": time.Now().UTC(),
+		"traceparent": traceparentOf(r.Context()),
 	})
 	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(
 		`INSERT INTO tenant_%s.outbox (topic, key, payload) VALUES ($1,$2,$3)`,

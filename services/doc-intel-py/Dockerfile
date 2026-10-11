@@ -45,6 +45,7 @@ RUN pip install --no-cache-dir openai confluent-kafka minio httpx "psycopg[binar
 # been crashing every build on import since then. Nobody had rebuilt this
 # image until now, so it went unnoticed.
 RUN pip install --no-cache-dir pytesseract opencv-python-headless
+RUN pip install --no-cache-dir opentelemetry-sdk opentelemetry-exporter-otlp-proto-http opentelemetry-instrumentation-httpx
 COPY . .
 # docling's default OCR backend (rapidocr) lazy-downloads its model weights
 # into its own site-packages dir on first real use, not into $HOME/.cache --

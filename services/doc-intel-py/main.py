@@ -17,6 +17,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+import otel_setup
 import psycopg
 from confluent_kafka import Consumer
 from minio import Minio
@@ -534,6 +535,7 @@ CONSUMER_GROUP = "doc-intel" if TOPIC_PREFIX == "idre" else f"doc-intel-{TOPIC_P
 
 
 def main() -> None:
+    otel_setup.init("idre-doc-intel")
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BROKERS", "localhost:9092"),
         "group.id": CONSUMER_GROUP,
@@ -565,10 +567,16 @@ def main() -> None:
     pending = deque()  # (msg, future), FIFO for in-order commit
 
     def run(evt: dict) -> None:
-        if evt.get("type") == "doc.uploaded":
-            process(evt)
-        elif evt.get("type") == "check.uploaded":
-            process_check(evt)
+        kind = evt.get("type")
+        if kind not in ("doc.uploaded", "check.uploaded"):
+            return
+        with otel_setup.span(f"{kind} process", traceparent=evt.get("traceparent"), consumer=True,
+                             **{"idre.tenant": evt.get("tenant"), "idre.doc_id": evt.get("doc_id"),
+                                "idre.case_id": evt.get("case_id"), "messaging.system": "kafka"}):
+            if kind == "doc.uploaded":
+                process(evt)
+            else:
+                process_check(evt)
 
     def drain(block: bool = False) -> None:
         while pending and (block or pending[0][1].done()):
