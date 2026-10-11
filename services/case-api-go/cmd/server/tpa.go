@@ -183,7 +183,9 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 	// proves the address is real.
 	tempPassword, _ := result["temporary_password"].(string)
 	subject, body := tpaWelcomeMail(in.Name, in.ContactName, username, tempPassword, s.cfg.PortalBaseURL)
-	_, logBody := tpaWelcomeMail(in.Name, in.ContactName, username, "", s.cfg.PortalBaseURL)
+	// The mail log records that the email went out, not what it said: the
+	// sign-in details belong to the recipient only.
+	logBody := tpaWelcomeLogNote
 	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
 		// Without the email nobody holds the password, so the account would
 		// be unusable and the address could not be registered again. Undo
@@ -207,8 +209,8 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		"tpa_id": id, "name": in.Name, "username": username, "user_id": userID, "credentials_emailed_to": in.ContactEmail,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"tpa_id": id, "status": "ACTIVE", "emailed_to": in.ContactEmail,
-		"next": "Your username and a temporary password have been emailed to " + in.ContactEmail + ". Sign in to the portal with them (you'll be asked to set a new password) — your organization is already linked.",
+		"tpa_id": id, "status": "ACTIVE",
+		"next": "Check your email for how to sign in. Your organization is already linked to your portal account.",
 	})
 }
 
@@ -226,18 +228,16 @@ func validMailbox(addr string) bool {
 	return !strings.Contains(local, "..") && !strings.HasPrefix(local, ".") && !strings.HasSuffix(local, ".")
 }
 
-// tpaWelcomeMail builds the sign-in email for a newly registered TPA. With
-// an empty password it returns the copy kept in the mail log, where the
-// password is replaced by a placeholder.
+// tpaWelcomeLogNote is what the mail log keeps for a TPA sign-in email.
+const tpaWelcomeLogNote = "Sign-in details for the new TPA portal account were emailed to the recipient. They are not kept in the mail log."
+
+// tpaWelcomeMail builds the sign-in email for a newly registered TPA.
 func tpaWelcomeMail(orgName, contactName, username, tempPassword, portalBase string) (subject, body string) {
 	greeting := "Hello,"
 	if strings.TrimSpace(contactName) != "" {
 		greeting = "Hello " + strings.TrimSpace(contactName) + ","
 	}
 	pw := tempPassword
-	if pw == "" {
-		pw = "[temporary password — sent to the recipient, not stored here]"
-	}
 	subject = "Your TPA portal account — " + orgName
 	body = greeting + "\n\n" +
 		orgName + " is now registered as a third-party administrator. Your portal account is ready and already linked to your organization.\n\n" +

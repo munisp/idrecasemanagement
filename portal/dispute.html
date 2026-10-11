@@ -55,8 +55,8 @@
     <p class="muted">For third-party administrators — revenue-cycle firms, legal representatives and
       plan delegates who file on behalf of providers or health plans. Register once, then file, pay
       and track disputes for all your client organizations from the portal.</p>
-    <p class="muted">This does not file a dispute. We'll email your portal username and a temporary
-      password to the contact email below; nothing is shown on this page.</p>
+    <p class="muted">This does not file a dispute. We'll email sign-in instructions to the contact
+      email below.</p>
     <form id="tpa-form" class="apply-form" novalidate>
       <label>State program * <select id="t-state" required></select></label>
       <label>TPA organization name * <input id="t-org" maxlength="200" required placeholder="Your organization" /></label>
@@ -176,7 +176,7 @@
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
-          msg.textContent = `Registered. We've emailed your username and a temporary password to ${data.emailed_to || body.contact_email}. Sign in at the portal with them (you'll be asked to set a new password); your organization is already linked, ready to add clients and file on their behalf. If it doesn't arrive in a few minutes, check your spam folder.`;
+          msg.textContent = "Registered. Check your email for how to sign in — if it doesn't arrive in a few minutes, look in your spam folder.";
           e.target.reset();
         } else {
           msg.classList.add("err");

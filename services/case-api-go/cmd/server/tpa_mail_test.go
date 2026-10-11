@@ -15,13 +15,14 @@ func TestTPAWelcomeMail(t *testing.T) {
 			t.Errorf("email body is missing %q", want)
 		}
 	}
-	// The copy kept in the mail log must not contain the password.
-	_, logged := tpaWelcomeMail("Acme Revenue Cycle", "", "dana.lee", "", "https://idre.example.gov")
-	if strings.Contains(logged, "Tmp-9f2c!x") || !strings.Contains(logged, "not stored here") {
-		t.Errorf("logged copy must carry a placeholder, not a password: %q", logged)
+	// What the mail log keeps must carry no sign-in detail at all.
+	for _, secret := range []string{"dana.lee", "Tmp-9f2c!x", "Username", "Password", "app.html"} {
+		if strings.Contains(tpaWelcomeLogNote, secret) {
+			t.Errorf("mail-log note must not contain %q", secret)
+		}
 	}
-	if !strings.HasPrefix(logged, "Hello,") {
-		t.Errorf("no contact name should greet generically: %q", logged[:20])
+	if _, generic := tpaWelcomeMail("Acme Revenue Cycle", "", "dana.lee", "x", "https://idre.example.gov"); !strings.HasPrefix(generic, "Hello,") {
+		t.Errorf("no contact name should greet generically: %q", generic[:20])
 	}
 }
 
