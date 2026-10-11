@@ -273,8 +273,10 @@ func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 // fewest open assignments wins. Manual override via {"assignee": "<sub>"}.
 
 func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// The PM assigns reviewers (SOP). A Reviewer still takes work with
+	// "Grab next"; it cannot route cases to other people.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

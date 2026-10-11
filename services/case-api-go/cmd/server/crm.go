@@ -109,10 +109,6 @@ func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 	// hasRole quirk, onboarding.go) -- without it this would wrongly
 	// reject the tenant's own admin too, which is a different role from
 	// reviewer and keeps full access here.
-	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
-		http.Error(w, `{"error":"forbidden: reviewer cannot create new CRM accounts"}`, http.StatusForbidden)
-		return
-	}
 	var in struct {
 		Type      string         `json:"type"`
 		LegalName string         `json:"legal_name"`
@@ -216,10 +212,6 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// CASE_MANAGER excluded, TENANT_ADMIN exempted, same as createAccount.
-	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
-		http.Error(w, `{"error":"forbidden: reviewer cannot create new contacts"}`, http.StatusForbidden)
-		return
-	}
 	var in struct {
 		AccountID string `json:"account_id"`
 		Name      string `json:"name"`
@@ -423,10 +415,6 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// CASE_MANAGER excluded, TENANT_ADMIN exempted, same as createAccount.
-	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
-		http.Error(w, `{"error":"forbidden: reviewer cannot create new tasks"}`, http.StatusForbidden)
-		return
-	}
 	var in struct {
 		Subject  string `json:"subject"`
 		CaseID   string `json:"case_id"`

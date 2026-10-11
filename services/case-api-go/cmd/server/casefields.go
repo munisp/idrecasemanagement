@@ -124,7 +124,7 @@ func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	zipName := fmt.Sprintf("dispute documentation %s.zip", caseNumber)
+	zipName := fmt.Sprintf("Filing party dispute documentation %s.zip", caseNumber)
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", zipName))
 	zw := zip.NewWriter(w)

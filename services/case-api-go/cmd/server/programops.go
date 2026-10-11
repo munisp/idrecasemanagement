@@ -24,7 +24,8 @@ import (
 // number equals the case number (program convention); both parties can carry
 // independent receivables on one case (dual receivables).
 func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// The PM creates invoices (SOP); the Reviewer does not.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
@@ -427,8 +428,10 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	// one -- reviewer keeps advanceIntake (working an existing intake)
 	// but not this. TENANT_ADMIN added back -- see reportsReadRoles
 	// (casemgmt.go) for why.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// CASE_MANAGER is back: the SOP has the Reviewer send the submission
+	// instructions, and that is what opening an intake does.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -906,7 +909,15 @@ var terminalInternalStatuses = map[string]bool{
 	"Plan Opt-Out": true, "Ineligible": true, "Dismissed": true, "Withdrawn": true,
 }
 
-const decidedInvoicePaidStatus = "Decided - Invoice Paid"
+const decidedInvoicePaidStatus = "Decided - Invoice Paid" // the earlier resting status; still recognised
+
+// invoicePaidStatus / invoicePaidAgencyStatus: the SOP's closure -- "A case
+// closes when the review costs are paid (Internal Status = Invoice Paid,
+// FL AHCA Status = Closed)".
+const (
+	invoicePaidStatus       = "Invoice Paid"
+	invoicePaidAgencyStatus = "Closed"
+)
 
 // maybeMarkDecidedInvoicePaid sets the completed-case resting status when the
 // last open receivable on a decided case is paid. AHCA: closure is reserved
@@ -925,14 +936,14 @@ func (s *server) maybeMarkDecidedInvoicePaid(r *http.Request, tenant, caseID str
 		sanitizeTenant(tenant)), caseID).Scan(&internal); err != nil {
 		return
 	}
-	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || !decidedEnoughForInvoiceRest(internal) {
-		return // already terminal, already resting, or not yet decided
+	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || internal == invoicePaidStatus || !decidedEnoughForInvoiceRest(internal) {
+		return // already terminal, already closed, or not yet decided
 	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
-		`UPDATE tenant_%s.cases SET internal_status=$2, updated_at=now() WHERE id=$1`,
-		sanitizeTenant(tenant)), caseID, decidedInvoicePaidStatus)
+		`UPDATE tenant_%s.cases SET internal_status=$2, agency_status=$3, updated_at=now() WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID, invoicePaidStatus, invoicePaidAgencyStatus)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_COMPLETED",
-		"All invoices paid — case rests at 'Decided - Invoice Paid' (completed, not closed)")
+		"All review costs paid — case closed (Internal Status: Invoice Paid, FL AHCA Status: Closed)")
 }
 
 // sweepIntakeDay13: AHCA completeness gate — an RFI may ride with the

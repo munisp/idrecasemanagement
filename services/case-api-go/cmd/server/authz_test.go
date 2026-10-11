@@ -22,12 +22,18 @@ func TestReviewerOnlyReviewsRoleFloors(t *testing.T) {
 		gate  []string
 		want  bool
 	}{
-		// createIntake: opening a new pre-case intake request.
-		{"createIntake: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"createIntake: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
-		// bulkIntake: same policy, dropped in lockstep with createIntake.
-		{"bulkIntake: PM allowed", []string{"PM"}, []string{"BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"bulkIntake: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// createIntake: the SOP has the Reviewer send the submission
+		// instructions, which is what opening an intake does.
+		{"createIntake: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"createIntake: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"createIntake: CODER rejected", []string{"CODER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// bulkIntake: same policy, in lockstep with createIntake.
+		{"bulkIntake: PM allowed", []string{"PM"}, []string{"BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"bulkIntake: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		// issueInvoice / assignCase: the PM's, per the SOP roles table.
+		{"issueInvoice: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"issueInvoice: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"assignCase: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// requestAdhocDeliverable: requesting a NEW ad hoc deliverable --
 		// submitDeliverable (fulfilling an existing one) is untouched.
 		{"requestAdhocDeliverable: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
@@ -309,8 +315,8 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// assignCase / bulkCases: reassignment is a management decision, not
 		// routine casework -- narrower than the broad case-staff gate.
-		{"assign: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"assign: ATTORNEY rejected", []string{"ATTORNEY"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"assign: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"assign: ATTORNEY rejected", []string{"ATTORNEY"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		{"bulk: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"bulk: CODER rejected", []string{"CODER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 		// grabNext: whoever actually works a queued case, not PM/FINANCE oversight.
@@ -594,8 +600,6 @@ func TestTenantAdminKeepsWhatReviewerLost(t *testing.T) {
 		"timeReport":              {"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
 		"tenantStaff":             {"PM", "TENANT_ADMIN"},
 		"initiateCase":            {"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
-		"createIntake":            {"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
-		"bulkIntake":              {"BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
 		"requestAdhocDeliverable": {"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
 		"tpaAdminAction":          {"FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"},
 	}

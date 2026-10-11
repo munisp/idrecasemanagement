@@ -20,7 +20,7 @@ sequence happens to be in when the RFI goes out.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from temporalio import workflow
 
@@ -28,8 +28,9 @@ with workflow.unsafe.imports_passed_through():
     from activities import flag_cms_breach
     from ahca_activities import (
         set_dual_status, set_program_date, record_followup_action,
-        send_correspondence, set_case_outcome,
+        send_correspondence, set_case_outcome, notify_roles,
     )
+    from calendar_engine import add_business_days
 
 
 @workflow.defn(name="AhcaDisputeWorkflow")
@@ -353,14 +354,50 @@ class AhcaDisputeWorkflow:
                 return await self._withdraw(tenant, case_id)
             if self.rfi_lapsed:
                 return "RFI_LAPSED"
+            if self.estimate_permission is not True and workflow.patched("gate-dismissal-letter-sent"):
+                # No permission by day 15: the SOP gives a further 2-3 business
+                # days, and a dismissal is a letter (Attorney QA), not a status
+                # click. A late "yes" during either wait still proceeds.
+                if self.estimate_permission is None:
+                    start = workflow.now().date()
+                    grace_days = (add_business_days(start, 3, tenant) - start).days
+                    await workflow.execute_activity(
+                        record_followup_action,
+                        args=[tenant, case_id, "day15_no_permission",
+                              "Day 15 — no permission to proceed received. Final 3 business days before the case is dismissed."],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                    await workflow.wait_condition(
+                        lambda: self.estimate_permission is not None or self.provider_withdrawn,
+                        timeout=timedelta(days=grace_days),
+                    )
+                    if self.provider_withdrawn:
+                        return await self._withdraw(tenant, case_id)
+                if self.estimate_permission is not True:
+                    if "dismissal" not in self.letters_sent:
+                        await workflow.execute_activity(
+                            record_followup_action,
+                            args=[tenant, case_id, "send_dismissal_letter",
+                                  "No permission to proceed — send the Dismissal letter (Attorney QA). The case is dismissed when it has been sent."],
+                            start_to_close_timeout=timedelta(seconds=30),
+                        )
+                    await workflow.wait_condition(
+                        lambda: "dismissal" in self.letters_sent or self.estimate_permission is True or self.provider_withdrawn)
+                    if self.provider_withdrawn:
+                        return await self._withdraw(tenant, case_id)
             if self.estimate_permission is not True:
-                # No permission by day 15 (or explicit decline) → Dismissal,
-                # after the 2-3 business day grace the narrative describes.
+                # No permission (or explicit decline) → Dismissal.
                 await workflow.execute_activity(
                     set_dual_status, args=[tenant, case_id, "Dismissed", "Closed"],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 return "DISMISSED"
+
+        if self.estimate_requested and self.estimate_permission is True and workflow.patched("date-provider-responded"):
+            await workflow.execute_activity(
+                set_program_date, args=[tenant, case_id, "date_provider_responded", workflow.now().date().isoformat()],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
 
         # --- Stage 4: health plan notification --------------------------------
         # The plan's 15-day clock starts when the notification email is sent,
@@ -389,6 +426,12 @@ class AhcaDisputeWorkflow:
             set_dual_status, args=[tenant, case_id, "Plan Notification Packet Issued", "Awaiting Plan Response"],
             start_to_close_timeout=timedelta(seconds=30),
         )
+        if workflow.patched("date-plan-response-due"):
+            due = date.fromisoformat(plan_notified_day) + timedelta(days=15)
+            await workflow.execute_activity(
+                set_program_date, args=[tenant, case_id, "date_health_plan_response_due", due.isoformat()],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
 
         # --- Stage 5: full review -- PLAN_RESPONSE clock, 15cd, follow_ups on
         # days 13 (Medicaid AHCA-notify), 14 (call+email), 15 (call again).
@@ -436,11 +479,30 @@ class AhcaDisputeWorkflow:
                 set_dual_status, args=[tenant, case_id, "Plan - No Response", "Under Review"],
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            if workflow.patched("default-determination-notice"):
+                await workflow.execute_activity(
+                    notify_roles,
+                    args=[tenant, case_id, ["PM", "CASE_MANAGER"], "DEFAULT_DETERMINATION",
+                          "The health plan did not respond by day 15 — default determination for the provider. "
+                          "Reviewer: draft the Default Determination. PM: QA it and create the default invoice."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
         else:
             await workflow.execute_activity(
                 set_dual_status, args=[tenant, case_id, "Review In Progress", "Under Review"],
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            if workflow.patched("plan-responded-date-and-notice"):
+                await workflow.execute_activity(
+                    set_program_date, args=[tenant, case_id, "date_plan_responded", workflow.now().date().isoformat()],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                await workflow.execute_activity(
+                    notify_roles,
+                    args=[tenant, case_id, ["ATTORNEY", "CODER"], "PLAN_RESPONDED",
+                          "The health plan has responded — the case is Under Review. Coder: decide whether the plan's documents need coding review."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
 
         # --- Stage 5-6: Coder/Nurse/Attorney review -> PM QA -> determination.
         # No statutory sub-clock governs this internally; the 60-day
@@ -518,6 +580,17 @@ class AhcaDisputeWorkflow:
         return "FINAL_ORDER_ISSUED"
 
     async def _withdraw(self, tenant: str, case_id: str) -> str:
+        # A withdrawal is closed by its letter (QA, AHCA and the plan copied),
+        # ideally within one business day of the request.
+        if workflow.patched("gate-withdrawal-letter-sent"):
+            if "withdrawal" not in self.letters_sent:
+                await workflow.execute_activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "send_withdrawal_letter",
+                          "Provider asked to withdraw — send the Withdrawal letter through QA within 1 business day, copying AHCA and the Health Plan. The case closes when it has been sent."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            await workflow.wait_condition(lambda: "withdrawal" in self.letters_sent)
         await workflow.execute_activity(
             set_dual_status, args=[tenant, case_id, "Provider - Withdrawal", "Closed"],
             start_to_close_timeout=timedelta(seconds=30),

@@ -45,6 +45,23 @@ async def set_program_date(tenant: str, case_id: str, key: str, value: str) -> N
 
 
 @activity.defn
+async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, body: str) -> None:
+    """Tell the people who must act, not the whole tenant: one notification
+    per role (user_sub 'role:<ROLE>', which case-api shows to holders of that
+    role), plus a line on the case timeline."""
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,%s,%s)",
+            (tenant, case_id, typ, body),
+        )
+        for role in roles:
+            c.execute(
+                "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,%s,%s,%s,%s)",
+                (tenant, f"role:{role}", typ, f"Case {case_id}: {body}", f"#/cases/{case_id}"),
+            )
+
+
+@activity.defn
 async def send_correspondence(tenant: str, case_id: str, template: str, body: str) -> None:
     """Drafts/sends a real templated email via the same endpoint the portal
     uses, with to/cc left empty so resolveRecipients fills them server-side

@@ -635,6 +635,10 @@ func main() {
 		r.Post("/admin/tpas/{tpaId}/invite-code", s.adminTPAInviteCode) // mint a claim code for any TPA
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
+		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
+		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
+		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary)   // Coder's Dispute Summary + cost estimate
+		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)        // Attorney rules on a flagged AOR
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)   // auto-adjudicate from case+doc data (Lever 1)
 		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)         // grounded advisory brief (Phase 1 copilot)
 		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)    // latest persisted brief

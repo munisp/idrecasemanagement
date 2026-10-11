@@ -282,7 +282,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 	case "HOLD_AOR":
 		_, _ = s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Hold', agency_status='Other', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
-		s.notify(r, tenant, "*", "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — attorney confirmation requested", caseID), "#/cases/"+caseID)
+		s.notify(r, tenant, "role:ATTORNEY", "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — please confirm (case page, Eligibility review)", caseID), "#/cases/"+caseID)
 	case "INELIGIBLE":
 		// agency_status='Closed' matches what the workflow's own equivalent
 		// transition sets (set_dual_status in ahca_workflow.py) -- this HTTP

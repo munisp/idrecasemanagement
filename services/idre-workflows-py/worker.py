@@ -79,7 +79,7 @@ async def run_workers(client: Client) -> None:
         workflows=[AhcaDisputeWorkflow],
         activities=[
             set_dual_status, set_program_date, record_followup_action,
-            send_correspondence, set_case_outcome,
+            send_correspondence, set_case_outcome, notify_roles,
             flag_cms_breach,  # reused as-is from activities.py -- generic, not CMS-specific at the DB/HTTP layer
         ],
     )

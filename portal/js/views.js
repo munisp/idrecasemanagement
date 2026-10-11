@@ -62,6 +62,92 @@ const Views = (() => {
   }
   function bindClientPager() {}
 
+  // ---- SOP fields: one owner role each ----------------------------------------
+  const SOP_DATE_LABELS = {
+    date_case_accepted: "Date Case Accepted",
+    date_acknowledgment_letter_sent_to_provider: "Date Acknowledgment Letter Sent to Provider",
+    date_acknowledgment_letter_sent_to_health_plan: "Date Acknowledgment Letter Sent to Health Plan",
+    date_provider_responded: "Date Provider Responded",
+    date_health_plan_response_due: "Date Health Plan's Response is Due",
+    date_plan_responded: "Date Plan Responded",
+    date_recommendation_sent_to_agency: "Date the Recommendation is Sent to the Agency",
+    date_final_order_sent: "Date Final Order Sent",
+  };
+  const SOP_NOTE_FIELDS = [
+    ["internal_case_review", "Internal Case Review notes", ["CASE_MANAGER", "PM"], "Reviewer / PM"],
+    ["coder_review", "Coder Review notes", ["CODER"], "Coder"],
+    ["clinical_review", "Clinical Review notes", ["NURSE_PHYSICIAN", "DOCTOR", "NURSE"], "Nurse / Physician"],
+    ["legal_review", "Legal Review notes", ["ATTORNEY"], "Attorney"],
+    ["external", "Comments/Notes (External for Florida)", ["CASE_MANAGER", "PM"], "Reviewer / PM"],
+  ];
+  const sopStamp = (x) => (x && x.by ? `<span class="muted"> — ${esc(x.by)}, ${fmtDate(x.at)}</span>` : "");
+  function sopNotesHtml(id, c) {
+    const rn = (c.details && c.details.review_notes) || {};
+    return `<details class="prog-sec"><summary>Review notes</summary>
+      <p class="muted">One field per role. Everyone on the case can read all of them; each is written only by its owner.</p>` +
+      SOP_NOTE_FIELDS.map(([f, label, roles, owner]) => {
+        const mine = can(...roles, "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+        const n = rn[f] || {};
+        return `<form class="form" onsubmit="event.preventDefault(); Views.saveReviewNote('${id}','${f}',this)">
+          <label><b>${esc(label)}</b>${sopStamp(n)}
+            <textarea name="text" rows="3" ${mine ? "" : "readonly"} placeholder="${mine ? "" : "Written by the " + esc(owner)}">${esc(n.text || "")}</textarea></label>
+          ${mine ? `<button class="mini">Save</button>` : ""}</form>`;
+      }).join("") + `</details>`;
+  }
+  function sopSummaryHtml(id, c, cfg) {
+    const ds = (c.details && c.details.dispute_summary) || {};
+    const mine = can("CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const ro = mine ? "" : "disabled";
+    const matrix = (cfg.estimate && cfg.estimate.cost_matrix) || [];
+    const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : "";
+    return `<details class="prog-sec"><summary>Dispute Summary (Coder)</summary>
+      <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead, the summary of the dispute,
+        and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${sopStamp(ds)}</p>
+      <form class="form" onsubmit="event.preventDefault(); Views.saveDisputeSummary('${id}',this)">
+        <div class="inline-form">
+          <input name="plan_type" placeholder="health plan type" value="${esc(ds.plan_type || "")}" ${ro} />
+          <label>verified from the plan's letterhead <input type="checkbox" name="verified" ${ds.plan_type_verified_from_letterhead ? "checked" : ""} ${ro} /></label>
+          <label>coding review required <input type="checkbox" name="coding" ${ds.coding_review_required ? "checked" : ""} ${ro} /></label>
+        </div>
+        <label>Summary <textarea name="summary" rows="3" ${mine ? "" : "readonly"}>${esc(ds.summary || "")}</textarea></label>
+        <div class="inline-form">
+          ${matrix.length ? `<select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
+            <option value="">Estimated Cost Matrix…</option>
+            ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select>` : ""}
+          <input name="estimate" type="number" step="0.01" min="0" placeholder="full review cost estimate $" value="${est}" ${ro} />
+          <input name="basis" placeholder="matrix row / basis for the estimate" value="${esc(ds.estimate_basis || "")}" ${ro} />
+        </div>
+        ${mine ? `<button class="mini">Save Dispute Summary</button>` : ""}</form></details>`;
+  }
+  function sopAorHtml(id, c) {
+    const a = c.details && c.details.aor_confirmation;
+    const shown = a ? `<p>Attorney confirmation: <b>AOR ${a.valid ? "valid" : "invalid"}</b> — ${esc(a.reason)}${sopStamp(a)}</p>` : "";
+    if (!can("ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return shown;
+    return shown + `<form class="inline-form" onsubmit="event.preventDefault(); Views.confirmAor('${id}',this)">
+      <b>Attorney: confirm AOR</b>
+      <select name="valid" required><option value="">ruling…</option><option value="false">AOR is invalid</option><option value="true">AOR is valid</option></select>
+      <input name="reason" placeholder="reason" required style="flex:1;min-width:220px" /><button class="mini">Record</button></form>`;
+  }
+  async function saveReviewNote(id, field, form) {
+    try { await Api.program.setReviewNote(id, field, form.text.value); UI.toast("Notes saved"); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+  async function saveDisputeSummary(id, form) {
+    const body = { plan_type: form.plan_type.value, plan_type_verified_from_letterhead: form.verified.checked,
+      coding_review_required: form.coding.checked, summary: form.summary.value, estimate_basis: form.basis.value };
+    if (form.estimate.value !== "") body.full_review_estimate_cents = Math.round(Number(form.estimate.value) * 100);
+    try { await Api.program.setDisputeSummary(id, body); UI.toast("Dispute Summary saved"); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+  async function confirmAor(id, form) {
+    try { await Api.program.confirmAor(id, form.valid.value === "true", form.reason.value); UI.toast("AOR confirmation recorded"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+  async function eligChecklist(id) {
+    try { await Api.program.eligibilityChecklist(id); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+
   // ---- Statutory clock helpers -------------------------------------------------
   const clockChip = (c) => {
     const txt = c.remaining >= 0 ? `${c.remaining} ${c.basis === "business" ? "bd" : "cd"} left` : `Breached ${Math.abs(c.remaining)}d ago`;
@@ -710,7 +796,7 @@ const Views = (() => {
         `</ul>`).join("");
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         html += `<div class="actions">
-          <button onclick="Views.assign('${id}')">Assign / route</button>
+          ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button onclick="Views.assign('${id}')">Assign / route</button>` : ""}
           <button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
           <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
         </div>`;
@@ -1324,7 +1410,7 @@ const Views = (() => {
       <details class="prog-sec" open><summary>Dual status</summary>
       <p class="muted">Current: ${c.internal_status ? badge(c.internal_status) : "<em>none</em>"} / ${c.agency_status ? badge(c.agency_status) : "<em>none</em>"}</p>
       <p class="muted">Case details: ${c.details && Object.keys(c.details).length
-        ? Object.entries(c.details).map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
+        ? Object.entries(c.details).filter(([, v]) => v === null || typeof v !== "object").map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
         : "<em>none set</em>"}</p>
       <form id="p-status" class="inline-form">
         <select name="internal"><option value="">internal status…</option>
@@ -1350,6 +1436,8 @@ const Views = (() => {
         Result is ELIGIBLE, INELIGIBLE (with reason code), or HOLD_AOR — and INELIGIBLE/HOLD move the case status
         automatically.</p>
       <div id="p-elig-history"></div>
+      <div class="actions"><button type="button" class="mini" onclick="Views.eligChecklist('${id}')">Download Eligibility Checklist</button></div>
+      ${sopAorHtml(id, c)}
       <div class="actions"><button id="p-elig-auto" title="Derives every rule input from the case record and analyzed documents, then decides — or tells you exactly which inputs are still missing">⚡ Auto-adjudicate from case + documents</button></div>
       <div id="p-elig-auto-out"></div>
       <form id="p-elig" class="form">
@@ -1383,11 +1471,11 @@ const Views = (() => {
         <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
 
       <details class="prog-sec"><summary>Invoices & claims</summary>
-      <form id="p-inv" class="inline-form">
+      ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form">
         <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
         <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
         <input name="amount" type="number" step="0.01" placeholder="amount $" required />
-        <button>Issue invoice</button></form><div id="p-inv-list" data-case-id="${esc(id)}"></div>
+        <button>Issue invoice</button></form>` : `<p class="muted">Invoices are created by the PM.</p>`}<div id="p-inv-list" data-case-id="${esc(id)}"></div>
       <form id="p-claims" class="inline-form">
         <textarea name="csv" rows="3" placeholder="claim_number,cpt,billed,paid per line (bulk import)"></textarea>
         <p class="mhint">For disputes at/crossing 100 claims (Capitol Bridge large-volume policy), add 9 more
@@ -1430,6 +1518,9 @@ const Views = (() => {
         <input name="num_claims" type="number" placeholder="number of claims reviewed" />
         <button>Send signal</button></form></details>
 
+      ${sopNotesHtml(id, c)}
+      ${sopSummaryHtml(id, c, cfg)}
+
       <details class="prog-sec"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
         <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
@@ -1464,8 +1555,12 @@ const Views = (() => {
             return `<tr><td>${esc(cl.label)}</td><td class="mono">${esc(cl.basis)}</td>
               <td>${rec ? `<b>${esc(rec)}</b>` : `<span class="muted">not recorded</span>`}</td></tr>`;
           });
+          const bases = new Set((cfg.clocks || []).map((cl) => cl.basis));
+          const others = Object.entries(pd).filter(([k]) => !bases.has(k)).sort()
+            .map(([k, v]) => `<tr><td>${esc(SOP_DATE_LABELS[k] || k.replace(/_/g, " "))}</td><td class="mono">${esc(k)}</td><td><b>${esc(v)}</b></td></tr>`);
           el.innerHTML = `<table><thead><tr><th>Clock basis</th><th>Key</th><th>Recorded</th></tr></thead>
-            <tbody>${rows.join("")}</tbody></table>`;
+            <tbody>${rows.join("")}</tbody></table>` + (others.length
+            ? `<p><b>Other recorded dates</b></p><table><thead><tr><th>Date</th><th>Key</th><th>Recorded</th></tr></thead><tbody>${others.join("")}</tbody></table>` : "");
         }).catch(() => {});
         Api.cm.clocks(id).then((cls) => {
           const el = document.getElementById("p-clock-proj"); if (!el) return;
@@ -1890,12 +1985,9 @@ const Views = (() => {
 
   const INTAKE_STATUSES = ["DOCS_RECEIVED", "PACKET_COMPLETE", "PAID", "CONVERTED", "INELIGIBLE", "CLOSED_REFUNDED"];
   function intake() {
-    // CASE_MANAGER cannot create new intake (single or bulk) per the
-    // "reviewer only reviews" follow-up -- matches createIntake/bulkIntake's
-    // backend gates, which now require PM/FEDERAL_ADMIN/PLATFORM_ADMIN/
-    // TENANT_ADMIN (the last is a different role from reviewer and keeps
-    // full access).
-    const canCreate = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
+    // The Reviewer owns intake (SOP): it sends the submission instructions,
+    // which is what opening an intake does. Matches createIntake/bulkIntake.
+    const canCreate = can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
     afterRender(() => {
       intakeBox("");
       $("#intake-form")?.addEventListener("submit", async (ev) => {
@@ -5399,5 +5491,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist };
 })();

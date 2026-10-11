@@ -238,7 +238,7 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 	// dropped from "staff roles" here in lockstep with createIntake, per
 	// the "reviewer only reviews" follow-up; PM picked it up there too.
 	// TENANT_ADMIN added back -- see reportsReadRoles (casemgmt.go) for why.
-	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires TPA, BULK_SUBMITTER, or staff role"}`, http.StatusForbidden)
 		return
 	}
