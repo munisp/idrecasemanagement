@@ -58,6 +58,9 @@ class AhcaDisputeWorkflow:
         self.rfi_to: str | None = None  # "provider" | "plan"
         self.rfi_response_received = False
         self.rfi_lapsed = False
+        # Templates of the letters that have really gone out (case-api
+        # signals each send). The stage gates in _run_stages wait on these.
+        self.letters_sent: set[str] = set()
 
     # ---- signals -------------------------------------------------------
     @workflow.signal(name="PACKET_COMPLETE")
@@ -122,6 +125,10 @@ class AhcaDisputeWorkflow:
     @workflow.signal(name="FINAL_ORDER_ISSUED")
     def on_final_order_issued(self, data: dict) -> None:
         self.final_order_issued = True
+
+    @workflow.signal(name="LETTER_SENT")
+    def on_letter_sent(self, data: dict) -> None:
+        self.letters_sent.add(data.get("template", ""))
 
     @workflow.signal(name="RFI_SENT")
     def on_rfi_sent(self, data: dict) -> None:
@@ -297,6 +304,22 @@ class AhcaDisputeWorkflow:
             )
             return "INELIGIBLE"
 
+        # The dispute is eligible, but "Provider Acceptance Letter Issued" is a
+        # fact about a letter: wait until the acceptance letter has passed QA
+        # and gone out. (patched(): cases already past this point keep the
+        # history they have.)
+        if workflow.patched("gate-acceptance-letter-sent"):
+            if "acceptance" not in self.letters_sent:
+                await workflow.execute_activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "send_acceptance_letter",
+                          "Dispute is eligible — send the Acceptance letter through QA. The case moves on when it has been sent."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            await workflow.wait_condition(lambda: "acceptance" in self.letters_sent or self.provider_withdrawn)
+            if self.provider_withdrawn:
+                return await self._withdraw(tenant, case_id)
+
         # --- Stage 3: provider response (cost estimate / RFI / withdrawal) --
         await workflow.execute_activity(
             set_dual_status, args=[tenant, case_id, "Provider Acceptance Letter Issued", "Awaiting Provider Response"],
@@ -340,8 +363,26 @@ class AhcaDisputeWorkflow:
                 return "DISMISSED"
 
         # --- Stage 4: health plan notification --------------------------------
+        # The plan's 15-day clock starts when the notification email is sent,
+        # so nothing below runs until it has passed QA and gone out.
+        plan_notified_day = today
+        if workflow.patched("gate-plan-notification-sent"):
+            if "plan_notification" not in self.letters_sent:
+                await workflow.execute_activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "send_plan_notification",
+                          "Send the Health Plan Notification and FL Plan Packet through QA. The plan's 15-day clock starts when it has been sent."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            await workflow.wait_condition(
+                lambda: "plan_notification" in self.letters_sent or self.provider_withdrawn or self.rfi_lapsed)
+            if self.provider_withdrawn:
+                return await self._withdraw(tenant, case_id)
+            if self.rfi_lapsed:
+                return "RFI_LAPSED"
+            plan_notified_day = workflow.now().date().isoformat()
         await workflow.execute_activity(
-            set_program_date, args=[tenant, case_id, "plan_notified_at", today],
+            set_program_date, args=[tenant, case_id, "plan_notified_at", plan_notified_day],
             start_to_close_timeout=timedelta(seconds=30),
         )
         await workflow.execute_activity(
@@ -436,6 +477,18 @@ class AhcaDisputeWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
             )
 
+        # "Determination Sent to FL" is also a fact about a letter: the PM
+        # QAs the Final Order package, and only when the email to AHCA has
+        # gone out does the case take that status and its date.
+        if workflow.patched("gate-final-order-sent"):
+            if "final_order" not in self.letters_sent:
+                await workflow.execute_activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "send_final_order_package",
+                          "Review complete — PM to QA the Final Order package and create the invoice; then send it to AHCA. The case is marked Determination Sent to FL when it has been sent."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            await workflow.wait_condition(lambda: "final_order" in self.letters_sent)
         determination_day = workflow.now().date().isoformat()
         await workflow.execute_activity(
             set_program_date, args=[tenant, case_id, "date_recommendation_sent_to_agency", determination_day],

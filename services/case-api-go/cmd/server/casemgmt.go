@@ -221,8 +221,8 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, type, body, COALESCE(link,''), created_at
 		FROM public.notifications
-		WHERE tenant=$1 AND (user_sub=$2 OR user_sub='*') AND read_at IS NULL
-		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, p.Subject)
+		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL
+		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, notifTargets(p))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -250,8 +250,8 @@ func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 	// tenant member could mark ANY other user's notification read by id.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.notifications SET read_at=now()
-		WHERE tenant=$1 AND id=$2 AND (user_sub=$3 OR user_sub='*')`,
-		tenant, chi.URLParam(r, "notifId"), p.Subject)
+		WHERE tenant=$1 AND id=$2 AND user_sub = ANY($3)`,
+		tenant, chi.URLParam(r, "notifId"), notifTargets(p))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
 }
 
@@ -263,8 +263,8 @@ func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.notifications SET read_at=now()
-		WHERE tenant=$1 AND (user_sub=$2 OR user_sub='*') AND read_at IS NULL`,
-		tenant, p.Subject)
+		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL`,
+		tenant, notifTargets(p))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
 }
 

@@ -47,19 +47,19 @@ import (
 // ---------------------------------------------------------------------------
 
 type Config struct {
-	Addr            string // :8080
-	DatabaseURL     string // postgres://...
-	KeycloakJWKS    string // https://keycloak/realms/idre/protocol/openid-connect/certs
-	KeycloakIssuer  string // https://keycloak/realms/idre
-	TemporalHost    string // temporal-frontend:7233
-	TemporalNS      string // idre
-	TBAddresses     string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
-	TBClusterID     string // decimal cluster ID this TigerBeetle deployment was formatted with
-	DaprHTTP        string // http://localhost:3500
+	Addr           string // :8080
+	DatabaseURL    string // postgres://...
+	KeycloakJWKS   string // https://keycloak/realms/idre/protocol/openid-connect/certs
+	KeycloakIssuer string // https://keycloak/realms/idre
+	TemporalHost   string // temporal-frontend:7233
+	TemporalNS     string // idre
+	TBAddresses    string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
+	TBClusterID    string // decimal cluster ID this TigerBeetle deployment was formatted with
+	DaprHTTP       string // http://localhost:3500
 	// TopicPrefix namespaces every Kafka topic this deployment publishes
 	// ("<prefix>.<tenant>.<domain>"). Two deployments on one broker MUST
 	// use different prefixes or each consumes the other's events.
-	TopicPrefix string
+	TopicPrefix     string
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
 	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
@@ -72,19 +72,19 @@ type Config struct {
 	// MailWebhookSecret (whsec_…) signs the mail provider's delivery reports
 	// (bounced/delivered/complained). Empty = the endpoint is closed.
 	MailWebhookSecret string
-	MojaloopAdapter string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
-	MojaloopSecret  string // HMAC secret shared with the scheme adapter
-	PortalBaseURL   string // https://portal.example.gov — Stripe success/cancel return
-	ClamdAddr       string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
-	SMTPHost        string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
-	SMTPPort        int
-	SMTPUser        string
-	SMTPPass        string
-	SMTPFrom        string // e.g. flcdr@example.org
-	WorkerToken     string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
-	KeycloakURL     string // http://keycloak:8080 (base, no /realms/... suffix) -- admin API calls
-	KCAdmin         string // Keycloak master-realm admin username, for tenant provisioning
-	KCAdminPassword string
+	MojaloopAdapter   string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
+	MojaloopSecret    string // HMAC secret shared with the scheme adapter
+	PortalBaseURL     string // https://portal.example.gov — Stripe success/cancel return
+	ClamdAddr         string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
+	SMTPHost          string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
+	SMTPPort          int
+	SMTPUser          string
+	SMTPPass          string
+	SMTPFrom          string // e.g. flcdr@example.org
+	WorkerToken       string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
+	KeycloakURL       string // http://keycloak:8080 (base, no /realms/... suffix) -- admin API calls
+	KCAdmin           string // Keycloak master-realm admin username, for tenant provisioning
+	KCAdminPassword   string
 }
 
 func configFromEnv() Config {
@@ -122,23 +122,23 @@ func configFromEnv() Config {
 		// The copilot shares the in-cluster ollama already serving doc-intel
 		// extraction and graph-intel KGQA — a shared LOCAL instance with a
 		// known OOM history, so briefs are single bounded calls, never loops.
-		CopilotEndpoint: get("COPILOT_ENDPOINT", get("VLM_ENDPOINT", "http://ollama.ollama.svc.cluster.local:11434/v1")),
-		OpenSearchURL:   get("OPENSEARCH_URL", ""),
-		OpenSearchUser:  get("OPENSEARCH_USER", ""),
-		OpenSearchPass:  get("OPENSEARCH_PASSWORD", ""),
-		CopilotModel:    get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
-		StripeSecret:    get("STRIPE_SECRET_KEY", ""),
-		StripeWebhook:   get("STRIPE_WEBHOOK_SECRET", ""),
+		CopilotEndpoint:   get("COPILOT_ENDPOINT", get("VLM_ENDPOINT", "http://ollama.ollama.svc.cluster.local:11434/v1")),
+		OpenSearchURL:     get("OPENSEARCH_URL", ""),
+		OpenSearchUser:    get("OPENSEARCH_USER", ""),
+		OpenSearchPass:    get("OPENSEARCH_PASSWORD", ""),
+		CopilotModel:      get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
+		StripeSecret:      get("STRIPE_SECRET_KEY", ""),
+		StripeWebhook:     get("STRIPE_WEBHOOK_SECRET", ""),
 		MailWebhookSecret: get("MAIL_WEBHOOK_SECRET", ""),
-		MojaloopAdapter: get("MOJALOOP_ADAPTER_URL", ""),
-		MojaloopSecret:  get("MOJALOOP_WEBHOOK_SECRET", ""),
-		PortalBaseURL:   get("PORTAL_BASE_URL", "http://localhost:8080"),
-		ClamdAddr:       get("CLAMD_ADDR", "localhost:3310"),
-		SMTPHost:        get("SMTP_HOST", ""),
-		SMTPPort:        getInt("SMTP_PORT", 587),
-		SMTPUser:        get("SMTP_USER", ""),
-		SMTPPass:        get("SMTP_PASS", ""),
-		SMTPFrom:        get("SMTP_FROM", "idre@localhost"),
+		MojaloopAdapter:   get("MOJALOOP_ADAPTER_URL", ""),
+		MojaloopSecret:    get("MOJALOOP_WEBHOOK_SECRET", ""),
+		PortalBaseURL:     get("PORTAL_BASE_URL", "http://localhost:8080"),
+		ClamdAddr:         get("CLAMD_ADDR", "localhost:3310"),
+		SMTPHost:          get("SMTP_HOST", ""),
+		SMTPPort:          getInt("SMTP_PORT", 587),
+		SMTPUser:          get("SMTP_USER", ""),
+		SMTPPass:          get("SMTP_PASS", ""),
+		SMTPFrom:          get("SMTP_FROM", "idre@localhost"),
 		// No default: an empty WorkerToken disables the service-auth path
 		// entirely rather than accepting a guessable default as a credential.
 		WorkerToken: get("WORKER_TOKEN", ""),
@@ -538,7 +538,7 @@ func main() {
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/checks", s.uploadCheck)                                // physical check photo/scan intake
 		r.Get("/checks", s.listChecks)                                  // review queue
-		r.Get("/checks/{checkId}/image", s.checkImage)                 // vault-unsealed scan for portal preview
+		r.Get("/checks/{checkId}/image", s.checkImage)                  // vault-unsealed scan for portal preview
 		r.Post("/checks/{checkId}/clear", s.clearCheck)                 // funds-cleared settlement
 		r.Post("/checks/{checkId}/match", s.matchCheck)                 // manual link to invoice/case when auto-match (checkResult) landed it in REVIEW
 		r.Post("/internal/checks/{checkId}/result", s.checkResult)      // worker-token: doc-intel OCR
@@ -579,67 +579,67 @@ func main() {
 
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
-		r.Put("/program/label", s.setTenantLabel)         // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
-		r.Get("/admin/tenant-labels", s.listTenantLabels) // cross-tenant switcher label map
-		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
-		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
-		r.Post("/cases/{caseId}/time", s.addTimeEntry)               // per-role effort on the dispute
+		r.Put("/program/label", s.setTenantLabel)                // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
+		r.Get("/admin/tenant-labels", s.listTenantLabels)        // cross-tenant switcher label map
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate) // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)        // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/time", s.addTimeEntry)           // per-role effort on the dispute
 		r.Get("/cases/{caseId}/time", s.listTimeEntries)
-		r.Get("/time/mine", s.myTimeEntries)              // personal timesheet (all disputes)
-		r.Get("/time/summary", s.myTimeSummary)           // today / this week / this month totals
-		r.Put("/time/{entryId}", s.updateTimeEntry)       // editable entries, audited before/after
-		r.Delete("/time/{entryId}", s.deleteTimeEntry)    // deletion keeps the audit snapshot
-		r.Get("/reports/time", s.timeReport)                          // weekly per-dispute + monthly team rollup
-		r.Post("/time/report/send", s.timeReportSend)              // email the team-hours report out (PM/FINANCE/admin)
-		r.Get("/reports/time/rates", s.getTimeRates)                  // role billable rates (view: PM/FINANCE/admin)
-		r.Put("/reports/time/rates", s.putTimeRate)                   // set rates (PM/admin only)
+		r.Get("/time/mine", s.myTimeEntries)           // personal timesheet (all disputes)
+		r.Get("/time/summary", s.myTimeSummary)        // today / this week / this month totals
+		r.Put("/time/{entryId}", s.updateTimeEntry)    // editable entries, audited before/after
+		r.Delete("/time/{entryId}", s.deleteTimeEntry) // deletion keeps the audit snapshot
+		r.Get("/reports/time", s.timeReport)           // weekly per-dispute + monthly team rollup
+		r.Post("/time/report/send", s.timeReportSend)  // email the team-hours report out (PM/FINANCE/admin)
+		r.Get("/reports/time/rates", s.getTimeRates)   // role billable rates (view: PM/FINANCE/admin)
+		r.Put("/reports/time/rates", s.putTimeRate)    // set rates (PM/admin only)
 		// Service-fee invoicing engine (time ledger x rates -> invoices)
-		r.Post("/billing/invoices", s.generateInvoice)                // generate DRAFT for week/month/custom range
+		r.Post("/billing/invoices", s.generateInvoice) // generate DRAFT for week/month/custom range
 		r.Get("/billing/invoices", s.listBillingInvoices)
 		r.Get("/billing/invoices/{invoiceId}", s.getBillingInvoice)
-		r.Post("/billing/invoices/{invoiceId}/{action}", s.transitionInvoice) // approve|issue|void
+		r.Post("/billing/invoices/{invoiceId}/{action}", s.transitionInvoice)    // approve|issue|void
 		r.Post("/billing/invoices/{invoiceId}/payments", s.recordInvoicePayment) // FINANCE
 		r.Get("/billing/invoices/{invoiceId}/export", s.exportInvoiceCSV)        // accounting import CSV
 		// Reconciliation engine + accounting adapters
-		r.Post("/recon/import", s.reconImport)                        // CSV upload / configured http_json feed
-		r.Post("/recon/batches/{batchId}/match", s.reconRunMatch)     // deterministic auto-match
+		r.Post("/recon/import", s.reconImport)                    // CSV upload / configured http_json feed
+		r.Post("/recon/batches/{batchId}/match", s.reconRunMatch) // deterministic auto-match
 		r.Get("/recon/batches", s.reconListBatches)
 		r.Get("/recon/batches/{batchId}", s.reconGetBatch)
-		r.Post("/recon/items/{itemId}/resolve", s.reconResolveItem)   // manual match|exception|ignore|unmatch
-		r.Get("/recon/summary", s.reconSummary)                       // platform vs external drift for a period
+		r.Post("/recon/items/{itemId}/resolve", s.reconResolveItem) // manual match|exception|ignore|unmatch
+		r.Get("/recon/summary", s.reconSummary)                     // platform vs external drift for a period
 		// AR/AP subledger (arap.go)
-		r.Get("/arap/receivables", s.listReceivables)                 // open AR derived live from invoice stores
+		r.Get("/arap/receivables", s.listReceivables) // open AR derived live from invoice stores
 		r.Get("/arap/payables", s.listPayables)
-		r.Post("/arap/payables", s.createPayable)                     // FINANCE records an obligation
+		r.Post("/arap/payables", s.createPayable)                      // FINANCE records an obligation
 		r.Post("/arap/payables/{payableId}/{action}", s.settlePayable) // settle|void
-		r.Get("/arap/summary", s.arapSummary)                         // AR vs AP net position
-		r.Post("/arap/payouts/nacha", s.createNachaPayout)     // FINANCE: ACH file from open payables
+		r.Get("/arap/summary", s.arapSummary)                          // AR vs AP net position
+		r.Post("/arap/payouts/nacha", s.createNachaPayout)             // FINANCE: ACH file from open payables
 		r.Get("/arap/payouts", s.listPayoutBatches)
 		r.Get("/arap/payouts/{batchId}/file", s.payoutBatchFile)
-		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
+		r.Get("/cases/{caseId}/financials", s.caseFinancials) // every money record tied to the dispute
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
 		// multiple initiating parties (providers or health plans).
-		r.Post("/tpa/claim", s.claimTPA)                    // burn a one-time claim code, bind user -> TPA
-		r.Post("/tpa/unlink", s.unlinkTPA)                  // staff-only: undo "Act as this TPA"
-		r.Post("/tpa/invite-code", s.tpaInviteCode)         // mint a fresh claim code to add a teammate
-		r.Get("/tpa/me", s.tpaMe)                           // my TPA org + clients
-		r.Post("/tpa/clients", s.tpaAddClient)              // add an initiating party I represent
+		r.Post("/tpa/claim", s.claimTPA)            // burn a one-time claim code, bind user -> TPA
+		r.Post("/tpa/unlink", s.unlinkTPA)          // staff-only: undo "Act as this TPA"
+		r.Post("/tpa/invite-code", s.tpaInviteCode) // mint a fresh claim code to add a teammate
+		r.Get("/tpa/me", s.tpaMe)                   // my TPA org + clients
+		r.Post("/tpa/clients", s.tpaAddClient)      // add an initiating party I represent
 		r.Get("/tpa/clients", s.tpaListClients)
 		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
-		r.Post("/tpa/intake", s.tpaIntake)                  // file a dispute on behalf of a client
-		r.Get("/tpa/dashboard", s.tpaDashboard)             // status of all my clients' disputes
-		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute) // correct my own filing while it awaits payment
-		r.Get("/admin/tpas", s.adminListTPAs)               // state oversight
-		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus) // suspend|reactivate
+		r.Post("/tpa/intake", s.tpaIntake)                              // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)                         // status of all my clients' disputes
+		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)             // correct my own filing while it awaits payment
+		r.Get("/admin/tpas", s.adminListTPAs)                           // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)       // suspend|reactivate
 		r.Post("/admin/tpas/{tpaId}/invite-code", s.adminTPAInviteCode) // mint a claim code for any TPA
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
-		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
-		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)       // grounded advisory brief (Phase 1 copilot)
-		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)  // latest persisted brief
-		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
-		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface, private per worker)
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)   // auto-adjudicate from case+doc data (Lever 1)
+		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)         // grounded advisory brief (Phase 1 copilot)
+		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)    // latest persisted brief
+		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)         // Phase 2: QA-gated determination/correspondence drafts
+		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)     // Assistant thread (conversational surface, private per worker)
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
 		r.Post("/cases/{caseId}/copilot/chat/log", s.copilotChatLog) // fast-path intents: persist without calling the model
 		r.Get("/cases/{caseId}/copilot/chat/shares", s.copilotListThreadShares)
@@ -647,14 +647,14 @@ func main() {
 		r.Delete("/cases/{caseId}/copilot/chat/shares/{userId}", s.copilotUnshareThread)
 		r.Get("/copilot/chat", s.copilotGeneralChatHistory) // floating-widget thread, no case open
 		r.Post("/copilot/chat", s.copilotGeneralChat)
-		r.Post("/copilot/chat/log", s.copilotGeneralChatLog) // fast-path intents: persist without calling the model
-		r.Get("/assistant/briefing", s.briefing) // worker-scoped morning digest (conversation-first step 2)
+		r.Post("/copilot/chat/log", s.copilotGeneralChatLog)               // fast-path intents: persist without calling the model
+		r.Get("/assistant/briefing", s.briefing)                           // worker-scoped morning digest (conversation-first step 2)
 		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions) // Phase 3: bounded action-batch proposal
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence)                      // template draft / send (G3)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
-		r.Get("/correspondence", s.listMailJournal)                          // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
+		r.Get("/correspondence", s.listMailJournal)              // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
 		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
@@ -675,7 +675,7 @@ func main() {
 		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake
 		r.Post("/intake", s.createIntake)                 // pre-case intake (G12)
 		r.Post("/intake/bulk", s.bulkIntake)              // third-party batch filing (idempotent by batch_ref)
-		r.Get("/intake/bulk", s.listIntakeBatches)          // filer status board (own batches; staff may filter)
+		r.Get("/intake/bulk", s.listIntakeBatches)        // filer status board (own batches; staff may filter)
 		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch) // batch receipt / reconciliation
 		r.Get("/intake", s.listIntake)
 		r.Post("/intake/{intakeId}/advance", s.advanceIntake) // refund window enforced
@@ -743,7 +743,7 @@ func main() {
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
-	r.Post("/api/webhooks/mail", s.mailWebhook) // provider delivery reports -> mail log status
+	r.Post("/api/webhooks/mail", s.mailWebhook)                // provider delivery reports -> mail log status
 	r.Post("/api/webhooks/lockbox/{tenant}", s.lockboxWebhook) // bank deposit confirmation (HMAC)
 	r.Post("/api/webhooks/mojaloop", s.mojaloopWebhook)
 
@@ -1182,14 +1182,17 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 // ELIGIBILITY_RESULT -> checkEligibility's floor) rather than inventing a
 // separate rule for the same decision reaching the workflow two ways.
 var signalRoleFloors = map[string][]string{
-	"RESPONSE_FILED":           {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"OFFER_SUBMITTED":          {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"FEES_PAID":                {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"SELECTION_FINALIZED":      {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"DETERMINATION_ISSUED":     {"ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"PAYMENT_RECORDED":         {"FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"SETTLED_OR_WITHDRAWN":     {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"PLAN_OPT_OUT":             {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"RESPONSE_FILED":       {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"OFFER_SUBMITTED":      {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"FEES_PAID":            {"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"SELECTION_FINALIZED":  {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"DETERMINATION_ISSUED": {"ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PAYMENT_RECORDED":     {"FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"SETTLED_OR_WITHDRAWN": {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PLAN_OPT_OUT":         {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	// Sent by case-api itself when a letter really goes out; a person
+	// sending it by hand would walk a case past its QA gate.
+	"LETTER_SENT":              {"FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ELIGIBILITY_RESULT":       {"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"CODING_REVIEW_COMPLETE":   {"CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
@@ -1275,7 +1278,7 @@ const (
 	acctOperatingCash    uint32 = 7002 // invoice payments received (operating, not escrow)
 	acctAccountsPayable  uint32 = 7003 // open obligations (awards, vendor, refunds)
 	acctProgramExpense   uint32 = 7004 // expense recognition when a payable is recorded
-	ledgerCodeIDRE       uint16 = 700 // platform code; ledger id = tenantLedgerID(tenant)
+	ledgerCodeIDRE       uint16 = 700  // platform code; ledger id = tenantLedgerID(tenant)
 )
 
 func tenantLedgerID(tenant string) uint32 {

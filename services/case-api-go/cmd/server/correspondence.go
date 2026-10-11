@@ -270,8 +270,11 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	toJ, _ := json.Marshal(in.To)
 	ccJ, _ := json.Marshal(in.CC)
 	status := "SENT"
-	if tpl.QARole != "" {
-		status = "PENDING" // QA gate (G4): attorney/PM must approve before send
+	// QA gate (G4): the template's QA role must approve before send. The
+	// worker is exempt -- what the workflow sends at a lapsed deadline is a
+	// fixed notice with nobody at a compose screen to wait for.
+	if tpl.QARole != "" && !contains(p.Roles, serviceRole) {
+		status = "PENDING"
 	}
 	var qid string
 	// artifact stores the template key (schema comment: "template key, e.g.
@@ -279,15 +282,20 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	// which made it impossible for qaDecision to ever look up which role's
 	// approval a pending draft actually needed.
 	_ = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, requested_by_sub)
-		VALUES ($1,$2,$3,'email',$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, displayName(p), p.Subject).Scan(&qid)
+		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, requested_by_sub, rfi_to)
+		VALUES ($1,$2,$3,'email',$4,$5,$6,$7,$8,$9,$10,nullif($11,'')) RETURNING id`,
+		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, displayName(p), p.Subject, in.RfiTo).Scan(&qid)
 
 	if status == "PENDING" {
 		// Held for QA: nothing is sent yet, but the mail log shows it as
 		// PENDING so "where is that email?" has an answer before approval.
 		s.logCorrespondenceHeld(r, tenant, caseID, in.Template, subject, body, in.To, in.CC, p.Subject, qid)
-		s.notify(r, tenant, "*", "QA_REVIEW",
+		// The case shows it is waiting on QA, and the approver is told.
+		if prev, changed := s.markCaseInQA(r, tenant, caseID, tpl.Key); changed {
+			_, _ = s.db.Exec(r.Context(),
+				`UPDATE public.qa_reviews SET prev_internal_status=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, prev)
+		}
+		s.notify(r, tenant, "role:"+tpl.QARole, "QA_REVIEW",
 			fmt.Sprintf("%s draft on case %s awaiting %s QA approval", tpl.Key, caseID, tpl.QARole), "#/qa")
 	} else {
 		// No QA gate on this template — deliver immediately via SMTP.
@@ -305,30 +313,7 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 			fmt.Sprintf("%s sent to %d recipient(s) (cc %d) — template %s", subject, len(in.To), len(in.CC), in.Template))
-		if dateKeys, ok := templateDateKeys[in.Template]; ok {
-			today := time.Now().UTC().Format("2006-01-02")
-			for _, key := range dateKeys {
-				_, _ = s.db.Exec(r.Context(),
-					fmt.Sprintf(`UPDATE tenant_%s.cases SET program_dates = program_dates || jsonb_build_object($2::text, $3::text), updated_at=now() WHERE id=$1`,
-						sanitizeTenant(tenant)), caseID, key, today)
-			}
-		}
-		// RFI can go out at stages 3-5 ("3-5 Any" per the narrative) -- signal
-		// the workflow's concurrent RFI watcher so the 15-day response clock
-		// and its day-15 lapse->closed outcome actually run, same auto-signal
-		// shape as checkEligibility/recordOptOut. Best-effort.
-		if in.Template == "rfi" {
-			rfiTo := in.RfiTo
-			if rfiTo != "plan" {
-				rfiTo = "provider"
-			}
-			var caseNumber string
-			if err := s.db.QueryRow(r.Context(),
-				fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber); err == nil {
-				wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-				_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "RFI_SENT", map[string]any{"to": rfiTo})
-			}
-		}
+		s.afterLetterSent(r, tenant, caseID, in.Template, in.RfiTo)
 		// "parties notified" and friends tick themselves on delivery.
 		s.autoChecklist(r, tenant, caseID)
 	}
@@ -429,11 +414,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	var caseID, subject, body, status, artifact, channel, draftedBy, requestedBySub string
+	var caseID, subject, body, status, artifact, channel, draftedBy, requestedBySub, rfiTo string
 	var toJ, ccJ []byte
 	err := s.db.QueryRow(r.Context(),
-		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'), coalesce(drafted_by,''), coalesce(requested_by_sub,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
-		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &draftedBy, &requestedBySub)
+		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'), coalesce(drafted_by,''), coalesce(requested_by_sub,''), coalesce(rfi_to,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
+		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &draftedBy, &requestedBySub, &rfiTo)
 	// APPROVED (not yet SENT) + a fresh APPROVE decision is a retry of a
 	// previously failed send -- status only reaches APPROVED-without-SENT
 	// when sendMail below failed last time, and the response used to claim
@@ -624,10 +609,15 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 				s.notify(r, tenant, requestedBySub, "DRAFT_SENT",
 					fmt.Sprintf("Your correspondence draft %q was approved and sent to %d recipient(s).", subject, len(to)), "#/cases/"+caseID)
 			}
+			// The letter is out: the case leaves its QA status, the dates the
+			// SOP ties to this letter are set, and the workflow hears of it.
+			s.releaseCaseFromQA(r, tenant, caseID, qid)
+			s.afterLetterSent(r, tenant, caseID, artifact, rfiTo)
 			// Notification is a fact now — the checklist follows.
 			s.autoChecklist(r, tenant, caseID)
 		}
 	} else {
+		s.releaseCaseFromQA(r, tenant, caseID, qid)
 		s.settleHeldMail(r, tenant, qid, "REJECTED", "rejected in QA"+orDash(": "+in.Note), body, to, cc)
 		s.logActivity(r.Context(), tenant, caseID, "QA_REJECTED",
 			fmt.Sprintf("Draft rejected in QA by %s: %s%s", p.Subject, subject, orDash(" — "+in.Note)))
