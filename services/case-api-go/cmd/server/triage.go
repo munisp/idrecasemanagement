@@ -42,6 +42,26 @@ type eligibilityInput struct {
 	FinalDeterminationAt string   `json:"final_determination_at"` // YYYY-MM-DD
 	Flags                []string `json:"flags"`
 	AORValid             *bool    `json:"aor_valid"`
+	ServiceDate          string   `json:"service_date"` // YYYY-MM-DD, earliest date of service in dispute
+	DisputeType          string   `json:"dispute_type"` // denied_in_full | denied_in_part | underpaid | overpaid
+}
+
+// noOverrideReasons are computed INELIGIBLE results a reviewer may not set
+// aside: the filing window is statutory and not extendable.
+var noOverrideReasons = map[string]bool{"over_filing_window": true, "over_12_months": true}
+
+// invalidEligibilityInput returns a message when a supplied date is not a
+// YYYY-MM-DD calendar date, "" otherwise.
+func invalidEligibilityInput(in eligibilityInput) string {
+	for name, v := range map[string]string{"final_determination_at": in.FinalDeterminationAt, "service_date": in.ServiceDate} {
+		if v == "" {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", v); err != nil {
+			return name + " must be a date in YYYY-MM-DD form"
+		}
+	}
+	return ""
 }
 
 // evalEligibility is the pure decision core shared by checkEligibility
@@ -56,6 +76,25 @@ func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason st
 	for _, f := range in.Flags {
 		if contains(cfg.Eligibility.Reasons, f) {
 			return "INELIGIBLE", f, evidence
+		}
+	}
+	// claim type: the program takes denied, underpaid and overpaid claims.
+	if len(cfg.Eligibility.DisputeTypes) > 0 && in.DisputeType != "" {
+		evidence["dispute_type"] = in.DisputeType
+		if !contains(cfg.Eligibility.DisputeTypes, in.DisputeType) {
+			return "INELIGIBLE", "not_an_eligible_dispute_type", evidence
+		}
+	}
+	// date of service: only services rendered after the program start count.
+	if cfg.Eligibility.ServicesAfter != "" && in.ServiceDate != "" {
+		floor, ferr := time.Parse("2006-01-02", cfg.Eligibility.ServicesAfter)
+		sd, serr := time.Parse("2006-01-02", in.ServiceDate)
+		if ferr == nil && serr == nil {
+			evidence["services_after"] = cfg.Eligibility.ServicesAfter
+			evidence["service_date"] = in.ServiceDate
+			if !sd.After(floor) {
+				return "INELIGIBLE", "service_before_program_start", evidence
+			}
 		}
 	}
 	// filing window (12-month style)
@@ -170,6 +209,12 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	if v, ok := d["aor_valid"].(bool); ok {
 		in.AORValid = &v
 	}
+	if v, _ := d["service_date"].(string); v != "" {
+		in.ServiceDate = v
+	}
+	if v, _ := d["dispute_type"].(string); v != "" {
+		in.DisputeType = v
+	}
 	if arr, ok := d["eligibility_flags"].([]any); ok {
 		for _, f := range arr {
 			if s2, ok := f.(string); ok {
@@ -196,6 +241,16 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 				WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
 				  AND doc_type IN ('eob','determination_letter')
 			) dates WHERE v IS NOT NULL`, tenant, caseID).Scan(&in.FinalDeterminationAt)
+	}
+	// Earliest analyzed date of service, for the program-start floor. The
+	// earliest is the conservative one: a single pre-program service line
+	// makes that part of the dispute out of scope.
+	if in.ServiceDate == "" {
+		_ = s.db.QueryRow(r.Context(), `
+			SELECT coalesce(MIN(NULLIF(result->'normalized'->>'service_date','')), '')
+			FROM public.doc_analysis
+			WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
+			  AND doc_type IN ('idr_claim','eob')`, tenant, caseID).Scan(&in.ServiceDate)
 	}
 	return in, nil
 }

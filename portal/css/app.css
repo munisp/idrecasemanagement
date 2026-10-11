@@ -598,3 +598,6 @@ button.bad{color:var(--red-700);border-color:var(--red-700)}
 th.sortable .sort-arrow{opacity:.45;font-weight:400}
 th.sortable.sorted .sort-arrow{opacity:1}
 th.sortable:focus-visible{outline:2px solid var(--accent-fg);outline-offset:-2px}
+.elig-flags{border:1px solid var(--line,#ddd);border-radius:8px;padding:8px 12px;margin:8px 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:4px 16px}
+.elig-flags legend{font-size:.85em;padding:0 6px}
+.elig-flags label{display:flex;gap:6px;align-items:flex-start;font-weight:400}

@@ -58,6 +58,12 @@ type ProgramConfig struct {
 		FilingWindowMonths int             `json:"filing_window_months"`
 		ProofOfTimeliness  []string        `json:"proof_of_timeliness"`
 		Reasons            []string        `json:"ineligibility_reasons"`
+		// ServicesAfter (YYYY-MM-DD): the program covers services rendered
+		// strictly after this date. Empty = no floor.
+		ServicesAfter string `json:"services_after"`
+		// DisputeTypes: the kinds of claim dispute the program accepts
+		// (denied in full/part, underpaid, overpaid). Empty = not checked.
+		DisputeTypes []string `json:"dispute_types"`
 	} `json:"eligibility"`
 	Time struct {
 		QuarterHours bool `json:"quarter_hours"` // FL: time recorded in decimal quarter hours only
@@ -425,6 +431,13 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.Unmarshal(raw, &override)
+	// A human-submitted date that does not parse must be rejected, not
+	// ignored: evalEligibility skips a rule whose date is unusable, which
+	// would turn a typo into a silent pass on the filing window.
+	if msg := invalidEligibilityInput(in); msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
+		return
+	}
 
 	// Decision + persistence both live in triage.go, shared with the
 	// auto-adjudication endpoint — one implementation, so the auto path
@@ -435,6 +448,21 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		opts.borderline, opts.borderlineReasons = true, bl
 		evidence["borderline"] = true
 		evidence["borderline_reasons"] = bl
+	}
+	// The filing window can only be tested against a date. Without one the
+	// rule is skipped, so a result other than INELIGIBLE would rest on an
+	// unchecked window -- refuse rather than record an ELIGIBLE that was
+	// never tested for timeliness.
+	if result != "INELIGIBLE" && cfg.Eligibility.FilingWindowMonths > 0 && in.FinalDeterminationAt == "" {
+		http.Error(w, fmt.Sprintf(`{"error":"final determination date required: the %d-month filing window cannot be checked without it (the last EOB date, the service date or appeal documents are accepted as proof)"}`,
+			cfg.Eligibility.FilingWindowMonths), http.StatusUnprocessableEntity)
+		return
+	}
+	// No extensions: a dispute filed outside the window cannot be overridden
+	// to ELIGIBLE. If the date was entered wrongly, correct the date.
+	if override.Override && result == "INELIGIBLE" && noOverrideReasons[reason] {
+		http.Error(w, `{"error":"this result cannot be overridden: the filing window is not extendable (AHCA no longer grants extensions). If the final determination date is wrong, correct it and recompute."}`, http.StatusUnprocessableEntity)
+		return
 	}
 	// Override: INELIGIBLE → ELIGIBLE only, with a mandatory written reason.
 	// The computed result is preserved in evidence so the record shows both

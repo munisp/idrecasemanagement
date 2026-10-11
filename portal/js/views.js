@@ -182,6 +182,23 @@ const Views = (() => {
   const laneChip = (lane) => lane === "AUTO_REVIEW" ? `<span class="chip lane-auto" title="Everything needed for a one-click confirm is present">AUTO</span>`
     : lane === "COMPLEX" ? `<span class="chip lane-complex" title="Batched, duplicated, escalated, or high-dollar">COMPLEX</span>`
     : `<span class="chip lane-std">STANDARD</span>`;
+  // Plain-language labels for the program's ineligibility reason codes (the
+  // SOP's exclusion list). An unlisted code falls back to the code itself.
+  const ELIG_REASON_LABELS = {
+    late_payment_only: "Concerns only late payment",
+    interest_only: "Concerns only interest",
+    medicare_grievance: "Part of an open Medicare managed care grievance",
+    medicare_reconsideration: "Qualifies for Medicare reconsideration",
+    plan_not_fl_regulated: "Plan is not regulated by Florida",
+    provider_not_fl_licensed: "Provider is not licensed in Florida",
+    medicaid_fair_hearing: "Part of a Medicaid fair hearing",
+    pending_court_action: "Pending state or federal court action",
+    over_12_months: "Filed more than 12 months after the final determination",
+    pre_2000_binding_process: "Subject to a binding pre-October 1, 2000 internal resolution process",
+    below_threshold: "Below the minimum disputed amount",
+    improper_aggregation: "Claims aggregated incorrectly",
+    internal_process_not_exhausted: "Contract requires the internal dispute process, and it was not exhausted",
+  };
   const slaBadge = (days) => {
     if (days === undefined || days === null) return '<span class="muted">—</span>';
     const cls = days < 0 ? "sla breach" : days <= 3 ? "sla risk" : days <= 7 ? "sla watch" : "sla ok";
@@ -1333,15 +1350,21 @@ const Views = (() => {
       <div id="p-elig-history"></div>
       <div class="actions"><button id="p-elig-auto" title="Derives every rule input from the case record and analyzed documents, then decides — or tells you exactly which inputs are still missing">⚡ Auto-adjudicate from case + documents</button></div>
       <div id="p-elig-auto-out"></div>
-      <form id="p-elig" class="inline-form">
+      <form id="p-elig" class="form">
+        <div class="inline-form">
         <select name="provider_type" required title="provider type"><option value="">provider type…</option>
           ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option>${esc(x)}</option>`).join("")}</select>
         <label>contracted <input type="checkbox" name="contracted" /></label>
-        <input name="amount" type="number" step="0.01" placeholder="disputed $" required />
-        <input name="fd" type="date" title="final determination date" />
-        <input name="flags" placeholder="flags (comma-separated reason codes)" list="p-elig-flags" title="${esc(((cfg.eligibility || {}).ineligibility_reasons || []).join(", "))}" />
-        <datalist id="p-elig-flags">${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<option value="${esc(x)}">`).join("")}</datalist>
+        <input name="amount" type="number" step="0.01" placeholder="aggregate disputed $" required />
+        <label>final determination <input name="fd" type="date" required title="Final determination date — the last EOB date, service date or appeal documents are accepted as proof. The 12-month filing window runs from it." /></label>
+        <label>date of service <input name="service_date" type="date" title="Earliest date of service in dispute${(cfg.eligibility || {}).services_after ? ` — must be after ${esc(cfg.eligibility.services_after)}` : ""}" /></label>
+        ${((cfg.eligibility || {}).dispute_types || []).length ? `<select name="dispute_type" title="claim type"><option value="">claim type…</option>
+          ${cfg.eligibility.dispute_types.map((x) => `<option value="${esc(x)}">${esc(x.replace(/_/g, " "))}</option>`).join("")}</select>` : ""}
         <label>AOR valid <input type="checkbox" name="aor_valid" checked /></label>
+        </div>
+        <fieldset class="elig-flags"><legend>Tick any that apply — each one makes the dispute ineligible</legend>
+          ${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<label><input type="checkbox" name="flag" value="${esc(x)}" /> ${esc(ELIG_REASON_LABELS[x] || x.replace(/_/g, " "))}</label>`).join("")}
+        </fieldset>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
       <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
@@ -1514,7 +1537,9 @@ const Views = (() => {
           provider_type: f.provider_type.value, contracted: f.contracted.checked,
           disputed_amount_cents: money(f.amount.value),
           final_determination_at: f.fd.value || "",
-          flags: f.flags.value ? f.flags.value.split(",").map((x) => x.trim()).filter(Boolean) : [],
+          service_date: f.service_date.value || "",
+          dispute_type: f.dispute_type ? f.dispute_type.value : "",
+          flags: [...f.querySelectorAll('input[name="flag"]:checked')].map((x) => x.value),
           aor_valid: f.aor_valid.checked,
         });
         const out = document.getElementById("p-elig-out");

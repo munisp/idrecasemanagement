@@ -351,7 +351,9 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     ],
     "filing_window_months": 12,
     "proof_of_timeliness": ["last_eob_date","service_date","appeal_documents"],
-    "ineligibility_reasons": ["late_payment_only","interest_only","medicare_grievance","plan_not_fl_regulated","provider_not_fl_licensed","medicaid_fair_hearing","pending_court_action","over_12_months","pre_2000_binding_process","below_threshold","internal_process_not_exhausted"]
+    "ineligibility_reasons": ["late_payment_only","interest_only","medicare_grievance","medicare_reconsideration","plan_not_fl_regulated","provider_not_fl_licensed","medicaid_fair_hearing","pending_court_action","over_12_months","pre_2000_binding_process","below_threshold","improper_aggregation","internal_process_not_exhausted"],
+    "services_after": "2000-10-02",
+    "dispute_types": ["denied_in_full","denied_in_part","underpaid","overpaid"]
   },
   "time": {"quarter_hours": true},
   "fees": {"initial_fee_cents": 12359, "refund_window_days": 7, "invoice_due_days": null, "invoice_number_equals_case_number": true, "invoiced_filer_orgs": []},
