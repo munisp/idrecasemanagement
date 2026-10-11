@@ -135,7 +135,7 @@
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
-          msg.textContent = `Registered! Your one-time claim code is ${data.claim_code} — save it now, it is shown only once. Then log in to the portal, open TPA, and enter this code to link your organization.`;
+          msg.textContent = `Registered! Your portal login — username: ${data.username}, password: ${data.temporary_password} — save this now, it is shown only once. Sign in at the portal with it (you'll be asked to set a new password); your organization is already linked, ready to add clients and file on their behalf.`;
           e.target.reset();
         } else {
           msg.classList.add("err");

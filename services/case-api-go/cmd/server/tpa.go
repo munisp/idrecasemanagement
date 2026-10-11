@@ -4,10 +4,14 @@ package main
 //
 // A TPA is an organization that files, pays, and tracks disputes ON BEHALF OF
 // one or more initiating parties (providers or health plans — a client list
-// the TPA manages itself). Onboarding is self-serve: the TPA registers its
-// organization publicly and receives a one-time claim code; its first portal
-// user claims the org with that code (no staff approval gate — states retain
-// SUSPEND as the after-the-fact control).
+// the TPA manages itself). Onboarding is self-serve: registering the
+// organization also creates its first Keycloak account (TPA role, same
+// temp-password mechanism staff accounts get) and links it to the org in
+// the same call — no staff approval gate, no separate manual step (states
+// retain SUSPEND as the after-the-fact control). A claim code is still
+// generated and kept live: if that first account is ever lost, a FEDERAL_
+// ADMIN/PLATFORM_ADMIN can create a replacement account the normal staff
+// way and have it claim the org with the code instead of starting over.
 //
 // Every TPA-filed dispute gets a case_origin row: who the case belongs to
 // (initiating party = the client) vs who filed/paid (the TPA). The intake
@@ -52,8 +56,30 @@ func (s *server) tpaForPrincipal(r *http.Request, tenant string) (*tpaOrg, error
 	return &o, nil
 }
 
-// registerTPA: PUBLIC self-serve onboarding. Returns the org and a one-time
-// claim code (shown once — the first portal user links the org with it).
+// tpaUsernameFromEmail derives a Keycloak-safe username from the local part
+// of an email (lowercase, [a-z0-9.-_] only) -- registrants give us an email,
+// not a chosen username, and the account still needs one.
+func tpaUsernameFromEmail(email string) string {
+	local := email
+	if i := strings.IndexByte(email, '@'); i >= 0 {
+		local = email[:i]
+	}
+	var b strings.Builder
+	for _, c := range strings.ToLower(local) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_' {
+			b.WriteByte(byte(c))
+		}
+	}
+	if b.Len() == 0 {
+		return "tpa"
+	}
+	return b.String()
+}
+
+// registerTPA: PUBLIC self-serve onboarding. Creates the org AND its first
+// Keycloak login (TPA role, temp password) in one call, already linked --
+// returns the credentials directly, the same way staff account creation
+// does, since a brand-new registrant has no other way to get one.
 func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Tenant       string `json:"tenant"`
@@ -66,20 +92,72 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"tenant, name, and a valid contact_email are required"}`, http.StatusBadRequest)
 		return
 	}
-	code := "TPA-" + strings.ToUpper(hex.EncodeToString(func() []byte { b := make([]byte, 3); _, _ = rand.Read(b); return b }()))
-	var id string
-	err := s.db.QueryRow(r.Context(), `
-		INSERT INTO public.tpas (tenant, name, contact_name, contact_email, claim_code, status)
-		VALUES (lower($1), $2, $3, $4, $5, 'ACTIVE') RETURNING id`,
-		in.Tenant, in.Name, in.ContactName, in.ContactEmail, code).Scan(&id)
+	tenant := strings.ToLower(in.Tenant)
+
+	tok, err := s.kcAdminToken(r.Context())
 	if err != nil {
-		http.Error(w, `{"error":"registration failed — an organization with this email may already exist for this program"}`, http.StatusConflict)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak admin auth failed: " + err.Error()})
 		return
 	}
-	s.logAudit(r.Context(), strings.ToLower(in.Tenant), "", "TPA_REGISTERED", map[string]any{"tpa_id": id, "name": in.Name})
+	groupPath := "/tenant/" + tenant
+	if _, err := s.kcEnsureGroup(r.Context(), tok, tenant); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak group ensure failed: " + err.Error()})
+		return
+	}
+	base := tpaUsernameFromEmail(in.ContactEmail)
+	username := base
+	var result map[string]any
+	for attempt := 0; attempt < 5; attempt++ {
+		result = s.kcCreateUser(r.Context(), tok, username, in.ContactEmail, "TPA", []string{groupPath})
+		if _, failed := result["error"]; !failed {
+			break
+		}
+		errMsg, _ := result["error"].(string)
+		if !strings.Contains(errMsg, "already exists") {
+			writeJSON(w, http.StatusBadGateway, result)
+			return
+		}
+		// Username collision (contact_email reused, or base is very common,
+		// e.g. "info"/"admin") -- try a short random suffix instead of
+		// failing registration over something the registrant never typed.
+		suffix := make([]byte, 2)
+		_, _ = rand.Read(suffix)
+		username = base + hex.EncodeToString(suffix)
+	}
+	if _, failed := result["error"]; failed {
+		writeJSON(w, http.StatusConflict, result)
+		return
+	}
+	userID, _ := result["user_id"].(string)
+	if userID == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "TPA account created but its Keycloak id was unavailable -- cannot link it to an organization"})
+		return
+	}
+
+	code := "TPA-" + strings.ToUpper(hex.EncodeToString(func() []byte { b := make([]byte, 3); _, _ = rand.Read(b); return b }()))
+	var id string
+	if err := s.db.QueryRow(r.Context(), `
+		INSERT INTO public.tpas (tenant, name, contact_name, contact_email, claim_code, status)
+		VALUES ($1, $2, $3, $4, $5, 'ACTIVE') RETURNING id`,
+		tenant, in.Name, in.ContactName, in.ContactEmail, code).Scan(&id); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "registration failed — an organization with this email may already exist for this program"})
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id) VALUES ($1,$2,$3)`,
+		tenant, userID, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "organization and login were created, but linking them failed — sign in and use claim code " + code + " (Profile → Claim TPA) to finish linking",
+		})
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "TPA_REGISTERED", map[string]any{
+		"tpa_id": id, "name": in.Name, "username": username, "user_id": userID,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"tpa_id": id, "status": "ACTIVE", "claim_code": code,
-		"next": "Sign in to the portal with a TPA account and enter this claim code (Profile → Claim TPA) to link your organization. Then add your initiating parties and file on their behalf.",
+		"tpa_id": id, "status": "ACTIVE",
+		"username": username, "temporary_password": result["temporary_password"],
+		"next": "Sign in to the portal with the username and password above (you'll be asked to set a new password) — your organization is already linked. Then add your initiating parties and file on their behalf.",
 	})
 }
 

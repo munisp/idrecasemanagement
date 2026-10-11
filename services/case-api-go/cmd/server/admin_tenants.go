@@ -228,6 +228,7 @@ func (s *server) kcCreateUser(ctx context.Context, tok, username, email, role st
 			out["role_assignment_error"] = "user created but could not determine its id from the Location header -- role was not assigned"
 			return out
 		}
+		out["user_id"] = userID // == the JWT "sub" this account will present once it logs in
 		if err := s.kcAssignRealmRole(ctx, tok, userID, role); err != nil {
 			out["role_assignment_error"] = "user created but role assignment failed: " + err.Error()
 		}
