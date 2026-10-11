@@ -79,7 +79,17 @@ func validateBulkIntakeItem(it bulkIntakeItem) string {
 // (programmed tenant -> startAhcaCase real-case branch; otherwise the legacy
 // intake_requests row with its INTAKE_CREATED audit). Never called without
 // validateBulkIntakeItem passing first.
-func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, it bulkIntakeItem) bulkIntakeResult {
+//
+// callerOrg is non-nil only when the filer is TPA: the row's own email/org
+// are the INITIATING PARTY's identity, not who's filing, so the case's
+// actual contact becomes the TPA's own (payment/case-number/upload links
+// go to the TPA, same as single-dispute tpaIntake), "org" resolves to a
+// real tpa_clients row (found by party name, or created from this row) so
+// repeat filings for the same client accumulate correctly, and a
+// case_origin row ties the new case back to both -- without it, the case
+// is real but invisible on the TPA's own Tracking dashboard, which reads
+// exclusively from case_origin.
+func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, it bulkIntakeItem, callerOrg *tpaOrg) bulkIntakeResult {
 	res := bulkIntakeResult{ExternalRef: it.ExternalRef}
 	if msg := validateBulkIntakeItem(it); msg != "" {
 		res.Status, res.Error = "ERROR", msg
@@ -88,6 +98,9 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 	fpt := strings.ToUpper(strings.TrimSpace(it.FilingPartyType))
 	if fpt == "" {
 		fpt = "PROVIDER"
+	}
+	if callerOrg != nil {
+		return s.processOneTPABulkIntake(r, tenant, callerOrg, it, fpt)
 	}
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
 		// Bulk CSV rows don't carry a service_line column (same reasoning as
@@ -141,6 +154,70 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 	return res
 }
 
+// processOneTPABulkIntake is the TPA branch of processOneBulkIntake: the
+// row's "org" becomes a real tpa_clients row (reused if this TPA already
+// has one by that exact party name, created otherwise), the case's contact
+// is the TPA's own (mirrors tpaIntake), and a case_origin row ties the two
+// together so the case shows up on the TPA's Tracking dashboard. Rows with
+// a blank org fall back to the row's own contact_name as the party name --
+// still real, just unlabeled.
+func (s *server) processOneTPABulkIntake(r *http.Request, tenant string, org *tpaOrg, it bulkIntakeItem, fpt string) bulkIntakeResult {
+	res := bulkIntakeResult{ExternalRef: it.ExternalRef}
+	cfg := s.loadProgram(r, tenant)
+	if cfg == nil {
+		res.Status, res.Error = "ERROR", "TPA filing is available on programmed tenants"
+		return res
+	}
+	partyName := strings.TrimSpace(it.Org)
+	if partyName == "" {
+		partyName = strings.TrimSpace(it.ContactName)
+	}
+	if partyName == "" {
+		res.Status, res.Error = "ERROR", "org or contact_name required to identify the initiating party"
+		return res
+	}
+	var clientID string
+	err := s.db.QueryRow(r.Context(), `
+		INSERT INTO public.tpa_clients (tenant, tpa_id, party_name, party_type, contact_email)
+		VALUES ($1,$2,$3,$4,$5)
+		ON CONFLICT (tenant, tpa_id, party_name) DO UPDATE SET party_name=EXCLUDED.party_name
+		RETURNING id`, tenant, org.ID, partyName, fpt, it.Email).Scan(&clientID)
+	if err != nil {
+		res.Status, res.Error = "ERROR", "could not resolve or create the initiating party client"
+		return res
+	}
+	caseID, caseNumber, err := s.startAhcaCaseOpt(r, tenant, cfg,
+		org.ContactEmail, org.ContactName, org.Name+" on behalf of "+partyName, fpt, it.DisputedAmountCents, "", false)
+	if err != nil {
+		res.Status = "ERROR"
+		if isUniqueViolation(err) {
+			res.Error = "case_number collision — retry the batch (idempotent replay will skip completed rows)"
+		} else {
+			res.Error = "case creation failed"
+		}
+		return res
+	}
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.case_origin
+		  (tenant, case_id, tpa_id, client_id, initiating_party_name, initiating_party_type, filed_by_email)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		tenant, caseID, org.ID, clientID, partyName, fpt, org.ContactEmail)
+	// Same two follow-ups as single-dispute tpaIntake, so a bulk-filed case
+	// looks identical on screen to one filed through the form.
+	_, _ = s.db.Exec(r.Context(), `
+		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,
+		tenant, caseID, org.Name+" (on behalf of "+partyName+")")
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET details = details || $2::jsonb WHERE id=$1`, sanitizeTenant(tenant)),
+		caseID, fmt.Sprintf(`{"initiating_party":%q,"filed_by_tpa":%q}`, partyName, org.Name))
+	res.Status, res.CaseID, res.CaseNumber = "CREATED", caseID, caseNumber
+	var st string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
+	res.PaymentRequired = st == "AWAITING_PAYMENT"
+	return res
+}
+
 // bulkIntake handles POST /intake/bulk.
 //
 //	{
@@ -163,6 +240,20 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// Resolved once for the whole batch, not per row: a TPA's bulk rows need
+	// case_origin attribution (tpa_id + a resolved/created tpa_clients row
+	// per row's "org") exactly like single-dispute filing (tpaIntake) gets,
+	// or the TPA never sees what it just filed on its own "Tracking"
+	// dashboard -- confirmed live, this branch didn't exist at all before.
+	var callerOrg *tpaOrg
+	if hasRole(p, "TPA") {
+		org, err := s.tpaForPrincipal(r, tenant)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
+			return
+		}
+		callerOrg = org
+	}
 	var in struct {
 		BatchRef string           `json:"batch_ref"`
 		Items    []bulkIntakeItem `json:"items"`
@@ -210,7 +301,7 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(it.ExternalRef) == "" {
 			it.ExternalRef = fmt.Sprintf("row-%d", i+1)
 		}
-		res := s.processOneBulkIntake(r, tenant, p.Subject, it)
+		res := s.processOneBulkIntake(r, tenant, p.Subject, it, callerOrg)
 		if res.Status == "CREATED" {
 			created++
 		} else {
