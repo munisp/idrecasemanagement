@@ -575,6 +575,27 @@ func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA sees only the offer-window deadlines on disputes IT filed (via
+	// case_origin), not the whole tenant's -- same scoping as listCases/
+	// the #/tpa "Tracking" card. TPA has no public.tasks rows of its own,
+	// so there's nothing to add there.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		org, err := s.tpaForPrincipal(r, tenant)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
+			return
+		}
+		deadlines, _ := s.queryRows(r, fmt.Sprintf(`
+			SELECT c.id::text AS ref, 'OFFER_WINDOW' AS kind, c.case_number AS label,
+			       to_char(c.offer_window_ends_at,'YYYY-MM-DD"T"HH24:MI') AS due, c.id::text AS case_id
+			FROM tenant_%s.cases c
+			JOIN public.case_origin o ON o.case_id = c.id::text
+			WHERE o.tenant=$1 AND o.tpa_id=$2
+			  AND c.offer_window_ends_at IS NOT NULL AND c.status='OFFER_WINDOW_OPEN'`, sanitizeTenant(tenant)),
+			tenant, org.ID)
+		writeJSON(w, http.StatusOK, deadlines)
+		return
+	}
 	deadlines, _ := s.queryRows(r, fmt.Sprintf(`
 		SELECT id::text AS ref, 'OFFER_WINDOW' AS kind, case_number AS label,
 		       to_char(offer_window_ends_at,'YYYY-MM-DD"T"HH24:MI') AS due, id::text AS case_id

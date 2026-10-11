@@ -116,6 +116,11 @@ const Views = (() => {
 
   // ---- Dashboard -----------------------------------------------------------
   async function dashboard() {
+    // TPA's home IS the TPA dashboard -- the generic rollup below is built
+    // entirely on Api.cases.list(), the whole tenant's cases, which TPA is
+    // deliberately blocked from (access-control follow-up); it has its own
+    // correctly-scoped "Tracking" card on this same page instead.
+    if (has("TPA")) return tpaView();
     const me = Auth.claims();
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;

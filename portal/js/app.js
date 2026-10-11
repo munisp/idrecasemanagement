@@ -173,7 +173,11 @@
   if (has("CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/ops", "◔", "Ops"]);
   links.push(["#/timesheet", "⏱", "My timesheet"]);
   links.push(["#/calendar", "▨", "Calendar"]);
-  links.push(["#/onboarding", "⚑", "Onboarding"]);
+  // TPA excluded -- Onboarding is for registering NEW provider/payer/IDRE
+  // entity/auditor organizations and reviewing those applications; a TPA
+  // registers through its own dedicated flow (dispute.html) and has no
+  // use for this screen.
+  if (!has("TPA")) links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
