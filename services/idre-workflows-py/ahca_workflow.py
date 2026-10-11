@@ -495,7 +495,7 @@ class AhcaDisputeWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
         )
         await workflow.execute_activity(
-            set_dual_status, args=[tenant, case_id, "Determination sent to FL", "Decided"],
+            set_dual_status, args=[tenant, case_id, "Determination Sent to FL", "Decided"],
             start_to_close_timeout=timedelta(seconds=30),
         )
         self.determination_sent = True  # stops the AGENCY_RECOMMENDATION watcher

@@ -40,3 +40,16 @@ func TestNotifTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonStatus(t *testing.T) {
+	list := []string{"QA Letter", "Determination Sent to FL", "Final Order Issued"}
+	if got, ok := canonStatus(list, "Determination sent to FL"); !ok || got != "Determination Sent to FL" {
+		t.Errorf("case-insensitive match should return the program's spelling, got %q %v", got, ok)
+	}
+	if got, ok := canonStatus(list, " QA Letter "); !ok || got != "QA Letter" {
+		t.Errorf("surrounding space should not matter, got %q %v", got, ok)
+	}
+	if _, ok := canonStatus(list, "Closed-Refunded"); ok {
+		t.Error("a status the program does not list must still be refused")
+	}
+}

@@ -341,13 +341,22 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
-		if in.Internal != "" && !contains(cfg.Statuses.Internal, in.Internal) {
-			http.Error(w, `{"error":"unknown internal status for this program"}`, http.StatusBadRequest)
-			return
+		// Matched without regard to case and stored as the program spells
+		// it: the workflow sent "Determination sent to FL" against a list
+		// that says "Determination Sent to FL", was refused, and retried
+		// forever -- no case could reach that status.
+		var ok bool
+		if in.Internal != "" {
+			if in.Internal, ok = canonStatus(cfg.Statuses.Internal, in.Internal); !ok {
+				http.Error(w, `{"error":"unknown internal status for this program"}`, http.StatusBadRequest)
+				return
+			}
 		}
-		if in.Agency != "" && !contains(cfg.Statuses.Agency, in.Agency) {
-			http.Error(w, `{"error":"unknown agency status for this program"}`, http.StatusBadRequest)
-			return
+		if in.Agency != "" {
+			if in.Agency, ok = canonStatus(cfg.Statuses.Agency, in.Agency); !ok {
+				http.Error(w, `{"error":"unknown agency status for this program"}`, http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	var matched int64
@@ -535,6 +544,17 @@ func (s *server) escalationTrigger(r *http.Request, tenant, caseID string, dispu
 		VALUES ($1,$2,'PROGRAM_TRIGGER',2,$3,$4)`, tenant, caseID, cfg.Escalation.RouteRole, detail)
 	s.logActivity(r.Context(), tenant, caseID, "ESCALATION_AUTO", detail)
 	s.notify(r, tenant, "*", "ESCALATION", detail, "#/cases/"+caseID)
+}
+
+// canonStatus finds v in the program's status list ignoring case and returns
+// the list's own spelling.
+func canonStatus(list []string, v string) (string, bool) {
+	for _, x := range list {
+		if strings.EqualFold(x, strings.TrimSpace(v)) {
+			return x, true
+		}
+	}
+	return v, false
 }
 
 func contains(xs []string, v string) bool {
