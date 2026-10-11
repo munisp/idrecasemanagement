@@ -626,11 +626,13 @@ func main() {
 		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
 		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface, private per worker)
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
+		r.Post("/cases/{caseId}/copilot/chat/log", s.copilotChatLog) // fast-path intents: persist without calling the model
 		r.Get("/cases/{caseId}/copilot/chat/shares", s.copilotListThreadShares)
 		r.Post("/cases/{caseId}/copilot/chat/shares", s.copilotShareThread)
 		r.Delete("/cases/{caseId}/copilot/chat/shares/{userId}", s.copilotUnshareThread)
 		r.Get("/copilot/chat", s.copilotGeneralChatHistory) // floating-widget thread, no case open
 		r.Post("/copilot/chat", s.copilotGeneralChat)
+		r.Post("/copilot/chat/log", s.copilotGeneralChatLog) // fast-path intents: persist without calling the model
 		r.Get("/assistant/briefing", s.briefing) // worker-scoped morning digest (conversation-first step 2)
 		r.Post("/cases/{caseId}/copilot/actions", s.copilotProposeActions) // Phase 3: bounded action-batch proposal
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)

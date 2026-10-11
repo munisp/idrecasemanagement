@@ -82,6 +82,44 @@ func (s *server) gatherGeneralCopilotFacts(r *http.Request, tenant string, p pri
 	return f, nil
 }
 
+// copilotGeneralChatLog handles POST /copilot/chat/log
+// {"user":"...","assistant":"..."} -- mirrors copilotChatLog (copilot_chat.go)
+// for the no-case-open thread: persists a fast-path intent's turn pair
+// without calling the model.
+func (s *server) copilotGeneralChatLog(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, copilotRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	var in struct {
+		User      string `json:"user"`
+		Assistant string `json:"assistant"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	in.User = truncate(strings.TrimSpace(in.User), 2000)
+	in.Assistant = truncate(strings.TrimSpace(in.Assistant), 4000)
+	if in.User == "" && in.Assistant == "" {
+		http.Error(w, `{"error":"user or assistant required"}`, http.StatusBadRequest)
+		return
+	}
+	if in.User != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body) VALUES ($1,$2,'user',$3)`,
+			tenant, p.Subject, in.User)
+	}
+	if in.Assistant != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body, model) VALUES ($1,$2,'assistant',$3,'local')`,
+			tenant, p.Subject, in.Assistant)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func copilotGeneralChatPrompt(f generalCopilotFacts) string {
 	return `You are the assistant inside a No Surprises Act / state dispute-resolution case
 platform, chatting with ` + f.UserDisplayName + ` about THEIR OWN work queue — not any

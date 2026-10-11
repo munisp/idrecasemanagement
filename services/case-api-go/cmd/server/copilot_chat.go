@@ -199,6 +199,51 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// copilotChatLog handles POST /cases/{caseId}/copilot/chat/log
+// {"user":"...","assistant":"..."} -- persists one turn pair WITHOUT calling
+// the model, for the floating widget's fast, deterministic intents (my
+// cases/tasks, what's left, create task, etc.) that answer locally from a
+// REST list call rather than the LLM. Those turns used to never reach the
+// thread at all (confirmed live: "the chat isn't storing" for ordinary
+// typed messages that happened to match one of these intents, e.g.
+// containing the word "task"), which looked identical to the free-text
+// path silently dropping messages, but was actually a different, deliberate
+// code path that just never wrote anything down.
+func (s *server) copilotChatLog(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, copilotRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	caseID := chi.URLParam(r, "caseId")
+	var in struct {
+		User      string `json:"user"`
+		Assistant string `json:"assistant"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	in.User = truncate(strings.TrimSpace(in.User), 2000)
+	in.Assistant = truncate(strings.TrimSpace(in.Assistant), 4000)
+	if in.User == "" && in.Assistant == "" {
+		http.Error(w, `{"error":"user or assistant required"}`, http.StatusBadRequest)
+		return
+	}
+	if in.User != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.copilot_threads (tenant, case_id, role, body, user_sub) VALUES ($1,$2,'user',$3,$4)`,
+			tenant, caseID, in.User, p.Subject)
+	}
+	if in.Assistant != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.copilot_threads (tenant, case_id, role, body, model, user_sub) VALUES ($1,$2,'assistant',$3,'local',$4)`,
+			tenant, caseID, in.Assistant, p.Subject)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // copilotShareThread handles POST /cases/{caseId}/copilot/chat/shares
 // {"user_id": "<keycloak id>"} -- grants that colleague read access to the
 // caller's OWN thread on this case. Only the owner can grant their own

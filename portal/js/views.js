@@ -2673,40 +2673,48 @@ const Views = (() => {
     thread.scrollTop = thread.scrollHeight;
   }
 
+  // Each asstAnswer*/asstDo* fast-path below returns the plain-text summary
+  // it rendered (or null on a caught error, which is already shown inline
+  // and isn't worth persisting) so handleAssistantMessage can log the turn
+  // -- see copilotChatLog's comment for why that log call exists at all.
   async function asstAnswerMyCases(threadId) {
     try {
       const r = await Api.cases.list({ mine: "true", sort: "sla", limit: 8 });
       const rows = r.cases || [];
-      if (!rows.length) { asstAppendRich(threadId, "No cases are currently assigned to you."); return; }
+      if (!rows.length) { asstAppendRich(threadId, "No cases are currently assigned to you."); return "No cases are currently assigned to you."; }
       const rowsHtml = rows.map((c) => `<a class="asst-fab-list-row" href="#/cases/${c.id}">
         <span class="afr-main"><b class="mono">${esc(c.case_number)}</b>
           <span class="afr-sub">${esc(c.service_line || "—")}</span></span>
         ${badge(c.status)}<span class="afr-sub">${c.sla_days_remaining}d left</span></a>`).join("");
-      asstAppendRich(threadId, `${rows.length} case${rows.length === 1 ? "" : "s"} assigned to you, soonest deadline first:`, rowsHtml);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      const summary = `${rows.length} case${rows.length === 1 ? "" : "s"} assigned to you, soonest deadline first:`;
+      asstAppendRich(threadId, summary, rowsHtml);
+      return summary + " " + rows.map((c) => `${c.case_number} (${c.status}, ${c.sla_days_remaining}d left)`).join("; ");
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   async function asstAnswerMyTasks(threadId) {
     try {
       const r = await Api.crm.tasks(true, { limit: 8 });
       const rows = (r.tasks || []).filter((t) => t.status !== "DONE");
-      if (!rows.length) { asstAppendRich(threadId, "No open tasks assigned to you."); return; }
+      if (!rows.length) { asstAppendRich(threadId, "No open tasks assigned to you."); return "No open tasks assigned to you."; }
       const rowsHtml = rows.map((t) => `<a class="asst-fab-list-row" href="${t.case_id ? `#/cases/${t.case_id}` : "#/crm/tasks"}">
         <span class="afr-main"><b>${esc(t.subject)}</b><span class="afr-sub">${esc(t.task_ref || "")}</span></span>
         ${badge(t.status)}<span class="afr-sub">${t.due_date ? "due " + esc(t.due_date) : "no due date"}</span></a>`).join("");
-      asstAppendRich(threadId, `${rows.length} open task${rows.length === 1 ? "" : "s"} assigned to you:`, rowsHtml);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      const summary = `${rows.length} open task${rows.length === 1 ? "" : "s"} assigned to you:`;
+      asstAppendRich(threadId, summary, rowsHtml);
+      return summary + " " + rows.map((t) => `${t.subject} (${t.task_ref || "no ref"}${t.due_date ? ", due " + t.due_date : ""})`).join("; ");
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   async function asstAnswerWhatsLeft(threadId, caseId) {
     if (!caseId) {
       asstAppendRich(threadId, "Open a case first — I'll read its checklist from there.");
-      return;
+      return null;
     }
     try {
       const items = await Api.cm.checklist(caseId);
       const open_ = (items || []).filter((i) => !i.done);
-      if (!open_.length) { asstAppendRich(threadId, "Nothing outstanding — every checklist item on this case is done."); return; }
+      if (!open_.length) { asstAppendRich(threadId, "Nothing outstanding — every checklist item on this case is done."); return "Nothing outstanding — every checklist item on this case is done."; }
       const byStage = {};
       open_.forEach((i) => { (byStage[i.stage] ||= []).push(i); });
       const rowsHtml = Object.entries(byStage).map(([stage, items2]) =>
@@ -2714,8 +2722,10 @@ const Views = (() => {
         items2.map((i) => `<div class="asst-fab-list-row"><span class="afr-main">${esc(i.item)}</span>
           ${i.required ? badge("REQUIRED") : ""}</div>`).join("")
       ).join("");
-      asstAppendRich(threadId, `${open_.length} outstanding checklist item${open_.length === 1 ? "" : "s"}:`, rowsHtml);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      const summary = `${open_.length} outstanding checklist item${open_.length === 1 ? "" : "s"}:`;
+      asstAppendRich(threadId, summary, rowsHtml);
+      return summary + " " + open_.map((i) => `${i.item} (${i.stage}${i.required ? ", required" : ""})`).join("; ");
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   // Lightweight slot extraction, not an LLM call -- a task's subject/due
@@ -2750,9 +2760,11 @@ const Views = (() => {
       const r = await Api.crm.createTask({
         subject, case_id: caseId || "", assignee: me?.sub || "", due_date: due || "",
       });
+      const summary = `✓ Task created: ${subject}${due ? ` (due ${due})` : ""}${r.task_ref ? ` — ${r.task_ref}` : ""}`;
       asstAppendRich(threadId,
         `✓ Task created: <b>${esc(subject)}</b>${due ? ` (due ${esc(due)})` : ""}${r.task_ref ? ` — ${esc(r.task_ref)}` : ""}`);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      return summary;
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   async function asstDoCompleteTask(threadId, msg) {
@@ -2767,18 +2779,22 @@ const Views = (() => {
         if (kw) candidates = candidates.filter((t) => t.subject.toLowerCase().includes(kw));
       }
       if (!candidates.length) {
-        asstAppendRich(threadId, "Couldn't find a matching open task of yours — try including part of its exact title or its TASK-#### reference.");
-        return;
+        const msg2 = "Couldn't find a matching open task of yours — try including part of its exact title or its TASK-#### reference.";
+        asstAppendRich(threadId, msg2);
+        return msg2;
       }
       if (candidates.length > 1) {
         const rowsHtml = candidates.slice(0, 6).map((t) =>
           `<div class="asst-fab-list-row"><span class="afr-main">${esc(t.subject)}</span><span class="afr-sub">${esc(t.task_ref)}</span></div>`).join("");
-        asstAppendRich(threadId, "Multiple open tasks match — tell me the exact reference (e.g. TASK-2026-00042):", rowsHtml);
-        return;
+        const summary = "Multiple open tasks match — tell me the exact reference (e.g. TASK-2026-00042):";
+        asstAppendRich(threadId, summary, rowsHtml);
+        return summary + " " + candidates.slice(0, 6).map((t) => `${t.subject} (${t.task_ref})`).join("; ");
       }
       await Api.crm.completeTask(candidates[0].id);
+      const summary = `✓ Marked done: ${candidates[0].subject} (${candidates[0].task_ref})`;
       asstAppendRich(threadId, `✓ Marked done: <b>${esc(candidates[0].subject)}</b> (${esc(candidates[0].task_ref)})`);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      return summary;
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   // Multi-turn, so module-scoped: a brand-new case gets opened only once
@@ -2874,7 +2890,8 @@ const Views = (() => {
           `<div class="asst-fab-list-row"><span class="afr-main">${esc(x.status)}</span><span class="afr-sub">${x.count} · avg ${esc(x.amount_label)} $${Math.round(x.avg_amount_usd || 0).toLocaleString()}</span></div>`).join("");
       }
       asstAppendRich(threadId, title, rowsHtml || `<p class="muted" style="margin:0">No data.</p>`);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      return title;
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   // Free-text correspondence requests route through the SAME copilotDraft
@@ -2903,9 +2920,11 @@ const Views = (() => {
     }
     try {
       const r = await Api.program.copilotDraft(caseId, "correspondence", instructions, to);
+      const summary = `✉ Draft queued in the QA gate (${r.subject || "correspondence"})${to.length ? ` — to ${to.join(", ")}` : ""}. Approve, edit, or reject it there — nothing is sent automatically.`;
       asstAppendRich(threadId,
         `✉ Draft queued in the QA gate (${esc(r.subject || "correspondence")})${to.length ? ` — to ${esc(to.join(", "))}` : ""}. Approve, edit, or reject it there — nothing is sent automatically.`);
-    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); }
+      return summary;
+    } catch (e) { asstAppendRich(threadId, `⚠ ${esc(e.message)}`); return null; }
   }
 
   async function asstDoUpload(threadId, caseId, file) {
@@ -3080,6 +3099,20 @@ const Views = (() => {
     }, "Clearing…");
   }
 
+  // Fast-path intents answer locally (REST list calls, not the LLM) and
+  // used to never reach the thread's own persistence at all -- confirmed
+  // live as "the chat isn't storing" for perfectly ordinary typed messages
+  // that happened to contain a word like "task" (ASST_INTENT_TASKS matches
+  // any message with "task"/"tasks" in it, by design, not just the quick
+  // button). copilotChatLog/copilotGeneralChatLog persist the turn without
+  // re-running it through the model. Best-effort: a failed log call never
+  // blocks or breaks the reply the worker already sees on screen.
+  function logFastPathTurn(caseId, msg, summary) {
+    if (!summary) return;
+    const p = caseId ? Api.program.copilotChatLog(caseId, msg, summary) : Api.program.copilotGeneralChatLog(msg, summary);
+    p.catch(() => {});
+  }
+
   // Shared router for BOTH surfaces (full #/assistant page and the floating
   // widget) so action intents, file uploads, and the fallbacks behave
   // identically no matter which one the worker is talking to.
@@ -3089,28 +3122,28 @@ const Views = (() => {
     if (!caseId) caseId = await asstResolveCaseId(msg);
     if (ASST_INTENT_TASK_CREATE.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstDoCreateTask(threadId, msg, caseId);
+      logFastPathTurn(caseId, msg, await asstDoCreateTask(threadId, msg, caseId));
     } else if (ASST_INTENT_TASK_COMPLETE.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstDoCompleteTask(threadId, msg);
+      logFastPathTurn(caseId, msg, await asstDoCompleteTask(threadId, msg));
     } else if (ASST_INTENT_CASES.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstAnswerMyCases(threadId);
+      logFastPathTurn(caseId, msg, await asstAnswerMyCases(threadId));
     } else if (ASST_INTENT_INTAKE_CREATE.test(msg) || asstIntakeDraft) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
       await asstDoCreateIntake(threadId, msg);
     } else if (ASST_INTENT_LEFT.test(msg) && caseId) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstAnswerWhatsLeft(threadId, caseId);
+      logFastPathTurn(caseId, msg, await asstAnswerWhatsLeft(threadId, caseId));
     } else if (ASST_INTENT_REPORT.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstDoReport(threadId, msg);
+      logFastPathTurn(caseId, msg, await asstDoReport(threadId, msg));
     } else if (ASST_INTENT_TASKS.test(msg)) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstAnswerMyTasks(threadId);
+      logFastPathTurn(caseId, msg, await asstAnswerMyTasks(threadId));
     } else if (ASST_INTENT_DRAFT_CORR.test(msg) && caseId) {
       asstAppend(threadId, "user", msg); asstThinking(threadId);
-      await asstDoDraftCorrespondence(threadId, caseId, msg);
+      logFastPathTurn(caseId, msg, await asstDoDraftCorrespondence(threadId, caseId, msg));
     } else if (ASST_INTENT_DRAFT_RATIONALE.test(msg) && caseId) {
       await assistantChip(caseId, "determination_rationale", document.createElement("button"), threadId);
     } else if (caseId) {
