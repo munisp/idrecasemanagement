@@ -31,6 +31,27 @@ type shareGrant struct {
 	ExpiresAt                              time.Time
 }
 
+// uploadLinkFiles is how many files one upload link accepts. Each file spends
+// one use, and a party filing a dispute sends a packet (claim form, EOBs,
+// records, letters), not one document -- a one-use link made them come back
+// for a new link per file. The 500 MB per-link byte budget still applies.
+const uploadLinkFiles = 50
+
+// shareLinkUses is the use count a new link gets. Upload links always take a
+// packet; a download link is one-shot unless the caller asks for more.
+func shareLinkUses(kind string, requested int) int {
+	if kind == "upload" {
+		if requested > uploadLinkFiles {
+			return requested
+		}
+		return uploadLinkFiles
+	}
+	if requested <= 0 {
+		return 1
+	}
+	return requested
+}
+
 // consumeShare atomically validates + spends one use of a token.
 func (s *server) consumeShare(r *http.Request, token, wantKind string) (*shareGrant, error) {
 	var g shareGrant
@@ -78,8 +99,8 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 	if g.Kind == "upload" {
 		body = fmt.Sprintf(`
 			<h1>Secure document upload</h1>
-			<p class="muted">Case <b>%s</b> · link expires %s · %d of %d use(s) remaining</p>
-			<input type="file" id="f" accept="image/*,application/pdf" capture="environment" multiple />
+			<p class="muted">Case <b>%s</b> · link expires %s · up to %d more file(s) of %d on this link</p>
+			<input type="file" id="f" accept="image/*,application/pdf" multiple />
 			<p id="qual" class="muted"></p>
 			<button id="go" disabled>Upload securely</button>
 			<div id="bar" style="display:none;height:8px;background:#e5e7eb;border-radius:4px;margin:14px 0">
@@ -373,7 +394,7 @@ f.onchange = function(){
   msg.textContent = "";
   if (f.files.length > REMAINING) {
     go.disabled = true;
-    msg.textContent = f.files.length + " file(s) selected, but only " + REMAINING + " use(s) remain on this link. Remove some files or ask for a new link.";
+    msg.textContent = f.files.length + " file(s) selected, but this link accepts " + REMAINING + " more. Remove some files or ask for a new link.";
   } else {
     go.disabled = !f.files.length;
     if (f.files.length > 1) msg.textContent = f.files.length + " file(s) selected.";

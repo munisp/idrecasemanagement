@@ -761,16 +761,14 @@ func (s *server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	if in.DaysTTL <= 0 {
 		in.DaysTTL = 7
 	}
-	if in.MaxUses <= 0 {
-		in.MaxUses = 1
-	}
+	in.MaxUses = shareLinkUses(in.Kind, in.MaxUses)
 	buf := make([]byte, 24)
 	_, _ = rand.Read(buf)
 	token := hex.EncodeToString(buf)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	_, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
-		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), $7, $8)`,
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, max_files, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), $7, $7, $8)`,
 		token, tenant, caseID, in.Kind, in.ObjectKey, in.DaysTTL, in.MaxUses, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -786,7 +784,7 @@ func (s *server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "path": "/api/share/" + token, "kind": in.Kind})
 }
 
-// autoShareLink mints a 7-day, 10-use upload link for a case and returns the
+// autoShareLink mints a 7-day link (uploads: uploadLinkFiles files; downloads: 10 uses) for a case and returns the
 // absolute portal URL. Used by draftCorrespondence's auto-share path so the
 // sender never has to pre-create and paste a link. Failure is soft: the
 // placeholder degrades to the relative path rather than failing the draft.
@@ -798,9 +796,9 @@ func (s *server) autoShareLink(r *http.Request, tenant, caseID, kind, objectKey 
 	token := hex.EncodeToString(buf)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if _, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
-		VALUES ($1,$2,$3,$4, nullif($5,''), now() + interval '7 days', 10, $6)`,
-		token, tenant, caseID, kind, objectKey, p.Subject); err != nil {
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, max_files, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + interval '7 days', $7, $7, $6)`,
+		token, tenant, caseID, kind, objectKey, p.Subject, shareLinkUses(kind, 10)); err != nil {
 		return "/s/" + token
 	}
 	s.logActivity(r.Context(), tenant, caseID, "SHARE_LINK",

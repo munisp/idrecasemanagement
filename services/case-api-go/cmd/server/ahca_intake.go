@@ -331,9 +331,9 @@ func (s *server) mintShareLink(r *http.Request, tenant, caseID, kind, objectKey 
 	_, _ = rand.Read(buf)
 	token := hex.EncodeToString(buf)
 	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
-		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), 1, 'system:ahca-intake')`,
-		token, tenant, caseID, kind, objectKey, daysTTL)
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, max_files, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), $7, $7, 'system:ahca-intake')`,
+		token, tenant, caseID, kind, objectKey, daysTTL, shareLinkUses(kind, 0))
 	return token
 }
 
