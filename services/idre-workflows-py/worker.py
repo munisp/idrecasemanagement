@@ -38,7 +38,7 @@ from copilot_actions import (
 from onboarding import StakeholderOnboardingWorkflow, TenantOnboardingWorkflow
 from ahca_activities import (
     set_dual_status, set_program_date, record_followup_action,
-    send_correspondence, set_case_outcome,
+    send_correspondence, set_case_outcome, notify_roles,
 )
 from ahca_workflow import AhcaDisputeWorkflow
 
