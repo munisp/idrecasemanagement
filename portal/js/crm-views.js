@@ -8,7 +8,7 @@ const CrmViews = (() => {
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
-  const can = (...rs) => rs.some(role);
+  const can = (...rs) => Auth.can(...rs);
   const CRM_PAGE = 100;
   // Offset pager shared by accounts/leads/tasks: footer markup + a binder that
   // appends the next page's rows in place (busy state on the button).

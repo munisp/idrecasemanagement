@@ -20,10 +20,10 @@ const Palette = (() => {
       { s: "Go", icon: "◎", label: "Leads", run: () => go("#/crm/leads") },
       { s: "Go", icon: "☑", label: "My tasks", run: () => go("#/crm/tasks") },
       { s: "Go", icon: "▨", label: "Calendar", run: () => go("#/calendar") },
-      ...(reportsRoles.some((r) => roles.includes(r)) ? [{ s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") }] : []),
+      ...(Auth.can(...reportsRoles) ? [{ s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") }] : []),
       // Matches initiateCase's backend gate: filing is a creation action,
       // not a review one, so CASE_MANAGER was dropped (PM picked it up).
-      ...(["PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"].some((r) => roles.includes(r)) ?
+      ...(Auth.can("PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") ?
         [{ s: "Action", icon: "＋", label: "New dispute", kbd: "C", run: () => go("#/new") }] : []),
       { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext },
       { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", run: () => go("#/ask") },

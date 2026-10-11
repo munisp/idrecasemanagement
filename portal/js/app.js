@@ -133,7 +133,7 @@
   }
 
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
-  const has = (...rs) => rs.some((r) => me.roles.includes(r));
+  const has = (...rs) => Auth.can(...rs);
   // "New dispute" (#/new) only fits the federal NSA process -- CMS case
   // number format, required provider/payer IDs on file, an open-negotiation
   // -end date. A programmed tenant (FL AHCA CDR today) has none of those
@@ -154,7 +154,7 @@
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
       ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
   }
-  if (!programmed && has("PARTY", "PM", "TENANT_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
+  if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
   if (!has("TPA")) links.push(["#/ask", "✦", "Ask the graph"]);
@@ -180,7 +180,7 @@
   // registers through its own dedicated flow (dispute.html) and has no
   // use for this screen.
   if (!has("TPA")) links.push(["#/onboarding", "⚑", "Onboarding"]);
-  if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
+  if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
   // CASE_MANAGER deliberately excluded from all four -- standalone finance

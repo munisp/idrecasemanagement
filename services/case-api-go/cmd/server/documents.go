@@ -58,11 +58,33 @@ var docFolders = map[string]bool{
 	"OFFERS": true, "DETERMINATION": true, "INVOICES": true, "PARTY_UPLOADS": true,
 }
 
+// tenantStaffRoles are the roles a tenant's own staff hold. A gate that
+// names any of them is a tenant-level permission.
+var tenantStaffRoles = map[string]bool{
+	"CASE_MANAGER": true, "PM": true, "FINANCE": true, "ARBITRATOR": true,
+	"ATTORNEY": true, "CODER": true, "NURSE_PHYSICIAN": true, "DOCTOR": true,
+	"NURSE": true, "TENANT_ADMIN": true,
+}
+
 // hasAnyRole reports whether the principal holds any of the listed roles.
+//
+// TENANT_ADMIN is the tenant's own super-admin: it passes every gate that
+// admits at least one tenant staff role, so it can do anything any staff
+// member of its tenant can (tenancy() still confines it to its own tenant).
+// It does NOT pass gates made up only of platform roles (FEDERAL_ADMIN,
+// PLATFORM_ADMIN, the worker token) -- creating tenants or federal admins --
+// nor identity checks on external roles such as hasAnyRole(p, "TPA").
 func hasAnyRole(p principal, roles ...string) bool {
 	for _, want := range roles {
 		if hasRole(p, want) {
 			return true
+		}
+	}
+	if contains(p.Roles, "TENANT_ADMIN") {
+		for _, want := range roles {
+			if tenantStaffRoles[want] {
+				return true
+			}
 		}
 	}
 	return false

@@ -616,3 +616,38 @@ func TestTenantAdminKeepsWhatReviewerLost(t *testing.T) {
 		t.Error("inline reviewer exclusion must still catch CASE_MANAGER")
 	}
 }
+
+// TENANT_ADMIN passes any gate that admits a tenant staff role, and nothing
+// else: not platform-only gates, not identity checks on external roles.
+func TestTenantAdminIsTenantSuperAdmin(t *testing.T) {
+	ta := principal{Roles: []string{"TENANT_ADMIN"}}
+	allowed := map[string][]string{
+		"financialReadRoles": financialReadRoles,
+		"billingViewRoles":   billingViewRoles,
+		"arapReadRoles":      arapReadRoles,
+		"reconReadRoles":     reconReadRoles,
+		"settle (FINANCE)":   {"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+		"opt-out (ATTORNEY)": {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+		"crmStaffRoles":      crmStaffRoles,
+	}
+	for name, gate := range allowed {
+		if !hasAnyRole(ta, gate...) {
+			t.Errorf("%s: TENANT_ADMIN must be allowed", name)
+		}
+	}
+	denied := map[string][]string{
+		"createTenant / federal admins": {"FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+		"worker-token only":             {serviceRole},
+		"is-a-TPA identity check":       {"TPA"},
+		"external roles only":           {"PARTY", "BULK_SUBMITTER", "STATE_AUDITOR"},
+	}
+	for name, gate := range denied {
+		if hasAnyRole(ta, gate...) {
+			t.Errorf("%s: TENANT_ADMIN must NOT be allowed", name)
+		}
+	}
+	// Other roles are unaffected by the rule.
+	if hasAnyRole(principal{Roles: []string{"CASE_MANAGER"}}, financialReadRoles...) {
+		t.Error("CASE_MANAGER must stay out of financialReadRoles")
+	}
+}

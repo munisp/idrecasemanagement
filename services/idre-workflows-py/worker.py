@@ -15,6 +15,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from temporalio.client import Client
+import otel_setup
 from temporalio.worker import Worker
 
 from activities import (
@@ -159,9 +160,11 @@ _MAIN_LOOP: asyncio.AbstractEventLoop | None = None
 async def main() -> None:
     global _MAIN_LOOP
     _MAIN_LOOP = asyncio.get_running_loop()
+    otel_setup.init("idre-workflows")
     client = await Client.connect(
         os.environ.get("TEMPORAL_HOST", "localhost:7233"),
         namespace=os.environ.get("TEMPORAL_NAMESPACE", "idre"),
+        interceptors=otel_setup.temporal_interceptors(),
     )
     start_dapr_listener(client)
     await run_workers(client)

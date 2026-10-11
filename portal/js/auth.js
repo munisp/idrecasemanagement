@@ -88,10 +88,24 @@ const Auth = (() => {
     };
   }
 
+  // The one role check every screen uses. TENANT_ADMIN is the tenant's own
+  // super-admin: it passes any check that admits a tenant staff role. It
+  // does not pass platform-only checks (FEDERAL_ADMIN/PLATFORM_ADMIN alone)
+  // or identity checks on external roles like can("TPA"). Mirrors the
+  // backend's hasAnyRole (cmd/server/documents.go) exactly.
+  const STAFF_ROLES = ["CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "CODER",
+    "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "TENANT_ADMIN"];
+  function can(...rs) {
+    // Auth.claims, not the local claims(): demo mode swaps Auth.claims out.
+    const roles = Auth.claims()?.roles || [];
+    return rs.some((r) => roles.includes(r)) ||
+      (roles.includes("TENANT_ADMIN") && rs.some((r) => STAFF_ROLES.includes(r)));
+  }
+
   function logout() {
     sessionStorage.clear();
     location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`;
   }
 
-  return { login, logout, handleCallback, token, claims };
+  return { login, logout, handleCallback, token, claims, can };
 })();

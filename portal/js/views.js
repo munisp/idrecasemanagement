@@ -12,7 +12,7 @@ const Views = (() => {
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="App.rerender()">Retry</button></div>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
-  const can = (...rs) => rs.some(role);
+  const can = (...rs) => Auth.can(...rs);
   // Federal NSA cases price on QPA (qpa_cents); programmed tenants (FL AHCA
   // etc.) have no such concept and always read $0 there -- they use
   // disputed_amount_cents instead (accumulates from imported claims, or a
@@ -3764,8 +3764,8 @@ const Views = (() => {
   }
 
   async function timeReport() {
-    if (!can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-      return `<div class="view-head"><h1>Team time</h1></div><p class="muted">Requires CASE_MANAGER, PM, or FINANCE.</p>`;
+    if (!can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Team time</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
     const now = new Date();
     const defMonth = now.toISOString().slice(0, 7);
     // Role-based billable rates: only PM/admin may set them; only

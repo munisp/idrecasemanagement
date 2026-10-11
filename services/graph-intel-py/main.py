@@ -28,10 +28,13 @@ import epr_kgqa
 import gnn
 import graphdb
 import lakehouse_io
+import otel_setup
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 
 app = FastAPI(title="idre-graph-intel", version="1.0.0")
+otel_setup.init("idre-graph-intel")
+otel_setup.instrument_fastapi(app)
 
 
 def _load_cases(tenant: str) -> list[dict]:

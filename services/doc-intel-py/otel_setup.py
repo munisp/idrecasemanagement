@@ -73,3 +73,30 @@ def mark_error(sp, message: str) -> None:
         return
     from opentelemetry.trace import Status, StatusCode
     sp.set_status(Status(StatusCode.ERROR, message[:200]))
+
+
+def enabled() -> bool:
+    return _tracer is not None
+
+
+def instrument_fastapi(app) -> None:
+    """Server spans for a FastAPI app (no-op when tracing is off)."""
+    if _tracer is None:
+        return
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        FastAPIInstrumentor.instrument_app(app, excluded_urls="healthz,health,metrics")
+    except Exception as exc:  # noqa: BLE001 - optional
+        print(f"[otel] fastapi instrumentation unavailable: {exc}", flush=True)
+
+
+def temporal_interceptors() -> list:
+    """Temporal client interceptors that trace workflows and activities."""
+    if _tracer is None:
+        return []
+    try:
+        from temporalio.contrib.opentelemetry import TracingInterceptor
+        return [TracingInterceptor()]
+    except Exception as exc:  # noqa: BLE001 - optional
+        print(f"[otel] temporal tracing unavailable: {exc}", flush=True)
+        return []

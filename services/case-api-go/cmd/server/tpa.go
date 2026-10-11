@@ -455,19 +455,23 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// Staff may name any TPA with ?tpa_id=. Everyone else -- and staff who
+	// did not name one -- gets the org their own account is linked to. The
+	// second case used to be a 400 ("tpa_id required for staff view"): a
+	// staffer who had clicked "Act as this TPA" is linked to that org, the
+	// page then loads this dashboard without a tpa_id, and it failed.
+	isStaff := hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 	orgID := ""
-	if hasAnyRole(p, "TPA") && !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		org, err := s.tpaForPrincipal(r, tenant)
-		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
-			return
-		}
+	if q := r.URL.Query().Get("tpa_id"); q != "" && isStaff {
+		orgID = q
+	} else if org, err := s.tpaForPrincipal(r, tenant); err == nil {
 		orgID = org.ID
-	} else if q := r.URL.Query().Get("tpa_id"); q != "" {
-		orgID = q // staff inspecting a specific TPA
+	} else if !isStaff {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
+		return
 	}
 	if orgID == "" {
-		http.Error(w, `{"error":"tpa_id required for staff view"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"not linked to a TPA organization -- pass tpa_id to view one"}`, http.StatusBadRequest)
 		return
 	}
 	rows, err := s.queryRows(r, fmt.Sprintf(`
