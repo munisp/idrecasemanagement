@@ -619,6 +619,7 @@ func main() {
 		r.Get("/tpa/dashboard", s.tpaDashboard)             // status of all my clients' disputes
 		r.Get("/admin/tpas", s.adminListTPAs)               // state oversight
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus) // suspend|reactivate
+		r.Post("/admin/tpas/{tpaId}/invite-code", s.adminTPAInviteCode) // mint a claim code for any TPA
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)

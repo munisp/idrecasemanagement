@@ -284,6 +284,7 @@ const Api = (() => {
       tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${qs(tpaId ? { tpa_id: tpaId } : {})}`),
       adminTpas: () => req("GET", `${t()}/admin/tpas`),
       adminTpaStatus: (id, status) => req("POST", `${t()}/admin/tpas/${id}/status`, { status }),
+      adminTpaInviteCode: (id) => req("POST", `${t()}/admin/tpas/${id}/invite-code`, {}),
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
