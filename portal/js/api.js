@@ -114,17 +114,17 @@ const Api = (() => {
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       timeAdd: (id, p) => req("POST", `${t()}/cases/${id}/time`, p),
       timeList: (id) => req("GET", `${t()}/cases/${id}/time`),
+      analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
+      retryAnalysis: (id, docId) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/retry`),
+      downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
+      activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
+    },
     // Personal timesheet: daily entry screen with day/week/month totals.
     time: {
       mine: (from, to) => req("GET", `${t()}/time/mine${from||to ? `?from=${from||""}&to=${to||""}` : ""}`),
       summary: () => req("GET", `${t()}/time/summary`),
       update: (id, p) => req("PUT", `${t()}/time/${id}`, p),
       remove: (id) => req("DELETE", `${t()}/time/${id}`),
-    },
-      analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
-      retryAnalysis: (id, docId) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/retry`),
-      downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
-      activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },
     onboarding: {
       submit: (payload) => req("POST", `${t()}/onboarding/applications`, payload),

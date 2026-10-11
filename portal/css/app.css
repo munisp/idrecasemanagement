@@ -595,3 +595,6 @@ button.mini.danger{color:#991b1b;border-color:#fecaca}
 .day-head td{background:var(--surface-sunken);font-weight:600}
 button.ghost{background:transparent;border:1px solid currentColor}
 button.bad{color:var(--red-700);border-color:var(--red-700)}
+th.sortable .sort-arrow{opacity:.45;font-weight:400}
+th.sortable.sorted .sort-arrow{opacity:1}
+th.sortable:focus-visible{outline:2px solid var(--accent-fg);outline-offset:-2px}
