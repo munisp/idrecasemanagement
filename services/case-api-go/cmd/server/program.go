@@ -470,7 +470,9 @@ func (s *server) eligibilityHistory(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	rows, err := s.queryRows(r, `
-		SELECT id, result, COALESCE(reason,'') AS reason, evidence, decided_by, created_at
+		SELECT id, result, COALESCE(reason,'') AS reason, evidence, decided_by, created_at,
+		       COALESCE(rule_version,'') AS rule_version, COALESCE(borderline,false) AS borderline,
+		       COALESCE(override,false) AS override, COALESCE(override_reason,'') AS override_reason
 		FROM public.eligibility_reviews WHERE tenant=$1 AND case_id=$2
 		ORDER BY created_at DESC LIMIT 10`, tenant, id)
 	if err != nil {

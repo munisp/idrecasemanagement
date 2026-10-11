@@ -1329,11 +1329,13 @@ const Views = (() => {
       <div class="actions"><button id="p-elig-auto" title="Derives every rule input from the case record and analyzed documents, then decides — or tells you exactly which inputs are still missing">⚡ Auto-adjudicate from case + documents</button></div>
       <div id="p-elig-auto-out"></div>
       <form id="p-elig" class="inline-form">
-        <input name="provider_type" placeholder="provider type (e.g. hospital_inpatient)" required />
+        <select name="provider_type" required title="provider type"><option value="">provider type…</option>
+          ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option>${esc(x)}</option>`).join("")}</select>
         <label>contracted <input type="checkbox" name="contracted" /></label>
         <input name="amount" type="number" step="0.01" placeholder="disputed $" required />
         <input name="fd" type="date" title="final determination date" />
-        <input name="flags" placeholder="flags (comma-separated reason codes)" />
+        <input name="flags" placeholder="flags (comma-separated reason codes)" list="p-elig-flags" title="${esc(((cfg.eligibility || {}).ineligibility_reasons || []).join(", "))}" />
+        <datalist id="p-elig-flags">${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<option value="${esc(x)}">`).join("")}</datalist>
         <label>AOR valid <input type="checkbox" name="aor_valid" checked /></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
