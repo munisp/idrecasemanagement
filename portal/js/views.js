@@ -359,6 +359,7 @@ const Views = (() => {
       // page started from: cursors[n] opens page n.
       const cursors = ["", page.next_cursor];
       const total = page.total;
+      let grandTotal = total;
       const opts = saved.map((s) => `<option value="${s.id}" ${s.id === v ? "selected" : ""}>${s.pinned ? "★ " : ""}${esc(s.name)}</option>`).join("");
       const density = localStorage.getItem("idre.density") || "comfortable";
       document.body.classList.toggle("density-compact", density === "compact");
@@ -401,7 +402,10 @@ const Views = (() => {
           cursors[pg + 1] = next.next_cursor;
           document.querySelector(".dg-wrap").outerHTML = caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch);
           bindGrid(loaded);
-          return { total: next.total ?? total, shown: loaded.length };
+          // Past the first page a keyset query counts only what is left
+          // after the cursor, so the list's size is the first page's total.
+          if (pg === 0 && next.total != null) grandTotal = next.total;
+          return { total: grandTotal, shown: loaded.length };
         });
       });
       return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
