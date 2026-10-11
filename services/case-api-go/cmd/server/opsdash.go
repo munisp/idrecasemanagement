@@ -27,7 +27,8 @@ import (
 // CASE_MANAGER removed per the "reviewer only reviews" follow-up: Ops is a
 // tenant-wide operational/financial KPI dashboard, not dispute-review
 // content, so reviewer loses it entirely (matches Reports/Financials).
-var opsRoles = []string{"ARBITRATOR", "FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
+// TENANT_ADMIN added back -- see reportsReadRoles (casemgmt.go) for why.
+var opsRoles = []string{"ARBITRATOR", "FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN"}
 
 func (s *server) presencePing(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)

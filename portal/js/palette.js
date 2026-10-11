@@ -11,7 +11,7 @@ const Palette = (() => {
 
   const ACTIONS = () => {
     const roles = Auth.claims()?.roles || [];
-    const reportsRoles = ["PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN"];
+    const reportsRoles = ["PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN"];
     return [
       { s: "Go", icon: "▤", label: "Home", run: () => go("#/dashboard") },
       { s: "Go", icon: "▦", label: "Disputes", run: () => go("#/cases") },
@@ -23,7 +23,7 @@ const Palette = (() => {
       ...(reportsRoles.some((r) => roles.includes(r)) ? [{ s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") }] : []),
       // Matches initiateCase's backend gate: filing is a creation action,
       // not a review one, so CASE_MANAGER was dropped (PM picked it up).
-      ...(["PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].some((r) => roles.includes(r)) ?
+      ...(["PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"].some((r) => roles.includes(r)) ?
         [{ s: "Action", icon: "＋", label: "New dispute", kbd: "C", run: () => go("#/new") }] : []),
       { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext },
       { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", run: () => go("#/ask") },

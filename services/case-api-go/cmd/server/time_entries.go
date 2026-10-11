@@ -200,7 +200,8 @@ func (s *server) listTimeEntries(w http.ResponseWriter, r *http.Request) {
 //     totals. This is the billing-review table.
 func (s *server) timeReport(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// TENANT_ADMIN added back -- see reportsReadRoles (casemgmt.go) for why.
+	if !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires PM or FINANCE"}`, http.StatusForbidden)
 		return
 	}

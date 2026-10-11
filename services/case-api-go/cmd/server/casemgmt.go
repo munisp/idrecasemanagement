@@ -57,7 +57,13 @@ var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDE
 // here, unlike financialReadRoles -- Reports nav never included them).
 // CASE_MANAGER removed per the same access-control follow-up as
 // financialReadRoles: reviewer loses Reports entirely, not just a subset.
-var reportsReadRoles = []string{"PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", serviceRole}
+// TENANT_ADMIN added back explicitly: it used to ride in on CASE_MANAGER's
+// hasRole quirk, and removing CASE_MANAGER from this list silently took
+// TENANT_ADMIN down with it -- confirmed live, not intended. Reviewer and
+// tenant admin are different roles with different scopes going forward;
+// every "CASE_MANAGER removed" change from the reviewer-only-reviews work
+// gets this same explicit TENANT_ADMIN restoration.
+var reportsReadRoles = []string{"PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole}
 
 // ---- Notifications -----------------------------------------------------------
 

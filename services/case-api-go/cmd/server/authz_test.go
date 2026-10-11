@@ -581,3 +581,38 @@ func TestIsUniqueViolation(t *testing.T) {
 		t.Fatal("pg error code 23505 must be recognized as a unique violation")
 	}
 }
+
+// TENANT_ADMIN is a different role from reviewer (CASE_MANAGER): it reaches
+// CASE_MANAGER-gated handlers through hasRole's quirk, so every gate that
+// dropped or excluded CASE_MANAGER has to name or exempt TENANT_ADMIN itself.
+func TestTenantAdminKeepsWhatReviewerLost(t *testing.T) {
+	ta := principal{Roles: []string{"TENANT_ADMIN"}}
+	rev := principal{Roles: []string{"CASE_MANAGER"}}
+	lists := map[string][]string{
+		"reportsReadRoles":        reportsReadRoles,
+		"opsRoles":                opsRoles,
+		"timeReport":              {"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"tenantStaff":             {"PM", "TENANT_ADMIN"},
+		"initiateCase":            {"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"createIntake":            {"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"bulkIntake":              {"BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"requestAdhocDeliverable": {"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"tpaAdminAction":          {"FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"},
+	}
+	for name, gate := range lists {
+		if !hasAnyRole(ta, gate...) {
+			t.Errorf("%s: TENANT_ADMIN must be allowed", name)
+		}
+		if hasAnyRole(rev, gate...) {
+			t.Errorf("%s: CASE_MANAGER must stay rejected", name)
+		}
+	}
+	// Inline exclusions (createAccount/Contact/Task, submitApplication, claimTPA).
+	excluded := func(p principal) bool { return hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") }
+	if excluded(ta) {
+		t.Error("inline reviewer exclusion must not catch TENANT_ADMIN")
+	}
+	if !excluded(rev) {
+		t.Error("inline reviewer exclusion must still catch CASE_MANAGER")
+	}
+}

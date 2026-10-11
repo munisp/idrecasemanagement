@@ -62,8 +62,12 @@ func (s *server) submitApplication(w http.ResponseWriter, r *http.Request) {
 	// starting a new onboarding application is a creation action; reviewer
 	// keeps decideApplication (deciding a pending one) but not this. Every
 	// other authenticated tenant role keeps the open self-service access
-	// this route has always had (no gate otherwise).
-	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "CASE_MANAGER") {
+	// this route has always had (no gate otherwise). TENANT_ADMIN exempted
+	// from the exclusion -- it's a different role from reviewer and keeps
+	// full access (hasRole("CASE_MANAGER") is also true for TENANT_ADMIN
+	// via its own hasRole quirk below, so this must be checked explicitly).
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden: reviewer cannot submit new onboarding applications"}`, http.StatusForbidden)
 		return
 	}

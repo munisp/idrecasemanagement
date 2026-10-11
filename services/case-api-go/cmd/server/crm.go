@@ -103,8 +103,13 @@ func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 	// "reviewer only reviews" follow-up: creating a new CRM account is a
 	// creation action, not a review one. Inline rather than removed from
 	// crmStaffRoles itself -- reviewer keeps every OTHER crmStaffRoles
-	// action (convertLead, completeTask, addNote, listNotes).
-	if hasRole(p, "CASE_MANAGER") {
+	// action (convertLead, completeTask, addNote, listNotes). The
+	// !hasRole(p,"TENANT_ADMIN") guard matters: hasRole("CASE_MANAGER")
+	// is also true for TENANT_ADMIN (the per-tenant super-admin's own
+	// hasRole quirk, onboarding.go) -- without it this would wrongly
+	// reject the tenant's own admin too, which is a different role from
+	// reviewer and keeps full access here.
+	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden: reviewer cannot create new CRM accounts"}`, http.StatusForbidden)
 		return
 	}
@@ -210,8 +215,8 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
-	// CASE_MANAGER excluded, same as createAccount -- see that comment.
-	if hasRole(p, "CASE_MANAGER") {
+	// CASE_MANAGER excluded, TENANT_ADMIN exempted, same as createAccount.
+	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden: reviewer cannot create new contacts"}`, http.StatusForbidden)
 		return
 	}
@@ -417,8 +422,8 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
-	// CASE_MANAGER excluded, same as createAccount -- see that comment.
-	if hasRole(p, "CASE_MANAGER") {
+	// CASE_MANAGER excluded, TENANT_ADMIN exempted, same as createAccount.
+	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden: reviewer cannot create new tasks"}`, http.StatusForbidden)
 		return
 	}

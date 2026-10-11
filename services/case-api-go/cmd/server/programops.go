@@ -425,8 +425,9 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	// CASE_MANAGER removed, PM added, per the "reviewer only reviews"
 	// follow-up: opening a new intake is a creation action, not a review
 	// one -- reviewer keeps advanceIntake (working an existing intake)
-	// but not this.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// but not this. TENANT_ADMIN added back -- see reportsReadRoles
+	// (casemgmt.go) for why.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}

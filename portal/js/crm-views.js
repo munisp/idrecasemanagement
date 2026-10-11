@@ -118,7 +118,7 @@ const CrmViews = (() => {
     afterRender(() => accountsBox(""));
     const typeFilter = `<select id="acc-type" onchange="CrmViews.accountsFilter(this.value)"><option value="">All types</option>
       ${["PROVIDER", "PAYER", "IDRE", "AUDITOR", "OTHER"].map((t) => `<option value="${t}">${t}</option>`).join("")}</select>`;
-    return `<div class="view-head"><h1>Accounts</h1>${can("CASE_MANAGER") ? "" : `<a class="button" href="#/crm/accounts/new">New account</a>`}${typeFilter}</div>
+    return `<div class="view-head"><h1>Accounts</h1>${(can("CASE_MANAGER") && !can("TENANT_ADMIN")) ? "" : `<a class="button" href="#/crm/accounts/new">New account</a>`}${typeFilter}</div>
       <div id="acc-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -158,7 +158,7 @@ const CrmViews = (() => {
         (d.contacts.length ? `<table><tbody>` + d.contacts.map((c) =>
           `<tr><td>${esc(c.name)}</td><td>${esc(c.role_title)}</td><td>${esc(c.email)}</td><td>${esc(c.phone)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No contacts.</p>`) +
-        (can("CASE_MANAGER") ? "" : `<form id="nc" class="form"><b>Add contact</b>
+        ((can("CASE_MANAGER") && !can("TENANT_ADMIN")) ? "" : `<form id="nc" class="form"><b>Add contact</b>
            <input name="name" placeholder="Name" required />
            <input name="role_title" placeholder="Role (e.g. Billing lead)" />
            <input name="email" type="email" placeholder="Email" />
@@ -277,7 +277,7 @@ const CrmViews = (() => {
         <a class="tab ${mine ? "active" : ""}" href="#/crm/tasks">My tasks</a>
         <a class="tab ${!mine ? "active" : ""}" href="#/crm/tasks?all=1">All tasks</a>
       </div>
-      ${can("CASE_MANAGER") ? "" : `<form id="nt" class="form"><b>New task</b>
+      ${(can("CASE_MANAGER") && !can("TENANT_ADMIN")) ? "" : `<form id="nt" class="form"><b>New task</b>
         <input name="subject" placeholder="Subject" required />
         <input name="case_id" placeholder="Case ID (optional)" />
         <input name="due_date" type="date" /><button>Create</button></form>`}

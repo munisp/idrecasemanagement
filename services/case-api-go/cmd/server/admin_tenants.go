@@ -420,15 +420,14 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 	// doesn't exist on this route.
 	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 	if !isAdmin {
-		// CASE_MANAGER removed from Team per the same access-control
-		// follow-up as Reports/Team time: reviewer loses tenant staff
-		// admin entirely. Note this also drops the old hasRole("CASE_
-		// MANAGER") quirk that silently admitted TENANT_ADMIN here too
-		// (same mechanism as the DOCTOR/NURSE -> NURSE_PHYSICIAN split) --
-		// consistent with how financialReadRoles already made this same
-		// tradeoff, not re-added here.
-		if !hasRole(p, "PM") || !contains(p.Tenants, in.Tenant) {
-			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM adding staff to their own tenant"}`, http.StatusForbidden)
+		// CASE_MANAGER removed from Team per the access-control follow-up:
+		// reviewer loses tenant staff admin entirely. TENANT_ADMIN added
+		// back explicitly: it's a genuinely different role from reviewer
+		// (the tenant's own super-admin) that had been riding in on
+		// CASE_MANAGER's hasRole quirk and got silently taken down with
+		// it -- confirmed live, not intended.
+		if !hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, in.Tenant) {
+			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN adding staff to their own tenant"}`, http.StatusForbidden)
 			return
 		}
 	}
@@ -696,9 +695,10 @@ func (s *server) updateTenantStaffStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	in.Tenant = strings.ToLower(strings.TrimSpace(in.Tenant))
+	// TENANT_ADMIN added back -- see createTenantStaff for why.
 	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
-	if !isAdmin && (!hasRole(p, "PM") || !contains(p.Tenants, in.Tenant)) {
-		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM acting on their own tenant"}`, http.StatusForbidden)
+	if !isAdmin && (!hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, in.Tenant)) {
+		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN acting on their own tenant"}`, http.StatusForbidden)
 		return
 	}
 	tok, userID, ok := s.resolveStaffTarget(w, r, p, username)
@@ -740,9 +740,10 @@ func (s *server) deleteTenantStaff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"tenant query param required"}`, http.StatusBadRequest)
 		return
 	}
+	// TENANT_ADMIN added back -- see createTenantStaff for why.
 	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
-	if !isAdmin && (!hasRole(p, "PM") || !contains(p.Tenants, tenant)) {
-		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM acting on their own tenant"}`, http.StatusForbidden)
+	if !isAdmin && (!hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, tenant)) {
+		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN acting on their own tenant"}`, http.StatusForbidden)
 		return
 	}
 	tok, userID, ok := s.resolveStaffTarget(w, r, p, username)
@@ -841,9 +842,10 @@ func (s *server) listTenantStaff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"tenant query param required"}`, http.StatusBadRequest)
 		return
 	}
+	// TENANT_ADMIN added back -- see createTenantStaff for why.
 	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		if !hasRole(p, "PM") || !contains(p.Tenants, tenant) {
-			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM viewing their own tenant"}`, http.StatusForbidden)
+		if !hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, tenant) {
+			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN viewing their own tenant"}`, http.StatusForbidden)
 			return
 		}
 	}

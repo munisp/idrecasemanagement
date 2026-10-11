@@ -865,7 +865,7 @@ const Views = (() => {
     // CASE_MANAGER keeps the review queue above (deciding a pending
     // application) but not this -- starting a new one is a creation
     // action, per the "reviewer only reviews" follow-up.
-    if (!can("CASE_MANAGER")) {
+    if (!can("CASE_MANAGER") || can("TENANT_ADMIN")) {
       html += `<h2>New application</h2><p class="muted">Self-service registration for provider, payer, IDRE and auditor organizations.</p>
         <p><a class="button" href="#/onboarding/new">Start application</a></p>`;
     }
@@ -1858,8 +1858,10 @@ const Views = (() => {
   function intake() {
     // CASE_MANAGER cannot create new intake (single or bulk) per the
     // "reviewer only reviews" follow-up -- matches createIntake/bulkIntake's
-    // backend gates, which now require PM/FEDERAL_ADMIN/PLATFORM_ADMIN.
-    const canCreate = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    // backend gates, which now require PM/FEDERAL_ADMIN/PLATFORM_ADMIN/
+    // TENANT_ADMIN (the last is a different role from reviewer and keeps
+    // full access).
+    const canCreate = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
     afterRender(() => {
       intakeBox("");
       $("#intake-form")?.addEventListener("submit", async (ev) => {
@@ -2113,7 +2115,7 @@ const Views = (() => {
         press <b>mark delivered</b> — that records the delivery timestamp (your proof to the agency) and rolls the
         schedule forward. Ad hoc agency requests get a due date of +10 business days automatically.
         Anything overdue or due within 3 days is highlighted; due soon is amber, on track is green.</p></details>` +
-      (can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
+      (can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
         <input name="name" required placeholder="Ad hoc report name" />
         <input name="ref" placeholder="Contract ref (optional)" size="10" />
         <button class="mini">request ad hoc (due +10 business days)</button></form>` : "") +
@@ -3508,7 +3510,7 @@ const Views = (() => {
         <label><input type="checkbox" name="billable" checked /> billable</label>
         <button class="mini">Log</button></form>
       ${recent ? `<table><thead><tr><th>Date</th><th>Who</th><th>Role</th><th>Time</th><th>Note</th></tr></thead><tbody>${recent}</tbody></table>` : `<p class="muted">No entries yet.</p>`}
-      <p class="muted">Append-only, recorded under your name and role${can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? ` — <a href="#/time">team weekly/monthly rollups ↗</a>` : ""}</p></div>`;
+      <p class="muted">Append-only, recorded under your name and role${can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") ? ` — <a href="#/time">team weekly/monthly rollups ↗</a>` : ""}</p></div>`;
   }
 
   async function asstTimeAdd(caseId, form) {
@@ -4977,7 +4979,7 @@ const Views = (() => {
       // reviewer per the "reviewer only reviews" follow-up, so this form
       // would just fail -- reviewer still sees the oversight table below,
       // read-only.
-      orgBox.innerHTML = can("CASE_MANAGER") ? "" : `<div class="card"><h2>Link your TPA organization</h2>
+      orgBox.innerHTML = (can("CASE_MANAGER") && !can("TENANT_ADMIN")) ? "" : `<div class="card"><h2>Link your TPA organization</h2>
         <p class="muted">Enter the one-time claim code from your TPA registration.</p>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaClaimFn(this)">
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
@@ -5163,7 +5165,7 @@ const Views = (() => {
       // CASE_MANAGER excluded per the "reviewer only reviews" follow-up --
       // matches adminTPAInviteCode/adminSetTPAStatus/claimTPA's backend
       // gates. Reviewer still sees this table, just not the action buttons.
-      const canAct = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      const canAct = can("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
       const rows = (r.tpas || []).map((t) => `<tr><td>${esc(t.name)}</td><td>${esc(t.contact_email)}</td><td>${t.clients}</td><td>${t.cases_filed}</td>
         <td>${badge(t.status)}</td>
         <td class="mono">${t.claim_code

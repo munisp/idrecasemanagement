@@ -171,10 +171,13 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 // new TPA user has no other role yet) -- CASE_MANAGER is the one exclusion,
 // since the only reason a CASE_MANAGER would ever call this is "Act as this
 // TPA" from the oversight list, an administrative action reviewer no
-// longer gets per the "reviewer only reviews" follow-up.
+// longer gets per the "reviewer only reviews" follow-up. TENANT_ADMIN is
+// exempted from that exclusion -- a different role from reviewer, keeps
+// full access (hasRole("CASE_MANAGER") is also true for TENANT_ADMIN via
+// its own hasRole quirk, onboarding.go, so this must check explicitly).
 func (s *server) claimTPA(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if hasRole(p, "CASE_MANAGER") {
+	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden: reviewer cannot act as a TPA"}`, http.StatusForbidden)
 		return
 	}
@@ -551,8 +554,9 @@ func (s *server) adminTPAInviteCode(w http.ResponseWriter, r *http.Request) {
 	// CASE_MANAGER removed per the "reviewer only reviews" follow-up:
 	// minting a code to act as (or hand off) a TPA is an administrative
 	// action, not a review one. Reviewer keeps seeing the oversight table
-	// (adminListTPAs) -- just not the action buttons on it.
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	// (adminListTPAs) -- just not the action buttons on it. TENANT_ADMIN
+	// added back -- see reportsReadRoles (casemgmt.go) for why.
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -574,8 +578,9 @@ func (s *server) adminTPAInviteCode(w http.ResponseWriter, r *http.Request) {
 // adminSetTPAStatus: the state's after-the-fact control (suspend bad actors).
 func (s *server) adminSetTPAStatus(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	// CASE_MANAGER removed, same reasoning as adminTPAInviteCode above.
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	// CASE_MANAGER removed, TENANT_ADMIN added back, same reasoning as
+	// adminTPAInviteCode above.
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}

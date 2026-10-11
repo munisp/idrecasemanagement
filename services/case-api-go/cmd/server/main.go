@@ -830,7 +830,8 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	// CASE_MANAGER removed for the same reason, per the "reviewer only
 	// reviews" follow-up: filing is a creation action, deciding is a review
 	// action, and reviewer keeps only the latter. PM takes over this duty.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// TENANT_ADMIN added back -- see reportsReadRoles (casemgmt.go) for why.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires PARTY, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
