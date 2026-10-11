@@ -1174,6 +1174,8 @@ const Views = (() => {
     });
   }
   async function reports() {
+    if (!can("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Reports</h1></div><p class="muted">Your role doesn't have access to Reports.</p>`;
     const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
       ? `<a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>` : "";
     afterRender(() => {
@@ -4023,6 +4025,8 @@ const Views = (() => {
   // ---- Operations dashboard (staff roles; presence + workload + KPIs) -----
 
   async function opsDashboard() {
+    if (!can("PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"))
+      return `<div class="view-head"><h1>Ops</h1></div><p class="muted">Your role doesn't have access to Ops.</p>`;
     try {
       const d = await Api.program.opsDashboard();
       const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
@@ -4316,6 +4320,8 @@ const Views = (() => {
       `</tbody></table>`;
   }
   async function teamAdmin() {
+    if (!can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+      return `<div class="view-head"><h1>Team</h1></div><p class="muted">Your role doesn't have access to Team.</p>`;
     const isAdmin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
     const tenant = Api.getTenant();
     let html = `<div class="view-head"><h1>Team</h1>
@@ -5178,7 +5184,7 @@ const Views = (() => {
           : canAct ? `<button class="mini" onclick="Views.tpaAdminInviteCodeFn('${t.id}')">Generate</button>` : `<span class="muted">none</span>`}</td>
         <td>${canAct ? `<button class="mini ${t.status === "ACTIVE" ? "danger" : ""}" onclick="Views.tpaAdminStatusFn('${t.id}','${t.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${t.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button>` : ""}</td></tr>`).join("");
       box.innerHTML = rows ? `<table class="tbl"><thead><tr><th>TPA</th><th>Contact</th><th>Clients</th><th>Cases</th><th>Status</th><th>Claim code</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-        <p class="muted" style="margin-top:6px">"Act as" links YOUR OWN account to that TPA (same effect as the TPA entering the code themselves) and switches this page to its dashboard -- a deliberate support action, not a read-only peek. "New" burns any pending code and mints a fresh one.</p>`
+${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN account to that TPA (same effect as the TPA entering the code themselves) and switches this page to its dashboard -- a deliberate support action, not a read-only peek. "New" burns any pending code and mints a fresh one.</p>` : ""}`
         : '<p class="muted">No TPAs registered.</p>';
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
