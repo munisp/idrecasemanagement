@@ -79,7 +79,7 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 		body = fmt.Sprintf(`
 			<h1>Secure document upload</h1>
 			<p class="muted">Case <b>%s</b> · link expires %s · %d of %d use(s) remaining</p>
-			<input type="file" id="f" accept="image/*,application/pdf" capture="environment" />
+			<input type="file" id="f" accept="image/*,application/pdf" capture="environment" multiple />
 			<p id="qual" class="muted"></p>
 			<button id="go" disabled>Upload securely</button>
 			<div id="bar" style="display:none;height:8px;background:#e5e7eb;border-radius:4px;margin:14px 0">
@@ -88,7 +88,7 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 			<p class="fine">Files are encrypted before storage and attached directly to the case docket. Large files upload in chunks and <b>resume automatically</b> if the connection drops. Do not upload documents for any other case.</p>
 			<script>%s</script>`,
 			escHTML(caseNumber), g.ExpiresAt.Format("Jan 2, 2006 15:04 MST"), g.MaxUses-g.Uses, g.MaxUses,
-			resumableJS(token))
+			resumableJS(token, g.MaxUses-g.Uses))
 		body += shareChatSection(token)
 	} else {
 		body = fmt.Sprintf(`
@@ -363,14 +363,22 @@ func shareChatSection(token string) string {
 // resumableJS is the landing-page uploader: small files use the one-shot
 // endpoint; anything larger goes through the chunked protocol with HEAD-probe
 // resume and per-chunk retry. No libraries, no accounts.
-func resumableJS(token string) string {
+func resumableJS(token string, remaining int) string {
 	return `(function(){
-var T = ` + "`" + token + "`" + `, CHUNK = 8*1024*1024, MAX = 100*1024*1024;
+var T = ` + "`" + token + "`" + `, CHUNK = 8*1024*1024, MAX = 100*1024*1024, REMAINING = ` + fmt.Sprint(remaining) + `;
 var f = document.getElementById("f"), go = document.getElementById("go"),
     fill = document.getElementById("fill"), bar = document.getElementById("bar"),
     msg = document.getElementById("msg");
 f.onchange = function(){
-  go.disabled = !f.files.length; msg.textContent=""; qualCheck(f.files[0]);
+  msg.textContent = "";
+  if (f.files.length > REMAINING) {
+    go.disabled = true;
+    msg.textContent = f.files.length + " file(s) selected, but only " + REMAINING + " use(s) remain on this link. Remove some files or ask for a new link.";
+  } else {
+    go.disabled = !f.files.length;
+    if (f.files.length > 1) msg.textContent = f.files.length + " file(s) selected.";
+  }
+  qualCheck(f.files[0]);
 };
 // Capture guidance: grade photos BEFORE upload (blur via Laplacian variance
 // on a downscaled canvas, brightness, resolution). Warns, never blocks — the
@@ -408,46 +416,67 @@ function qualCheck(file){
   };
   im.src = url;
 }
+// uploadOne drives a single file through the small-file or resumable-
+// chunked path (unchanged from the original single-file flow), reporting
+// its own progress via onProgress(pct, label).
+async function uploadOne(file, onProgress){
+  if (file.size <= CHUNK) {
+    onProgress(0, "Uploading "+file.name+"...");
+    var fd = new FormData(); fd.append("file", file);
+    var r0 = await fetch("/api/share/"+T+"/upload", {method:"POST", body:fd});
+    if(!r0.ok) throw new Error("upload failed ("+r0.status+")");
+    onProgress(100, "");
+    return;
+  }
+  var cr = await (await fetch("/api/share/"+T+"/uploads", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({filename:file.name, size:file.size})})).json();
+  var up = cr.upload_id;
+  var off = 0;
+  while (off < file.size) {
+    // probe first: resumes correctly after a dropped connection
+    var hd = await fetch("/api/share/"+T+"/uploads/"+up, {method:"HEAD"});
+    off = parseInt(hd.headers.get("Upload-Offset")||"0",10);
+    var done = false;
+    while (!done) {
+      var chunk = file.slice(off, Math.min(off+CHUNK, file.size));
+      var rp = await fetch("/api/share/"+T+"/uploads/"+up, {method:"PATCH",
+        headers:{"Upload-Offset": String(off), "Content-Type":"application/octet-stream"}, body: chunk});
+      if (rp.status === 409) { // offset mismatch — re-probe and continue
+        hd = await fetch("/api/share/"+T+"/uploads/"+up, {method:"HEAD"});
+        off = parseInt(hd.headers.get("Upload-Offset")||"0",10);
+        continue;
+      }
+      if (!rp.ok) throw new Error("chunk failed ("+rp.status+") — retrying");
+      var jr = await rp.json(); off = jr.offset; done = true;
+      onProgress(Math.round(100*off/file.size),
+        file.name+": "+Math.round(off/1048576)+" of "+Math.round(file.size/1048576)+" MB");
+    }
+  }
+  var fin = await fetch("/api/share/"+T+"/uploads/"+up+"/complete", {method:"POST"});
+  if(!fin.ok) throw new Error("finalize failed ("+fin.status+")");
+}
+// idx persists across a failed click so retrying resumes at the file that
+// failed instead of re-uploading ones that already succeeded (each
+// consumes one of the link's limited uses -- redoing a finished upload
+// would burn a use for nothing).
+var idx = 0;
 go.onclick = async function(){
-  var file = f.files[0]; if(!file) return;
-  if(file.size > MAX){ msg.textContent = "File exceeds the 100MB limit."; return; }
+  var files = f.files; if(!files.length) return;
+  for (var i = 0; i < files.length; i++) {
+    if (files[i].size > MAX) { msg.textContent = files[i].name+" exceeds the 100MB limit — remove it and try again."; return; }
+  }
   go.disabled = true; bar.style.display = "block";
   try {
-    if (file.size <= CHUNK) {
-      var fd = new FormData(); fd.append("file", file);
-      var r0 = await fetch("/api/share/"+T+"/upload", {method:"POST", body:fd});
-      if(!r0.ok) throw new Error("upload failed ("+r0.status+")");
-    } else {
-      var cr = await (await fetch("/api/share/"+T+"/uploads", {method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({filename:file.name, size:file.size})})).json();
-      var up = cr.upload_id;
-      var off = 0;
-      while (off < file.size) {
-        // probe first: resumes correctly after a dropped connection
-        var hd = await fetch("/api/share/"+T+"/uploads/"+up, {method:"HEAD"});
-        off = parseInt(hd.headers.get("Upload-Offset")||"0",10);
-        var done = false;
-        while (!done) {
-          var chunk = file.slice(off, Math.min(off+CHUNK, file.size));
-          var rp = await fetch("/api/share/"+T+"/uploads/"+up, {method:"PATCH",
-            headers:{"Upload-Offset": String(off), "Content-Type":"application/octet-stream"}, body: chunk});
-          if (rp.status === 409) { // offset mismatch — re-probe and continue
-            hd = await fetch("/api/share/"+T+"/uploads/"+up, {method:"HEAD"});
-            off = parseInt(hd.headers.get("Upload-Offset")||"0",10);
-            continue;
-          }
-          if (!rp.ok) throw new Error("chunk failed ("+rp.status+") — retrying");
-          var jr = await rp.json(); off = jr.offset; done = true;
-          fill.style.width = Math.round(100*off/file.size)+"%";
-          msg.textContent = "Uploaded "+Math.round(off/1048576)+" of "+Math.round(file.size/1048576)+" MB";
-        }
-      }
-      var fin = await fetch("/api/share/"+T+"/uploads/"+up+"/complete", {method:"POST"});
-      if(!fin.ok) throw new Error("finalize failed ("+fin.status+")");
+    for (; idx < files.length; idx++) {
+      await uploadOne(files[idx], function(pct, label){
+        var overall = Math.round(100 * (idx + pct/100) / files.length);
+        fill.style.width = overall + "%";
+        if (label) msg.textContent = (files.length > 1 ? "("+(idx+1)+"/"+files.length+") " : "") + label;
+      });
     }
     fill.style.width = "100%";
-    msg.innerHTML = "<b>Upload complete.</b> You may close this window.";
+    msg.innerHTML = "<b>" + files.length + " file(s) uploaded.</b> You may close this window.";
     f.disabled = true;
   } catch(e){ msg.textContent = e.message + " — click Upload to resume."; go.disabled = false; }
 };
