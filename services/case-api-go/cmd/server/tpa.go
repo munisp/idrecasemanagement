@@ -441,7 +441,7 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 		         WHERE py.tenant=o.tenant AND py.case_id=o.case_id AND py.status='PAID') AS paid_cents
 		FROM public.case_origin o
 		JOIN public.tpa_clients cl ON cl.id = o.client_id
-		JOIN tenant_%s.cases c ON c.id = o.case_id
+		JOIN tenant_%s.cases c ON c.id::text = o.case_id
 		WHERE o.tenant=$1 AND o.tpa_id=$2
 		ORDER BY o.created_at DESC LIMIT 500`, sanitizeTenant(tenant)), tenant, orgID)
 	if err != nil {
