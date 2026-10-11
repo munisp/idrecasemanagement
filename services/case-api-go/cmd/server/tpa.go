@@ -194,6 +194,34 @@ func (s *server) claimTPA(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tpa_id": id, "status": "linked"})
 }
 
+// unlinkTPA: POST /tpa/unlink -- the way back out of claimTPA/"Act as this
+// TPA", for staff only. A genuine single-role TPA account IS that
+// organization and has no legitimate reason to unlink itself (it would
+// just lock itself out, needing a fresh code from an admin to get back
+// in) -- this exists for a staffer who claimed a TPA from the oversight
+// list for support/escalation and now wants #/tpa to go back to showing
+// the oversight list instead of staying linked to that org forever.
+func (s *server) unlinkTPA(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	res, err := s.db.Exec(r.Context(), `
+		DELETE FROM public.tpa_users WHERE tenant=$1 AND user_sub=$2`, tenant, p.Subject)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	if res.RowsAffected() == 0 {
+		http.Error(w, `{"error":"not linked to any TPA organization"}`, http.StatusNotFound)
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "TPA_UNLINKED", map[string]any{"by": p.Subject})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "unlinked"})
+}
+
 // tpaInviteCode: POST /tpa/invite-code -- mints a fresh claim code for the
 // caller's OWN already-linked org, so they can add a second staff member
 // at their firm themselves (that colleague signs up for any portal
