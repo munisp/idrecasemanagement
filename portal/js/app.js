@@ -154,7 +154,7 @@
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
       ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
   }
-  if (!programmed && has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
+  if (!programmed && has("PARTY", "PM")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
   if (!has("TPA")) links.push(["#/ask", "✦", "Ask the graph"]);

@@ -9,6 +9,63 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 )
 
+// "Reviewer only reviews" follow-up: CASE_MANAGER keeps every DECIDE/
+// ADVANCE/UPDATE action on an existing record (advanceIntake, qaDecide,
+// convertLead, completeTask, addNote, submitDeliverable, assign, escalate,
+// decide) but loses the ability to CREATE a new top-level record. PM picks
+// up the create-side duties that moved off CASE_MANAGER. Pins the exact
+// gate each affected handler now enforces.
+func TestReviewerOnlyReviewsRoleFloors(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		gate  []string
+		want  bool
+	}{
+		// createIntake: opening a new pre-case intake request.
+		{"createIntake: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"createIntake: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// bulkIntake: same policy, dropped in lockstep with createIntake.
+		{"bulkIntake: PM allowed", []string{"PM"}, []string{"BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"bulkIntake: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// requestAdhocDeliverable: requesting a NEW ad hoc deliverable --
+		// submitDeliverable (fulfilling an existing one) is untouched.
+		{"requestAdhocDeliverable: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"requestAdhocDeliverable: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, c.gate...)
+		if got != c.want {
+			t.Errorf("%s: roles=%v gate=%v: got allowed=%v, want %v", c.name, c.roles, c.gate, got, c.want)
+		}
+	}
+
+	// createAccount/createContact/createTask: CASE_MANAGER is excluded by an
+	// inline check layered ON TOP of crmStaffRoles (not removed from the
+	// shared var itself, since reviewer keeps every other crmStaffRoles
+	// action -- convertLead/completeTask/addNote/listNotes). Mirrors each
+	// handler's own two-step gate exactly.
+	crmCreateAllowed := func(roles []string) bool {
+		p := principal{Roles: roles}
+		return hasAnyRole(p, crmStaffRoles...) && !hasRole(p, "CASE_MANAGER")
+	}
+	crmCreateCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"crmCreate: PM allowed", []string{"PM"}, true},
+		{"crmCreate: ARBITRATOR allowed", []string{"ARBITRATOR"}, true},
+		{"crmCreate: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+		{"crmCreate: PARTY rejected (not even in crmStaffRoles)", []string{"PARTY"}, false},
+	}
+	for _, c := range crmCreateCases {
+		if got := crmCreateAllowed(c.roles); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+}
+
 func TestHasAnyRole(t *testing.T) {
 	p := principal{Roles: []string{"ARBITRATOR"}}
 	if hasAnyRole(p, "FINANCE", "CASE_MANAGER") {
@@ -185,13 +242,17 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		// initiateCase: who may open a new federal NSA case record. PARTY is
 		// allowed -- the portal's "New dispute" nav + form is self-service
 		// federal NSA filing, not staff-only (confirmed against the UI's own
-		// nav gate: has("PARTY", "CASE_MANAGER")). ARBITRATOR was removed in
-		// the access-control audit (AC-5): the role that decides a dispute
+		// nav gate: has("PARTY", "PM")). ARBITRATOR was removed in the
+		// access-control audit (AC-5): the role that decides a dispute
 		// shouldn't also be able to file one -- undermines impartiality
-		// regardless of whether it's ever misused.
-		{"initiate: ARBITRATOR rejected", []string{"ARBITRATOR"}, []string{"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
-		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// regardless of whether it's ever misused. CASE_MANAGER removed (PM
+		// added) per the "reviewer only reviews" follow-up: filing is a
+		// creation action, not a review one.
+		{"initiate: ARBITRATOR rejected", []string{"ARBITRATOR"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: PM allowed", []string{"PM"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// assignCase / bulkCases: reassignment is a management decision, not
 		// routine casework -- narrower than the broad case-staff gate.
 		{"assign: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},

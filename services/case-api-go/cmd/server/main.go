@@ -827,8 +827,11 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	// ARBITRATOR removed (access-control audit, AC-5 separation of duties):
 	// the role that decides a dispute shouldn't also be able to file one --
 	// undermines arbitrator impartiality regardless of whether it's misused.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PARTY, CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// CASE_MANAGER removed for the same reason, per the "reviewer only
+	// reviews" follow-up: filing is a creation action, deciding is a review
+	// action, and reviewer keeps only the latter. PM takes over this duty.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PARTY, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 

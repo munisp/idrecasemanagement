@@ -7,6 +7,8 @@ const CrmViews = (() => {
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
+  const role = (r) => (Auth.claims()?.roles || []).includes(r);
+  const can = (...rs) => rs.some(role);
   const CRM_PAGE = 100;
   // Offset pager shared by accounts/leads/tasks: footer markup + a binder that
   // appends the next page's rows in place (busy state on the button).
@@ -116,7 +118,7 @@ const CrmViews = (() => {
     afterRender(() => accountsBox(""));
     const typeFilter = `<select id="acc-type" onchange="CrmViews.accountsFilter(this.value)"><option value="">All types</option>
       ${["PROVIDER", "PAYER", "IDRE", "AUDITOR", "OTHER"].map((t) => `<option value="${t}">${t}</option>`).join("")}</select>`;
-    return `<div class="view-head"><h1>Accounts</h1><a class="button" href="#/crm/accounts/new">New account</a>${typeFilter}</div>
+    return `<div class="view-head"><h1>Accounts</h1>${can("CASE_MANAGER") ? "" : `<a class="button" href="#/crm/accounts/new">New account</a>`}${typeFilter}</div>
       <div id="acc-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -156,11 +158,11 @@ const CrmViews = (() => {
         (d.contacts.length ? `<table><tbody>` + d.contacts.map((c) =>
           `<tr><td>${esc(c.name)}</td><td>${esc(c.role_title)}</td><td>${esc(c.email)}</td><td>${esc(c.phone)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No contacts.</p>`) +
-        `<form id="nc" class="form"><b>Add contact</b>
+        (can("CASE_MANAGER") ? "" : `<form id="nc" class="form"><b>Add contact</b>
            <input name="name" placeholder="Name" required />
            <input name="role_title" placeholder="Role (e.g. Billing lead)" />
            <input name="email" type="email" placeholder="Email" />
-           <input name="phone" placeholder="Phone" /><button>Add</button></form>`;
+           <input name="phone" placeholder="Phone" /><button>Add</button></form>`);
       html += `<h2>Disputes (${d.cases.length})</h2>` +
         (d.cases.length ? `<table><tbody>` + d.cases.map((c) =>
           `<tr class="click" onclick="location.hash='#/cases/${c.id}'"><td>${esc(c.case_number)}</td>
@@ -275,10 +277,10 @@ const CrmViews = (() => {
         <a class="tab ${mine ? "active" : ""}" href="#/crm/tasks">My tasks</a>
         <a class="tab ${!mine ? "active" : ""}" href="#/crm/tasks?all=1">All tasks</a>
       </div>
-      <form id="nt" class="form"><b>New task</b>
+      ${can("CASE_MANAGER") ? "" : `<form id="nt" class="form"><b>New task</b>
         <input name="subject" placeholder="Subject" required />
         <input name="case_id" placeholder="Case ID (optional)" />
-        <input name="due_date" type="date" /><button>Create</button></form>
+        <input name="due_date" type="date" /><button>Create</button></form>`}
       <div id="task-box"><p class="muted">Loading…</p></div>`;
   }
 

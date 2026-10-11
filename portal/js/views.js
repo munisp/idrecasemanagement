@@ -1851,6 +1851,10 @@ const Views = (() => {
 
   const INTAKE_STATUSES = ["DOCS_RECEIVED", "PACKET_COMPLETE", "PAID", "CONVERTED", "INELIGIBLE", "CLOSED_REFUNDED"];
   function intake() {
+    // CASE_MANAGER cannot create new intake (single or bulk) per the
+    // "reviewer only reviews" follow-up -- matches createIntake/bulkIntake's
+    // backend gates, which now require PM/FEDERAL_ADMIN/PLATFORM_ADMIN.
+    const canCreate = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
     afterRender(() => {
       intakeBox("");
       $("#intake-form")?.addEventListener("submit", async (ev) => {
@@ -1867,8 +1871,8 @@ const Views = (() => {
       <option value="" selected>All statuses</option>
       ${INTAKE_STATUSES.map((s) => `<option value="${s}">${s}</option>`).join("")}</select>`;
     return `<div class="view-head"><h1>Pre-case intake</h1>${statusFilter}</div>
-      <p class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</p>
-      <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
+      <p class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</p>` +
+      (canCreate ? `<details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
           <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
           <input id="intake-bulk-ref" placeholder="batch reference — the idempotency key" style="flex:1;min-width:220px" />
@@ -1883,8 +1887,8 @@ const Views = (() => {
         <button>New intake request</button></form>
       <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
         eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
-        not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>
-      <div id="intake-box"><p class="muted">Loading…</p></div>`;
+        not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>` : "") +
+      `<div id="intake-box"><p class="muted">Loading…</p></div>`;
   }
 
   async function intakeBox(status) {
@@ -2103,11 +2107,11 @@ const Views = (() => {
         The platform computes the <b>next due date</b> from the rule and delivery history. When a report ships,
         press <b>mark delivered</b> — that records the delivery timestamp (your proof to the agency) and rolls the
         schedule forward. Ad hoc agency requests get a due date of +10 business days automatically.
-        Anything overdue or due within 3 days is highlighted; due soon is amber, on track is green.</p></details>
-      <form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
+        Anything overdue or due within 3 days is highlighted; due soon is amber, on track is green.</p></details>` +
+      (can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.requestDeliverable(new FormData(event.target), event.target.querySelector('button'))">
         <input name="name" required placeholder="Ad hoc report name" />
         <input name="ref" placeholder="Contract ref (optional)" size="10" />
-        <button class="mini">request ad hoc (due +10 business days)</button></form>` +
+        <button class="mini">request ad hoc (due +10 business days)</button></form>` : "") +
         (d.length ? `<div class="deliv-grid">` + d.map((x) => {
           const last = lastDelivered(x.name);
           return `<div class="deliv-card">

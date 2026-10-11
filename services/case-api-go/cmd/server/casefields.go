@@ -210,8 +210,11 @@ func (s *server) writeDocPlaintext(r *http.Request, tenant, objectKey string, pa
 // Contract deliverable 1.3 (§2.4.4): ad hoc reports are due within 10 business
 // days of the request. The clock starts here — not in a spreadsheet.
 func (s *server) requestAdhocDeliverable(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// CASE_MANAGER removed per the "reviewer only reviews" follow-up:
+	// requesting a new ad hoc deliverable is a creation action; reviewer
+	// keeps submitDeliverable (fulfilling an existing one) but not this.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

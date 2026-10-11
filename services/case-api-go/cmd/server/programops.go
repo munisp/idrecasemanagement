@@ -422,8 +422,12 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 // mirrors the notification flow (the NON-filing party receives the plan
 // notification packet).
 func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// CASE_MANAGER removed, PM added, per the "reviewer only reviews"
+	// follow-up: opening a new intake is a creation action, not a review
+	// one -- reviewer keeps advanceIntake (working an existing intake)
+	// but not this.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

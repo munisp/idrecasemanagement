@@ -94,8 +94,18 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, crmStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	// CASE_MANAGER excluded from this one crmStaffRoles action per the
+	// "reviewer only reviews" follow-up: creating a new CRM account is a
+	// creation action, not a review one. Inline rather than removed from
+	// crmStaffRoles itself -- reviewer keeps every OTHER crmStaffRoles
+	// action (convertLead, completeTask, addNote, listNotes).
+	if hasRole(p, "CASE_MANAGER") {
+		http.Error(w, `{"error":"forbidden: reviewer cannot create new CRM accounts"}`, http.StatusForbidden)
 		return
 	}
 	var in struct {
@@ -195,8 +205,14 @@ func (s *server) account360(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, crmStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	// CASE_MANAGER excluded, same as createAccount -- see that comment.
+	if hasRole(p, "CASE_MANAGER") {
+		http.Error(w, `{"error":"forbidden: reviewer cannot create new contacts"}`, http.StatusForbidden)
 		return
 	}
 	var in struct {
@@ -399,6 +415,11 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, crmStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	// CASE_MANAGER excluded, same as createAccount -- see that comment.
+	if hasRole(p, "CASE_MANAGER") {
+		http.Error(w, `{"error":"forbidden: reviewer cannot create new tasks"}`, http.StatusForbidden)
 		return
 	}
 	var in struct {

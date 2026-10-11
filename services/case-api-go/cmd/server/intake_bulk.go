@@ -234,8 +234,10 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 	// and read their own batches — nothing else on the platform. TPA is a
 	// first-class role filing on behalf of the initiating party; BULK_SUBMITTER
 	// remains for plain batch filers. Staff roles keep their existing
-	// single-intake rights and gain bulk as a superset.
-	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// single-intake rights and gain bulk as a superset -- CASE_MANAGER
+	// dropped from "staff roles" here in lockstep with createIntake, per
+	// the "reviewer only reviews" follow-up; PM picked it up there too.
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires TPA, BULK_SUBMITTER, or staff role"}`, http.StatusForbidden)
 		return
 	}
