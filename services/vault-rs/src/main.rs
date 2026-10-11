@@ -28,6 +28,8 @@ use sha2::Sha256;
 use std::sync::Arc;
 use zeroize::Zeroize;
 
+mod otel;
+
 #[derive(Clone)]
 struct AppState {
     master: Arc<[u8; 32]>,
@@ -246,6 +248,7 @@ async fn open_doc(State(st): State<AppState>, Json(req): Json<DocRequest>) -> im
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     tracing_subscriber::fmt::init();
+    let _tracer_provider = otel::init();
     let master_hex = std::env::var("VAULT_MASTER_SECRET")
         .expect("VAULT_MASTER_SECRET (64 hex chars) required — inject via Dapr secret store");
     let raw = hex::decode(master_hex).expect("hex");
@@ -265,6 +268,7 @@ async fn main() {
         .route("/reveal", post(reveal))
         .route("/docs/seal", post(seal_doc))
         .route("/docs/open", post(open_doc))
+        .layer(axum::middleware::from_fn(otel::trace_request))
         .with_state(st);
 
     let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:8081".into());
