@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	tb_types "github.com/tigerbeetle/tigerbeetle-go/pkg/types"
@@ -152,6 +153,10 @@ func (s *server) listReceivables(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows = withAging(rows, asOf)
+	// Merged from two separate, unordered queries -- never had any sort at
+	// all (confirmed live: rows came back in raw scan order). Newest basis
+	// date first, same convention as every other list in the app.
+	sort.Slice(rows, func(i, j int) bool { return rows[i].BasisDate > rows[j].BasisDate })
 	var total int64
 	for _, r0 := range rows {
 		total += r0.Due

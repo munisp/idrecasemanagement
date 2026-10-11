@@ -71,9 +71,14 @@ func (s *server) slaReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(), `
-		SELECT case_id, clock, COALESCE(detail,''), created_at
-		FROM public.sla_breaches WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
+	q := `SELECT case_id, clock, COALESCE(detail,''), created_at FROM public.sla_breaches WHERE tenant=$1`
+	args := []any{tenant}
+	if clock := r.URL.Query().Get("clock"); clock != "" {
+		args = append(args, clock)
+		q += fmt.Sprintf(` AND clock=$%d`, len(args))
+	}
+	q += ` ORDER BY created_at DESC LIMIT 200`
+	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

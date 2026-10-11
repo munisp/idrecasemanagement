@@ -236,16 +236,35 @@ func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := pageParams(r, 100, 500)
+	// status=OPEN is a shorthand for "not yet converted" (any status other
+	// than CONVERTED), since that's the one distinction the UI's own
+	// Convert-button gate already cares about -- an exact status value
+	// still works for anyone filtering on something more specific.
+	status := r.URL.Query().Get("status")
+	statusClause, statusArg := "", any(nil)
+	switch status {
+	case "":
+	case "OPEN":
+		statusClause = " AND status<>$2"
+		statusArg = "CONVERTED"
+	default:
+		statusClause = " AND status=$2"
+		statusArg = status
+	}
+	queryArgs := []any{tenant}
+	if statusArg != nil {
+		queryArgs = append(queryArgs, statusArg)
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
-		`SELECT count(*) FROM public.leads WHERE tenant=$1`, tenant).Scan(&total); err != nil {
+		`SELECT count(*) FROM public.leads WHERE tenant=$1`+statusClause, queryArgs...).Scan(&total); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, source, COALESCE(name,''), COALESCE(organization,''),
 		       COALESCE(phone,''), COALESCE(summary,''), status, created_at
-		FROM public.leads WHERE tenant=$1 ORDER BY created_at DESC, id LIMIT %d OFFSET %d`, limit, offset), tenant)
+		FROM public.leads WHERE tenant=$1`+statusClause+` ORDER BY created_at DESC, id LIMIT %d OFFSET %d`, limit, offset), queryArgs...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -340,6 +359,10 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	if mine {
 		q += ` AND assignee=$2`
 		args = append(args, p.Subject)
+	}
+	if status := r.URL.Query().Get("status"); status != "" {
+		args = append(args, status)
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
 	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int

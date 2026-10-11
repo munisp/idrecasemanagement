@@ -140,10 +140,19 @@ func (s *server) publicApply(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listApplications(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(), `
-		SELECT id, tenant, type, legal_name, npi, status, coalesce(status_reason,''), submitted_at
-		FROM public.stakeholder_applications
-		WHERE tenant=$1 ORDER BY submitted_at DESC LIMIT 200`, tenant)
+	q := `SELECT id, tenant, type, legal_name, npi, status, coalesce(status_reason,''), submitted_at
+		FROM public.stakeholder_applications WHERE tenant=$1`
+	args := []any{tenant}
+	if status := r.URL.Query().Get("status"); status != "" {
+		args = append(args, status)
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
+	}
+	if typ := r.URL.Query().Get("type"); typ != "" {
+		args = append(args, typ)
+		q += fmt.Sprintf(` AND type=$%d`, len(args))
+	}
+	q += ` ORDER BY submitted_at DESC LIMIT 200`
+	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

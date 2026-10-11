@@ -852,31 +852,41 @@ const Views = (() => {
   }
 
   // ---- Onboarding --------------------------------------------------------------
-  async function onboarding() {
+  function onboarding() {
     let html = `<h1>Onboarding</h1>`;
     if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
-      try {
-        const apps = await Api.onboarding.list();
-        if (apps.length) {
-          const rowsHtml = (list) => list.map((a) => `<tr><td>${esc(a.legal_name)}</td><td>${esc(a.type)}</td>
-            <td>${badge(a.status)}</td><td class="muted">${esc(a.status_reason || "—")}</td><td>${fmtDate(a.submitted_at)}</td>
-            <td>${["PENDING_APPROVAL"].includes(a.status) ? `
-              <button onclick="Views.decide('${a.id}','APPROVE')">Approve</button>
-              <button class="danger" onclick="Views.decide('${a.id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("");
-          const { bodyHtml, pagerHtml } = initClientPager("onb", apps, rowsHtml);
-          afterRender(() => bindClientPager("onb", "#onb-tb tbody"));
-          html += `<h2>Review queue</h2><table id="onb-tb"><thead><tr>
-          <th>Legal name</th><th>Type</th><th>Status</th><th>Reason</th><th>Submitted</th><th></th></tr></thead>
-          <tbody>${bodyHtml}</tbody></table>${pagerHtml}`;
-        } else {
-          html += `<h2>Review queue</h2><p class="muted">Queue empty.</p>`;
-        }
-      } catch (e) { html += err(e); }
+      afterRender(() => onboardingBox("PENDING_APPROVAL"));
+      const statusFilter = `<select id="onb-status" onchange="Views.onboardingFilter(this.value)">
+        <option value="PENDING_APPROVAL" selected>Pending</option><option value="">All</option>
+        <option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select>`;
+      html += `<div class="view-head"><h2>Review queue</h2>${statusFilter}</div>
+        <div id="onb-box"><p class="muted">Loading…</p></div>`;
     }
     html += `<h2>New application</h2><p class="muted">Self-service registration for provider, payer, IDRE and auditor organizations.</p>
       <p><a class="button" href="#/onboarding/new">Start application</a></p>`;
     return html;
   }
+
+  async function onboardingBox(status) {
+    const box = document.getElementById("onb-box");
+    if (!box) return;
+    box.innerHTML = `<p class="muted">Loading…</p>`;
+    try {
+      const apps = await Api.onboarding.list({ status });
+      if (!apps.length) { box.innerHTML = `<p class="muted">Queue empty.</p>`; return; }
+      const rowsHtml = (list) => list.map((a) => `<tr><td>${esc(a.legal_name)}</td><td>${esc(a.type)}</td>
+        <td>${badge(a.status)}</td><td class="muted">${esc(a.status_reason || "—")}</td><td>${fmtDate(a.submitted_at)}</td>
+        <td>${["PENDING_APPROVAL"].includes(a.status) ? `
+          <button onclick="Views.decide('${a.id}','APPROVE')">Approve</button>
+          <button class="danger" onclick="Views.decide('${a.id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("");
+      const { bodyHtml, pagerHtml } = initClientPager("onb", apps, rowsHtml);
+      box.innerHTML = `<table id="onb-tb"><thead><tr>
+        <th>Legal name</th><th>Type</th><th>Status</th><th>Reason</th><th>Submitted</th><th></th></tr></thead>
+        <tbody>${bodyHtml}</tbody></table>${pagerHtml}`;
+      bindClientPager("onb", "#onb-tb tbody");
+    } catch (e) { box.innerHTML = err(e); }
+  }
+  function onboardingFilter(status) { onboardingBox(status); }
 
   function onboardingNew() {
     afterRender(() => $("#ob").addEventListener("submit", async (ev) => {
@@ -922,15 +932,40 @@ const Views = (() => {
   }
 
   // ---- Voice console -------------------------------------------------------------
+  function voiceIntakeBox(status) {
+    const all = window._voiceIntake || [];
+    const list = status ? all.filter((v) => v.status === status) : all;
+    const rowsHtml = (l) => l.map((v) => `<tr><td>${esc(v.caller_name)}<br/><span class="muted">${esc(v.caller_phone)}</span></td>
+          <td>${esc(v.organization)}</td><td>${esc(v.summary)}</td><td>${badge(v.status)}</td><td>${fmtDate(v.created_at)}</td></tr>`).join("");
+    const page = initClientPager("vintake", list, rowsHtml);
+    const box = document.getElementById("vintake-box");
+    if (!box) return;
+    box.innerHTML = list.length ? `<table id="vintake-tb"><thead><tr><th>Caller</th><th>Organization</th><th>Summary</th><th>Status</th><th>At</th></tr></thead>
+        <tbody>${page.bodyHtml}</tbody></table>${page.pagerHtml}` : `<p class="muted">No intake requests${status ? ` with status ${status}` : ""}.</p>`;
+    bindClientPager("vintake", "#vintake-tb tbody");
+  }
+  function voiceIntakeFilter(status) { voiceIntakeBox(status); }
+
+  function voiceLogBox(direction) {
+    const all = window._voiceLogs || [];
+    const list = direction ? all.filter((l) => l.direction === direction) : all;
+    const rowsHtml = (l) => l.map((x) => `<tr><td>${esc(x.direction)}</td><td>${esc(x.tool)}</td><td>${esc(x.case_number)}</td>
+          <td>${badge(x.status)}</td><td>${fmtDate(x.created_at)}</td></tr>`).join("");
+    const page = initClientPager("vlog", list, rowsHtml);
+    const box = document.getElementById("vlog-box");
+    if (!box) return;
+    box.innerHTML = list.length ? `<table id="vlog-tb"><thead><tr><th>Direction</th><th>Tool/event</th><th>Case</th><th>Status</th><th>At</th></tr></thead>
+        <tbody>${page.bodyHtml}</tbody></table>${page.pagerHtml}` : `<p class="muted">No calls${direction ? ` (${direction})` : ""} yet.</p>`;
+    bindClientPager("vlog", "#vlog-tb tbody");
+  }
+  function voiceLogFilter(direction) { voiceLogBox(direction); }
+
   async function voice() {
     try {
       const [intake, logs] = await Promise.all([Api.voice.intake(), Api.voice.logs()]);
-      const intakeRowsHtml = (list) => list.map((v) => `<tr><td>${esc(v.caller_name)}<br/><span class="muted">${esc(v.caller_phone)}</span></td>
-            <td>${esc(v.organization)}</td><td>${esc(v.summary)}</td><td>${badge(v.status)}</td><td>${fmtDate(v.created_at)}</td></tr>`).join("");
-      const intakePage = initClientPager("vintake", intake, intakeRowsHtml);
-      const logRowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.direction)}</td><td>${esc(l.tool)}</td><td>${esc(l.case_number)}</td>
-            <td>${badge(l.status)}</td><td>${fmtDate(l.created_at)}</td></tr>`).join("");
-      const logPage = initClientPager("vlog", logs, logRowsHtml);
+      window._voiceIntake = intake; window._voiceLogs = logs;
+      const intakeStatuses = [...new Set(intake.map((v) => v.status))].sort();
+      const logDirections = [...new Set(logs.map((l) => l.direction))].sort();
       afterRender(() => {
         $("#ob-call")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
@@ -943,8 +978,7 @@ const Views = (() => {
             } catch (e) { UI.toast(e.message, { kind: "warn" }); }
           }, "Dialing…");
         });
-        bindClientPager("vintake", "#vintake-tb tbody");
-        bindClientPager("vlog", "#vlog-tb tbody");
+        voiceIntakeBox(""); voiceLogBox("");
       });
       return `<h1>Voice console</h1>
 
@@ -961,12 +995,14 @@ const Views = (() => {
           <button>Place outbound call</button>
           <p class="muted">Requires outbound calling enabled in the tenant voice config.</p>
         </form>
-        <h2>Intake requests (${intake.length})</h2>` +
-        (intake.length ? `<table id="vintake-tb"><thead><tr><th>Caller</th><th>Organization</th><th>Summary</th><th>Status</th><th>At</th></tr></thead>
-          <tbody>${intakePage.bodyHtml}</tbody></table>${intakePage.pagerHtml}` : `<p class="muted">No intake requests.</p>`) +
-        `<h2>Call log</h2>` +
-        (logs.length ? `<table id="vlog-tb"><thead><tr><th>Direction</th><th>Tool/event</th><th>Case</th><th>Status</th><th>At</th></tr></thead>
-          <tbody>${logPage.bodyHtml}</tbody></table>${logPage.pagerHtml}` : `<p class="muted">No calls yet.</p>`);
+        <div class="view-head"><h2>Intake requests (${intake.length})</h2>
+          ${intakeStatuses.length > 1 ? `<select onchange="Views.voiceIntakeFilter(this.value)"><option value="">All statuses</option>
+            ${intakeStatuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>` : ""}</div>
+        <div id="vintake-box"><p class="muted">Loading…</p></div>
+        <div class="view-head"><h2>Call log</h2>
+          ${logDirections.length > 1 ? `<select onchange="Views.voiceLogFilter(this.value)"><option value="">All directions</option>
+            ${logDirections.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join("")}</select>` : ""}</div>
+        <div id="vlog-box"><p class="muted">Loading…</p></div>`;
     } catch (e) { return `<h1>Voice console</h1>` + err(e); }
   }
 
@@ -1037,25 +1073,36 @@ const Views = (() => {
       } catch (e) { rptError("rpt-status-out", e); }
     });
   }
+  function renderRptSla(sla, clockFilter) {
+    const byClock = {};
+    sla.forEach((b) => { byClock[b.clock] = (byClock[b.clock] || 0) + 1; });
+    const clocks = Object.keys(byClock).sort();
+    const shown = clockFilter ? sla.filter((b) => b.clock === clockFilter) : sla;
+    document.getElementById("rpt-sla-out").innerHTML = (sla.length
+      ? (clocks.length > 1 ? `<p><select onchange="Views.rptSlaFilter(this.value)">
+            <option value="">All clocks (${sla.length})</option>
+            ${clocks.map((c) => `<option value="${esc(c)}" ${c === clockFilter ? "selected" : ""}>${esc(c)} (${byClock[c]})</option>`).join("")}
+          </select></p>` : "") +
+        `<div class="chart-card">` + chartHBars(
+          Object.entries(byClock).map(([k, v]) => ({ label: k, value: v }))) + `</div>` +
+        `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
+        shown.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td>
+          <td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") + `</tbody></table>`
+      : `<p class="muted">No breaches recorded — all statutory clocks held. ✔</p>`);
+    document.getElementById("rpt-sla-csv").onclick = () => csvDownload("sla_breaches.csv", ["case_id", "clock", "detail", "at"],
+      shown.map((x) => [x.case_id, x.clock, x.detail, x.at]));
+  }
   async function loadRptSla(btn) {
     await runOrDirect(btn, async () => {
       try {
         const sla = await Api.reports.sla();
+        window._rptSla = sla;
         document.getElementById("kpi-breaches").textContent = sla.length.toLocaleString();
-        const byClock = {};
-        sla.forEach((b) => { byClock[b.clock] = (byClock[b.clock] || 0) + 1; });
-        document.getElementById("rpt-sla-out").innerHTML = (sla.length
-          ? `<div class="chart-card">` + chartHBars(
-              Object.entries(byClock).map(([k, v]) => ({ label: k, value: v }))) + `</div>` +
-            `<table><thead><tr><th>Case</th><th>Clock</th><th>Detail</th><th>At</th></tr></thead><tbody>` +
-            sla.map((b) => `<tr><td class="mono">${esc(b.case_id)}</td><td>${badge(b.clock)}</td>
-              <td>${esc(b.detail)}</td><td>${fmtDate(b.at)}</td></tr>`).join("") + `</tbody></table>`
-          : `<p class="muted">No breaches recorded — all statutory clocks held. ✔</p>`);
-        document.getElementById("rpt-sla-csv").onclick = () => csvDownload("sla_breaches.csv", ["case_id", "clock", "detail", "at"],
-          sla.map((x) => [x.case_id, x.clock, x.detail, x.at]));
+        renderRptSla(sla, "");
       } catch (e) { rptError("rpt-sla-out", e); }
     });
   }
+  function rptSlaFilter(clock) { renderRptSla(window._rptSla || [], clock); }
   async function loadRptFin(btn) {
     await runOrDirect(btn, async () => {
       try {
@@ -1802,58 +1849,68 @@ const Views = (() => {
     return `<span class="${left <= 3 ? "badge warn" : "muted"}">day 13 in ${left}d</span>`;
   }
 
-  async function intake() {
-    // afterRender() fires AFTER the await, right before return -- see the
-    // other views in this file for why that order matters (setTimeout(fn,0)
-    // beats an in-flight fetch if called before it).
+  const INTAKE_STATUSES = ["DOCS_RECEIVED", "PACKET_COMPLETE", "PAID", "CONVERTED", "INELIGIBLE", "CLOSED_REFUNDED"];
+  function intake() {
+    afterRender(() => {
+      intakeBox("");
+      $("#intake-form")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        await newIntake(ev.target);
+      });
+      // Bulk intake (CSV): parse on file pick, submit posts the idempotent
+      // batch and renders the per-row receipt.
+      window._intakeBulk = { items: [] };
+      $("#intake-bulk-file")?.addEventListener("change", (ev) => bulkIntakeFile(ev.target));
+      $("#intake-bulk-btn")?.addEventListener("click", (ev) => { ev.preventDefault(); bulkIntakeSubmit(ev.target); });
+    });
+    const statusFilter = `<select id="intake-status" onchange="Views.intakeFilter(this.value)">
+      <option value="" selected>All statuses</option>
+      ${INTAKE_STATUSES.map((s) => `<option value="${s}">${s}</option>`).join("")}</select>`;
+    return `<div class="view-head"><h1>Pre-case intake</h1>${statusFilter}</div>
+      <p class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</p>
+      <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
+          <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
+          <input id="intake-bulk-ref" placeholder="batch reference — the idempotency key" style="flex:1;min-width:220px" />
+          <button class="mini" id="intake-bulk-btn" disabled>Submit batch</button></div>
+        <p class="muted">Header row required: <code>email, contact_name, org, filing_party_type, amount, external_ref, notes</code>
+          (amount in dollars; filing_party_type PROVIDER or HEALTH_PLAN). Resubmitting the same batch reference replays the receipt — nothing files twice.</p>
+        <div id="intake-bulk-preview"></div>
+        <div id="intake-bulk-result"></div></details>
+      <form id="intake-form" class="inline-form">
+        <input name="email" type="email" placeholder="requester email" required />
+        <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
+        <button>New intake request</button></form>
+      <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
+        eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
+        not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>
+      <div id="intake-box"><p class="muted">Loading…</p></div>`;
+  }
+
+  async function intakeBox(status) {
+    const box = document.getElementById("intake-box");
+    if (!box) return;
+    box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const [r, prog] = await Promise.all([Api.program.intake({ limit: 50 }), Api.program.get().catch(() => null)]);
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: 50, status }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
       const intakeNext = r.next_offset ?? -1;
       const intakeTotal = r.total ?? rows.length;
-      window._intakePager = { next: intakeNext }; // reset on every view render
+      window._intakePager = { next: intakeNext, status }; // reset on every box render
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
       // no QPA concept and use a disputed amount instead -- same split as
       // everywhere else amounts show in this app. Only the results table's
       // column label needs this; the amount itself is never hand-typed --
       // it's backfilled from the filing party's uploaded documents.
       const label = amtLabel(prog);
-      afterRender(() => {
-        $("#intake-form")?.addEventListener("submit", async (ev) => {
-          ev.preventDefault();
-          await newIntake(ev.target);
-        });
-        // Bulk intake (CSV): parse on file pick, submit posts the idempotent
-        // batch and renders the per-row receipt.
-        window._intakeBulk = { items: [] };
-        $("#intake-bulk-file")?.addEventListener("change", (ev) => bulkIntakeFile(ev.target));
-        $("#intake-bulk-btn")?.addEventListener("click", (ev) => { ev.preventDefault(); bulkIntakeSubmit(ev.target); });
-      });
-      return `<div class="view-head"><h1>Pre-case intake</h1>
-        <span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>
-        <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
-            <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
-            <input id="intake-bulk-ref" placeholder="batch reference — the idempotency key" style="flex:1;min-width:220px" />
-            <button class="mini" id="intake-bulk-btn" disabled>Submit batch</button></div>
-          <p class="muted">Header row required: <code>email, contact_name, org, filing_party_type, amount, external_ref, notes</code>
-            (amount in dollars; filing_party_type PROVIDER or HEALTH_PLAN). Resubmitting the same batch reference replays the receipt — nothing files twice.</p>
-          <div id="intake-bulk-preview"></div>
-          <div id="intake-bulk-result"></div></details>
-        <form id="intake-form" class="inline-form">
-          <input name="email" type="email" placeholder="requester email" required />
-          <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
-          <button>New intake request</button></form>
-        <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
-          eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
-          not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>` +
-        (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
+      box.innerHTML = (rows.length ? `<table><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests.</p>`) +
+          `</tbody></table>` : `<p class="muted">No intake requests${status ? ` with status ${status}` : ""}.</p>`) +
         (intakeNext >= 0 ? `<p class="pager" id="intake-pg"><span class="muted">Showing ${rows.length} of ${intakeTotal}</span>
           <button class="mini" onclick="Views.intakeMore(this)">Load more (${Math.min(50, intakeTotal - rows.length)} remaining)</button></p>` : "");
-    } catch (e) { return err(e); }
+    } catch (e) { box.innerHTML = err(e); }
   }
+  function intakeFilter(status) { intakeBox(status); }
 
   // Shared by intake()'s initial render and intakeMore()'s appended page --
   // a real-case row (origin:"case", from startAhcaCase) has no intake
@@ -1882,10 +1939,10 @@ const Views = (() => {
   }
 
   async function intakeMore(btn) {
-    const st = window._intakePager || { next: 50 };
+    const st = window._intakePager || { next: 50, status: "" };
     await UI.run(btn, async () => {
       try {
-        const r = await Api.program.intake({ limit: 50, offset: st.next });
+        const r = await Api.program.intake({ limit: 50, offset: st.next, status: st.status });
         const rows = r.intake || [];
         st.next = r.next_offset ?? -1;
         window._intakePager = st;
@@ -4042,7 +4099,7 @@ const Views = (() => {
       const [lr, ar, pr] = await Promise.all([Api.program.rules(), Api.program.rulesAudit().catch(() => ({ changes: [] })), Api.program.get().catch(() => null)]);
       rulesDraft = (lr.rules || []).map((r) => ({ ...r }));
       afterRender(bindRulesAdmin);
-      const audit = ar.changes || [];
+      window._rulesAudit = ar.changes || [];
       const curLabel = pr?.tenant_label || "";
       return `<div class="view-head"><h1>Program rules</h1>
         <span class="muted">live policy — changes take effect immediately and are permanently audited</span></div>
@@ -4070,13 +4127,24 @@ const Views = (() => {
               (r.actions || []).map((a) => `<li class="mono">${actText(a)}</li>`).join("")}</ul></div></div>
           </div>`).join("") : `<p class="muted">No rules configured — hardcoded defaults apply.</p>`) +
         `</div>
-        <h2>Change history <span class="muted">append-only audit trail</span></h2>` +
-        (audit.length ? `<table><thead><tr><th>When</th><th>Changed by</th><th>Note</th><th>Rules</th><th></th></tr></thead><tbody>` +
-          audit.map((c) => `<tr><td class="muted">${fmtDate(c.changed_at)}</td><td class="mono">${esc(c.changed_by.slice(0, 12))}…</td>
-            <td>${esc(c.note || "—")}</td><td>${(c.before || []).length} → ${(c.after || []).length}</td>
-            <td><details><summary class="mini">diff</summary><pre class="rule-diff">${esc(JSON.stringify(c.after, null, 1))}</pre></details></td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No changes recorded yet.</p>`);
+        <h2>Change history <span class="muted">append-only audit trail, newest first</span></h2>
+        ${window._rulesAudit.length ? `<p><input placeholder="Filter by who changed it or the note…" oninput="Views.rulesAuditFilter(this.value)" style="min-width:280px" /></p>` : ""}
+        <div id="rules-audit-box">${rulesAuditHtml(window._rulesAudit)}</div>`;
     } catch (e) { return err(e); }
+  }
+
+  function rulesAuditHtml(audit) {
+    return audit.length ? `<table><thead><tr><th>When</th><th>Changed by</th><th>Note</th><th>Rules</th><th></th></tr></thead><tbody>` +
+        audit.map((c) => `<tr><td class="muted">${fmtDate(c.changed_at)}</td><td class="mono">${esc(c.changed_by.slice(0, 12))}…</td>
+          <td>${esc(c.note || "—")}</td><td>${(c.before || []).length} → ${(c.after || []).length}</td>
+          <td><details><summary class="mini">diff</summary><pre class="rule-diff">${esc(JSON.stringify(c.after, null, 1))}</pre></details></td></tr>`).join("") +
+        `</tbody></table>` : `<p class="muted">No changes recorded yet.</p>`;
+  }
+  function rulesAuditFilter(q) {
+    q = q.trim().toLowerCase();
+    const filtered = q ? (window._rulesAudit || []).filter((c) =>
+      (c.changed_by || "").toLowerCase().includes(q) || (c.note || "").toLowerCase().includes(q)) : (window._rulesAudit || []);
+    document.getElementById("rules-audit-box").innerHTML = rulesAuditHtml(filtered);
   }
 
   function ruleEdit(idx) {
@@ -4561,6 +4629,10 @@ const Views = (() => {
           <button class="mini">Record obligation</button></form>` : ""}
         ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<p><button class="mini" onclick="Views.arapNacha()">Generate ACH (NACHA) payout file</button>
           <span class="muted"> from open payables that carry bank destinations</span></p>` : ""}
+        <p><label class="muted">Status
+          <select id="arap-ap-status" onchange="Views.arapApFilter(this.value)">
+            ${["OPEN", "SETTLED", "VOID"].map((s) => `<option value="${s}" ${s === "OPEN" ? "selected" : ""}>${s}</option>`).join("")}
+          </select></label></p>
         <div id="arap-ap"><p class="muted">Loading…</p></div>
         <div id="arap-nacha"></div></div>`;
   }
@@ -4596,12 +4668,14 @@ const Views = (() => {
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
-  async function arapApBox() {
+  async function arapApBox(status) {
+    status = status || "OPEN";
     const box = document.getElementById("arap-ap");
+    box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const r = await Api.program.payablesList();
+      const r = await Api.program.payablesList(status);
       const rows = (r.payables || []).map((x) => {
-        const canWrite = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+        const canWrite = status === "OPEN" && can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
         const acts = canWrite ? `<button class="mini" onclick="Views.arapSettle('${x.id}')">Settle</button>
           <button class="mini danger" onclick="Views.arapVoid('${x.id}')">Void</button>` : "";
         return `<tr><td>${esc(x.party)}</td><td>${badge(x.kind)}</td><td>${usdC(x.amount_cents)}</td>
@@ -4675,6 +4749,8 @@ const Views = (() => {
     catch (e) { alert(e.message); }
   }
 
+  function arapApFilter(status) { arapApBox(status); }
+
   // ===== Reconciliation view (#/recon) =====
   function reconView() {
     if (!can(...finRoles))
@@ -4721,18 +4797,33 @@ const Views = (() => {
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
+  function reconBatchRowsHtml(batches, status) {
+    const shown = status ? batches.filter((b) => b.status === status) : batches;
+    return shown.length ? `<table class="tbl"><thead><tr><th></th><th>Source</th><th>Period</th><th>Items</th><th>Matched</th><th>Exceptions</th><th>Unmatched</th><th>Status</th><th>Imported by</th><th></th></tr></thead><tbody>` +
+      shown.map((b) => `<tr><td>#${b.id}</td><td>${esc(b.source)}</td>
+        <td>${esc(b.period_start)} → ${esc(b.period_end)}</td><td>${b.total_items}</td>
+        <td>${b.matched}</td><td>${b.exceptions}</td><td>${b.unmatched}</td><td>${badge(b.status)}</td>
+        <td>${esc(b.imported_by || "—")}</td>
+        <td><button class="mini" onclick="Views.reconOpen(${b.id})">Open</button>
+        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" onclick="Views.reconMatchRun(${b.id})">Re-run match</button>` : ""}</td></tr>`).join("") + `</tbody></table>`
+      : `<p class="muted">${status ? `No ${status.toLowerCase()} batches.` : "No imports yet."}</p>`;
+  }
+  function reconBatchFilter(status) {
+    const box = document.getElementById("recon-batches-list");
+    if (box) box.innerHTML = reconBatchRowsHtml(window._reconBatches || [], status);
+  }
   async function reconBatchList() {
     const box = document.getElementById("recon-batches");
     if (!box) return;
     try {
       const r = await Api.program.reconBatches();
-      const rows = (r.batches || []).map((b) => `<tr><td>#${b.id}</td><td>${esc(b.source)}</td>
-        <td>${esc(b.period_start)} → ${esc(b.period_end)}</td><td>${b.total_items}</td>
-        <td>${b.matched}</td><td>${b.exceptions}</td><td>${b.unmatched}</td><td>${badge(b.status)}</td>
-        <td>${esc(b.imported_by || "—")}</td>
-        <td><button class="mini" onclick="Views.reconOpen(${b.id})">Open</button>
-        ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" onclick="Views.reconMatchRun(${b.id})">Re-run match</button>` : ""}</td></tr>`).join("");
-      box.innerHTML = `<h2>Batches</h2>${rows ? `<table class="tbl"><thead><tr><th></th><th>Source</th><th>Period</th><th>Items</th><th>Matched</th><th>Exceptions</th><th>Unmatched</th><th>Status</th><th>Imported by</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No imports yet.</p>'}`;
+      window._reconBatches = r.batches || [];
+      const statuses = [...new Set(window._reconBatches.map((b) => b.status))].sort();
+      const filter = window._reconBatches.length && statuses.length > 1
+        ? `<select onchange="Views.reconBatchFilter(this.value)"><option value="">All statuses</option>
+            ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>` : "";
+      box.innerHTML = `<div class="view-head"><h2>Batches</h2>${filter}</div>
+        <div id="recon-batches-list">${reconBatchRowsHtml(window._reconBatches, "")}</div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -4819,7 +4910,8 @@ const Views = (() => {
         <div class="card"><h2>My batch filings — status</h2>
           <div id="tpa-batches"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>Tracking — all your parties' disputes</h2>
-          <div id="tpa-rollup"></div><div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+          <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
+          <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
       </div>
       ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
       <div class="card"><h2>State oversight — all TPAs</h2><div id="tpa-admin"><p class="muted">Loading…</p></div></div>` : ""}`;
@@ -4902,15 +4994,36 @@ const Views = (() => {
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
+  function tpaCasesHtml(cases, status, q) {
+    let shown = cases;
+    if (status) shown = shown.filter((x) => x.status === status);
+    if (q) shown = shown.filter((x) => (x.client_name || "").toLowerCase().includes(q) || (x.case_number || "").toLowerCase().includes(q));
+    if (!shown.length) return '<p class="muted">No disputes match this filter.</p>';
+    return `<table class="tbl"><thead><tr><th>Initiating party</th><th>Type</th><th>Case</th><th>Status</th><th>Disputed</th><th>Invoiced</th><th>Paid</th><th>Filed</th></tr></thead><tbody>` +
+      shown.map((x) => `<tr><td>${esc(x.client_name)}</td><td>${badge(x.initiating_party_type)}</td>
+        <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
+        <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${usdC(x.invoiced_cents)}</td><td>${usdC(x.paid_cents)}</td><td>${esc(x.filed)}</td></tr>`).join("")
+      + `</tbody></table>`;
+  }
+  function tpaCasesFilter() {
+    const status = document.getElementById("tpa-cases-status")?.value || "";
+    const q = (document.getElementById("tpa-cases-q")?.value || "").trim().toLowerCase();
+    const box = document.getElementById("tpa-cases");
+    if (box) box.innerHTML = tpaCasesHtml(window._tpaCases || [], status, q);
+  }
   async function tpaDashBox(tpaId) {
-    const roll = document.getElementById("tpa-rollup"), box = document.getElementById("tpa-cases");
+    const roll = document.getElementById("tpa-rollup"), box = document.getElementById("tpa-cases"),
+      filtersBox = document.getElementById("tpa-cases-filters");
     try {
       const r = await Api.program.tpaDashboard(tpaId);
+      window._tpaCases = r.cases || [];
       roll.innerHTML = (r.by_client || []).map((x) => `<span class="chip">${esc(x.initiating_party)}: <b>${x.cases}</b> cases (${x.open} open) · invoiced ${usdC(x.invoiced_cents)} · paid ${usdC(x.paid_cents)}</span> `).join("");
-      const rows = (r.cases || []).map((x) => `<tr><td>${esc(x.client_name)}</td><td>${badge(x.initiating_party_type)}</td>
-        <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
-        <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${usdC(x.invoiced_cents)}</td><td>${usdC(x.paid_cents)}</td><td>${esc(x.filed)}</td></tr>`).join("");
-      box.innerHTML = rows ? `<table class="tbl"><thead><tr><th>Initiating party</th><th>Type</th><th>Case</th><th>Status</th><th>Disputed</th><th>Invoiced</th><th>Paid</th><th>Filed</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">No disputes filed yet.</p>';
+      const statuses = [...new Set(window._tpaCases.map((x) => x.status))].sort();
+      if (filtersBox) filtersBox.innerHTML = window._tpaCases.length ? `<p>
+        <select id="tpa-cases-status" onchange="Views.tpaCasesFilter()"><option value="">All statuses</option>
+          ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+        <input id="tpa-cases-q" placeholder="Filter by party or case #…" oninput="Views.tpaCasesFilter()" /></p>` : "";
+      box.innerHTML = tpaCasesHtml(window._tpaCases, "", "");
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -5172,5 +5285,5 @@ const Views = (() => {
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
 })();

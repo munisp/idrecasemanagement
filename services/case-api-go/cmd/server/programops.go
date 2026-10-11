@@ -688,7 +688,19 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	// legacy intake_requests and programmed-tenant cases come from two
 	// different tables with no shared key to UNION on, so this can't be one
 	// paginated SQL query the way accounts/leads/tasks are -- merge, sort,
-	// then paginate the combined set in memory.
+	// then paginate the combined set in memory. Filtering after the merge
+	// for the same reason: one status value, two sources with different
+	// status vocabularies already normalized into the same "status" field
+	// by the queries above.
+	if status := r.URL.Query().Get("status"); status != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if str(row["status"]) == status {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		ti, _ := rows[i]["created_at"].(time.Time)
 		tj, _ := rows[j]["created_at"].(time.Time)
@@ -758,10 +770,13 @@ func (s *server) listDeliverables(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, dv{d.Name, d.DueRule, d.Format, next})
 	}
-	// persisted deliverable instances (status + delivery timestamps)
+	// persisted deliverable instances (status + delivery timestamps) --
+	// sorted by when it was actually delivered, not by due date: this is a
+	// delivery HISTORY, and due_date DESC put next-due-soonest items above
+	// ones delivered just now, which read as backwards live.
 	rows, _ := s.queryRows(r, `
 		SELECT name, case_id, due_date, status, delivered_at FROM public.deliverables
-		WHERE tenant=$1 ORDER BY due_date DESC NULLS LAST LIMIT 50`, tenant)
+		WHERE tenant=$1 ORDER BY delivered_at DESC NULLS LAST, due_date DESC LIMIT 50`, tenant)
 	writeJSON(w, http.StatusOK, map[string]any{"deliverables": out, "history": rows})
 }
 

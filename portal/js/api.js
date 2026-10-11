@@ -128,7 +128,7 @@ const Api = (() => {
     },
     onboarding: {
       submit: (payload) => req("POST", `${t()}/onboarding/applications`, payload),
-      list: () => req("GET", `${t()}/onboarding/applications`),
+      list: (params) => req("GET", `${t()}/onboarding/applications${qs(params || {})}`),
       decide: (id, decision, reason) => req("POST", `${t()}/onboarding/applications/${id}/decision`, { decision, reason }),
     },
     voice: {
