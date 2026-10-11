@@ -56,6 +56,10 @@ type Config struct {
 	TBAddresses     string // tigerbeetle-0:3000,tigerbeetle-1:3000,...
 	TBClusterID     string // decimal cluster ID this TigerBeetle deployment was formatted with
 	DaprHTTP        string // http://localhost:3500
+	// TopicPrefix namespaces every Kafka topic this deployment publishes
+	// ("<prefix>.<tenant>.<domain>"). Two deployments on one broker MUST
+	// use different prefixes or each consumes the other's events.
+	TopicPrefix string
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
 	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
@@ -109,6 +113,7 @@ func configFromEnv() Config {
 		// silently rejected ("invalid header_cluster" on the replica side).
 		TBClusterID:   get("TIGERBEETLE_CLUSTER_ID", ""),
 		DaprHTTP:      get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
+		TopicPrefix:   get("TOPIC_PREFIX", "idre"),
 		VaultURL:      get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL: get("GRAPH_INTEL_URL", "http://localhost:8082"),
 		// The copilot shares the in-cluster ollama already serving doc-intel
@@ -917,7 +922,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	})
 	if _, err := tx.Exec(r.Context(),
 		`INSERT INTO outbox (topic, key, payload) VALUES ($1,$2,$3)`,
-		fmt.Sprintf("idre.%s.cases", tenant), caseID, payload); err != nil {
+		fmt.Sprintf("%s.%s.cases", s.cfg.TopicPrefix, tenant), caseID, payload); err != nil {
 		http.Error(w, `{"error":"outbox"}`, http.StatusInternalServerError)
 		return
 	}
@@ -1401,7 +1406,7 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *server) publish(ctx context.Context, tenant, domain string, event map[string]any) {
-	topic := fmt.Sprintf("idre.%s.%s", tenant, domain)
+	topic := fmt.Sprintf("%s.%s.%s", s.cfg.TopicPrefix, tenant, domain)
 	url := fmt.Sprintf("%s/v1.0/publish/idre-pubsub/%s", s.cfg.DaprHTTP, topic)
 	body, _ := json.Marshal(event)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))

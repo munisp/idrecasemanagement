@@ -69,7 +69,7 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(
 		`INSERT INTO tenant_%s.outbox (topic, key, payload) VALUES ($1,$2,$3)`,
 		sanitizeTenant(tenant)),
-		fmt.Sprintf("idre.%s.letters", tenant), caseID, payload); err != nil {
+		fmt.Sprintf("%s.%s.letters", s.cfg.TopicPrefix, tenant), caseID, payload); err != nil {
 		http.Error(w, `{"error":"outbox"}`, http.StatusInternalServerError)
 		return
 	}

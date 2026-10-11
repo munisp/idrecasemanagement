@@ -526,14 +526,24 @@ def process_check(evt: dict) -> None:
             pass
 
 
+# Two deployments sharing one Kafka broker must not share topics or a consumer
+# group, or each consumes the other's events. TOPIC_PREFIX namespaces both; the
+# default keeps the original names.
+TOPIC_PREFIX = os.environ.get("TOPIC_PREFIX", "idre")
+CONSUMER_GROUP = "doc-intel" if TOPIC_PREFIX == "idre" else f"doc-intel-{TOPIC_PREFIX}"
+
+
 def main() -> None:
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BROKERS", "localhost:9092"),
-        "group.id": "doc-intel",
+        "group.id": CONSUMER_GROUP,
+        # Regex subscriptions only see a newly created topic on a metadata
+        # refresh; the 5-minute default delays a tenant's first event that long.
+        "topic.metadata.refresh.interval.ms": 30000,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
     })
-    consumer.subscribe(["^idre\\..*\\.documents"], on_assign=lambda c, ps: None)
+    consumer.subscribe([f"^{re.escape(TOPIC_PREFIX)}\\..*\\.documents"], on_assign=lambda c, ps: None)
 
     running = True
     def stop(*_):
@@ -578,7 +588,7 @@ def main() -> None:
             pending.popleft()
             block = False
 
-    print(f"doc-intel consuming idre.*.documents (workers={workers}) ...", flush=True)
+    print(f"doc-intel consuming {TOPIC_PREFIX}.*.documents as group {CONSUMER_GROUP} (workers={workers}) ...", flush=True)
     while running:
         drain()
         if len(pending) >= workers * 2:

@@ -194,14 +194,24 @@ def handle(evt: dict) -> None:
     print(f"[lettergen] {tenant}/{case_id}: {key} -> {filename}", flush=True)
 
 
+# Two deployments sharing one Kafka broker must not share topics or a consumer
+# group, or each consumes the other's events. TOPIC_PREFIX namespaces both; the
+# default keeps the original names.
+TOPIC_PREFIX = os.environ.get("TOPIC_PREFIX", "idre")
+CONSUMER_GROUP = "lettergen" if TOPIC_PREFIX == "idre" else f"lettergen-{TOPIC_PREFIX}"
+
+
 def main() -> None:
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BROKERS", "localhost:9092"),
-        "group.id": "lettergen",
+        "group.id": CONSUMER_GROUP,
+        # Regex subscriptions only see a newly created topic on a metadata
+        # refresh; the 5-minute default delays a tenant's first event that long.
+        "topic.metadata.refresh.interval.ms": 30000,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
     })
-    consumer.subscribe([r"^idre\..*\.letters$"])
+    consumer.subscribe([f"^{re.escape(TOPIC_PREFIX)}\\..*\\.letters$"])
 
     running = True
     def stop(*_):
