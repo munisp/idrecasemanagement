@@ -24,3 +24,17 @@ func TestTPAWelcomeMail(t *testing.T) {
 		t.Errorf("no contact name should greet generically: %q", logged[:20])
 	}
 }
+
+func TestValidMailbox(t *testing.T) {
+	for _, ok := range []string{"dana.lee@acme-rcm.com", "billing+idr@northgate.health", "a@b.co"} {
+		if !validMailbox(ok) {
+			t.Errorf("%q should be accepted", ok)
+		}
+	}
+	for _, bad := range []string{"", "no-at-sign", "bad address@nowhere", "double..dot@resend.dev", "trailingdot.@resend.dev",
+		".lead@x.com", "user@localhost", "user@.com", "Dana <dana@x.com>", "a@x.com, b@y.com"} {
+		if validMailbox(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}

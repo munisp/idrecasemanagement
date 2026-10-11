@@ -22,6 +22,7 @@ package main
 // correctly per dispute AND per TPA.
 
 import (
+	"net/mail"
 	"log/slog"
 	"crypto/rand"
 	"encoding/hex"
@@ -99,6 +100,14 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := strings.ToLower(in.Tenant)
+	// The login is emailed, so the address has to be one mail can reach.
+	// Checked here so the visitor gets a plain message instead of an opaque
+	// upstream error from account creation.
+	in.ContactEmail = strings.TrimSpace(in.ContactEmail)
+	if !validMailbox(in.ContactEmail) {
+		http.Error(w, `{"error":"enter a valid contact email address — your sign-in details will be sent there"}`, http.StatusBadRequest)
+		return
+	}
 
 	// Public and it sends email: same per-address throttle as the public
 	// dispute form, so it cannot be used to flood a mailbox or mint accounts.
@@ -185,7 +194,9 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		if derr := s.kcDeleteUser(r.Context(), tok, userID); derr != nil {
 			slog.Error("TPA registration rollback: could not delete the Keycloak user", "user_id", userID, "err", derr)
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{
+		// 422, not 502: the CDN in front of the portal replaces the body of
+		// a 502 with its own error page, which hid this message.
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": "we could not send the sign-in email to that address, so nothing was registered. Check the email address and try again.",
 		})
 		return
@@ -199,6 +210,20 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		"tpa_id": id, "status": "ACTIVE", "emailed_to": in.ContactEmail,
 		"next": "Your username and a temporary password have been emailed to " + in.ContactEmail + ". Sign in to the portal with them (you'll be asked to set a new password) — your organization is already linked.",
 	})
+}
+
+// validMailbox: a single plain address (no display name, no list) with a
+// dotted domain and no doubled or edge dots in the local part.
+func validMailbox(addr string) bool {
+	a, err := mail.ParseAddress(addr)
+	if err != nil || a.Address != addr || strings.ContainsAny(addr, " \t") {
+		return false
+	}
+	local, domain, ok := strings.Cut(addr, "@")
+	if !ok || local == "" || !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return false
+	}
+	return !strings.Contains(local, "..") && !strings.HasPrefix(local, ".") && !strings.HasSuffix(local, ".")
 }
 
 // tpaWelcomeMail builds the sign-in email for a newly registered TPA. With
