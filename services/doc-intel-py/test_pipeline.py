@@ -475,3 +475,37 @@ def test_word_overlap():
     assert pl._word_overlap("allowed amount $120", "allowed amount $120") == 1.0
     assert pl._word_overlap("cat dog", "sun moon") == 0.0
     assert 0 < pl._word_overlap("allowed amount claim", "allowed amount number") < 1
+
+
+def test_vlm_out_of_domain_read_without_underscore(monkeypatch):
+    # The deployed model answers "in_domain", not the prompted "_in_domain".
+    _stub_openai(monkeypatch)
+    pl._MODEL_CACHE.clear()
+    monkeypatch.setattr(pl, "_vlm_call",
+                        lambda *a, **k: {"in_domain": False, "billed_amount_usd": None})
+    ctx = pl.stage_vlm_extract(_long_ctx(monkeypatch, n_chunks=1),
+                               {"endpoint": "http://x/v1", "model": "m", "chunk_chars": 10}, _SCHEMAS)
+    assert ctx["in_domain"] is False
+    assert "in_domain" not in ctx["extracted"]
+
+
+def test_vlm_rejection_with_image_is_rechecked_text_only(monkeypatch):
+    from PIL import Image
+    _stub_openai(monkeypatch)
+    pl._MODEL_CACHE.clear()
+    calls = []
+
+    def fake_call(client, model, content, max_tokens):
+        calls.append(len(content))
+        if len(content) > 1:  # image attached: the blurry-thumbnail rejection
+            return {"in_domain": False, "billed_amount_usd": None}
+        return {"in_domain": True, "billed_amount_usd": 1850.0}
+
+    monkeypatch.setattr(pl, "_vlm_call", fake_call)
+    ctx = _long_ctx(monkeypatch, n_chunks=1)
+    ctx["pages"] = [Image.new("RGB", (800, 1000), "white")]
+    ctx = pl.stage_vlm_extract(ctx, {"endpoint": "http://x/v1", "model": "m", "chunk_chars": 10,
+                                     "vision": True}, _SCHEMAS)
+    assert calls == [2, 1]
+    assert ctx["in_domain"] is True
+    assert ctx["extracted"]["billed_amount_usd"] == 1850.0

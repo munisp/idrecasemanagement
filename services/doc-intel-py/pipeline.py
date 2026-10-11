@@ -613,6 +613,23 @@ def _merge_extractions(parts: list[dict], fields: list[str]) -> dict:
     return merged
 
 
+def _in_domain_verdict(parsed: dict, pop: bool = False) -> bool:
+    """The model's related-to-billing verdict; True when it gave none.
+
+    The prompt asks for "_in_domain" but the deployed model answers with
+    "in_domain" (no underscore) -- reading only the prompted spelling meant a
+    rejection was never seen at all. Accept both, and string booleans."""
+    verdict = True
+    for key in ("_in_domain", "in_domain"):
+        if key in parsed:
+            v = parsed.pop(key) if pop else parsed[key]
+            if isinstance(v, str):
+                v = v.strip().lower() not in ("false", "no", "0")
+            if v is not None:
+                verdict = bool(v)
+    return verdict
+
+
 def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     """VLM semantic extraction via an OpenAI-compatible endpoint
     (PaddleOCR-VL or Qwen2.5-VL served by vLLM; swap with one env var).
@@ -740,7 +757,15 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
                                 # upstream context fix (thumbnail) + JPEG encoding
                                 "image_url": {"url": f"data:image/jpeg;base64,{pil_to_b64(thumb)}"}})
                 break  # one page image per chunk keeps token cost bounded
-        return _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+        parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+        # A "not in domain" verdict reached WITH a page image attached is not
+        # trusted on its own: confirmed live, the low-resolution thumbnail made
+        # the model reject a plainly worded claim form that the same prompt
+        # without the image extracted perfectly. Re-ask text-only and take
+        # that answer -- one extra call, only on rejections.
+        if len(content) > 1 and not _in_domain_verdict(parsed):
+            parsed = _vlm_call(client, cfg["model"], content[:1], cfg.get("max_tokens", 2048))
+        return parsed
 
     # Chunk concurrency: the endpoint is the LOCAL in-cluster Ollama, NOT
     # OpenAI -- a shared platform instance with a known OOM history (see
@@ -760,7 +785,7 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     parts: list[dict] = []
     in_domain_votes: list[bool] = []
     for parsed in raw_parts:
-        in_domain_votes.append(bool(parsed.pop("_in_domain", True)))
+        in_domain_votes.append(_in_domain_verdict(parsed, pop=True))
         parts.append(parsed)
 
     ctx["in_domain"] = any(in_domain_votes) if in_domain_votes else True
