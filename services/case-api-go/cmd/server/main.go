@@ -989,6 +989,16 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 // Response: {"cases": [...], "next_cursor": "...", "total": N}
 func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA deliberately excluded: this is the tenant's whole case list, no
+	// per-caller scoping -- a TPA only has standing to see the disputes IT
+	// filed, which is exactly what #/tpa's own "Tracking" card already
+	// reads from case_origin. Letting TPA hit this generic endpoint (via
+	// the Disputes/Pipeline nav, which until now showed for every role)
+	// would leak every other client's and other TPAs' cases to them.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden: TPA accounts see their own disputes on the TPA page"}`, http.StatusForbidden)
+		return
+	}
 	q := r.URL.Query()
 	limit := 50
 	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {

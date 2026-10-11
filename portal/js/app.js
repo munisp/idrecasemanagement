@@ -143,12 +143,21 @@
   // programmed tenant's case managers was pure confusion: a form whose
   // required fields don't apply to any case they'd ever open.
   const programmed = !!(await Api.program.get().catch(() => null))?.config;
-  const links = [
-    ["#/dashboard", "▤", "Home"], ["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
-    ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"],
-  ];
+  const links = [["#/dashboard", "▤", "Home"]];
+  // TPA deliberately excluded from the generic CRM/case screens -- those
+  // show the WHOLE tenant's cases/accounts/leads/tasks with no per-caller
+  // scoping, but a TPA only has standing to see the disputes it filed
+  // itself, which is exactly what its own #/tpa "Tracking" card already
+  // shows. Matches the backend's listCases/listAccounts/listLeads/
+  // listTasks TPA exclusion.
+  if (!has("TPA")) {
+    links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
+      ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
+  }
   if (!programmed && has("PARTY", "CASE_MANAGER")) links.push(["#/new", "＋", "New dispute"]);
-  links.push(["#/ask", "✦", "Ask the graph"]);
+  // TPA excluded -- Ask the graph answers from the whole tenant's case
+  // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
+  if (!has("TPA")) links.push(["#/ask", "✦", "Ask the graph"]);
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);

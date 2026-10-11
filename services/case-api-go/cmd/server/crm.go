@@ -50,6 +50,12 @@ func nextOffset(offset, limit, total int) int {
 
 func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA excluded -- see listCases' comment (main.go): generic CRM lists
+	// are the whole tenant's data, not scoped to what a TPA filed.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden: TPA accounts see their own clients on the TPA page"}`, http.StatusForbidden)
+		return
+	}
 	typ := r.URL.Query().Get("type")
 	q := `SELECT id, tenant, type, legal_name, COALESCE(npi,''), COALESCE(phone,''),
 	             custom, created_at FROM public.accounts WHERE tenant=$1`
@@ -224,6 +230,11 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA excluded -- see listCases' comment (main.go).
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int
 	if err := s.db.QueryRow(r.Context(),
@@ -316,6 +327,11 @@ func (s *server) convertLead(w http.ResponseWriter, r *http.Request) {
 func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// TPA excluded -- see listCases' comment (main.go).
+	if hasRole(p, "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
 	mine := r.URL.Query().Get("mine") == "true"
 	q := `SELECT id, COALESCE(task_ref,''), subject, COALESCE(case_id,''), COALESCE(assignee,''),
 	             COALESCE(to_char(due_date,'YYYY-MM-DD'),''), status, created_at

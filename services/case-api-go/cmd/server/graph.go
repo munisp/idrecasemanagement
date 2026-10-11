@@ -76,6 +76,13 @@ func (s *server) proxyGraph(w http.ResponseWriter, r *http.Request, method, path
 // injected server-side so a caller can never query across the state line.
 func (s *server) graphAsk(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA excluded -- see listCases' comment (main.go): the KGQA graph
+	// answers from the WHOLE tenant's case data, which a TPA has no
+	// standing to query beyond the disputes it filed itself.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		Question string `json:"question"`
 		K        int    `json:"k"`
@@ -95,6 +102,11 @@ func (s *server) graphAsk(w http.ResponseWriter, r *http.Request) {
 // graphFeedback handles POST /graph/feedback {log_id, rating}.
 func (s *server) graphFeedback(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA excluded -- see graphAsk's comment just above.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
 	var in struct {
 		LogID  string `json:"log_id"`
 		Rating int    `json:"rating"`
