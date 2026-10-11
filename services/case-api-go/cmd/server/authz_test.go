@@ -335,6 +335,7 @@ func TestThirdRoleAuditFloors_ReadEndpoints(t *testing.T) {
 		// gate exactly -- notably FINANCE and ARBITRATOR are NOT here, unlike
 		// financialReadRoles, because the Reports nav never admitted them.
 		{"reportsRead: PM allowed", []string{"PM"}, reportsReadRoles, true},
+		{"reportsRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, reportsReadRoles, false},
 		{"reportsRead: FINANCE rejected", []string{"FINANCE"}, reportsReadRoles, false},
 		{"reportsRead: ARBITRATOR rejected", []string{"ARBITRATOR"}, reportsReadRoles, false},
 		// opsRoles (opsDashboard, also backs the Reports -> Trends tab): PM
@@ -396,8 +397,11 @@ func TestFourthRoleAuditFloors_FinanceVisibility(t *testing.T) {
 // (federal.admin itself was hand-seeded directly in the Keycloak realm),
 // and no way to add a second staff member to an already-existing tenant
 // without resubmitting a whole tenant-creation request. Scoped with the
-// user: either federal tier can mint more of either federal role; a
-// CASE_MANAGER may add tenant staff only to their own tenant.
+// user: either federal tier can mint more of either federal role; a PM
+// may add tenant staff only to their own tenant. CASE_MANAGER was removed
+// from this (and Reports, Team time) per the same access-control
+// follow-up as financialReadRoles -- reviewer loses tenant staff admin
+// entirely, not just a subset.
 func TestAdminCreationRoleFloors(t *testing.T) {
 	t.Run("createFederalAdmin", func(t *testing.T) {
 		cases := []struct {
@@ -420,13 +424,13 @@ func TestAdminCreationRoleFloors(t *testing.T) {
 
 	t.Run("createTenantStaff tenant-scoping", func(t *testing.T) {
 		// Mirrors createTenantStaff's own gate logic (admins bypass the
-		// tenant check; CASE_MANAGER must match the target tenant).
+		// tenant check; PM must match the target tenant).
 		allowed := func(roles []string, callerTenant, targetTenant string) bool {
 			p := principal{Roles: roles}
 			if hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 				return true
 			}
-			return hasRole(p, "CASE_MANAGER") && targetTenant == callerTenant
+			return hasRole(p, "PM") && targetTenant == callerTenant
 		}
 		cases := []struct {
 			name         string
@@ -436,8 +440,9 @@ func TestAdminCreationRoleFloors(t *testing.T) {
 			want         bool
 		}{
 			{"FEDERAL_ADMIN can target any tenant", []string{"FEDERAL_ADMIN"}, "tx", "fl", true},
-			{"CASE_MANAGER can target own tenant", []string{"CASE_MANAGER"}, "fl", "fl", true},
-			{"CASE_MANAGER rejected on a different tenant", []string{"CASE_MANAGER"}, "tx", "fl", false},
+			{"PM can target own tenant", []string{"PM"}, "fl", "fl", true},
+			{"PM rejected on a different tenant", []string{"PM"}, "tx", "fl", false},
+			{"CASE_MANAGER rejected even on own tenant", []string{"CASE_MANAGER"}, "fl", "fl", false},
 			{"ARBITRATOR rejected even on own tenant", []string{"ARBITRATOR"}, "tx", "tx", false},
 		}
 		for _, c := range cases {

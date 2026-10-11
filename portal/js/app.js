@@ -181,8 +181,8 @@
   // use for this screen.
   if (!has("TPA")) links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER")) links.push(["#/voice", "☎", "Voice console"]);
-  if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
-  if (has("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
+  if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
+  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
   // CASE_MANAGER deliberately excluded from all four -- standalone finance
   // screens, not case-detail info; matches billingViewRoles/arapReadRoles/
   // reconReadRoles/financialReadRoles (access-control follow-up).
@@ -197,7 +197,7 @@
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
-  if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/team", "⚉", "Team"]);
+  if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/team", "⚉", "Team"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>

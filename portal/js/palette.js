@@ -9,22 +9,26 @@ const Palette = (() => {
     else localStorage.setItem("idre.recents", JSON.stringify(recents));
   }
 
-  const ACTIONS = () => ([
-    { s: "Go", icon: "▤", label: "Home", run: () => go("#/dashboard") },
-    { s: "Go", icon: "▦", label: "Disputes", run: () => go("#/cases") },
-    { s: "Go", icon: "▥", label: "Pipeline", run: () => go("#/pipeline") },
-    { s: "Go", icon: "◈", label: "Accounts", run: () => go("#/crm/accounts") },
-    { s: "Go", icon: "◎", label: "Leads", run: () => go("#/crm/leads") },
-    { s: "Go", icon: "☑", label: "My tasks", run: () => go("#/crm/tasks") },
-    { s: "Go", icon: "▨", label: "Calendar", run: () => go("#/calendar") },
-    { s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") },
-    { s: "Action", icon: "＋", label: "New dispute", kbd: "C", run: () => go("#/new") },
-    { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext },
-    { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", run: () => go("#/ask") },
-    { s: "Action", icon: "⟳", label: "Sync dispute graph (Postgres → FalkorDB → lakehouse)", run: graphSync },
-    { s: "Action", icon: "⌘", label: "Train GNN link predictor", run: graphTrain },
-    { s: "Action", icon: "◐", label: "Toggle dark mode", run: () => document.getElementById("theme-toggle").click() },
-  ]);
+  const ACTIONS = () => {
+    const roles = Auth.claims()?.roles || [];
+    const reportsRoles = ["PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN"];
+    return [
+      { s: "Go", icon: "▤", label: "Home", run: () => go("#/dashboard") },
+      { s: "Go", icon: "▦", label: "Disputes", run: () => go("#/cases") },
+      { s: "Go", icon: "▥", label: "Pipeline", run: () => go("#/pipeline") },
+      { s: "Go", icon: "◈", label: "Accounts", run: () => go("#/crm/accounts") },
+      { s: "Go", icon: "◎", label: "Leads", run: () => go("#/crm/leads") },
+      { s: "Go", icon: "☑", label: "My tasks", run: () => go("#/crm/tasks") },
+      { s: "Go", icon: "▨", label: "Calendar", run: () => go("#/calendar") },
+      ...(reportsRoles.some((r) => roles.includes(r)) ? [{ s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") }] : []),
+      { s: "Action", icon: "＋", label: "New dispute", kbd: "C", run: () => go("#/new") },
+      { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext },
+      { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", run: () => go("#/ask") },
+      { s: "Action", icon: "⟳", label: "Sync dispute graph (Postgres → FalkorDB → lakehouse)", run: graphSync },
+      { s: "Action", icon: "⌘", label: "Train GNN link predictor", run: graphTrain },
+      { s: "Action", icon: "◐", label: "Toggle dark mode", run: () => document.getElementById("theme-toggle").click() },
+    ];
+  };
   async function graphSync() {
     try { const r = await Api.graph.sync(); UI.toast(`Graph synced — ${r.cases} cases mirrored to FalkorDB + lakehouse`); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }

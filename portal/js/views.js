@@ -3499,7 +3499,7 @@ const Views = (() => {
         <label><input type="checkbox" name="billable" checked /> billable</label>
         <button class="mini">Log</button></form>
       ${recent ? `<table><thead><tr><th>Date</th><th>Who</th><th>Role</th><th>Time</th><th>Note</th></tr></thead><tbody>${recent}</tbody></table>` : `<p class="muted">No entries yet.</p>`}
-      <p class="muted">Append-only, recorded under your name and role — <a href="#/time">team weekly/monthly rollups ↗</a></p></div>`;
+      <p class="muted">Append-only, recorded under your name and role${can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? ` — <a href="#/time">team weekly/monthly rollups ↗</a>` : ""}</p></div>`;
   }
 
   async function asstTimeAdd(caseId, form) {
@@ -4271,9 +4271,10 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
-  // #/team -- the one page a CASE_MANAGER has a standing right to (their
-  // own tenant, enforced server-side by createTenantStaff/listTenantStaff),
+  // #/team -- the one page a PM has a standing right to (their own
+  // tenant, enforced server-side by createTenantStaff/listTenantStaff),
   // independent of the Rules page's FEDERAL_ADMIN/PLATFORM_ADMIN-only gate.
+  // CASE_MANAGER (reviewer) no longer has any access here, by request.
   // scope is "tenant" (acts via the tenant-staff endpoints, tenant required)
   // or "federal" (cross-tenant admin endpoints, no tenant). The caller's own
   // row never gets action buttons -- the backend rejects self-suspend/

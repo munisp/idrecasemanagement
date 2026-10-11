@@ -55,7 +55,9 @@ var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDE
 // reportsReadRoles: the Reports page's summary/SLA endpoints. Matches the
 // portal's own Reports nav gate (notably FINANCE and ARBITRATOR are NOT
 // here, unlike financialReadRoles -- Reports nav never included them).
-var reportsReadRoles = []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", serviceRole}
+// CASE_MANAGER removed per the same access-control follow-up as
+// financialReadRoles: reviewer loses Reports entirely, not just a subset.
+var reportsReadRoles = []string{"PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", serviceRole}
 
 // ---- Notifications -----------------------------------------------------------
 
