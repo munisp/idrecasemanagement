@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"bytes"
 	crand "crypto/rand"
 	"encoding/base64"
@@ -426,9 +427,25 @@ func (s *server) retryDocumentAnalysis(w http.ResponseWriter, r *http.Request) {
 
 // ---- vault helpers ---------------------------------------------------------
 
+// vaultPost calls the vault with the incoming request's context, so the call
+// is cancelled with the request and its span joins the request's trace
+// (http.Post used context.Background and started a detached trace).
+func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Response, error) {
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.VaultURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return http.DefaultClient.Do(req)
+}
+
 func (s *server) vaultSealDoc(r *http.Request, tenant, key string, pt []byte) ([]byte, error) {
 	body, _ := json.Marshal(vaultDocReq{Tenant: tenant, Key: key, DataB64: b64enc(pt)})
-	resp, err := http.Post(s.cfg.VaultURL+"/docs/seal", "application/json", bytes.NewReader(body))
+	resp, err := s.vaultPost(r, "/docs/seal", body)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +461,7 @@ func (s *server) vaultSealDoc(r *http.Request, tenant, key string, pt []byte) ([
 
 func (s *server) vaultOpenDoc(r *http.Request, tenant, key string, ct []byte) ([]byte, error) {
 	body, _ := json.Marshal(vaultDocReq{Tenant: tenant, Key: key, DataB64: b64enc(ct)})
-	resp, err := http.Post(s.cfg.VaultURL+"/docs/open", "application/json", bytes.NewReader(body))
+	resp, err := s.vaultPost(r, "/docs/open", body)
 	if err != nil {
 		return nil, err
 	}
