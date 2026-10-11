@@ -58,6 +58,15 @@ func (s *server) createApplication(r *http.Request, tenant string, in Onboarding
 // Creates the application row and starts the durable onboarding workflow.
 func (s *server) submitApplication(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// CASE_MANAGER excluded per the "reviewer only reviews" follow-up:
+	// starting a new onboarding application is a creation action; reviewer
+	// keeps decideApplication (deciding a pending one) but not this. Every
+	// other authenticated tenant role keeps the open self-service access
+	// this route has always had (no gate otherwise).
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "CASE_MANAGER") {
+		http.Error(w, `{"error":"forbidden: reviewer cannot submit new onboarding applications"}`, http.StatusForbidden)
+		return
+	}
 	var in OnboardingApplication
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.LegalName == "" || in.Type == "" {
 		http.Error(w, `{"error":"legal_name and type required"}`, http.StatusBadRequest)

@@ -24,7 +24,10 @@ import (
 // testing: pm.fl/coder.fl/nurse.fl/attorney.fl all hit this, but only PM
 // is a real mismatch -- the other three correctly have no Reports nav
 // access at all, so their 403 here is consistent, not a bug).
-var opsRoles = []string{"CASE_MANAGER", "ARBITRATOR", "FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
+// CASE_MANAGER removed per the "reviewer only reviews" follow-up: Ops is a
+// tenant-wide operational/financial KPI dashboard, not dispute-review
+// content, so reviewer loses it entirely (matches Reports/Financials).
+var opsRoles = []string{"ARBITRATOR", "FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
 
 func (s *server) presencePing(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)

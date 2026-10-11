@@ -862,8 +862,13 @@ const Views = (() => {
       html += `<div class="view-head"><h2>Review queue</h2>${statusFilter}</div>
         <div id="onb-box"><p class="muted">Loading…</p></div>`;
     }
-    html += `<h2>New application</h2><p class="muted">Self-service registration for provider, payer, IDRE and auditor organizations.</p>
-      <p><a class="button" href="#/onboarding/new">Start application</a></p>`;
+    // CASE_MANAGER keeps the review queue above (deciding a pending
+    // application) but not this -- starting a new one is a creation
+    // action, per the "reviewer only reviews" follow-up.
+    if (!can("CASE_MANAGER")) {
+      html += `<h2>New application</h2><p class="muted">Self-service registration for provider, payer, IDRE and auditor organizations.</p>
+        <p><a class="button" href="#/onboarding/new">Start application</a></p>`;
+    }
     return html;
   }
 
@@ -4968,7 +4973,11 @@ const Views = (() => {
       $("#tpa-bulk-file")?.addEventListener("change", (ev) => tpaBulkFile(ev.target));
       $("#tpa-bulk-btn")?.addEventListener("click", (ev) => { ev.preventDefault(); tpaBulkSubmit(ev.target); });
     } catch (e) {
-      orgBox.innerHTML = `<div class="card"><h2>Link your TPA organization</h2>
+      // CASE_MANAGER excluded: claimTPA (backing "Act as") now 403s for
+      // reviewer per the "reviewer only reviews" follow-up, so this form
+      // would just fail -- reviewer still sees the oversight table below,
+      // read-only.
+      orgBox.innerHTML = can("CASE_MANAGER") ? "" : `<div class="card"><h2>Link your TPA organization</h2>
         <p class="muted">Enter the one-time claim code from your TPA registration.</p>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaClaimFn(this)">
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
@@ -5151,7 +5160,10 @@ const Views = (() => {
     if (!box) return;
     try {
       const r = await Api.program.adminTpas();
-      const canAct = can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      // CASE_MANAGER excluded per the "reviewer only reviews" follow-up --
+      // matches adminTPAInviteCode/adminSetTPAStatus/claimTPA's backend
+      // gates. Reviewer still sees this table, just not the action buttons.
+      const canAct = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
       const rows = (r.tpas || []).map((t) => `<tr><td>${esc(t.name)}</td><td>${esc(t.contact_email)}</td><td>${t.clients}</td><td>${t.cases_filed}</td>
         <td>${badge(t.status)}</td>
         <td class="mono">${t.claim_code

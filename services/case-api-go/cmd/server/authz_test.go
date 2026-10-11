@@ -64,6 +64,60 @@ func TestReviewerOnlyReviewsRoleFloors(t *testing.T) {
 			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
 		}
 	}
+
+	// submitApplication/claimTPA: open to any authenticated tenant member
+	// EXCEPT CASE_MANAGER (an inline exclusion, not a positive role list) --
+	// mirror that shape exactly rather than a gate array.
+	notCaseManager := func(roles []string) bool { return !hasRole(principal{Roles: roles}, "CASE_MANAGER") }
+	openExceptReviewerCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"submitApplication/claimTPA: PM allowed", []string{"PM"}, true},
+		{"submitApplication/claimTPA: PARTY allowed", []string{"PARTY"}, true},
+		{"submitApplication/claimTPA: TPA allowed", []string{"TPA"}, true},
+		{"submitApplication/claimTPA: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+	}
+	for _, c := range openExceptReviewerCases {
+		if got := notCaseManager(c.roles); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+
+	// opsRoles: reviewer loses the Ops dashboard entirely (tenant-wide
+	// operational/financial KPIs, not dispute-review content).
+	opsCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"opsRoles: PM allowed", []string{"PM"}, true},
+		{"opsRoles: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+	}
+	for _, c := range opsCases {
+		if got := hasAnyRole(principal{Roles: c.roles}, opsRoles...); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+
+	// adminTPAInviteCode/adminSetTPAStatus: the TPA oversight list's action
+	// buttons (mint code / act as / suspend) -- reviewer keeps the
+	// read-only oversight table (adminListTPAs, untouched) but not these.
+	tpaAdminActionCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"tpaAdminAction: FEDERAL_ADMIN allowed", []string{"FEDERAL_ADMIN"}, true},
+		{"tpaAdminAction: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+		{"tpaAdminAction: PM rejected (never had this)", []string{"PM"}, false},
+	}
+	for _, c := range tpaAdminActionCases {
+		if got := hasAnyRole(principal{Roles: c.roles}, "FEDERAL_ADMIN", "PLATFORM_ADMIN"); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
 }
 
 func TestHasAnyRole(t *testing.T) {
