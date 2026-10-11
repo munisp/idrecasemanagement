@@ -284,6 +284,9 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		tenant, caseID, tpl.Key, subject, body, toJ, ccJ, status, displayName(p), p.Subject).Scan(&qid)
 
 	if status == "PENDING" {
+		// Held for QA: nothing is sent yet, but the mail log shows it as
+		// PENDING so "where is that email?" has an answer before approval.
+		s.logCorrespondenceHeld(r, tenant, caseID, in.Template, subject, body, in.To, in.CC, p.Subject, qid)
 		s.notify(r, tenant, "*", "QA_REVIEW",
 			fmt.Sprintf("%s draft on case %s awaiting %s QA approval", tpl.Key, caseID, tpl.QARole), "#/qa")
 	} else {
@@ -592,7 +595,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := sendErr; err != nil {
 			deliveryError = err.Error()
-			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject, err.Error())
+			if !s.settleHeldMail(r, tenant, qid, "FAILED", err.Error(), body, to, cc) {
+				s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject, err.Error())
+			}
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
 			// The reviewer who clicked Approve already sees this in the
@@ -607,7 +612,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_, _ = s.db.Exec(r.Context(),
 				`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
-			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
+			if !s.settleHeldMail(r, tenant, qid, "SENT", "", body, to, cc) {
+				s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
+			}
 			if len(to) > 0 {
 				s.logCorrespondenceInquiry(r, tenant, caseID, to[0], fmt.Sprintf("%s: %s", artifact, subject), p.Subject)
 			}
@@ -621,6 +628,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			s.autoChecklist(r, tenant, caseID)
 		}
 	} else {
+		s.settleHeldMail(r, tenant, qid, "REJECTED", "rejected in QA"+orDash(": "+in.Note), body, to, cc)
 		s.logActivity(r.Context(), tenant, caseID, "QA_REJECTED",
 			fmt.Sprintf("Draft rejected in QA by %s: %s%s", p.Subject, subject, orDash(" — "+in.Note)))
 		if requestedBySub != "" {
@@ -669,7 +677,8 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	q := `SELECT c.id, c.case_id, COALESCE(k.case_number,'') AS case_number, c.direction, c.template,
 	             c.subject, c.body, c.recipients, c.sent_by, c.created_at,
-	             c.delivery_status, coalesce(c.delivery_error,'') AS delivery_error
+	             c.delivery_status, coalesce(c.delivery_error,'') AS delivery_error,
+	             c.status_updated_at
 	      FROM public.correspondence_log c
 	      LEFT JOIN tenant_` + sanitizeTenant(tenant) + `.cases k ON k.id::text = c.case_id
 	      WHERE c.tenant=$1`
@@ -681,6 +690,10 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	if term := strings.TrimSpace(r.URL.Query().Get("q")); term != "" {
 		q += fmt.Sprintf(` AND (c.subject ILIKE $%d OR c.body ILIKE $%d OR k.case_number ILIKE $%d)`, len(args)+1, len(args)+1, len(args)+1)
 		args = append(args, "%"+term+"%")
+	}
+	if st := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status"))); st != "" {
+		args = append(args, st)
+		q += fmt.Sprintf(` AND c.delivery_status = $%d`, len(args))
 	}
 	if from := r.URL.Query().Get("from"); from != "" {
 		args = append(args, from)

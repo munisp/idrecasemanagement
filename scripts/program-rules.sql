@@ -88,6 +88,18 @@ ALTER TABLE public.correspondence_log
     ADD COLUMN IF NOT EXISTS delivery_status text NOT NULL DEFAULT 'SENT',  -- SENT|FAILED
     ADD COLUMN IF NOT EXISTS delivery_error text;
 
+-- Mail-log lifecycle (2026): one row per email across its whole life.
+--   delivery_status: PENDING | SENT | DELIVERED | BOUNCED | COMPLAINED | FAILED | REJECTED
+--   qa_review_id ties a QA-held draft's row to its review so the same row is
+--   settled on approval/rejection; provider_message_id is stamped by the
+--   first delivery report so later reports match exactly.
+ALTER TABLE public.correspondence_log
+    ADD COLUMN IF NOT EXISTS qa_review_id text,
+    ADD COLUMN IF NOT EXISTS provider_message_id text,
+    ADD COLUMN IF NOT EXISTS status_updated_at timestamptz;
+CREATE INDEX IF NOT EXISTS correspondence_log_qa_idx ON public.correspondence_log (qa_review_id) WHERE qa_review_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS correspondence_log_provider_idx ON public.correspondence_log (provider_message_id) WHERE provider_message_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS correspondence_case ON public.correspondence_log (tenant, case_id);
 
 -- Invoices: one invoice number (= case number) can carry two receivables.

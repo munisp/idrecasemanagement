@@ -69,6 +69,9 @@ type Config struct {
 	OpenSearchPass  string // basic-auth password
 	StripeSecret    string // sk_live_… / sk_test_… ("" = card payments disabled)
 	StripeWebhook   string // whsec_… signing secret for /api/webhooks/stripe
+	// MailWebhookSecret (whsec_…) signs the mail provider's delivery reports
+	// (bounced/delivered/complained). Empty = the endpoint is closed.
+	MailWebhookSecret string
 	MojaloopAdapter string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
 	MojaloopSecret  string // HMAC secret shared with the scheme adapter
 	PortalBaseURL   string // https://portal.example.gov — Stripe success/cancel return
@@ -126,6 +129,7 @@ func configFromEnv() Config {
 		CopilotModel:    get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
 		StripeSecret:    get("STRIPE_SECRET_KEY", ""),
 		StripeWebhook:   get("STRIPE_WEBHOOK_SECRET", ""),
+		MailWebhookSecret: get("MAIL_WEBHOOK_SECRET", ""),
 		MojaloopAdapter: get("MOJALOOP_ADAPTER_URL", ""),
 		MojaloopSecret:  get("MOJALOOP_WEBHOOK_SECRET", ""),
 		PortalBaseURL:   get("PORTAL_BASE_URL", "http://localhost:8080"),
@@ -738,6 +742,7 @@ func main() {
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
+	r.Post("/api/webhooks/mail", s.mailWebhook) // provider delivery reports -> mail log status
 	r.Post("/api/webhooks/lockbox/{tenant}", s.lockboxWebhook) // bank deposit confirmation (HMAC)
 	r.Post("/api/webhooks/mojaloop", s.mojaloopWebhook)
 

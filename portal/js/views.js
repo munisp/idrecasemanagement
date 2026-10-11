@@ -1626,7 +1626,7 @@ const Views = (() => {
         const el = document.getElementById("p-corr"); if (!el) return;
         const rows = r.correspondence || [];
         el.innerHTML = rows.length ? `<table><tbody>` + rows.slice(0, 10).map((m) =>
-          `<tr><td>${badge(m.direction)}${m.delivery_status === "FAILED" ? ` <span class="badge warn" title="${esc(m.delivery_error || "")}">FAILED</span>` : ""}</td><td>${esc(m.subject || "")}</td>
+          `<tr><td>${badge(m.direction)} ${mailStatusBadge(m)}</td><td>${esc(m.subject || "")}</td>
            <td class="muted">${esc(m.template || "")} · ${fmtDate(m.created_at)}</td></tr>`).join("") +
           `</tbody></table>` : "";
       }).catch(() => {});
@@ -3963,9 +3963,11 @@ const Views = (() => {
       return `<div class="view-head"><h1>Mail log</h1></div><p class="muted">Requires a staff role.</p>`;
     afterRender(mailLogBox);
     return `<div class="view-head"><h1>Mail log</h1>
-      <span class="muted">every inbound and outbound mail across the platform — including failed deliveries and mail that matched no case</span></div>
+      <span class="muted">every inbound and outbound mail across the platform, with its delivery status — pending approval, sent, delivered, bounced or failed</span></div>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
         <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="OUT">Outbound</option></select>
+        <select name="status" title="delivery status"><option value="">Any delivery status</option>
+          ${["PENDING", "SENT", "DELIVERED", "BOUNCED", "FAILED", "COMPLAINED", "REJECTED"].map((x) => `<option>${x}</option>`).join("")}</select>
         <input name="q" placeholder="search subject / body / case number" style="min-width:18em" />
         <label class="muted">From <input name="from" type="date" /></label>
         <label class="muted">To <input name="to" type="date" /></label>
@@ -3975,8 +3977,27 @@ const Views = (() => {
 
   let mailLogFilterState = {};
 
+  // Delivery state of one mail-log row, shown on EVERY row (it used to show
+  // only FAILED, so a successful send looked the same as an unknown one).
+  const MAIL_STATUS = {
+    PENDING: ["warn", "Held for QA approval — not sent yet"],
+    SENT: ["s-paid", "Accepted by the mail server"],
+    DELIVERED: ["s-paid", "Delivered to the recipient's mail server"],
+    BOUNCED: ["s-denied", "Returned by the recipient's mail server"],
+    COMPLAINED: ["s-denied", "The recipient marked it as spam"],
+    FAILED: ["s-denied", "The mail server refused it — it was not sent"],
+    REJECTED: ["", "Rejected in QA — never sent"],
+  };
+  function mailStatusBadge(m) {
+    if (m.direction === "IN") return `<span class="badge" title="Inbound mail">RECEIVED</span>`;
+    const st = m.delivery_status || "SENT";
+    const [cls, tip] = MAIL_STATUS[st] || ["", ""];
+    return `<span class="badge ${cls}" title="${esc(tip)}">${esc(st)}</span>` +
+      (m.delivery_error ? `<div class="muted" style="font-size:.85em;max-width:22em">${esc(m.delivery_error)}</div>` : "");
+  }
+
   function mailLogFilter(form) {
-    mailLogFilterState = { direction: form.direction.value || "", q: form.q.value.trim() || "",
+    mailLogFilterState = { direction: form.direction.value || "", status: form.status.value || "", q: form.q.value.trim() || "",
       from: form.from.value || "", to: form.to.value || "" };
     mailLogBox();
   }
@@ -3995,7 +4016,7 @@ const Views = (() => {
           <td>${m.case_id ? `<a href="#/cases/${m.case_id}">${esc(m.case_number || "case")}</a>` : `<span class="muted" title="pre-case or unmatched mail">—</span>`}</td>
           <td>${esc(m.subject || "")}${m.template && m.template !== "inbound" ? ` <span class="muted">(${esc(m.template)})</span>` : ""}</td>
           <td class="muted">${esc(who)}</td>
-          <td>${m.delivery_status === "FAILED" ? `<span class="badge warn" title="${esc(m.delivery_error || "")}">FAILED</span>` : ""}</td>
+          <td>${mailStatusBadge(m)}</td>
           <td class="muted">${fmtDate(m.created_at)}</td>
           <td><button class="mini ghost" onclick="Views.mailLogBody(${m.id})">View</button></td></tr>
           <tr id="mail-body-${m.id}" style="display:none"><td colspan="7"><pre style="white-space:pre-wrap;max-height:16em;overflow:auto">${esc(m.body || "")}</pre></td></tr>`;
