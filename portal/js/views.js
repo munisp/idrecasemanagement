@@ -5138,11 +5138,44 @@ const Views = (() => {
     if (status) shown = shown.filter((x) => x.status === status);
     if (q) shown = shown.filter((x) => (x.client_name || "").toLowerCase().includes(q) || (x.case_number || "").toLowerCase().includes(q));
     if (!shown.length) return '<p class="muted">No disputes match this filter.</p>';
-    return `<table class="tbl"><thead><tr><th>Initiating party</th><th>Type</th><th>Case</th><th>Status</th><th>Disputed</th><th>Invoiced</th><th>Paid</th><th>Filed</th></tr></thead><tbody>` +
+    return `<table class="tbl"><thead><tr><th>Initiating party</th><th>Type</th><th>Case</th><th>Status</th><th>Disputed</th><th>Invoiced</th><th>Paid</th><th>Filed</th><th></th></tr></thead><tbody>` +
       shown.map((x) => `<tr><td>${esc(x.client_name)}</td><td>${badge(x.initiating_party_type)}</td>
         <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
-        <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${usdC(x.invoiced_cents)}</td><td>${usdC(x.paid_cents)}</td><td>${esc(x.filed)}</td></tr>`).join("")
+        <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${usdC(x.invoiced_cents)}</td><td>${usdC(x.paid_cents)}</td><td>${esc(x.filed)}</td>
+        <td>${x.status === "AWAITING_PAYMENT" && window._tpaCanEdit ? `<button class="mini" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")
       + `</tbody></table>`;
+  }
+  // A TPA may correct its own filing until the fee is paid; after that the
+  // server refuses (409) and the row loses its Edit button on the next load.
+  async function tpaEditDisputeFn(caseId) {
+    const x = (window._tpaCases || []).find((c) => c.case_id === caseId);
+    if (!x) return;
+    let clients = [];
+    try { clients = ((await Api.program.tpaClients()).clients || []).filter((c) => c.status === "ACTIVE" || c.id === x.client_id); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    const v = await UI.modal({
+      title: `Edit dispute ${x.case_number || ""}`,
+      body: "You can correct this filing until the initial fee is paid. After payment, contact the case team for changes.",
+      fields: [
+        { name: "client_id", label: "Initiating party", required: true, value: x.client_id,
+          options: clients.map((c) => [c.id, `${esc(c.party_name)} (${esc(c.party_type)})`]) },
+        { name: "contact_name", label: "Party contact name", value: esc(x.contact_name || "") },
+        { name: "amount", label: "Disputed amount (USD)", type: "number", step: "0.01",
+          value: x.disputed_amount_cents ? (x.disputed_amount_cents / 100).toFixed(2) : "" },
+        { name: "notes", label: "Notes", type: "textarea", value: esc(x.notes || "") },
+      ],
+    });
+    if (!v) return;
+    const amount = Number(v.amount || 0);
+    if (!Number.isFinite(amount) || amount < 0) { UI.toast("Enter a valid disputed amount", { kind: "warn" }); return; }
+    try {
+      const r = await Api.program.tpaEditDispute(caseId, {
+        client_id: v.client_id, contact_name: v.contact_name, notes: v.notes,
+        disputed_amount_cents: Math.round(amount * 100),
+      });
+      UI.toast((r.changed || []).length ? `Dispute ${r.case_number} updated` : "No changes to save");
+      tpaDashBox(); tpaClientsBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); tpaDashBox(); }
   }
   function tpaCasesFilter() {
     const status = document.getElementById("tpa-cases-status")?.value || "";
@@ -5156,6 +5189,8 @@ const Views = (() => {
     try {
       const r = await Api.program.tpaDashboard(tpaId);
       window._tpaCases = r.cases || [];
+      // Editable only on the caller's own org view, not staff oversight of another TPA.
+      window._tpaCanEdit = !tpaId;
       roll.innerHTML = (r.by_client || []).map((x) => `<span class="chip">${esc(x.initiating_party)}: <b>${x.cases}</b> cases (${x.open} open) · invoiced ${usdC(x.invoiced_cents)} · paid ${usdC(x.paid_cents)}</span> `).join("");
       const statuses = [...new Set(window._tpaCases.map((x) => x.status))].sort();
       if (filtersBox) filtersBox.innerHTML = window._tpaCases.length ? `<p>
@@ -5427,5 +5462,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody };
 })();

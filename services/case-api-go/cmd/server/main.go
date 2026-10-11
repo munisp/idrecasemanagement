@@ -629,6 +629,7 @@ func main() {
 		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
 		r.Post("/tpa/intake", s.tpaIntake)                  // file a dispute on behalf of a client
 		r.Get("/tpa/dashboard", s.tpaDashboard)             // status of all my clients' disputes
+		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute) // correct my own filing while it awaits payment
 		r.Get("/admin/tpas", s.adminListTPAs)               // state oversight
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus) // suspend|reactivate
 		r.Post("/admin/tpas/{tpaId}/invite-code", s.adminTPAInviteCode) // mint a claim code for any TPA

@@ -515,9 +515,15 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,
 		tenant, caseID, org.Name+" (on behalf of "+partyName+")")
 	// Initiating party visible on the case itself.
+	// The client's own contact and the filing notes are kept too, so the TPA
+	// can see and correct them while the fee is unpaid (tpa_edit.go).
+	originDetails, _ := json.Marshal(map[string]string{
+		"initiating_party": partyName, "filed_by_tpa": org.Name,
+		"initiating_party_contact": strings.TrimSpace(in.ContactName), "filing_notes": strings.TrimSpace(in.Notes),
+	})
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET details = details || $2::jsonb WHERE id=$1`, sanitizeTenant(tenant)),
-		caseID, fmt.Sprintf(`{"initiating_party":%q,"filed_by_tpa":%q}`, partyName, org.Name))
+		caseID, originDetails)
 	var st string
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
@@ -563,6 +569,8 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 		       o.created_at::date::text AS filed,
 		       c.case_number, c.status, c.disputed_amount_cents,
 		       cl.party_name AS client_name, cl.id AS client_id,
+		       coalesce(c.details->>'initiating_party_contact','') AS contact_name,
+		       coalesce(c.details->>'filing_notes','') AS notes,
 		       (SELECT coalesce(sum(i.amount_cents),0) FROM public.invoices i
 		         WHERE i.tenant=o.tenant AND i.case_id=o.case_id) AS invoiced_cents,
 		       (SELECT coalesce(sum(py.amount_cents),0) FROM public.payments py

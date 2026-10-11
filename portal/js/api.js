@@ -282,6 +282,7 @@ const Api = (() => {
       tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),
       tpaClientStatus: (id, status) => req("POST", `${t()}/tpa/clients/${id}/status`, { status }),
       tpaIntake: (body) => req("POST", `${t()}/tpa/intake`, body),
+      tpaEditDispute: (caseId, body) => req("PATCH", `${t()}/tpa/disputes/${caseId}`, body),
       tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${qs(tpaId ? { tpa_id: tpaId } : {})}`),
       adminTpas: () => req("GET", `${t()}/admin/tpas`),
       adminTpaStatus: (id, status) => req("POST", `${t()}/admin/tpas/${id}/status`, { status }),
