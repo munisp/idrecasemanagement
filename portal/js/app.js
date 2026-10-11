@@ -171,7 +171,9 @@
   // financialReadRoles (access-control follow-up).
   if (has("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/ops", "◔", "Ops"]);
-  links.push(["#/timesheet", "⏱", "My timesheet"]);
+  // TPA excluded -- billable-hours timesheet logging against disputes is a
+  // staff-productivity feature, not part of a TPA's own workflow.
+  if (!has("TPA")) links.push(["#/timesheet", "⏱", "My timesheet"]);
   links.push(["#/calendar", "▨", "Calendar"]);
   // TPA excluded -- Onboarding is for registering NEW provider/payer/IDRE
   // entity/auditor organizations and reviewing those applications; a TPA
