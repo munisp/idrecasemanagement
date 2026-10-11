@@ -36,6 +36,11 @@ type tpaOrg struct {
 	ContactName  string `json:"contact_name"`
 	ContactEmail string `json:"contact_email"`
 	Status       string `json:"status"`
+	// InviteCode: this org's current claim code, if one is pending -- null
+	// once it's been used. Shown to an already-linked user on their own
+	// #/tpa dashboard so they can add a second staff member at their firm
+	// themselves (generate a fresh one via tpaInviteCode if none is live).
+	InviteCode *string `json:"invite_code"`
 }
 
 // tpaForPrincipal resolves the caller's TPA org (linked via tpa_users).
@@ -43,10 +48,10 @@ func (s *server) tpaForPrincipal(r *http.Request, tenant string) (*tpaOrg, error
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	var o tpaOrg
 	err := s.db.QueryRow(r.Context(), `
-		SELECT t.id, t.name, t.contact_name, t.contact_email, t.status
+		SELECT t.id, t.name, t.contact_name, t.contact_email, t.status, t.claim_code
 		FROM public.tpa_users u JOIN public.tpas t ON t.id = u.tpa_id
 		WHERE u.tenant=$1 AND u.user_sub=$2`, tenant, p.Subject).
-		Scan(&o.ID, &o.Name, &o.ContactName, &o.ContactEmail, &o.Status)
+		Scan(&o.ID, &o.Name, &o.ContactName, &o.ContactEmail, &o.Status, &o.InviteCode)
 	if err != nil {
 		return nil, fmt.Errorf("no TPA organization linked to your account — claim one with your claim code")
 	}
@@ -187,6 +192,29 @@ func (s *server) claimTPA(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `UPDATE public.tpas SET claim_code=NULL, updated_at=now() WHERE id=$1`, id)
 	s.logAudit(r.Context(), tenant, "", "TPA_CLAIMED", map[string]any{"tpa_id": id, "by": p.Subject})
 	writeJSON(w, http.StatusOK, map[string]any{"tpa_id": id, "status": "linked"})
+}
+
+// tpaInviteCode: POST /tpa/invite-code -- mints a fresh claim code for the
+// caller's OWN already-linked org, so they can add a second staff member
+// at their firm themselves (that colleague signs up for any portal
+// account, then claims with this code) without going through an admin.
+// Overwrites any code already pending; the old one stops working.
+func (s *server) tpaInviteCode(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	org, err := s.tpaForPrincipal(r, tenant)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
+		return
+	}
+	code := "TPA-" + strings.ToUpper(hex.EncodeToString(func() []byte { b := make([]byte, 3); _, _ = rand.Read(b); return b }()))
+	if _, err := s.db.Exec(r.Context(), `
+		UPDATE public.tpas SET claim_code=$1, updated_at=now() WHERE id=$2`, code, org.ID); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	s.logAudit(r.Context(), tenant, "", "TPA_INVITE_CODE_GENERATED", map[string]any{"tpa_id": org.ID, "by": p.Subject})
+	writeJSON(w, http.StatusOK, map[string]any{"claim_code": code})
 }
 
 // tpaMe: the caller's org + clients + filing stats.

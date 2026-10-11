@@ -610,6 +610,7 @@ func main() {
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
 		// multiple initiating parties (providers or health plans).
 		r.Post("/tpa/claim", s.claimTPA)                    // burn a one-time claim code, bind user -> TPA
+		r.Post("/tpa/invite-code", s.tpaInviteCode)         // mint a fresh claim code to add a teammate
 		r.Get("/tpa/me", s.tpaMe)                           // my TPA org + clients
 		r.Post("/tpa/clients", s.tpaAddClient)              // add an initiating party I represent
 		r.Get("/tpa/clients", s.tpaListClients)

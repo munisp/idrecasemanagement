@@ -275,6 +275,7 @@ const Api = (() => {
       // Third-party administrators (file/pay/track on behalf of initiating parties)
       tpaRegister: (body) => req("POST", "/api/public/tpa/register", body),
       tpaClaim: (code) => req("POST", `${t()}/tpa/claim`, { code }),
+      tpaInviteCode: () => req("POST", `${t()}/tpa/invite-code`, {}),
       tpaMe: () => req("GET", `${t()}/tpa/me`),
       tpaClients: () => req("GET", `${t()}/tpa/clients`),
       tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),
