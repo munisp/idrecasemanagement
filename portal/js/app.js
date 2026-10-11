@@ -170,7 +170,7 @@
   // dashboard, not case-detail info; matches the backend's
   // financialReadRoles (access-control follow-up).
   if (has("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
-  if (has("CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/ops", "◔", "Ops"]);
+  if (has("CASE_MANAGER", "PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/ops", "◔", "Ops"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
   if (!has("TPA")) links.push(["#/timesheet", "⏱", "My timesheet"]);
@@ -197,7 +197,7 @@
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
-  if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/team", "⚉", "Team"]);
+  if (has("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/team", "⚉", "Team"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
