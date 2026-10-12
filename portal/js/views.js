@@ -6418,6 +6418,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     tabs.innerHTML = tab("accounts", `Bank accounts (${d.accounts.length})`) + tab("files", "Bank files") + tab("history", `History (${d.files.length})`) + tab("screening", "Sanctions screening");
     panel.innerHTML = payTab === "accounts" ? payAccountsPanel() : payTab === "files" ? payFilesPanel() : payTab === "history" ? payHistoryPanel() : payScreeningPanel();
     if (payTab === "files") payLoadPickers();
+    if (payTab === "screening") screenLoad(false);
     if (payTab === "accounts" && d.fin && !d.orgs) {
       Api.crm.accounts("", { limit: 500 }).then((r) => {
         d.orgs = (r.accounts || []).map((a) => a.name).filter(Boolean);
@@ -6681,8 +6682,51 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
         <label>Name<input name="name" placeholder="person or organization" required /></label>
         <label>Who is this<select name="subject_type"><option value="MANUAL">Other</option><option value="PARTY">Provider or health plan</option><option value="TPA">Third-party administrator</option><option value="VENDOR">Vendor</option><option value="ARBITRATOR">Independent reviewer</option></select></label>
         <button${st.enabled === false ? " disabled" : ""}>Check name</button></form>
-      <div id="screen-result"></div>`;
+      <div id="screen-result"></div>
+      <div class="pay-history-head"><h3>Past checks</h3><span class="muted" id="scr-count"></span></div>
+      <form class="pay-filter-bar" onsubmit="event.preventDefault(); Views.screenListFn(this)" onchange="Views.screenListFn(this)">
+        <input name="q" type="search" placeholder="Search names" aria-label="Search names" value="${esc(scrFilter.q)}" />
+        <select name="result" aria-label="Result">
+          <option value="" ${scrFilter.result === "" ? "selected" : ""}>All results</option>
+          <option value="match" ${scrFilter.result === "match" ? "selected" : ""}>Possible matches</option>
+          <option value="clear" ${scrFilter.result === "clear" ? "selected" : ""}>No match</option></select>
+        <select name="type" aria-label="Who">
+          <option value="">Anyone</option>${Object.entries(SCR_TYPE).map(([k, v]) => `<option value="${k}" ${scrFilter.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      </form>
+      <div id="scr-list"><p class="muted">Loading…</p></div>`;
   }
+
+  const SCR_TYPE = { MANUAL: "Other", PARTY: "Provider or health plan", TPA: "Third-party administrator", VENDOR: "Vendor", ARBITRATOR: "Independent reviewer",
+    PROVIDER: "Provider applicant", PAYER: "Health plan applicant", IDRE: "Review organization applicant", AUDITOR: "Auditor applicant", OTHER: "Other applicant" };
+  let scrFilter = { q: "", result: "", type: "" }, scrRows = [], scrTotal = 0;
+
+  function screenListFn(form) {
+    scrFilter = { q: form.q.value.trim(), result: form.result.value, type: form.type.value };
+    clearTimeout(screenListFn.t);
+    screenListFn.t = setTimeout(() => screenLoad(false), 250);
+  }
+
+  async function screenLoad(more) {
+    const box = document.getElementById("scr-list");
+    if (!box) return;
+    try {
+      const r = await Api.program.screeningChecks({ ...scrFilter, limit: 50, offset: more ? scrRows.length : 0 });
+      scrRows = more ? scrRows.concat(r.checks || []) : (r.checks || []);
+      scrTotal = r.total || 0;
+      const cnt = document.getElementById("scr-count");
+      if (cnt) cnt.textContent = `${scrTotal.toLocaleString()} check${scrTotal === 1 ? "" : "s"}${r.matches ? ` · ${r.matches} possible match${r.matches === 1 ? "" : "es"}` : ""}`;
+      const who = (b) => !b ? "—" : b === "system:onboarding" ? "Automatic, on onboarding approval" : /^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(b) ? "Staff member" : esc(b);
+      box.innerHTML = scrRows.length ? `<div class="pay-table-wrap"><table><thead><tr><th>When</th><th>Name checked</th><th>Who</th><th>Result</th><th>Closest name on the list</th><th>Checked by</th></tr></thead><tbody>
+        ${scrRows.map((c) => `<tr class="${c.matched ? "pay-row-hit" : ""}"><td>${fmtDate(c.created_at)}</td><td><b>${esc(c.query_name)}</b>${c.subject_ref ? `<div class="muted">${esc(c.subject_ref)}</div>` : ""}</td>
+          <td>${esc(SCR_TYPE[c.subject_type] || c.subject_type)}</td>
+          <td>${c.matched ? `<span class="badge pay-badge-bad">Possible match · ${Number(c.top_score).toFixed(2)}</span>` : '<span class="badge s-paid">No match</span>'}</td>
+          <td>${c.matched && c.top_match ? esc(c.top_match) + (c.match_count > 1 ? ` <span class="muted">+${c.match_count - 1} more</span>` : "") : "—"}</td>
+          <td>${who(c.screened_by)}</td></tr>`).join("")}
+        </tbody></table></div>${scrRows.length < scrTotal ? `<button class="mini ghost" onclick="Views.screenMore()">Show more (${(scrTotal - scrRows.length).toLocaleString()} older)</button>` : ""}`
+        : `<p class="muted">${scrFilter.q || scrFilter.result || scrFilter.type ? "No checks match these filters." : "No names checked yet."}</p>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  function screenMore() { screenLoad(true); }
 
   async function railScreenFn(form) {
     const box = document.getElementById("screen-result");
@@ -6695,10 +6739,11 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
              <div class="pay-table-wrap"><table><thead><tr><th>Name on the list</th><th class="num">Score</th><th>List entry</th></tr></thead><tbody>
              ${(r.matches || []).map((m) => `<tr><td>${esc(m.name)}</td><td class="num">${Number(m.score).toFixed(2)}</td><td class="mono">${esc(m.source_id || "")}</td></tr>`).join("")}</tbody></table></div>`
           : `<div class="pay-done">No match for “${esc(name)}” on the sanctions list. Check recorded.</div>`;
+        screenLoad(false);
       } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
     });
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn , correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn , correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore };
 })();

@@ -349,6 +349,7 @@ const Api = (() => {
       railFileBody: (id) => req("GET", `${t()}/payments/files/${id}/file`),
       screeningStatus: () => req("GET", `${t()}/screening/status`),
       screeningCheck: (body) => req("POST", `${t()}/screening/check`, body),
+      screeningChecks: (opts) => req("GET", `${t()}/screening/checks${qs(opts || {})}`),
       intake: (opts) => req("GET", `${t()}/intake${qs(opts || {})}`),
       createIntake: (p) => req("POST", `${t()}/intake`, p),
       intakeBulk: (p) => req("POST", `${t()}/intake/bulk`, p),

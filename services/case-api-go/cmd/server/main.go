@@ -637,6 +637,7 @@ func main() {
 		r.Get("/payments/files/{fileId}/file", s.paymentFileBody)
 		r.Get("/screening/status", s.screeningStatus)
 		r.Post("/screening/check", s.screenSubject)
+		r.Get("/screening/checks", s.screeningChecks) // the record of past screenings
 		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of

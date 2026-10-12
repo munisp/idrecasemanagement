@@ -684,7 +684,9 @@ ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 .badge.s-info{background:#e0e7ff;color:#3730a3;border:1px solid #6366f155}
 
 /* Payments page */
-.pay-sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:14px 0 4px}
+.pay-sum{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0 4px}
+@media (max-width:1100px){.pay-sum{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.pay-sum{grid-template-columns:1fr}}
 .pay-tile{background:var(--surface-raised);border:1px solid var(--border-subtle);border-radius:var(--radius-card);padding:10px 14px;display:grid;gap:2px}
 .pay-tile.warn{border-color:var(--warning-fg);background:var(--warning-bg)}
 .pay-tile .k{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-tertiary);font-weight:600}
@@ -721,3 +723,9 @@ ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 .badge.pay-badge-bad{background:var(--danger-bg);color:var(--danger-fg)}
 .pay-form label.chk{display:flex;align-items:center;gap:8px;color:var(--text-primary)}
 .pay-form label.chk input{width:auto;margin:0;flex:none}
+.pay-history-head{display:flex;align-items:baseline;gap:10px;margin-top:8px}
+.pay-history-head h3{margin:0;font-size:15px}
+.pay-filter-bar{display:flex;flex-wrap:wrap;gap:8px}
+.pay-filter-bar input[type=search]{min-width:240px}
+.pay-row-hit td{background:var(--danger-bg)}
+.pay-row-hit .pay-badge-bad{background:var(--danger-fg);color:var(--text-inverse)}
