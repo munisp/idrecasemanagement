@@ -339,6 +339,17 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
+	// A date read off a document that is not a real calendar date ("2026-02-30")
+	// would make evalEligibility skip the rule that needs it -- the filing
+	// window or the service-date floor -- and decide without it. That is a
+	// question for a person, not a pass.
+	if msg := invalidEligibilityInput(in); msg != "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"result": "NEEDS_HUMAN", "missing": []string{strings.SplitN(msg, " ", 2)[0]},
+			"detail": "a date read from the documents is not a valid calendar date (" + msg + "): enter it by hand",
+		})
+		return
+	}
 	if missing := missingEligibilityInputs(cfg, in); len(missing) > 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"result": "NEEDS_HUMAN", "missing": missing,
