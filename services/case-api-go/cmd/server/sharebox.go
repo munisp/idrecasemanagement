@@ -116,8 +116,9 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 			<h1>Secure document download</h1>
 			<p class="muted">Case <b>%s</b> · link expires %s · %d of %d use(s) remaining</p>
 			<p><a class="btn" href="/api/share/%s/download">Download document</a></p>
-			<p class="fine">This link grants access to one specific document. Downloads are logged to the case record.</p>`,
-			escHTML(caseNumber), g.ExpiresAt.Format("Jan 2, 2006 15:04 MST"), g.MaxUses-g.Uses, g.MaxUses, escHTML(token))
+			<p class="fine">%s Downloads are logged to the case record.</p>`,
+			escHTML(caseNumber), g.ExpiresAt.Format("Jan 2, 2006 15:04 MST"), g.MaxUses-g.Uses, g.MaxUses, escHTML(token),
+			map[bool]string{true: "This link downloads the dispute's documents as one zip file.", false: "This link grants access to one specific document."}[g.ObjectKey == caseZipKey])
 		body += shareChatSection(token)
 	}
 	// sharePage's <title> appends "— Secure Document Exchange" itself, so
@@ -267,6 +268,17 @@ func (s *server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	objectKey := g.ObjectKey
+	// A bundle link: the case's documents as one zip, sealed ones excluded.
+	if objectKey == caseZipKey {
+		if _, err := s.consumeShare(r, token, "download"); err != nil {
+			http.Error(w, `{"error":"link expired or invalid"}`, http.StatusGone)
+			return
+		}
+		s.logCorrespondence(r, g.Tenant, g.CaseID, "OUT", "sharebox_download",
+			"Document bundle downloaded via secure link", "", nil, nil, "sharebox:"+token[:8])
+		s.writeCaseZip(w, r, g.Tenant, g.CaseID, false)
+		return
+	}
 	if objectKey == "" {
 		// default: newest unsealed document on the case
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`

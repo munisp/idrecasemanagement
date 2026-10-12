@@ -124,14 +124,48 @@ func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles
 			}
 		}
 	}
+	// The address that asked to file stands in for a provider with no
+	// contacts on its account (and for a dispute with no account linked).
+	var requester, partyBilled string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT coalesce(details->>'requester_email',''), coalesce(details->>'party_billed','') FROM tenant_%s.cases WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&requester, &partyBilled)
+	provider := func() []string {
+		if got := lookup(providerAccountID); len(got) > 0 {
+			return got
+		}
+		if requester != "" {
+			return []string{requester}
+		}
+		return nil
+	}
+	var pmRecipients []string
+	var praw []byte
+	if err := s.db.QueryRow(r.Context(),
+		`SELECT config->'correspondence'->'pm_recipients' FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&praw); err == nil {
+		_ = json.Unmarshal(praw, &pmRecipients)
+	}
 	for _, role := range roles {
 		switch role {
 		case "provider", "requester", "filing_party":
-			add(lookup(providerAccountID))
+			add(provider())
 		case "health_plan":
 			add(lookup(payerAccountID))
 		case "agency":
 			add(agencyRecipients)
+		case "pm":
+			add(pmRecipients)
+		case "all_parties":
+			add(provider())
+			add(lookup(payerAccountID))
+		case "billed_party":
+			// who the Reviewer recorded as billed
+			if partyBilled == "Provider" || partyBilled == "Both" {
+				add(provider())
+			}
+			if partyBilled == "Health Plan" || partyBilled == "Both" {
+				add(lookup(payerAccountID))
+			}
 		}
 	}
 	return out
@@ -208,7 +242,15 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	// subject/qa_role; address resolution was silently left to the caller
 	// every time, with no fallback for roles that have no account contact.
 	if len(in.To) == 0 {
-		in.To = s.resolveRecipients(r, tenant, caseID, tpl.To)
+		toRoles := tpl.To
+		// An RFI goes to whichever side it was addressed to.
+		if tpl.Key == "rfi" {
+			toRoles = []string{"provider"}
+			if in.RfiTo == "plan" {
+				toRoles = []string{"health_plan"}
+			}
+		}
+		in.To = s.resolveRecipients(r, tenant, caseID, toRoles)
 	}
 	if len(in.CC) == 0 {
 		in.CC = s.resolveRecipients(r, tenant, caseID, tpl.CC)
@@ -245,6 +287,11 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 			SELECT object_key FROM tenant_%s.documents
 			WHERE case_id=$1 AND NOT sealed AND scan_status<>'BLOCKED'
 			ORDER BY created_at DESC LIMIT 1`, sanitizeTenant(tenant)), caseID).Scan(&objectKey)
+		// The plan notification carries ALL the filing party's documents,
+		// zipped ("Filing party dispute documentation FLxx-..."), not one file.
+		if tpl.Key == "plan_notification" && objectKey != "" {
+			objectKey = caseZipKey
+		}
 		link := ""
 		if objectKey != "" {
 			link = s.autoShareLink(r, tenant, caseID, "download", objectKey)

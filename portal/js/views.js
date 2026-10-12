@@ -134,6 +134,47 @@ const Views = (() => {
       <ul>${cs.map((x) => `<li>${esc(String(x.field).replace(/_cents$/, "").replace(/_/g, " "))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
         ${esc(x.document || "a document")} says <b>${esc(show(x.field, x.document_value))}</b></li>`).join("")}</ul></div>`;
   }
+  // Case information: the fields the Reviewer completes after payment
+  // (Provider & Health Plan Info), which the monthly report to Florida reads.
+  function sopCaseInfoHtml(id, c, cfg) {
+    const d = c.details || {}, fs = cfg.field_schema || {};
+    const mine = can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const ro = mine ? "" : "disabled";
+    const sel = (name, label, list) => `<label>${label} <select name="${name}" ${ro}><option value="">—</option>
+      ${(list || []).map((x) => `<option ${d[name] === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>`;
+    const inp = (name, label, extra = "") => `<label>${label} <input name="${name}" value="${esc(d[name] ?? "")}" ${extra} ${ro} /></label>`;
+    const missing = ["line_of_business", "disputed_issue", "provider_street", "provider_postal"].filter((k) => !d[k]).length;
+    return `<details class="prog-sec"><summary>Case information${missing && mine ? ` — ${missing} report field(s) not filled` : ""}</summary>
+      <p class="muted">Completed by the Reviewer. These go on the monthly report to Florida; the provider's name and the health plan come from the linked accounts unless typed here.</p>
+      <form class="form" onsubmit="event.preventDefault(); Views.saveCaseInfo('${id}', this)">
+        <div class="inline-form">
+          ${sel("line_of_business", "Line of business", fs.line_of_business)}
+          ${sel("disputed_issue", "Disputed issue", fs.disputed_issue)}
+          ${sel("out_of_network", "Out-of-network provider", fs.out_of_network || ["Yes", "No"])}
+          ${inp("claims_submitted", "Claims in the filing packet", 'type="number" min="0" style="width:7em"')}
+        </div>
+        <div class="inline-form">
+          ${inp("provider_org", "Provider organization")}${inp("provider_contact", "Provider contact")}${inp("health_plan", "Health plan")}
+        </div>
+        <div class="inline-form">
+          ${inp("provider_street", "Street address", 'style="min-width:18em"')}${inp("provider_city", "City")}
+          ${inp("provider_state", "State", 'maxlength="2" style="width:4em" placeholder="FL"')}${inp("provider_postal", "Postal code", 'style="width:8em" placeholder="12345"')}
+        </div>
+        ${mine ? `<button class="mini">Save case information</button>` : ""}</form></details>`;
+  }
+  async function saveCaseInfo(id, form) {
+    const body = {};
+    for (const k of ["line_of_business", "disputed_issue", "out_of_network", "provider_org", "provider_contact", "health_plan",
+      "provider_street", "provider_city", "provider_state", "provider_postal"]) {
+      const v = form[k].value.trim();
+      if (v) body[k] = v;
+    }
+    if (form.claims_submitted.value !== "") body.claims_submitted = parseInt(form.claims_submitted.value, 10) || 0;
+    if (!Object.keys(body).length) { UI.toast("Nothing to save", { kind: "info" }); return; }
+    try { await Api.cases.setDetails(id, body); UI.toast("Case information saved"); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+
   // Fraud, waste and abuse: anyone on the case can raise it; the PM assigns
   // an independent reviewer and records the outcome.
   const FWA_LABEL = { REPORTED: "Reported — awaiting the PM", UNDER_REVIEW: "With the independent reviewer",
@@ -1636,6 +1677,7 @@ const Views = (() => {
         ${((cfg.eligibility || {}).dispute_types || []).length ? `<select name="dispute_type" title="claim type"><option value="">claim type…</option>
           ${cfg.eligibility.dispute_types.map((x) => `<option value="${esc(x)}">${esc(x.replace(/_/g, " "))}</option>`).join("")}</select>` : ""}
         <label>AOR valid <input type="checkbox" name="aor_valid" checked /></label>
+        <input name="aor_reason" placeholder="AOR: reason it is valid / not valid" title="Recorded with the review. If the AOR is not valid, the Attorney confirms." style="min-width:18em" />
         </div>
         <fieldset class="elig-flags"><legend>Tick any that apply — each one makes the dispute ineligible</legend>
           ${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<label><input type="checkbox" name="flag" value="${esc(x)}" /> ${esc(ELIG_REASON_LABELS[x] || x.replace(/_/g, " "))}</label>`).join("")}
@@ -1685,6 +1727,7 @@ const Views = (() => {
         <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
       </div></details>` : ""}
 
+      ${sopCaseInfoHtml(id, c, cfg)}
       ${sopFwaHtml(id, c)}
       ${sopNotesHtml(id, c)}
       ${sopSummaryHtml(id, c, cfg)}
@@ -1806,7 +1849,7 @@ const Views = (() => {
           service_date: f.service_date.value || "",
           dispute_type: f.dispute_type ? f.dispute_type.value : "",
           flags: [...f.querySelectorAll('input[name="flag"]:checked')].map((x) => x.value),
-          aor_valid: f.aor_valid.checked,
+          aor_valid: f.aor_valid.checked, aor_reason: f.aor_reason.value,
         });
         const out = document.getElementById("p-elig-out");
         const resubmit = async (reason) => {
@@ -4227,8 +4270,10 @@ const Views = (() => {
     if (!can("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"))
       return `<div class="view-head"><h1>Mail log</h1></div><p class="muted">Requires a staff role.</p>`;
     afterRender(mailLogBox);
+    afterRender(mailRecipientsBox);
     return `<div class="view-head"><h1>Mail log</h1>
       <span class="muted">every inbound and outbound mail across the platform, with its delivery status — pending approval, sent, delivered, bounced or failed</span></div>
+      <div id="mail-recipients"></div>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
         <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="OUT">Outbound</option></select>
         <select name="status" title="delivery status"><option value="">Any delivery status</option>
@@ -4259,6 +4304,31 @@ const Views = (() => {
     const [cls, tip] = MAIL_STATUS[st] || ["", ""];
     return `<span class="badge ${cls}" title="${esc(tip)}">${esc(st)}</span>` +
       (m.delivery_error ? `<div class="muted" style="font-size:.85em;max-width:22em">${esc(m.delivery_error)}</div>` : "");
+  }
+
+  // Who at the agency the program writes to, and which PM address is copied
+  // on the Final Order. Letters that copy "AHCA" use the first list; with it
+  // empty, nobody at the agency is copied -- so an empty list is shown loudly.
+  async function mailRecipientsBox() {
+    const box = document.getElementById("mail-recipients");
+    if (!box) return;
+    let r;
+    try { r = await Api.program.recipients(); } catch (e) { box.innerHTML = ""; return; }
+    const admin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
+    const warn = !(r.agency || []).length ? `<div class="err-box"><b>No agency contacts are set.</b> Letters that copy AHCA, and the Final Order email, currently reach nobody at the agency.${admin ? " Add the addresses below." : " Ask an admin to add them."}</div>` : "";
+    if (!admin) { box.innerHTML = warn; return; }
+    box.innerHTML = warn + `<details class="prog-sec" ${warn ? "open" : ""}><summary>Program email recipients</summary>
+      <form class="form" onsubmit="event.preventDefault(); Views.saveMailRecipients(this)">
+        <label>Agency (AHCA) contacts — copied on letters, and the recipients of the Final Order email
+          <input name="agency" placeholder="name@agency.gov, second@agency.gov" value="${esc((r.agency || []).join(", "))}" /></label>
+        <label>PM address(es) copied on the Final Order email
+          <input name="pm" placeholder="pm@yourcompany.com" value="${esc((r.pm || []).join(", "))}" /></label>
+        <button class="mini">Save recipients</button></form></details>`;
+  }
+  async function saveMailRecipients(form) {
+    const split = (v) => v.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+    try { await Api.program.setRecipients({ agency: split(form.agency.value), pm: split(form.pm.value) }); UI.toast("Recipients saved"); mailRecipientsBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
   }
 
   function mailLogFilter(form) {
@@ -5733,5 +5803,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients };
 })();

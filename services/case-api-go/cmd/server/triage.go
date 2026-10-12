@@ -42,6 +42,7 @@ type eligibilityInput struct {
 	FinalDeterminationAt string   `json:"final_determination_at"` // YYYY-MM-DD
 	Flags                []string `json:"flags"`
 	AORValid             *bool    `json:"aor_valid"`
+	AORReason            string   `json:"aor_reason"` // why the Reviewer found the AOR valid or not
 	ServiceDate          string   `json:"service_date"` // YYYY-MM-DD, earliest date of service in dispute
 	DisputeType          string   `json:"dispute_type"` // denied_in_full | denied_in_part | underpaid | overpaid
 }
@@ -71,6 +72,12 @@ func invalidEligibilityInput(in eligibilityInput) string {
 func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason string, evidence map[string]any) {
 	result, reason = "ELIGIBLE", ""
 	evidence = map[string]any{"flags": in.Flags, "provider_type": in.ProviderType}
+	if in.AORValid != nil {
+		evidence["aor_valid"] = *in.AORValid
+		if strings.TrimSpace(in.AORReason) != "" {
+			evidence["aor_reason"] = strings.TrimSpace(in.AORReason)
+		}
+	}
 
 	// explicit ineligibility flags win
 	for _, f := range in.Flags {

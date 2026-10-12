@@ -54,6 +54,22 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Report formats: state as a 2-letter code, postal code in postal format.
+	if v, ok := in["provider_state"].(string); ok && v != "" {
+		v = strings.ToUpper(strings.TrimSpace(v))
+		if len(v) != 2 || v[0] < 'A' || v[0] > 'Z' || v[1] < 'A' || v[1] > 'Z' {
+			http.Error(w, `{"error":"provider_state must be a 2-letter state code"}`, http.StatusBadRequest)
+			return
+		}
+		in["provider_state"] = v
+	}
+	if v, ok := in["provider_postal"].(string); ok && v != "" {
+		if !validPostal(strings.TrimSpace(v)) {
+			http.Error(w, `{"error":"provider_postal must be a ZIP code: 12345 or 12345-6789"}`, http.StatusBadRequest)
+			return
+		}
+		in["provider_postal"] = strings.TrimSpace(v)
+	}
 	merge, _ := json.Marshal(in)
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET details = details || $2::jsonb, updated_at=now() WHERE id=$1`,
@@ -86,9 +102,20 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 // plan-notification workflow mails to the health plan. Sealed offer documents
 // are excluded until lawful reveal. Streams: each entry is decrypted straight
 // into the zip writer — no temp files.
+// caseZipKey marks a download link that carries the whole document bundle
+// of a case (the "Filing party dispute documentation" zip the plan
+// notification sends) instead of one document.
+const caseZipKey = "zip:case-documents"
+
 func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	s.writeCaseZip(w, r, tenant, caseID, s.revealLawful(r, caseID))
+}
+
+// writeCaseZip streams a case's clean documents as one zip. Sealed documents
+// are included only when includeSealed is true (never for a share link).
+func (s *server) writeCaseZip(w http.ResponseWriter, r *http.Request, tenant, caseID string, includeSealed bool) {
 	var caseNumber string
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
@@ -131,7 +158,7 @@ func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 	fl, _ := w.(http.Flusher)
 	used := map[string]int{}
 	for _, d := range docs {
-		if d.sealed && !s.revealLawful(r, caseID) {
+		if d.sealed && !includeSealed {
 			continue // double-blind: sealed offers never ship in party bundles
 		}
 		name := d.name
@@ -244,4 +271,23 @@ func (s *server) requestAdhocDeliverable(w http.ResponseWriter, r *http.Request)
 		"name": in.Name, "contract_ref": in.Ref, "due_date": due.Format("2006-01-02"),
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "due_date": due.Format("2006-01-02")})
+}
+
+// validPostal: US ZIP, five digits or ZIP+4.
+func validPostal(v string) bool {
+	if len(v) != 5 && len(v) != 10 {
+		return false
+	}
+	for i, c := range v {
+		if i == 5 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

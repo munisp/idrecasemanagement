@@ -220,3 +220,16 @@ func TestReportAgencyStatusIsOneOfFive(t *testing.T) {
 		t.Error("the reminder lead time should follow the setting")
 	}
 }
+
+func TestValidPostal(t *testing.T) {
+	for _, ok := range []string{"32301", "33101-1234"} {
+		if !validPostal(ok) {
+			t.Errorf("%q should be accepted", ok)
+		}
+	}
+	for _, bad := range []string{"", "3230", "323011", "32301-12", "3230A", "32301 1234", "33101_1234"} {
+		if validPostal(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}

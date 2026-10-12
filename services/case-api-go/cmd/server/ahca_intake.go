@@ -283,8 +283,9 @@ func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
 	if email != "" {
 		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
 	}
-	s.notify(r, tenant, "*", "AHCA_INTAKE",
-		fmt.Sprintf("Fee paid — intake activated: %s", caseNumber), "#/cases/"+caseID)
+	// The Reviewer is told the case now exists.
+	s.notify(r, tenant, "role:CASE_MANAGER", "AHCA_INTAKE",
+		fmt.Sprintf("Fee paid — case %s opened: confirm the filing packet", caseNumber), "#/cases/"+caseID)
 }
 
 // sendIntakeLinks mints the filing-instructions download link and the

@@ -319,6 +319,8 @@ const Api = (() => {
       intakeConverse: (message, fields, history) => req("POST", `${t()}/intake/converse`, { message, fields, history }),
       advanceIntake: (id, status, caseId) => req("POST", `${t()}/intake/${id}/advance`, { status, case_id: caseId }),
       deliverables: () => req("GET", `${t()}/deliverables`),
+      recipients: () => req("GET", `${t()}/program/recipients`),
+      setRecipients: (body) => req("PUT", `${t()}/program/recipients`, body),
       setContractDates: (dates) => req("PUT", `${t()}/program/contract-dates`, dates),
       recordOutcome: (caseId, body) => req("POST", `${t()}/cases/${caseId}/outcome`, body),
       fwa: (caseId, body) => req("POST", `${t()}/cases/${caseId}/fwa`, body),

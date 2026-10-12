@@ -641,6 +641,8 @@ func main() {
 		r.Post("/cases/{caseId}/outcome", s.recordOutcome)              // Reviewer: outcome, claims reviewed, award, party billed
 		r.Post("/cases/{caseId}/fwa", s.fwaAction)                      // fraud/waste/abuse: report, assign reviewer, conclude
 		r.Put("/program/contract-dates", s.setContractDates)            // admin: contract execution/effective/end dates
+		r.Get("/program/recipients", s.getCorrespondenceRecipients)     // agency contacts + PM copy addresses
+		r.Put("/program/recipients", s.setCorrespondenceRecipients)     // admin
 		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
 		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary)   // Coder's Dispute Summary + cost estimate
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)        // Attorney rules on a flagged AOR
@@ -1280,6 +1282,14 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", body.Signal, body.Data); err != nil {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return
+	}
+	// The Reviewer tells the Coder and the Attorney the packet is in: the
+	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
+	if body.Signal == "PACKET_COMPLETE" {
+		for _, role := range []string{"CODER", "ATTORNEY"} {
+			s.notify(r, tenant, "role:"+role, "PACKET_COMPLETE",
+				fmt.Sprintf("Case %s: the filing packet is complete and has been checked by the Reviewer", caseNumber), "#/cases/"+id)
+		}
 	}
 	// The filing packet's claim count is recorded with the step that
 	// confirms the packet (report column E).

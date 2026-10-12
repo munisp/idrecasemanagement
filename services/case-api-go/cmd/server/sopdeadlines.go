@@ -456,3 +456,71 @@ func closureReasonFor(template, eligReason string) (reason, outcome string) {
 	}
 	return "", ""
 }
+
+// setCorrespondenceRecipients: PUT /program/recipients {agency: [...], pm: [...]}
+// — the agency contacts every letter copies (and the Final Order goes to),
+// and the PM address(es) copied on the Final Order. Admin only.
+func (s *server) setCorrespondenceRecipients(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
+		http.Error(w, `{"error":"forbidden: recipients are set by an admin"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var in struct {
+		Agency []string `json:"agency"`
+		PM     []string `json:"pm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	clean := func(xs []string) ([]string, string) {
+		out := []string{}
+		for _, x := range xs {
+			x = strings.TrimSpace(x)
+			if x == "" {
+				continue
+			}
+			if !validMailbox(x) {
+				return nil, x
+			}
+			out = append(out, x)
+		}
+		return out, ""
+	}
+	agency, bad := clean(in.Agency)
+	if bad != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a valid email address: " + bad})
+		return
+	}
+	pm, bad := clean(in.PM)
+	if bad != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a valid email address: " + bad})
+		return
+	}
+	aj, _ := json.Marshal(agency)
+	pj, _ := json.Marshal(pm)
+	if _, err := s.db.Exec(r.Context(), `
+		UPDATE public.program_rules SET config = jsonb_set(jsonb_set(config,
+		  '{correspondence,agency_recipients}', $2::jsonb, true), '{correspondence,pm_recipients}', $3::jsonb, true), updated_at=now()
+		WHERE tenant=$1`, tenant, string(aj), string(pj)); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "CORRESPONDENCE_RECIPIENTS_SET", map[string]any{"by": p.Subject, "agency": agency, "pm": pm})
+	writeJSON(w, http.StatusOK, map[string]any{"agency": agency, "pm": pm})
+}
+
+// getCorrespondenceRecipients: GET /program/recipients
+func (s *server) getCorrespondenceRecipients(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var a, p []byte
+	_ = s.db.QueryRow(r.Context(), `
+		SELECT coalesce(config->'correspondence'->'agency_recipients','[]'::jsonb), coalesce(config->'correspondence'->'pm_recipients','[]'::jsonb)
+		FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&a, &p)
+	agency, pm := []string{}, []string{}
+	_ = json.Unmarshal(a, &agency)
+	_ = json.Unmarshal(p, &pm)
+	writeJSON(w, http.StatusOK, map[string]any{"agency": agency, "pm": pm})
+}
