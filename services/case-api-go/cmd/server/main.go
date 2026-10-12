@@ -808,6 +808,24 @@ func main() {
 		}
 	}()
 
+	// No upload left unread (docrequeue.go): every few minutes, documents the
+	// reader should have read and has not are announced to it again; one it
+	// still cannot read is flagged to the people on the case.
+	go func() {
+		t := time.NewTicker(docSweepEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+			}
+			if requeued, stalled := s.sweepUnreadDocuments(); requeued+stalled > 0 {
+				slog.Info("unread documents sweep", "requeued", requeued, "stalled", stalled)
+			}
+		}
+	}()
+
 	srv := &http.Server{Addr: cfg.Addr, Handler: r,
 		ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second}
 	// Graceful shutdown: drain in-flight requests on SIGTERM/SIGINT so a
@@ -1486,21 +1504,40 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 // Dapr pub/sub publish (Kafka-backed component "idre-pubsub")
 // ---------------------------------------------------------------------------
 
+// publish announces an event. Callers do not wait on the outcome, so a
+// failure is retried here and logged; an upload whose announcement is still
+// lost after that is found and re-announced by sweepUnreadDocuments.
 func (s *server) publish(ctx context.Context, tenant, domain string, event map[string]any) {
+	if err := s.publishChecked(ctx, tenant, domain, event); err != nil {
+		slog.Error("event not accepted by the message bus", "tenant", tenant, "domain", domain,
+			"type", event["type"], "doc_id", event["doc_id"], "err", err)
+	}
+}
+
+// publishOnce makes one attempt. A response the bus did not accept (it was
+// silently ignored before: only a transport error was ever noticed) is an error.
+func (s *server) publishOnce(ctx context.Context, tenant, domain string, event map[string]any) error {
 	topic := fmt.Sprintf("%s.%s.%s", s.cfg.TopicPrefix, tenant, domain)
 	if tp := traceparentOf(ctx); tp != "" {
 		event["traceparent"] = tp
 	}
 	url := fmt.Sprintf("%s/v1.0/publish/idre-pubsub/%s", s.cfg.DaprHTTP, topic)
 	body, _ := json.Marshal(event)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		slog.Error("dapr publish failed", "topic", topic, "err", err)
-		return
+		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return fmt.Errorf("message bus answered %d for %s: %s", resp.StatusCode, topic, strings.TrimSpace(string(msg)))
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
