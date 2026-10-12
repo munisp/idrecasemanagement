@@ -628,54 +628,24 @@ func (s *server) adminListTPAs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	// claim_code is included here on purpose: a staffer helping a TPA that's
-	// lost access (or needing to act on its behalf directly) can see, and
-	// mint, the same code the TPA itself would use at #/tpa's claim form --
-	// claimTPA already accepts any authenticated account, staff included.
+	// The claim code is NOT in this list, and staff cannot mint one. A code
+	// is the TPA's to generate (tpaInviteCode) and to hand over: staff who
+	// need to act for a TPA ask it for a code and enter it like anyone else
+	// (claimTPA). Listing or minting codes here let an admin link their own
+	// account to any TPA without that TPA knowing.
 	rows, _ := s.queryRows(r, `
-		SELECT t.id, t.name, t.contact_name, t.contact_email, t.status, t.created_at, t.claim_code,
+		SELECT t.id, t.name, t.contact_name, t.contact_email, t.status, t.created_at,
 		       (SELECT count(*) FROM public.tpa_clients c WHERE c.tpa_id=t.id) AS clients,
 		       (SELECT count(*) FROM public.case_origin o WHERE o.tpa_id=t.id) AS cases_filed
 		FROM public.tpas t WHERE t.tenant=$1 ORDER BY t.created_at DESC`, tenant)
 	writeJSON(w, http.StatusOK, map[string]any{"tpas": rows})
 }
 
-// adminTPAInviteCode: POST /admin/tpas/{tpaId}/invite-code -- staff version
-// of tpaInviteCode, for any TPA by id rather than the caller's own linked
-// org. Same use as the TPA's own button: hand the code to the TPA to add a
-// teammate, or claim it with the staffer's own account to act on the TPA's
-// behalf directly (support/escalation).
-func (s *server) adminTPAInviteCode(w http.ResponseWriter, r *http.Request) {
-	p := r.Context().Value(ctxPrincipal{}).(principal)
-	// CASE_MANAGER removed per the "reviewer only reviews" follow-up:
-	// minting a code to act as (or hand off) a TPA is an administrative
-	// action, not a review one. Reviewer keeps seeing the oversight table
-	// (adminListTPAs) -- just not the action buttons on it. TENANT_ADMIN
-	// added back -- see reportsReadRoles (casemgmt.go) for why.
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
-		return
-	}
-	tenant := r.Context().Value(ctxTenant{}).(string)
-	code := "TPA-" + strings.ToUpper(hex.EncodeToString(func() []byte { b := make([]byte, 3); _, _ = rand.Read(b); return b }()))
-	res, err := s.db.Exec(r.Context(), `
-		UPDATE public.tpas SET claim_code=$1, updated_at=now() WHERE tenant=$2 AND id=$3`,
-		code, tenant, r.PathValue("tpaId"))
-	if err != nil || res.RowsAffected() == 0 {
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
-		return
-	}
-	s.logAudit(r.Context(), tenant, "", "TPA_INVITE_CODE_GENERATED", map[string]any{
-		"tpa_id": r.PathValue("tpaId"), "by": p.Subject, "staff_generated": true,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"claim_code": code})
-}
-
 // adminSetTPAStatus: the state's after-the-fact control (suspend bad actors).
 func (s *server) adminSetTPAStatus(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	// CASE_MANAGER removed, TENANT_ADMIN added back, same reasoning as
-	// adminTPAInviteCode above.
+	// the removed staff code-minting endpoint.
 	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return

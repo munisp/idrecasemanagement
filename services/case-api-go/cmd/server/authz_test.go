@@ -107,7 +107,7 @@ func TestReviewerOnlyReviewsRoleFloors(t *testing.T) {
 		}
 	}
 
-	// adminTPAInviteCode/adminSetTPAStatus: the TPA oversight list's action
+	// adminSetTPAStatus (and, before it was removed, staff code minting): the TPA oversight list's action
 	// buttons (mint code / act as / suspend) -- reviewer keeps the
 	// read-only oversight table (adminListTPAs, untouched) but not these.
 	tpaAdminActionCases := []struct {

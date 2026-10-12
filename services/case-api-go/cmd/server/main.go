@@ -635,7 +635,6 @@ func main() {
 		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)             // correct my own filing while it awaits payment
 		r.Get("/admin/tpas", s.adminListTPAs)                           // state oversight
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)       // suspend|reactivate
-		r.Post("/admin/tpas/{tpaId}/invite-code", s.adminTPAInviteCode) // mint a claim code for any TPA
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist

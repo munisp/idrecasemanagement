@@ -5542,7 +5542,7 @@ const Views = (() => {
       // would just fail -- reviewer still sees the oversight table below,
       // read-only.
       orgBox.innerHTML = (can("CASE_MANAGER") && !can("TENANT_ADMIN")) ? "" : `<div class="card"><h2>Link your TPA organization</h2>
-        <p class="muted">Enter the one-time claim code from your TPA registration.</p>
+        <p class="muted">${can("TPA") ? "Enter the one-time claim code from your TPA registration." : "To act on a TPA's behalf, enter a claim code that TPA has given you. Only the TPA can create one."}</p>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaClaimFn(this)">
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
@@ -5760,17 +5760,14 @@ const Views = (() => {
     try {
       const r = await Api.program.adminTpas();
       // CASE_MANAGER excluded per the "reviewer only reviews" follow-up --
-      // matches adminTPAInviteCode/adminSetTPAStatus/claimTPA's backend
+      // matches adminSetTPAStatus/claimTPA's backend
       // gates. Reviewer still sees this table, just not the action buttons.
       const canAct = can("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
       const rows = (r.tpas || []).map((t) => `<tr><td>${esc(t.name)}</td><td>${esc(t.contact_email)}</td><td>${t.clients}</td><td>${t.cases_filed}</td>
         <td>${badge(t.status)}</td>
-        <td class="mono">${t.claim_code
-          ? `${esc(t.claim_code)}${canAct ? ` <button class="mini" onclick="Views.tpaAdminInviteCodeFn('${t.id}')">New</button> <button class="mini" onclick="Views.tpaAdminActAsFn('${t.id}','${esc(t.claim_code)}')">Act as</button>` : ""}`
-          : canAct ? `<button class="mini" onclick="Views.tpaAdminInviteCodeFn('${t.id}')">Generate</button>` : `<span class="muted">none</span>`}</td>
         <td>${canAct ? `<button class="mini ${t.status === "ACTIVE" ? "danger" : ""}" onclick="Views.tpaAdminStatusFn('${t.id}','${t.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${t.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button>` : ""}</td></tr>`).join("");
-      box.innerHTML = rows ? `<table class="tbl"><thead><tr><th>TPA</th><th>Contact</th><th>Clients</th><th>Cases</th><th>Status</th><th>Claim code</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN account to that TPA (same effect as the TPA entering the code themselves) and switches this page to its dashboard -- a deliberate support action, not a read-only peek. "New" burns any pending code and mints a fresh one.</p>` : ""}`
+      box.innerHTML = rows ? `<table class="tbl"><thead><tr><th>TPA</th><th>Contact</th><th>Clients</th><th>Cases</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, ask the TPA for a claim code -- they generate it on their own TPA page -- and enter it under "Link your TPA organization" above. Staff cannot see or create a TPA's codes.</p>` : ""}`
         : '<p class="muted">No TPAs registered.</p>';
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -5780,21 +5777,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     catch (e) { alert(e.message); }
   }
 
-  async function tpaAdminInviteCodeFn(id) {
-    try { await Api.program.adminTpaInviteCode(id); tpaAdminBox(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
-  }
-
-  // Claims the code under the STAFFER'S OWN account -- same tpa_users link
-  // the TPA itself would get by entering it, which is why #/tpa then shows
-  // that TPA's dashboard instead of the oversight list on the next reload.
-  async function tpaAdminActAsFn(id, code) {
-    if (!(await UI.confirm("Act as this TPA?", "Links your own account to this organization, the same as the TPA entering this code itself. You'll see its dashboard instead of the oversight list until you claim a different one.", "Act as"))) return;
-    try { await Api.program.tpaClaim(code); UI.toast("Linked — reopen TPA to act on its behalf"); location.hash = "#/tpa"; App.rerender(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
-  }
-
-  // Undo tpaAdminActAsFn / a manual claim -- back to the oversight-only
+  // Undo a claim made with a TPA-supplied code -- back to the oversight-only
   // view of #/tpa (the claim form + admin list, same as never having
   // claimed anything).
   async function tpaUnlinkFn() {
@@ -5947,5 +5930,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
 })();
