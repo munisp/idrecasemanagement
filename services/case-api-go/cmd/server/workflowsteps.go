@@ -123,8 +123,6 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		"The filer pays by card, or Finance records a check/ACH against the invoice.")
 	add("packet", "Confirm the filing packet is complete", "CASE_MANAGER", "signal:PACKET_COMPLETE",
 		f.Dates["packet_complete_at"] != "" || has("PACKET_COMPLETE"), "Payment and documents have both arrived.")
-	add("dispute_summary", "Complete the Dispute Summary", "CODER", "summary", f.HasSummary,
-		"Verify the plan type from the plan's letterhead.")
 
 	withdrawn := has("PROVIDER_WITHDRAW")
 	closing := false // the remaining steps end the case
@@ -153,6 +151,10 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		}
 		closing = true
 	default:
+		// The Coder's Dispute Summary follows the eligibility review, and is
+		// only owed on a dispute that is going forward.
+		add("dispute_summary", "Complete the Dispute Summary", "CODER", "summary", f.HasSummary,
+			"Verify the plan type from the plan's letterhead.")
 		letter("acceptance", "Acceptance letter", "CASE_MANAGER", "PM")
 		if estimate {
 			add("estimate", "Record the full review cost estimate", "CODER", "summary", f.HasEstimate,

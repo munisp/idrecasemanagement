@@ -40,10 +40,10 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Status = "PENDING_INTAKE"
 	expect("packet", "Reviewer")
 	f.Act["PACKET_COMPLETE"] = wfAct{Body: `Workflow signal PACKET_COMPLETE delivered — {"estimate_requested":false}`, At: now}
-	expect("dispute_summary", "Coder")
-	f.HasSummary = true
 	expect("eligibility", "Reviewer")
 	f.HasElig, f.EligResult, f.EligAt = true, "ELIGIBLE", now
+	expect("dispute_summary", "Coder")
+	f.HasSummary = true
 	expect("letter:acceptance", "Reviewer")
 	f.Letter["acceptance"] = "PENDING"
 	expect("qa:acceptance", "PM")
@@ -153,10 +153,10 @@ func TestWorkflowDecide(t *testing.T) {
 	now := time.Now()
 	f := wfBase()
 	f.Act["PACKET_COMPLETE"] = wfAct{At: now}
-	steps := buildWorkflowSteps(f) // next: the Coder's Dispute Summary
+	steps := buildWorkflowSteps(f) // next: the Reviewer's eligibility review
 	for action, wantOK := range map[string]bool{
-		"summary":                       true,  // the next step
-		"eligibility":                   false, // a later step
+		"eligibility":                   true,  // the next step
+		"summary":                       false, // a later step
 		"signal:CODING_REVIEW_COMPLETE": false,
 		"letter:acceptance":             false,
 		"letter:plan_notification":      false,
@@ -172,7 +172,7 @@ func TestWorkflowDecide(t *testing.T) {
 		if (why == "") != wantOK {
 			t.Errorf("%s: allowed=%v, want %v (%s)", action, why == "", wantOK, why)
 		}
-		if why != "" && !strings.Contains(why, "Dispute Summary") {
+		if why != "" && !strings.Contains(why, "Eligibility review") {
 			t.Errorf("%s: the refusal should name the next step: %q", action, why)
 		}
 	}
