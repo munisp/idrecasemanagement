@@ -126,9 +126,9 @@ def test_each_sample_question_reaches_its_own_figures():
         ("How many cases have been decided, and what was awarded?", "Decided: 9"),
     ]:
         assert any(must in line for line in facts.select(question, FACTS)), question
-    # a narrower question keeps the caseload lines to context, not the whole list
+    # the narrower category leads; the caseload lines follow as context, none dropped
     lines = facts.select("How many disputes are $1 million or more?", FACTS)
-    assert lines[-1].startswith("Total amount") and len([x for x in lines if x in FACTS["caseload"]]) <= 2
+    assert lines[0].startswith("Total amount") and lines[1:] == FACTS["caseload"]
     # a question that matches no category gets a little of everything
     assert len(facts.select("anything interesting?", FACTS)) >= 7
     assert facts.select("anything", {}) == []
@@ -160,3 +160,23 @@ def test_a_question_naming_a_case_gets_the_figures_beside_the_graph_paths():
          mock.patch.object(k, "_ollama_generate", side_effect=lambda p: (seen.setdefault("p", p) and "ok", "ollama:x")):
         r = k.ask("t1", "How does IDR-2026-0004 compare with the total amount in dispute?")
     assert "$12,850,595.98" in seen["p"] and "AGAINST" in seen["p"] and r["generator"] == "ollama:x"
+
+
+def test_a_waiting_question_is_answered_from_the_status_line_not_the_filer_line():
+    lines = ["Disputes by who filed: providers: 201, health plans: 3.",
+             "Disputes by internal status (where the work is): Provider Closure Letter Issued: 17, Provider Acceptance "
+             "Letter Issued: 11, RFI Pending Plan Response: 10, Plan Notification Packet Issued: 8.",
+             "Provider and plan pairs that appear together most: Northgate Health vs Sunshine Coast Health Plan: 4.",
+             "Disputes by agency status: Awaiting Provider Response: 22, Awaiting Plan Response: 8."]
+    a = k._records_answer("How many cases are waiting on the provider and how many on the plan?", lines)
+    assert a.startswith("Disputes by agency status")
+
+
+def test_service_words_are_not_party_names_and_full_names_rank_first():
+    assert "air" not in {t.lower() for t in k._terms("Which disputes involve air ambulance services?")}
+    graphdb.find_entities = lambda tenant, term: [
+        {"id": "Sunshine Coast Emergency Physicians, PA", "kind": "Party", "label": "Sunshine Coast Emergency Physicians, PA", "detail": ""},
+        {"id": "Sunshine Coast Health Plan", "kind": "Party", "label": "Sunshine Coast Health Plan", "detail": ""},
+    ] if term.lower() in ("sunshine", "coast") else []
+    ents = k.link_entities("t1", "What connects Northgate and Sunshine Coast Health Plan?")
+    assert ents[0]["label"] == "Sunshine Coast Health Plan"

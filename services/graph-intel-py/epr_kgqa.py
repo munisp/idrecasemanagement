@@ -26,6 +26,7 @@ GNN training round consumes — closing the kgqa -> gnn loop.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -60,6 +61,9 @@ _STOP = {
     "there", "you", "can", "give", "name", "names", "number", "numbers", "top", "against", "together", "appear",
     "pairs", "connects", "connect", "new", "old", "one", "two", "disputed", "money", "worth", "value", "they",
     "where", "when", "not", "but", "yes", "per", "its", "out", "into", "over", "under", "still", "also",
+    # Kinds of service. "air" in "air ambulance services" matched a provider
+    # called "... Air Rescue", and the question was answered about that provider.
+    "air", "ambulance", "anesthesia", "radiology", "imaging", "lab", "laboratory", "surgery", "surgical",
 }
 
 
@@ -84,7 +88,15 @@ def link_entities(tenant: str, question: str) -> list[dict]:
                 ents.append(e)
         if len(ents) >= 8:
             break
-    return ents
+    # The entities the question is most plainly about come first: the first
+    # two decide which paths are retrieved. A name written out in full beats
+    # one that merely shares a word with the question.
+    ql, terms = question.lower(), [t.lower() for t in _terms(question)]
+
+    def weight(e: dict) -> int:
+        label = str(e.get("label") or "").lower()
+        return (10 if label and label in ql else 0) + sum(1 for t in terms if t in label)
+    return sorted(ents, key=weight, reverse=True)
 
 
 def _ollama_generate(prompt: str) -> tuple[str, str]:
@@ -139,7 +151,9 @@ def _extractive_answer(question: str, entities: list[dict], paths: list[str],
 
 
 def _prompt(question: str, paths: list[str], general: list[str] | None = None) -> str:
-    evidence_lines = paths[:12] + list(general or [])
+    # The records first (a case's own lines lead them), then the graph paths;
+    # capped so a small local model reads all of it.
+    evidence_lines = list(general or [])[:14] + paths[:12]
     evidence = "\n".join(f"- {p}" for p in evidence_lines) or "(no evidence retrieved)"
     return (
         "You are the analyst for a healthcare claims dispute resolution program. "
@@ -162,20 +176,33 @@ def _facts_for(tenant: str, question: str) -> list[str]:
         return []
 
 
+def _case_lines(tenant: str, case_id: str) -> list[str]:
+    try:
+        import facts
+        return facts.case_lines(tenant, case_id)
+    except Exception:
+        return []
+
+
 def _records_answer(question: str, lines: list[str]) -> str:
     """The answer to a question about the program as a whole: the figures
     themselves, most relevant first. No model writes this one. Tried live, the
     model restated a ranked list as "each with 10 disputes" when the figures
     said 12, 12, 10, 10 -- and a count that is nearly right is worse than a
     plain line that is exactly right."""
-    words = {w for w in re.findall(r"[a-z0-9$]+", question.lower()) if len(w) > 2} - {
+    words = {w for w in re.findall(r"[a-z0-9$]+", question.lower()) if len(w) > 2 or w.isdigit()} - {
         "the", "and", "are", "was", "were", "how", "many", "what", "which", "with", "have", "has", "been", "for",
         "from", "that", "this", "does", "did", "our", "all", "any", "per", "each", "there"}
     stems = {w[:6] for w in words}
 
-    def score(line: str) -> int:
+    # A word found in few of the lines says more about which line is meant
+    # than one found in most: "provider" is in half of them, "waiting" in one.
+    lows = [ln.lower() for ln in lines]
+    rarity = {st: math.log(1 + len(lows) / df) for st in stems if (df := sum(1 for lo in lows if st in lo))}
+
+    def score(line: str) -> float:
         low = line.lower()
-        return sum(1 for st in stems if st in low)
+        return sum(min(low.count(st), 2) * w for st, w in rarity.items())
     ranked = sorted(lines, key=score, reverse=True)       # stable: ties keep the category order
     best = [ln for ln in ranked if score(ln) > 0][:4] or ranked[:3]
     return "\n".join(best)
@@ -190,13 +217,17 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
     # it names no case or party, beside the graph paths when it does.
     general = _facts_for(tenant, question)
     from_records = bool(general) and not entity_ids
+    # A question about one case also gets that case's own record, and the
+    # other disputes that share its filer or plan.
+    case_ents = [e for e in entities if e["kind"] == "Case"]
+    for e in case_ents[:2]:
+        general = _case_lines(tenant, e["id"]) + general
     if not general and not entity_ids:
         # No database in reach: the graph's own status count, put to the model as before.
         general = _general_summary(tenant)
 
     # GNN ranking for the first linked case (graph <-> gnn <-> kgqa)
     ranked: list[dict] = []
-    case_ents = [e for e in entities if e["kind"] == "Case"]
     if case_ents:
         pred = gnn.predict(tenant, case_ents[0]["id"], k=k, write_back=False)
         ranked = pred.get("predictions", [])

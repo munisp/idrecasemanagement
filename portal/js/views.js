@@ -1635,21 +1635,21 @@ const Views = (() => {
   function kgqaCategories(h) {
     const [c1, c2] = h.case_numbers || [];
     const [f1] = h.filers || [];
-    const [p1] = h.plans || [];
+    const [pairA, pairB] = h.pair || [];   // a provider and a plan that really appear on the same dispute
     const svc = ((h.service_lines || [])[0] || "").replace(/_/g, " ").toLowerCase();
     const cats = [
       ["Caseload and status", [
         "How many disputes do we have, and what stage is each in?",
         "How many disputes are open right now versus closed?",
         "How many disputes were opened in the last 30 days?",
-        "Which internal status has the most cases waiting?",
+        "Which internal status holds the most cases?",
         "How many cases are waiting on the provider and how many on the plan?"]],
       ["Who is filing", [
         "Which organizations file the most disputes?",
         "Which health plans are named in the most disputes?",
         "How many disputes were filed by providers versus health plans?",
         f1 ? `Which cases did ${f1} file?` : "Which providers are named in the most disputes?",
-        f1 && p1 ? `What connects ${f1} and ${p1}?` : "Which provider and plan pairs appear together most often?"]],
+        pairA && pairB ? `What connects ${pairA} and ${pairB}?` : "Which provider and plan pairs appear together most often?"]],
       ["Related cases", c1 ? [
         `Tell me about ${c1}`,
         `Which cases are most related to ${c1}?`,

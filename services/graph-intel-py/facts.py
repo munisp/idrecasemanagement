@@ -49,6 +49,14 @@ def _money(cents) -> str:
     return f"${(int(cents or 0)) / 100:,.2f}"
 
 
+_SERVICE_NAMES = {"ER": "ER (emergency)", "LAB": "LAB (laboratory)", "AIR_AMBULANCE": "AIR_AMBULANCE (air ambulance)",
+                  "RADIOLOGY": "RADIOLOGY (imaging)"}
+
+
+def _svc(name):
+    return _SERVICE_NAMES.get(name, name)
+
+
 def _pairs(rows, unit: str = "") -> str:
     return ", ".join(f"{name or '(not recorded)'}: {n}{unit}" for name, n in rows)
 
@@ -131,7 +139,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
 
         # ---- services ---------------------------------------------------
         rs = rows(f"SELECT service_line, count(*) FROM {t}.cases GROUP BY service_line ORDER BY count(*) DESC")
-        add("services", rs and "Disputes by service line: " + _pairs(rs) + ".")
+        add("services", rs and "Disputes by service line: " + _pairs([(_svc(n), c) for n, c in rs]) + ".")
         rs = rows(f"SELECT service_line, round(avg(disputed_amount_cents)) FROM {t}.cases "
                   f"WHERE service_line IS NOT NULL AND disputed_amount_cents > 0 GROUP BY service_line "
                   f"ORDER BY avg(disputed_amount_cents) DESC")
@@ -141,7 +149,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
                   f"SELECT service_line, case_number, row_number() OVER (PARTITION BY service_line ORDER BY opened_at DESC) rn "
                   f"FROM {t}.cases WHERE service_line IS NOT NULL) x WHERE rn <= 5 GROUP BY service_line")
         for name, nums in rs:
-            add("services", f"Most recent {name} disputes: {nums}.")
+            add("services", f"Most recent {_svc(name)} disputes: {nums}.")
 
         # ---- deadlines --------------------------------------------------
         r = one(f"SELECT count(*) FILTER (WHERE opened_at < now() - interval '60 days'), "
@@ -184,7 +192,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
             add("eligibility", f"{r[0]} disputes are on hold for an invalid authorization of representative; "
                                f"{r[1]} decisions were borderline and sent for a second look.")
         r = one(f"SELECT count(*) FROM {t}.cases c WHERE NOT {closed} AND status NOT IN ('AWAITING_PAYMENT') "
-                f"AND NOT EXISTS (SELECT 1 FROM public.eligibility_reviews e WHERE e.tenant=%s AND e.case_id=c.id)",
+                f"AND NOT EXISTS (SELECT 1 FROM public.eligibility_reviews e WHERE e.tenant=%s AND e.case_id::text=c.id::text)",
                 (tenant,))
         if r:
             add("eligibility", f"{r[0]} open disputes past payment have no eligibility decision yet.")
@@ -224,27 +232,27 @@ def _compute(tenant: str) -> dict[str, list[str]]:
     return out
 
 
-def select(question: str, facts: dict[str, list[str]], limit: int = 22) -> list[str]:
+def select(question: str, facts: dict[str, list[str]], limit: int = 40) -> list[str]:
     """The fact lines that bear on a question: its categories' lines, or a
     line or two from every category when it matches none."""
     q = (question or "").lower()
     picked = [name for name, words in CATEGORIES if re.search(words, q) and facts.get(name)]
     if not picked:
         return [line for name, _ in CATEGORIES for line in facts.get(name, [])[:2]][:limit]
-    # "How many ..." is in every count question; when a narrower category
-    # also matched, the caseload lines are only context -- keep two of them.
-    lines: list[str] = []
-    for name in picked:
-        take = facts[name][:2] if name == "caseload" and len(picked) > 1 else facts[name]
-        lines.extend(take)
-    return lines[:limit]
+    # "How many ..." is in every count question, so caseload usually matches
+    # beside a narrower category. Nothing is dropped for that: the answerer
+    # ranks these lines against the question, and "waiting on the provider"
+    # is a caseload line even though the question says "provider".
+    narrow = [n for n in picked if n != "caseload"]
+    order = narrow + (["caseload"] if "caseload" in picked else [])
+    return [line for name in order for line in facts[name]][:limit]
 
 
 def hints(tenant: str) -> dict:
     """Real names from this tenant for the portal's sample questions, so a
     suggested question is always about something that exists."""
     t = _schema(tenant)
-    out = {"case_numbers": [], "filers": [], "plans": [], "service_lines": []}
+    out = {"case_numbers": [], "filers": [], "plans": [], "service_lines": [], "pair": []}
     try:
         with psycopg.connect(DSN, autocommit=True, connect_timeout=4) as c:
             def col(sql: str) -> list[str]:
@@ -262,9 +270,64 @@ def hints(tenant: str) -> dict:
             out["plans"] = col(
                 f"SELECT details->>'health_plan' FROM {t}.cases WHERE coalesce(details->>'health_plan','') <> '' "
                 f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 1")
+            try:
+                r = c.execute(
+                    f"SELECT details->>'provider_org', details->>'health_plan' FROM {t}.cases "
+                    f"WHERE coalesce(details->>'provider_org','') <> '' AND coalesce(details->>'health_plan','') <> '' "
+                    f"GROUP BY 1, 2 ORDER BY count(*) DESC LIMIT 1").fetchone()
+                out["pair"] = list(r) if r else []
+            except Exception:
+                pass
             out["service_lines"] = col(
                 f"SELECT service_line FROM {t}.cases WHERE service_line IS NOT NULL AND service_line <> 'OTHER' "
                 f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 2")
+    except Exception:
+        pass
+    return out
+
+
+def case_lines(tenant: str, case_id: str) -> list[str]:
+    """What the records say about one dispute, and which other disputes share
+    its filer or its plan -- the questions asked about a single case."""
+    t = _schema(tenant)
+    out: list[str] = []
+    try:
+        with psycopg.connect(DSN, autocommit=True, connect_timeout=4) as c:
+            r = c.execute(
+                f"SELECT case_number, status, internal_status, agency_status, service_line, disputed_amount_cents, "
+                f"opened_at::date, details->>'requester_org', details->>'provider_org', details->>'health_plan', "
+                f"details->>'provider_type', details->>'filing_party_type' FROM {t}.cases WHERE id::text=%s", (case_id,)
+            ).fetchone()
+            if not r:
+                return out
+            num, status, internal, agency, svc, cents, opened, filer, prov, plan, ptype, ftype = r
+            bits = [f"status {status}"]
+            for label, v in (("internal status", internal), ("agency status", agency), ("service line", _svc(svc) if svc else None),
+                             ("provider type", (ptype or "").replace("_", " ") or None), ("opened", opened)):
+                if v:
+                    bits.append(f"{label} {v}")
+            if cents:
+                bits.append(f"disputed amount {_money(cents)}")
+            out.append(f"{num}: " + ", ".join(bits) + ".")
+            who = [f"filed by {filer}" + (" (a health plan)" if ftype == "HEALTH_PLAN" else "") if filer else None,
+                   f"provider {prov}" if prov else None, f"health plan {plan}" if plan else None]
+            if any(who):
+                out.append(f"{num} parties: " + "; ".join(w for w in who if w) + ".")
+            e = c.execute("SELECT result, reason, created_at::date FROM public.eligibility_reviews "
+                          "WHERE tenant=%s AND case_id::text=%s ORDER BY created_at DESC LIMIT 1", (tenant, case_id)).fetchone()
+            out.append(f"{num} eligibility: " + (f"{e[0]}" + (f" ({str(e[1]).replace('_', ' ')})" if e[1] else "")
+                                                 + f", decided {e[2]}." if e else "no decision recorded yet."))
+            for label, key, val in (("filer", "requester_org", filer), ("health plan", "health_plan", plan)):
+                if not val:
+                    continue
+                sib = c.execute(
+                    f"SELECT case_number FROM {t}.cases WHERE details->>'{key}'=%s AND id::text<>%s "
+                    f"ORDER BY opened_at DESC LIMIT 10", (val, case_id)).fetchall()
+                n = c.execute(f"SELECT count(*) FROM {t}.cases WHERE details->>'{key}'=%s AND id::text<>%s",
+                              (val, case_id)).fetchone()[0]
+                out.append(f"Other disputes with the same {label} as {num} ({val}): "
+                           + (", ".join(x[0] for x in sib) + (f" and {n - len(sib)} more" if n > len(sib) else "")
+                              if sib else "none") + ".")
     except Exception:
         pass
     return out
