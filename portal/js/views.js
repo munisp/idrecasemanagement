@@ -5586,7 +5586,7 @@ const Views = (() => {
   }
 
   async function billingExportFn(id) {
-    try { await Api.program.billingExport(id); } catch (e) { alert(e.message); }
+    try { await Api.program.billingExport(id); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   function billingPayForm(id) {
@@ -5608,7 +5608,7 @@ const Views = (() => {
         received_at: form.received_at.value || undefined,
       });
       billingList(); billingDetail(id);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ===== AR/AP view (#/arap) =====
@@ -5741,7 +5741,7 @@ const Views = (() => {
     try {
       const r = await Api.program.payoutBatchFile(id);
       saveTextFile(r.filename, r.file);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function arapRecord(form) {
@@ -5752,7 +5752,7 @@ const Views = (() => {
         due_date: form.due_date.value || undefined,
       });
       form.reset(); arapApBox(); arapSummaryBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function arapSettle(id) {
@@ -5851,7 +5851,7 @@ const Views = (() => {
     try { const m = await Api.program.reconMatch(id);
       alert(`matched ${m.matched} · exceptions ${m.exceptions} · unmatched ${m.unmatched}`);
       reconBatchList(); reconOpen(id);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function reconOpen(id) {
@@ -5892,7 +5892,7 @@ const Views = (() => {
       const det = document.querySelector("#recon-detail h2");
       if (det) { const m = det.textContent.match(/#(\d+)/); if (m) reconOpen(Number(m[1])); }
       reconBatchList();
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ── Third-party administrators ─────────────────────────────────────
@@ -6000,7 +6000,7 @@ const Views = (() => {
     try {
       await Api.program.tpaAddClient({ party_name: form.party_name.value, party_type: form.party_type.value, contact_email: form.contact_email.value });
       form.reset(); tpaClientsBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaClientStatusFn(id, status) {
@@ -6302,7 +6302,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       await Api.program.clearCheck(id, form.ref.value || "");
       document.getElementById("check-detail-card").style.display = "none";
       checksBox("");
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function checkMatchFn(id, form) {
@@ -6364,6 +6364,13 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     if (!can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"))
       return `<div class="view-head"><h1>Payments</h1></div><p class="muted">Requires PM, FINANCE, or admin.</p>`;
     const fin = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    // ACH debits, wires and cash letters are sent under the program's own
+    // bank identity. Until it is on file the server refuses them, so say so
+    // up front instead of after a click.
+    const prog = await Api.program.get().catch(() => null);
+    const n = prog?.config?.bank?.nacha || {};
+    const bankReady = !!(n.originating_dfi && n.immediate_destination && n.immediate_origin);
+    const off = bankReady ? "" : " disabled";
     const html = `
       <h2>Payment rails</h2>
       <div class="grid2">
@@ -6394,21 +6401,22 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       </div>
       ${fin ? `<div class="card">
         <h3>Generate payment files</h3>
+        ${bankReady ? "" : `<p class="muted">⚠ ACH debits, wires and cash letters are sent under this program's bank details (its bank's routing number, the receiving bank, and its company ID), and none are on file yet. They are set by the platform team when the program's bank account is opened, not on this screen. Metro 2 files don't need them.</p>`}
         <div class="grid2">
           <form class="inline-form" onsubmit="event.preventDefault(); Views.railAchDebitFn(this)">
             <b>ACH fee debit batch</b>
             <textarea name="items" rows="3" placeholder="invoice_id:account_id pairs, one per line" required></textarea>
             <input name="effective_date" type="date" />
-            <button class="mini">Build NACHA debit file</button></form>
+            <button class="mini"${off}>Build NACHA debit file</button></form>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.railWireFn(this)">
             <b>Fedwire transfer</b>
             <input name="payable_id" placeholder="payable id" required />
             <input name="payment_account_id" placeholder="payment account id" required />
-            <button class="mini">Build wire file</button></form>
+            <button class="mini"${off}>Build wire file</button></form>
           <div>
             <b>Image cash letter (X9.37)</b>
             <p class="muted">Bundles every cleared check not yet deposited.</p>
-            <button class="mini" onclick="Views.railIclFn()">Build cash letter</button></div>
+            <button class="mini" onclick="Views.railIclFn()"${off}>Build cash letter</button></div>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.railMetro2Fn(this)">
             <b>Metro 2 furnishing</b>
             <input name="identification_number" placeholder="furnisher code (≥5 chars)" required />
@@ -6460,12 +6468,20 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
         account_type: f.account_type.value, ach_debit_authorized: f.ach_debit_authorized.checked,
       });
       f.reset(); railAccountsBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function railAccountDelFn(id) {
     if (!confirm("Remove this payment account?")) return;
-    try { await Api.program.railAccountDel(id); railAccountsBox(); } catch (e) { alert(e.message); }
+    try { await Api.program.railAccountDel(id); railAccountsBox(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  function railFail(e, elId = "rail-gen-result") {
+    const msg = /bank\.nacha not configured/.test(e.message)
+      ? "This program's bank details aren't on file yet, so this file can't be built."
+      : e.message;
+    const box = document.getElementById(elId);
+    if (box) box.innerHTML = `<p class="error">${esc(msg)}</p>`; else UI.toast(msg, { kind: "warn" });
   }
 
   function railShowGenerated(elId, r) {
@@ -6481,7 +6497,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob); a.download = filename || r.filename; a.click();
       URL.revokeObjectURL(a.href);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function railAchDebitFn(form) {
@@ -6492,14 +6508,14 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       });
       const r = await Api.program.railAchDebits({ items, effective_date: form.effective_date.value || undefined });
       railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { railFail(e); }
   }
 
   async function railWireFn(form) {
     try {
       const r = await Api.program.railWire({ payable_id: form.payable_id.value.trim(), payment_account_id: form.payment_account_id.value.trim() });
       railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { railFail(e); }
   }
 
   async function railIclFn() {
@@ -6507,7 +6523,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     try {
       const r = await Api.program.railIcl();
       railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { railFail(e); }
   }
 
   async function railMetro2Fn(form) {
@@ -6515,7 +6531,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     try {
       const r = await Api.program.railMetro2({ identification_number: form.identification_number.value.trim(), threshold_days: Number(form.threshold_days.value) || 60 });
       railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { railFail(e); }
   }
 
   async function railReturnsFn(form) {
@@ -6527,7 +6543,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       document.getElementById("rail-returns-result").innerHTML =
         `<p class="ok">${r.applied} return(s) applied to payment items; ${r.unmatched} unmatched.</p>`;
       railFilesBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { railFail(e, "rail-returns-result"); }
   }
 
   async function railFilesBox() {
