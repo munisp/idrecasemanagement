@@ -723,6 +723,13 @@ def _field_question(field: str) -> str:
             "or {\"value\": null} if absent.")
 
 
+PROMPT_BUDGET_CHARS = 2000
+
+
+def _atomic_questions(fields: list[str]) -> str:
+    return "\n".join(f'- "{f}": {_field_question(f)}' for f in fields)
+
+
 def _merge_atomic(parts: list[dict], fields: list[str]) -> tuple[dict, dict]:
     """Merge per-chunk atomic answers: each part is {field: {"value": v,
     "probability": p}}. Highest-probability non-null value wins per field —
@@ -806,6 +813,14 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         "below clearly states. "
     ) if cfg.get("vision") else ""
     atomic = bool(cfg.get("atomic", True))
+    # The whole prompt is capped at 2000 chars (MAX_PROMPT_CHARS in
+    # run_chunk). One typed question per field costs ~150 chars, so for a
+    # schema of a dozen fields the questions alone fill the cap and the model
+    # is sent no document at all (seen live: an EOB read back with
+    # "Provider NPI" as the provider). Ask per field only when at least half
+    # the budget is left for the document.
+    if atomic and len(_atomic_questions(fields)) + 900 > PROMPT_BUDGET_CHARS // 2:
+        atomic = False
     if atomic:
         # System One decomposition: each field is an independently-judged
         # typed question carrying its own calibrated probability, instead of
@@ -813,7 +828,7 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         # ones. Same single call per chunk (the local Ollama serializes
         # anyway), but the ANSWER STRUCTURE forces per-field judgment and
         # yields the probability map verify() routes on.
-        questions = "\n".join(f'- "{f}": {_field_question(f)}' for f in fields)
+        questions = _atomic_questions(fields)
         instructions = (
             "You are an IDR (No Surprises Act dispute) document analyst. "
             "The transcribed text below is the authoritative content of this document. "
@@ -873,7 +888,7 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         # no plausible density can overflow: 2000 chars would need under
         # 0.49 chars/token to still exceed 4096 -- not a real tokenizer
         # outcome for any text, JSON, or digit-heavy content.
-        MAX_PROMPT_CHARS = 2000
+        MAX_PROMPT_CHARS = PROMPT_BUDGET_CHARS
         if len(prompt) > MAX_PROMPT_CHARS:
             prompt = prompt[:MAX_PROMPT_CHARS]
         content: list[dict] = [{"type": "text", "text": prompt}]
@@ -963,7 +978,8 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     ctx["in_domain"] = any(in_domain_votes) if in_domain_votes else True
     # Strict schema: only declared fields survive, all present (null-filled) —
     # the VLM can't smuggle invented keys into the record.
-    if atomic and any(isinstance(p.get(f), dict) and "value" in p[f] for p in parts for f in fields):
+    # Whichever prompt was sent, a per-field answer keeps its probabilities.
+    if any(isinstance(p.get(f), dict) and "value" in p[f] for p in parts for f in fields):
         parts = [{f: (p.get(f) if isinstance(p.get(f), dict) and "value" in p[f] else {"value": p.get(f)})
                   for f in fields} for p in parts]
         merged, probs = _merge_atomic(parts, fields)

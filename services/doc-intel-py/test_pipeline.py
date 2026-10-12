@@ -791,3 +791,20 @@ def test_a_per_field_answer_keeps_its_probabilities_and_is_shaped(monkeypatch):
     assert ex["billed_amount_usd"] in ("$1,850.00", 1850.0) and len(ex["service_lines"]) == 2
     assert ex["provider_name"] == "Northgate Health, P.C."
     assert ctx["vlm_field_probability"]["billed_amount_usd"] == 0.9
+
+
+def test_per_field_questions_never_crowd_out_the_document(monkeypatch):
+    sent = []
+    monkeypatch.setattr(pl, "_vlm_call", lambda client, model, content, mt: sent.append(content[0]["text"]) or {})
+    monkeypatch.setattr(pl, "_model", lambda key, factory: object())
+    many = ["claim_number", "billed_amount_usd", "allowed_amount_usd", "patient_responsibility_usd", "provider_name",
+            "payer_name", "service_date", "determination_date", "denial_codes", "service_lines", "network_status",
+            "cms_case_number", "plan_paid_usd"]
+    pl.stage_vlm_extract({"doc_type": "eob", "text": "DOCUMENT-BODY-MARKER", "markdown": "DOCUMENT-BODY-MARKER"},
+                         {"endpoint": "http://x", "model": "m"}, {"eob": {"fields": many}})
+    assert "DOCUMENT-BODY-MARKER" in sent[0]
+    few = ["claim_number", "billed_amount_usd"]
+    sent.clear()
+    pl.stage_vlm_extract({"doc_type": "eob", "text": "DOCUMENT-BODY-MARKER", "markdown": "DOCUMENT-BODY-MARKER"},
+                         {"endpoint": "http://x", "model": "m"}, {"eob": {"fields": few}})
+    assert "DOCUMENT-BODY-MARKER" in sent[0]
