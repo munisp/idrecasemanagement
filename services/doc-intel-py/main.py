@@ -251,6 +251,14 @@ def provider_type_from_text(text: str | None) -> str | None:
     m = re.search(r"(?:PLACE\s+OF\s+SERVICE|\bPOS\b)[\s:|.#(A-Z]{0,24}?\b(\d{2})\b", t)
     if m and m.group(1) in _POS_PROVIDER_TYPE:
         return _POS_PROVIDER_TYPE[m.group(1)]
+    # Forms are often read with every label first and the values after, so
+    # the code is not next to its label. A place-of-service code printed with
+    # its standard description ("11 (Office)") is just as explicit -- accepted
+    # when the form has a place-of-service field at all.
+    if re.search(r"PLACE\s+OF\s+SERVICE|\bPOS\b", t):
+        m = re.search(r"\b(11|19|21|22)\s*[(\-–:]\s*(OFFICE|INPATIENT\s+HOSPITAL|(?:ON|OFF)[\s-]*CAMPUS|OUTPATIENT\s+HOSPITAL)", t)
+        if m:
+            return _POS_PROVIDER_TYPE[m.group(1)]
     m = re.search(r"TYPE\s+OF\s+BILL[\s:|.#]{0,12}0?(\d{2})\d\b", t)
     if m and m.group(1) in _TOB_PROVIDER_TYPE:
         return _TOB_PROVIDER_TYPE[m.group(1)]

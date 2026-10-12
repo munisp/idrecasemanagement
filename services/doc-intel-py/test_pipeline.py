@@ -551,4 +551,8 @@ def test_provider_type_from_text_reads_only_explicit_codes():
     assert f("Type of Bill 0721") is None   # a dialysis clinic, not a hospital
     assert f("HEALTH INSURANCE CLAIM FORM CMS-1500") is None
     assert f("Explanation of Benefits — physician services") is None
+    # labels first, values after (how a form is often read)
+    assert f("Service Date:\n\n03/12/2026\n\nPlace of Service:\n\nNetwork Status:\n\nCPT / HCPCS Codes:\n\n11 (Office)\n\nOut-of-network") == "physician_dentist"
+    assert f("Place of Service:\n\nDischarge Date:\n\n21 (Inpatient Hospital)") == "hospital_inpatient"
+    assert f("Units: 11 (Office visits)") is None   # no place-of-service field on the page
     assert f("") is None and f(None) is None
