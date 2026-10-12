@@ -309,7 +309,14 @@ def infer_provider_type(provider_name: str | None, text: str | None, cpt_codes=N
     """
     name = str(provider_name or "").upper()
     t = str(text or "").upper()
-    codes = " ".join(cpt_codes) if isinstance(cpt_codes, list) else str(cpt_codes or "")
+    # An EOB's service lines arrive as rows ({"service": "Office visit (99215)", ...}),
+    # not strings: read each row's description, never join the rows blind.
+    if isinstance(cpt_codes, list):
+        codes = " ".join(
+            str(c.get("service") or c.get("description") or "") if isinstance(c, dict) else str(c)
+            for c in cpt_codes)
+    else:
+        codes = str(cpt_codes or "")
     if _HOSPITAL_NAME.search(name):
         if _INPATIENT.search(t):
             return "hospital_inpatient", f"provider is a hospital ({provider_name}) and the document describes inpatient services"

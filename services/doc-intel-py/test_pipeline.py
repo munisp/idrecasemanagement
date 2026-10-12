@@ -591,3 +591,8 @@ def test_infer_provider_type_from_an_eob():
     assert f(None, None)[0] is None
     typ, basis = f("Northgate Health, P.C.", "")
     assert "Northgate Health, P.C." in basis
+    # an EOB's service lines are rows, not strings (this crashed the read)
+    rows = [{"service": "Office visit, established patient (99215)", "billed_amount_usd": 1450.0},
+            {"service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0}]
+    assert f("Northgate Health, P.C.", "", rows)[0] == "physician_dentist"
+    assert f("", "", rows) == ("physician_dentist", "office-visit procedure codes (99202-99215) are billed")
