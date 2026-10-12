@@ -189,12 +189,27 @@ def line_amounts(v: Any, keys: tuple) -> list[float] | None:
     return out
 
 
+def column_total(vals: list[float]) -> float | None:
+    """The total of a column of amounts. When one row equals the sum of all
+    the others it IS the total -- a Totals row whose label the scan lost --
+    and adding it in would double the claim (seen on a faint fax: four rows,
+    the fourth the total of the other three)."""
+    if not vals:
+        return None
+    if len(vals) >= 3:
+        for i, v in enumerate(vals):
+            rest = vals[:i] + vals[i + 1:]
+            if v > 0 and abs(v - sum(rest)) < 0.01:
+                return round(v, 2)
+    return round(sum(vals), 2)
+
+
 def lines_billed_total(v: Any) -> float | None:
     """The sum of the lines' billed amounts -- only when EVERY line has one.
     A partial sum would be a wrong total, so it is not returned."""
     amts = line_amounts(v, _BILLED_KEYS)
-    total = round(sum(amts), 2) if amts else 0
-    return total if total > 0 else None
+    total = column_total(amts) if amts else 0
+    return total if total and total > 0 else None
 
 
 def _on_page(amount: float, text: str) -> bool:
@@ -516,7 +531,7 @@ def _money_from_tables(text: str, label_re: str) -> float | None:
         cells = [r[col] for r in body if col < len(r) and r not in total]
         vals = [as_money(c) for c in cells]
         if vals and all(v is not None for v in vals):
-            return round(sum(vals), 2)
+            return column_total(vals)
     return None
 
 
@@ -537,8 +552,43 @@ def _money_inline(text: str, label_re: str) -> float | None:
     return None
 
 
+def _label_blocks(text: str) -> list[tuple[str, str]]:
+    """Forms read as all their labels first, then all their values:
+
+        Claim Number:   Provider:   Service Date:
+        BMC-2026-1044   Bayfront    03/02/2026
+
+    comes out of OCR as a run of "Label:" lines followed by as many value
+    lines. Pair them by position. A label line is short and ends with a
+    colon; the pairing is used only when the value run is exactly as long."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    pairs: list[tuple[str, str]] = []
+    is_label = lambda s: s.endswith(":") and len(s) <= 40 and not re.search(r"\d{3}", s)  # noqa: E731
+    i = 0
+    while i < len(lines):
+        if not is_label(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and is_label(lines[j]):
+            j += 1
+        labels = lines[i:j]
+        k = j
+        while k < len(lines) and k - j < len(labels) and not is_label(lines[k]) and not lines[k].startswith(("|", "#")):
+            k += 1
+        values = lines[j:k]
+        if len(labels) >= 2 and len(values) == len(labels):
+            pairs += [(lab.rstrip(":").strip(), val) for lab, val in zip(labels, values)]
+        i = max(k, i + 1)
+    return pairs
+
+
 def _labelled(text: str, label_re: str, value_re: str = r"[^|\n]{1,120}") -> str | None:
     """"Label: value" or "| Label | value |" -- the first one found."""
+    for lab, val in _label_blocks(text):  # labels-first layouts, paired by position
+        if re.fullmatch(rf"(?i)\s*(?:{label_re})\s*", lab):
+            m = re.fullmatch(rf"\s*({value_re})\s*", val)
+            return m.group(1).strip(" \t|:;,") if m and not _is_label(m.group(1)) else None
     for rows in _table_rows(text):  # a column headed by the label: its first row
         if len(rows) >= 2:
             col = next((i for i, c in enumerate(rows[0]) if re.fullmatch(rf"(?i)\s*(?:{label_re})\s*:?\s*", c)), None)
@@ -546,9 +596,14 @@ def _labelled(text: str, label_re: str, value_re: str = r"[^|\n]{1,120}") -> str
                 m = re.fullmatch(rf"\s*({value_re})\s*", rows[1][col])
                 if m and not _is_label(m.group(1)):
                     return m.group(1).strip(" \t|:;,") or None
-    for m in re.finditer(rf"(?im)(?<![A-Za-z])(?:{label_re})\s*(?:[:=#]|\|)\s*#?\s*({value_re})", text):
+    for m in re.finditer(rf"(?im)(?<![A-Za-z])(?:{label_re})[ \t]*(?:[:=#]|\|)\s*#?\s*({value_re})", text):
         # Two fields printed side by side on one line: the value ends at the gap.
-        val = re.split(r"\s{2,}|\t", m.group(1).strip())[0].strip(" \t|:;,")
+        val = re.split(r"\s{2,}|\t", m.group(1).strip())[0].strip(" \t|;,")
+        # A "value" that ends in a colon is the next label ("Claim Number:"
+        # followed on the next line by a faded "rovider:"), never a value.
+        if val.endswith(":"):
+            continue
+        val = val.strip(":")
         if val and not _is_label(val):
             return val
     return None

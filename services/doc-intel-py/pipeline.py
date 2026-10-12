@@ -249,6 +249,53 @@ def _skew_angle(raw_angle: float) -> float:
     return ((raw_angle + 45) % 90) - 45
 
 
+def upright(img: Image.Image) -> tuple[Image.Image, int]:
+    """Turn a page that was scanned or faxed sideways or upside down the right
+    way up. Returns (page, degrees turned clockwise). Uses Tesseract's
+    orientation detector; a page it is unsure about is left as it is."""
+    try:
+        import pytesseract
+        probe = img.convert("L")
+        if max(probe.size) > 2000:
+            probe.thumbnail((2000, 2000))
+        osd = pytesseract.image_to_osd(probe, output_type=pytesseract.Output.DICT, config="--psm 0")
+        turn, conf = int(osd.get("rotate", 0)) % 360, float(osd.get("orientation_conf", 0))
+    except Exception:  # noqa: BLE001 -- too little text to tell, or no tesseract: leave it
+        return img, 0
+    if turn not in (90, 180, 270) or conf < 3.0:
+        return img, 0
+    return img.rotate(-turn, expand=True), turn
+
+
+def image_bytes(pages: list[Image.Image], raw: bytes) -> bytes:
+    """The pages written back in the upload's own image format (so the text
+    reader sees the turned pages, not the original bytes)."""
+    try:
+        fmt = Image.open(io.BytesIO(raw)).format or "PNG"
+    except Exception:  # noqa: BLE001
+        fmt = "PNG"
+    if fmt not in ("PNG", "JPEG", "TIFF", "BMP", "WEBP"):
+        fmt = "PNG"
+    buf = io.BytesIO()
+    first = pages[0].convert("RGB") if fmt == "JPEG" else pages[0]
+    if len(pages) > 1 and fmt == "TIFF":
+        first.save(buf, format="TIFF", save_all=True, append_images=pages[1:])
+    else:
+        first.save(buf, format=fmt)
+    return buf.getvalue()
+
+
+def upright_pages(pages: list[Image.Image]) -> tuple[list[Image.Image], list[tuple[int, int]]]:
+    """upright() over every page: (pages, [(page number, degrees turned)])."""
+    out, turned = [], []
+    for i, p in enumerate(pages):
+        q, deg = upright(p)
+        out.append(q)
+        if deg:
+            turned.append((i + 1, deg))
+    return out, turned
+
+
 def deskew_image(img: Image.Image) -> Image.Image:
     """Estimate and correct page skew via the ink pixels' minimum-area
     rectangle. Scanners and phone photos routinely land 1-5 degrees off, and
@@ -591,7 +638,34 @@ def stage_layout(ctx: dict, cfg: dict) -> dict:
 # VLM extraction
 # ---------------------------------------------------------------------------
 
+class ModelUnavailable(Exception):
+    """The extraction model could not be reached or kept timing out. The
+    document is left unread so the unread-document sweep reads it again
+    later, rather than saved with only what could be read without the model."""
+
+
+# One model request at a time per reader process (VLM_MAX_CONCURRENT). The
+# local Ollama serves requests one by one; three workers each sending two
+# sections queued requests for minutes, past the client timeout, and the
+# documents were saved half-read. Waiting here does not count against it.
+_VLM_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get("VLM_MAX_CONCURRENT", "1"))))
+
+
+def _transient(exc: BaseException) -> bool:
+    """A timeout, a dropped connection or a server error from the model --
+    worth reading the document again later, unlike a bad answer."""
+    names = {type(e).__name__ for e in (exc, exc.__cause__, exc.__context__) if e is not None}
+    return bool(names & {"APITimeoutError", "APIConnectionError", "InternalServerError", "ReadTimeout",
+                         "ConnectTimeout", "ConnectError", "RemoteProtocolError", "TimeoutException"}) \
+        or "timed out" in str(exc).lower() or "connection error" in str(exc).lower()
+
+
 def _vlm_call(client: Any, model: str, content: list[dict], max_tokens: int) -> dict:
+    with _VLM_SLOTS:
+        return _vlm_call_unlocked(client, model, content, max_tokens)
+
+
+def _vlm_call_unlocked(client: Any, model: str, content: list[dict], max_tokens: int) -> dict:
     """One VLM round-trip with transport retries and JSON self-repair.
 
     Retries up to 3 times on transport/5xx errors with exponential backoff.
@@ -1266,7 +1340,7 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # this document is treated as case evidence.
     ex_fields = {k: v for k, v in ex.items() if v not in (None, "", [], {})}
     unreadable = bool(ctx.get("scan_quality_poor") or ctx.get("ocr_low_confidence"))
-    if ctx.get("in_domain") is False and unreadable:
+    if unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
         # The model saw too little legible text to recognise the page. That is
         # a page nobody could read, not a page about something else -- and
         # "unrelated, possible mis-upload" sends a person looking for the
@@ -1303,6 +1377,9 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # Periodic watermark removed before OCR: extraction ran on the recovered
     # text layer — informational for the audit trail, values still verified
     # by grounding like any other.
+    for page, deg in ctx.get("pages_turned", []):
+        how = "upside down" if deg == 180 else "sideways"
+        findings.append({"field": None, "issue": f"Page {page} was {how} and was turned the right way up before reading"})
     if ctx.get("watermark_removed"):
         findings.append({"field": None, "issue": "Periodic watermark/stamp background detected and removed before OCR — extraction used the recovered text layer"})
     # Ambiguous classification: the winning type barely beat the runner-up.
@@ -1467,6 +1544,8 @@ def run_pipeline(ctx: dict, case: dict | None = None, schema_overrides: dict | N
             # not just the one that happened to trigger it first.
             if name == "docling":
                 raise
+            if name == "vlm_extract" and _transient(exc):
+                raise ModelUnavailable(str(exc)) from exc
             ctx.setdefault("findings", []).append(
                 {"stage": name, "issue": f"stage failed, skipped: {exc}"}
             )

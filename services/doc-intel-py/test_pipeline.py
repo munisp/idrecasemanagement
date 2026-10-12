@@ -808,3 +808,57 @@ def test_per_field_questions_never_crowd_out_the_document(monkeypatch):
     pl.stage_vlm_extract({"doc_type": "eob", "text": "DOCUMENT-BODY-MARKER", "markdown": "DOCUMENT-BODY-MARKER"},
                          {"endpoint": "http://x", "model": "m"}, {"eob": {"fields": few}})
     assert "DOCUMENT-BODY-MARKER" in sent[0]
+
+
+# ---- faint-fax fixes ---------------------------------------------------------
+
+def test_an_upside_down_page_is_turned_the_right_way_up():
+    from PIL import Image, ImageDraw, ImageFont
+    pytest = __import__("pytest")
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 34)
+    except OSError:
+        pytest.skip("no TrueType font to draw a test page")
+    page = Image.new("L", (1700, 2200), 255)
+    d = ImageDraw.Draw(page)
+    for i, line in enumerate(["EXPLANATION OF BENEFITS", "Claim Number: LOA-2026-007731",
+                              "Provider: Lakeview Orthopedic Associates", "Service Date: 04/22/2026",
+                              "This is not a bill. Keep this statement for your records."] * 6):
+        d.text((120, 120 + i * 60), line, fill=0, font=font)
+    fixed, turned = pl.upright(page.rotate(180))
+    if turned == 0 and pl.upright(page)[1] == 0:
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+        except Exception:
+            pytest.skip("tesseract not installed")
+    assert turned == 180
+    assert pl.upright(page)[1] == 0                                  # an upright page is left alone
+    assert pl.upright(page.rotate(90, expand=True))[1] == 90         # turned a quarter: turned back
+
+
+def test_a_model_timeout_leaves_the_document_for_re_reading(monkeypatch):
+    class APITimeoutError(Exception):
+        pass
+    def boom(ctx, cfg, schemas):
+        raise APITimeoutError("Request timed out.")
+    monkeypatch.setattr(pl, "stage_vlm_extract", boom)
+    spec = {"stages": [{"name": "vlm_extract"}], "schemas": {}}
+    monkeypatch.setattr(pl, "load_pipeline", lambda *a, **k: spec)
+    with pytest.raises(pl.ModelUnavailable):
+        pl.run_pipeline({"text": "x"})
+    # a bad answer (not a transport failure) is still just a skipped stage
+    monkeypatch.setattr(pl, "stage_vlm_extract", lambda *a: (_ for _ in ()).throw(ValueError("not JSON")))
+    ctx = pl.run_pipeline({"text": "x"})
+    assert any("stage failed" in f["issue"] for f in ctx["findings"])
+
+
+def test_a_badly_scanned_page_with_nothing_found_is_unreadable_not_unrelated():
+    ctx = pl.stage_validate({"extracted": {}, "classify_score": 0, "ocr_low_confidence": True, "text": "~~"}, {}, None)
+    assert ctx["doc_type"] == "unreadable"
+    assert not any("mis-upload" in f["issue"] for f in ctx["findings"])
+
+
+def test_turned_pages_are_reported():
+    ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 10.0}, "pages_turned": [(1, 180)], "text": "Billed 10.00"}, {}, None)
+    assert any("upside down and was turned" in f["issue"] for f in ctx["findings"])

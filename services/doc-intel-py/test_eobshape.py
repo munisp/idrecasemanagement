@@ -288,3 +288,70 @@ def test_a_line_that_does_not_add_up_is_reported():
     lines[1]["plan_paid_usd"] = 65.6
     assert es.reconcile_totals({"service_lines": lines}, "")[1] == []      # every line adds up: silent
     assert es.reconcile_totals({"service_lines": [{"service": "x", "allowed_amount_usd": 10.0}]}, "")[1] == []  # nothing to compare
+
+
+# ---- faint-fax failures (FAX-13 of the faded-fax set) -----------------------
+
+FAX13 = """## xplanation of Benefits
+
+Claim Number:
+
+rovider:
+
+Provider NPI:
+
+Member Name:
+
+Service Date:
+
+Determination Date:
+
+Network Status:
+
+BMC-2026-121044
+
+Bayfront Medical Center
+
+1093817465
+
+Lucille Hartmann
+
+03/02/2026
+
+05/11/2026
+
+In-network
+
+| ERVICE LINES - Date | ERVICE LINES - Service | Billed Amount | Allowed Amount | Plan Paid | Patient Responsibility |
+|---|---|---|---|---|---|
+| | Inpatient stay, DRG 291 (5 | $18,400.00 | $11,250.00 | $10,687.50 | $562.50 |
+| 03/02/2026 | days) | $14,250.00 | $8,100.00 | $7,695.00 | $405.00 |
+| 03/02/2026 | Cardiac catheterization lab | $4,620.00 | $1,980.00 | $1,881.00 | $99.00 |
+| 03/04/2026 | Pharmacy and IV therapy | $37,270.00 | $21,330.00 | $20,263.50 | $1,066.50 |
+
+Totals
+"""
+
+
+def test_a_totals_row_that_lost_its_label_is_not_added_in():
+    assert es.column_total([18400.0, 14250.0, 4620.0, 37270.0]) == 37270.0
+    assert es.column_total([100.0, 200.0]) == 300.0          # two rows: nothing to tell apart
+    assert es.column_total([100.0, 100.0, 100.0]) == 300.0
+    out, filled, _ = es.fill_from_text({}, FAX13, "eob")
+    assert out["billed_amount_usd"] == 37270.0
+    assert out["allowed_amount_usd"] == 21330.0
+    assert out["patient_responsibility_usd"] == 1066.5
+
+
+def test_labels_first_then_values_are_paired_by_position():
+    out, _, _ = es.fill_from_text({}, FAX13, "eob")
+    assert out["claim_number"] == "BMC-2026-121044"
+    assert out["service_date"] == "03/02/2026" and out["determination_date"] == "05/11/2026"
+    assert out["network_status"].lower() == "in-network"
+    # the faded "rovider:" label is never taken as a value
+    assert "rovider" not in str(out.values())
+
+
+def test_a_label_on_the_next_line_is_not_a_value():
+    assert es._labelled("Claim Number:\n\nrovider:\n", es._TEXT_LABELS["claim_number"]) is None
+    assert es._labelled("Claim Number: LOA-2026-007731", es._TEXT_LABELS["claim_number"]) == "LOA-2026-007731"

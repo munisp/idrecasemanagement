@@ -24,7 +24,7 @@ from minio import Minio
 from opensearchpy import OpenSearch
 
 from eobshape import as_lines, as_money, as_text, line_text, lines_text
-from pipeline import bytes_to_pages, ooxml_safe, run_pipeline, sniff_doc_kind
+from pipeline import ModelUnavailable, bytes_to_pages, image_bytes, ooxml_safe, run_pipeline, sniff_doc_kind, upright_pages
 from rules_engine import expand_template, fire_rules, load_rules
 from check_processor import extract_check
 import learning
@@ -748,13 +748,33 @@ def process(evt: dict) -> None:
     # pipeline (ensure_pages) — a born-digital PDF never pays for bitmaps.
     pages, truncated = (bytes_to_pages(raw, evt.get("content_type", ""), kind=kind_of)
                         if kind_of == "image" else ([], False))
+    # A page faxed upside down or sideways is turned the right way up before
+    # anything reads it: read as it came, its values landed in the wrong
+    # fields (a claim number as the provider).
+    turned = []
+    if pages:
+        try:
+            pages, turned = upright_pages(pages)
+            if turned:
+                raw = image_bytes(pages, raw)
+        except Exception as exc:  # noqa: BLE001 -- turning is an aid; reading goes on without it
+            print(f"doc-intel: could not check page orientation: {exc}", file=sys.stderr, flush=True)
+            turned = []
     ctx = {
+        "pages_turned": turned,
         "filename": evt.get("object_key", ""),
         "raw_bytes": raw,                                   # Docling parses bytes directly
         "content_type": evt.get("content_type", ""),
         "pages": pages,                                     # for OCR fallback + VLM image
     }
-    ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
+    try:
+        ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
+    except ModelUnavailable as exc:
+        # Not saved half-read: the document stays unread, and the unread-
+        # document sweep in case-api sends it again (and tells people if it
+        # still cannot be read after several tries).
+        print(f"doc-intel: model unavailable for {evt.get('doc_id')}, left for re-reading: {exc}", flush=True)
+        return
     truncated = truncated or ctx.get("pages_truncated", False)
     if truncated:
         # Page-capped render: analysis covers the first DOC_INTEL_MAX_PAGES
