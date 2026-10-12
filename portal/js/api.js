@@ -123,6 +123,7 @@ const Api = (() => {
     time: {
       mine: (from, to) => req("GET", `${t()}/time/mine${from||to ? `?from=${from||""}&to=${to||""}` : ""}`),
       summary: () => req("GET", `${t()}/time/summary`),
+      prompts: () => req("GET", `${t()}/time/prompts`),
       update: (id, p) => req("PUT", `${t()}/time/${id}`, p),
       remove: (id) => req("DELETE", `${t()}/time/${id}`),
     },
@@ -319,6 +320,7 @@ const Api = (() => {
       advanceIntake: (id, status, caseId) => req("POST", `${t()}/intake/${id}/advance`, { status, case_id: caseId }),
       deliverables: () => req("GET", `${t()}/deliverables`),
       setContractDates: (dates) => req("PUT", `${t()}/program/contract-dates`, dates),
+      recordOutcome: (caseId, body) => req("POST", `${t()}/cases/${caseId}/outcome`, body),
       fwa: (caseId, body) => req("POST", `${t()}/cases/${caseId}/fwa`, body),
       submitDeliverable: (p) => req("POST", `${t()}/deliverables`, p),
       requestDeliverable: (name, contract_ref) => req("POST", `${t()}/deliverables/request`, { name, contract_ref }),

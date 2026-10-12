@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	temporalclient "go.temporal.io/sdk/client"
+	"time"
 )
 
 func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +260,11 @@ func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
 	if err != nil || res.RowsAffected() == 0 {
 		return // not payment-gated, or already activated
 	}
+	// "Date Received" is the date the dispute was opened by payment -- not
+	// the day someone asked how to file. The 60-day clock runs from it.
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+		`UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object('received_at', $2::text) WHERE id=$1`, tbl),
+		caseID, time.Now().UTC().Format("2006-01-02"))
 	var caseNumber string
 	var details []byte
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(

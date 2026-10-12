@@ -68,6 +68,8 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Act["FINAL_ORDER_ISSUED"] = wfAct{At: now}
 	expect("letter:final_order_rationale_copy", "Reviewer")
 	f.Letter["final_order_rationale_copy"] = "SENT"
+	expect("outcome", "Reviewer")
+	f.HasOutcome = true
 	expect("payment", "Finance")
 	f.OpenInvoices, f.Internal = 0, "Invoice Paid"
 	if n := wfNext(buildWorkflowSteps(f)); n != nil {

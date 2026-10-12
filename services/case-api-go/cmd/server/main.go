@@ -587,6 +587,7 @@ func main() {
 		r.Get("/cases/{caseId}/time", s.listTimeEntries)
 		r.Get("/time/mine", s.myTimeEntries)           // personal timesheet (all disputes)
 		r.Get("/time/summary", s.myTimeSummary)        // today / this week / this month totals
+		r.Get("/time/prompts", s.timePrompts)          // disputes I worked on with no time recorded that day
 		r.Put("/time/{entryId}", s.updateTimeEntry)    // editable entries, audited before/after
 		r.Delete("/time/{entryId}", s.deleteTimeEntry) // deletion keeps the audit snapshot
 		r.Get("/reports/time", s.timeReport)           // weekly per-dispute + monthly team rollup
@@ -637,6 +638,7 @@ func main() {
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
 		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)               // the SOP steps: done, next, upcoming
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)              // Reviewer: outcome, claims reviewed, award, party billed
 		r.Post("/cases/{caseId}/fwa", s.fwaAction)                      // fraud/waste/abuse: report, assign reviewer, conclude
 		r.Put("/program/contract-dates", s.setContractDates)            // admin: contract execution/effective/end dates
 		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
@@ -779,6 +781,9 @@ func main() {
 			}
 			if n := s.sweepReportDeliverables(); n > 0 {
 				slog.Info("report deliverables sweep", "opened", n)
+			}
+			if n := s.sweepPaymentReminders(); n > 0 {
+				slog.Info("payment reminders sweep", "drafted", n)
 			}
 			select {
 			case <-sweepStop:
@@ -1275,6 +1280,15 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", body.Signal, body.Data); err != nil {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return
+	}
+	// The filing packet's claim count is recorded with the step that
+	// confirms the packet (report column E).
+	if body.Signal == "PACKET_COMPLETE" {
+		if n := toInt64(body.Data["claims_submitted"]); n > 0 {
+			_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+				`UPDATE tenant_%s.cases SET num_claims=$2, details = details || jsonb_build_object('claims_submitted', $2::int) WHERE id=$1`,
+				sanitizeTenant(tenant)), id, n)
+		}
 	}
 	// The withdrawal letter is due one business day from the request.
 	if body.Signal == "PROVIDER_WITHDRAW" {

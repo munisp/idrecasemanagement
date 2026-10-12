@@ -56,6 +56,7 @@ type wfFacts struct {
 	AORConfirmedAt   time.Time
 	Act              map[string]wfAct  // latest timeline entry per type (signals)
 	Letter           map[string]string // template -> status of its latest draft
+	HasOutcome       bool              // the Reviewer recorded the outcome and party billed
 	ReviewInvoice    bool              // an invoice other than the initial fee exists
 	OpenInvoices     int
 }
@@ -175,6 +176,8 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
 			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
 		letter("final_order_rationale_copy", "Final Order Rationale Copy", "CASE_MANAGER", "PM")
+		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
+			"Case Outcome, Number of Claims Reviewed, Final Amount Awarded, Party Billed.")
 		add("payment", "Review costs paid", "FINANCE", "settle",
 			f.Internal == "Invoice Paid" || f.Internal == "Decided - Invoice Paid" || (f.ReviewInvoice && f.OpenInvoices == 0),
 			"The case closes when the invoices are paid.")
@@ -284,6 +287,9 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 	if ds, ok := details["dispute_summary"].(map[string]any); ok {
 		f.HasSummary = true
 		_, f.HasEstimate = ds["full_review_estimate_cents"]
+	}
+	if by, _ := details["outcome_recorded_by"].(string); by != "" {
+		f.HasOutcome = true
 	}
 	if ac, ok := details["aor_confirmation"].(map[string]any); ok {
 		f.AORConfirmedAt, _ = time.Parse(time.RFC3339, fmt.Sprint(ac["at"]))

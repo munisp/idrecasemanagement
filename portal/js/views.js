@@ -205,7 +205,7 @@ const Views = (() => {
   const WF_STAGE_LETTERS = ["acceptance", "ineligible", "estimate_cost", "plan_notification", "final_order", "final_order_rationale_copy"];
   const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate"
     : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "aor_confirm" ? "Give the ruling"
-    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : "Open");
+    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it" : "Open");
   async function wfLoad(id, cfg) {
     const box = document.getElementById("wf-steps");
     if (!box) return;
@@ -281,12 +281,31 @@ const Views = (() => {
     if (a === "summary") return open("#p-summary-details");
     if (a === "invoice") return open("#p-inv-details");
     if (a === "settle") { location.hash = "#/finance"; return; }
+    if (a === "outcome") {
+      const fs = (cfg && cfg.field_schema) || {};
+      const opts = (xs) => [["", "choose…"]].concat((xs || []).map((x) => [x, x]));
+      const v = await UI.modal({ title: "Record the outcome", submitLabel: "Record", wide: true,
+        body: "These go on the reports to Florida. Each party's review cost comes from its invoice.",
+        fields: [{ name: "case_outcome", label: "Case outcome", required: true, options: opts(fs.case_outcome) },
+          { name: "party_billed", label: "Party billed", required: true, options: opts(fs.party_billed) },
+          { name: "amount", label: "Final amount awarded (USD)", type: "number", step: "0.01" },
+          { name: "num_claims", label: "Number of claims reviewed", type: "number", hint: "May differ from the number submitted." }] });
+      if (!v) return;
+      const body = { case_outcome: v.case_outcome, party_billed: v.party_billed };
+      if (v.amount) body.final_amount_awarded_cents = Math.round(parseFloat(v.amount) * 100);
+      if (v.num_claims) body.num_claims_reviewed = parseInt(v.num_claims, 10);
+      try { await Api.program.recordOutcome(id, body); UI.toast("Outcome recorded"); setTimeout(() => App.rerender(), 800); }
+      catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+      return;
+    }
     if (!a.startsWith("signal:")) return;
     const sig = a.slice(7);
     if (sig === "PACKET_COMPLETE") {
       const v = await UI.modal({ title: "Filing packet complete", body: "Payment and documents have both arrived.", submitLabel: "Confirm",
-        fields: [{ name: "est", label: "Did the filer tick “estimate requested” in the packet?", required: true, options: WF_YESNO }] });
-      if (v) wfSend(id, sig, { estimate_requested: v.est === "yes" }, "Packet recorded as complete");
+        fields: [{ name: "est", label: "Did the filer tick “estimate requested” in the packet?", required: true, options: WF_YESNO },
+          { name: "claims", label: "Number of claims in the filing packet", type: "number", required: true,
+            hint: "Reported to Florida as “Number of Claims Submitted with Initial Filing”." }] });
+      if (v) wfSend(id, sig, { estimate_requested: v.est === "yes", claims_submitted: parseInt(v.claims, 10) || 0 }, "Packet recorded as complete");
     } else if (sig === "ESTIMATE_PERMISSION") {
       const v = await UI.modal({ title: "Provider's permission to proceed", submitLabel: "Record",
         fields: [{ name: "g", label: "Did the provider give permission to proceed with the full review?", required: true, options: WF_YESNO }] });
@@ -295,22 +314,6 @@ const Views = (() => {
       const v = await UI.modal({ title: "Coding review complete", submitLabel: "Complete",
         fields: [{ name: "c", label: "Is clinical review by the Nurse / Physician needed?", required: true, options: WF_YESNO }] });
       if (v) wfSend(id, sig, { clinical_requested: v.c === "yes" }, "Coding review recorded");
-    } else if (sig === "ATTORNEY_REVIEW_COMPLETE") {
-      const fs = (cfg && cfg.field_schema) || {};
-      const opts = (xs) => [["", "choose…"]].concat((xs || []).map((x) => [x, x]));
-      const v = await UI.modal({ title: "Final rationale complete", submitLabel: "Complete", wide: true,
-        body: "Record the outcome with the rationale. The case then goes to the PM for the invoice and QA.",
-        fields: [{ name: "case_outcome", label: "Case outcome", options: opts(fs.case_outcome) },
-          { name: "party_billed", label: "Party billed", options: opts(fs.party_billed) },
-          { name: "amount", label: "Final amount awarded (USD)", type: "number", step: "0.01" },
-          { name: "num_claims", label: "Number of claims reviewed", type: "number" }] });
-      if (!v) return;
-      const data = {};
-      if (v.case_outcome) data.case_outcome = v.case_outcome;
-      if (v.party_billed) data.party_billed = v.party_billed;
-      if (v.amount) data.final_amount_awarded_cents = Math.round(parseFloat(v.amount) * 100);
-      if (v.num_claims) data.num_claims_reviewed = parseInt(v.num_claims, 10);
-      wfSend(id, sig, data, "Review recorded");
     } else if (await UI.confirm(st.label, "Record this step as done?", "Record")) {
       wfSend(id, sig, {}, "Recorded");
     }
@@ -3921,6 +3924,7 @@ const Views = (() => {
     return `<div class="view-head"><h1>My timesheet</h1>
       <span class="muted">log the hours you work each day — totals roll up daily, weekly, and monthly</span></div>
       <div id="ts-summary" class="cards"></div>
+      <div id="ts-prompts"></div>
       <div class="panel"><h2>Log time</h2>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.myTimeAdd(this)">
           <select name="case_id" id="ts-case" required><option value="">dispute…</option></select>
@@ -3962,6 +3966,34 @@ const Views = (() => {
       } catch (e) { /* leave placeholder */ }
     }
     await myTimeListBox();
+    myTimePrompts();
+  }
+  // Disputes this user worked on (from the audit trail) on days they have
+  // logged no time for them. "Log" fills the form above; nothing is recorded
+  // until they enter the hours themselves.
+  async function myTimePrompts() {
+    const box = document.getElementById("ts-prompts");
+    if (!box) return;
+    try {
+      const ps = (await Api.time.prompts()).prompts || [];
+      box.innerHTML = ps.length ? `<div class="panel"><h2>Time not yet recorded</h2>
+        <p class="muted">You worked on these disputes on these days and have no time entry for them.</p>
+        <table><thead><tr><th>Day</th><th>Dispute</th><th>What you did</th><th></th></tr></thead><tbody>` +
+        ps.map((x) => `<tr><td>${esc(x.day)}</td><td><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td>
+          <td class="muted">${esc(x.what)} (${x.actions})</td>
+          <td><button class="mini" type="button" onclick="Views.myTimePromptFill('${esc(x.case_id)}','${esc(x.case_number)}','${esc(x.day)}')">Log time</button></td></tr>`).join("") +
+        `</tbody></table></div>` : "";
+    } catch (e) { box.innerHTML = ""; }
+  }
+  function myTimePromptFill(caseId, caseNumber, day) {
+    const form = document.querySelector('form[onsubmit*="myTimeAdd"]');
+    if (!form) return;
+    const sel = form.case_id;
+    if (![...sel.options].some((o) => o.value === caseId)) sel.insertAdjacentHTML("beforeend", `<option value="${esc(caseId)}">${esc(caseNumber)}</option>`);
+    sel.value = caseId;
+    form.entry_date.value = day;
+    form.scrollIntoView({ behavior: "smooth", block: "center" });
+    form.hours.focus();
   }
 
   function myTimeRange(form, reset) {
@@ -5701,5 +5733,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill };
 })();
