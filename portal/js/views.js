@@ -1639,6 +1639,9 @@ const Views = (() => {
         <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
       </div></details>` : ""}
 
+      ${sopNotesHtml(id, c)}
+      ${sopSummaryHtml(id, c, cfg)}
+
       <details class="prog-sec"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
         <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
