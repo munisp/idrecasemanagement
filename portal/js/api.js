@@ -25,6 +25,19 @@ const Api = (() => {
     return data;
   }
 
+  // reqRaw: raw-text bodies (NACHA return files are not JSON).
+  async function reqRaw(method, path, raw) {
+    const tok = await Auth.token();
+    if (!tok) throw new Error("unauthenticated");
+    const resp = await fetch(window.IDRE_CONFIG.apiBase + path, {
+      method, headers: { Authorization: `Bearer ${tok}`, "Content-Type": "text/plain" }, body: raw,
+    });
+    if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
+    const data = resp.headers.get("content-type")?.includes("json") ? await resp.json() : await resp.text();
+    if (!resp.ok) throw new Error(typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`);
+    return data;
+  }
+
   // download: every file-serving endpoint requires the same Bearer auth as
   // every other API call -- a plain <a href> can never attach it, which is
   // exactly why "download" and the documents.zip link both 403'd with
@@ -118,6 +131,7 @@ const Api = (() => {
       timeList: (id) => req("GET", `${t()}/cases/${id}/time`),
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       retryAnalysis: (id, docId) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/retry`),
+      analysisFeedback: (id, docId, p) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/feedback`, p),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
       activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },
@@ -304,6 +318,7 @@ const Api = (() => {
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
       matchCheck: (checkId, body) => req("POST", `${t()}/checks/${checkId}/match`, body),
+      checkFeedback: (checkId, p) => req("POST", `${t()}/checks/${checkId}/feedback`, p),
       checkImage: (checkId) => blobURL(`${t()}/checks/${checkId}/image`),
       uploadCheck: (file) => {
         const fd = new FormData();
@@ -318,6 +333,21 @@ const Api = (() => {
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
       qaDecision: (id, decision, note, editedBody, to, cc) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined, to, cc }),
       mailJournal: (opts) => req("GET", `${t()}/correspondence${qs(opts || {})}`),
+      // Payment rails (moov-io): vault-sealed accounts, ACH/wire/ICL/Metro2 files, OFAC screening
+      railAccounts: () => req("GET", `${t()}/payments/accounts`),
+      railAccountAdd: (body) => req("POST", `${t()}/payments/accounts`, body),
+      railAccountDel: (id) => req("DELETE", `${t()}/payments/accounts/${id}`),
+      railRouting: (num) => req("GET", `${t()}/payments/routing/${encodeURIComponent(num)}`),
+      railAchDebits: (body) => req("POST", `${t()}/payments/ach/debits`, body),
+      railAchReturns: (raw) => reqRaw("POST", `${t()}/payments/ach/returns`, raw),
+      railWire: (body) => req("POST", `${t()}/payments/wire`, body),
+      railIcl: () => req("POST", `${t()}/payments/icl`, {}),
+      railMetro2: (body) => req("POST", `${t()}/payments/metro2`, body),
+      railFiles: (kind) => req("GET", `${t()}/payments/files${qs(kind ? { kind } : {})}`),
+      railFileItems: (id) => req("GET", `${t()}/payments/files/${id}/items`),
+      railFileBody: (id) => req("GET", `${t()}/payments/files/${id}/file`),
+      screeningStatus: () => req("GET", `${t()}/screening/status`),
+      screeningCheck: (body) => req("POST", `${t()}/screening/check`, body),
       intake: (opts) => req("GET", `${t()}/intake${qs(opts || {})}`),
       createIntake: (p) => req("POST", `${t()}/intake`, p),
       intakeBulk: (p) => req("POST", `${t()}/intake/bulk`, p),

@@ -199,10 +199,10 @@ func (s *server) decideApplication(w http.ResponseWriter, r *http.Request) {
 	// Approval authority matrix (enforced again inside the workflow):
 	//   IDRE_ENTITY  -> FEDERAL_ADMIN only
 	//   others       -> CASE_MANAGER of that tenant, or FEDERAL_ADMIN
-	var appType, tenant string
+	var appType, tenant, legalName string
 	if err := s.db.QueryRow(r.Context(),
-		`SELECT type, tenant FROM public.stakeholder_applications WHERE id=$1`, appID).
-		Scan(&appType, &tenant); err != nil {
+		`SELECT type, tenant, legal_name FROM public.stakeholder_applications WHERE id=$1`, appID).
+		Scan(&appType, &tenant, &legalName); err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
@@ -234,6 +234,11 @@ func (s *server) decideApplication(w http.ResponseWriter, r *http.Request) {
 		"by": p.Subject, "application_id": appID, "type": appType,
 		"decision": in.Decision, "reason": truncate(in.Reason, 500),
 	})
+	if in.Decision == "APPROVE" {
+		// OFAC sanctions screening (watchman-backed, warn-only): the approval
+		// stands, but a hit is recorded, audit-logged and broadcast to staff.
+		s.screenOnboardingSubject(r, tenant, strings.ToUpper(appType), appID, legalName)
+	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "decision signaled"})
 }
 

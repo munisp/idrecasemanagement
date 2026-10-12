@@ -500,6 +500,7 @@ func main() {
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
 		r.Get("/cases/{caseId}/documents/{docId}/835.csv", s.documentAs835) // an 835 ERA text file as a table
 		r.Post("/cases/{caseId}/documents/{docId}/analysis/retry", s.retryDocumentAnalysis)
+		r.Post("/cases/{caseId}/documents/{docId}/analysis/feedback", s.submitDocFeedback)
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
@@ -542,6 +543,7 @@ func main() {
 		r.Get("/checks/{checkId}/image", s.checkImage)                  // vault-unsealed scan for portal preview
 		r.Post("/checks/{checkId}/clear", s.clearCheck)                 // funds-cleared settlement
 		r.Post("/checks/{checkId}/match", s.matchCheck)                 // manual link to invoice/case when auto-match (checkResult) landed it in REVIEW
+		r.Post("/checks/{checkId}/feedback", s.submitCheckFeedback)     // extraction corrections -> learning loop
 		r.Post("/internal/checks/{checkId}/result", s.checkResult)      // worker-token: doc-intel OCR
 		r.Post("/internal/copilot/actions/apply", s.copilotApplyAction) // worker-token: Phase 3 batch executor
 		r.Post("/cases/relate", s.relateCases)
@@ -619,7 +621,23 @@ func main() {
 		r.Post("/arap/payouts/nacha", s.createNachaPayout)             // FINANCE: ACH file from open payables
 		r.Get("/arap/payouts", s.listPayoutBatches)
 		r.Get("/arap/payouts/{batchId}/file", s.payoutBatchFile)
-		r.Get("/cases/{caseId}/financials", s.caseFinancials) // every money record tied to the dispute
+		// Payment rails (moov-io stack): vault-sealed accounts, ACH debits/returns,
+		// Fedwire, X9.37 image cash letters, Metro 2 furnishing, OFAC screening.
+		r.Post("/payments/accounts", s.createPaymentAccount)
+		r.Get("/payments/accounts", s.listPaymentAccounts)
+		r.Delete("/payments/accounts/{accountId}", s.deletePaymentAccount)
+		r.Get("/payments/routing/{routing}", s.lookupRoutingNumber)
+		r.Post("/payments/ach/debits", s.createACHDebitBatch)
+		r.Post("/payments/ach/returns", s.ingestACHReturns)
+		r.Post("/payments/wire", s.createWireFile)
+		r.Post("/payments/icl", s.createImageCashLetter)
+		r.Post("/payments/metro2", s.createMetro2File)
+		r.Get("/payments/files", s.listPaymentFiles)
+		r.Get("/payments/files/{fileId}/items", s.paymentFileItems)
+		r.Get("/payments/files/{fileId}/file", s.paymentFileBody)
+		r.Get("/screening/status", s.screeningStatus)
+		r.Post("/screening/check", s.screenSubject)
+		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
 		// multiple initiating parties (providers or health plans).
@@ -840,6 +858,8 @@ func main() {
 		_ = srv.Shutdown(ctx)
 		stopTelemetry(ctx)
 	}()
+
+	s.startWatchmanRefresher() // OFAC SDN list: refresh now + every 24h (best-effort)
 
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

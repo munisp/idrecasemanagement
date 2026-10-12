@@ -699,3 +699,95 @@ def test_an_unreadable_page_is_called_unreadable_not_unrelated():
     assert not any("not related to medical billing" in f["issue"] for f in faint["findings"])
     clear = pl.stage_validate(dict(base), {}, None)                    # a legible page about something else
     assert clear["doc_type"] == "unrelated" and any("not related to medical billing" in f["issue"] for f in clear["findings"])
+
+
+# --- deterministic field extraction (stage_fields) --------------------------
+
+import fields as _fields
+
+
+BILL_TEXT = """
+Bright Path Surgery Center
+Statement Date: 03/15/2026
+Claim Number: CLM-88420317
+Rendering Provider NPI: 1234567893
+TIN: 59-1234567
+Date of Service: 2026-02-28
+CPT 99283   Emergency dept visit        $450.00
+CPT 70450   CT head                     $1,250.00
+Total Billed: $1,700.00
+Patient Responsibility: $340.00
+"""
+
+
+def test_extract_fields_amounts_and_dates():
+    f = _fields.extract_fields(BILL_TEXT)
+    labels = {a["label"]: a["cents"] for a in f["amounts"]}
+    assert labels["total billed"] == 170000
+    assert labels["patient responsibility"] == 34000
+    dates = {d["label"]: d["iso"] for d in f["dates"]}
+    assert dates["statement date"] == "2026-03-15"
+    assert dates["date of service"] == "2026-02-28"
+
+
+def test_extract_fields_identifiers_and_codes():
+    f = _fields.extract_fields(BILL_TEXT)
+    assert f["identifiers"]["npi"]["value"] == "1234567893"
+    assert f["identifiers"]["npi"]["luhn_valid"] is True
+    assert f["identifiers"]["tin"] == "591234567"
+    assert f["identifiers"]["claim_number"] == "CLM-88420317"
+    assert "99283" in f["cpt_codes"]
+
+
+def test_extract_fields_empty_text():
+    f = _fields.extract_fields("")
+    assert f["amounts"] == [] and f["dates"] == [] and f["identifiers"] == {}
+
+
+def test_npi_luhn_check():
+    assert _fields.valid_npi("1234567893") is True   # canonical CMS example
+    assert _fields.valid_npi("1234567890") is False
+    assert _fields.valid_npi("123") is False
+
+
+def test_cross_check_flags_bad_npi():
+    f = {"identifiers": {"npi": {"value": "1234567890", "luhn_valid": False}}, "amounts": []}
+    issues = _fields.cross_check(f)
+    assert any("Luhn" in i for i in issues)
+
+
+def test_cross_check_conflicting_totals():
+    f = {"identifiers": {}, "amounts": [
+        {"label": "total billed", "cents": 100000},
+        {"label": "total due", "cents": 90000},
+    ]}
+    issues = _fields.cross_check(f)
+    assert any("Conflicting total" in i for i in issues)
+
+
+def test_stage_fields_docked_in_pipeline(monkeypatch):
+    ctx = {"text": BILL_TEXT}
+    out = pl.stage_fields(ctx, {})
+    assert out["extracted_fields"]["identifiers"]["tin"] == "591234567"
+    # clean document: no check issues
+    assert out["field_check_issues"] == []
+
+
+def test_validate_surfaces_field_check_issues():
+    ctx = {"extracted": {}, "field_check_issues": ["NPI 1234567890 fails Luhn checksum"]}
+    out = pl.stage_validate(ctx, {}, None)
+    assert any("Luhn" in f["issue"] for f in out["findings"])
+    assert out["status"] == "ANALYZED_WITH_FINDINGS"
+
+
+def test_a_per_field_answer_keeps_its_probabilities_and_is_shaped(monkeypatch):
+    answer = {"_in_domain": True, "billed_amount_usd": {"value": "$1,850.00", "probability": 0.9},
+              "service_lines": {"value": ROWS, "probability": 0.7}, "provider_name": "Northgate Health, P.C."}
+    monkeypatch.setattr(pl, "_vlm_call", lambda *a, **k: dict(answer))
+    monkeypatch.setattr(pl, "_model", lambda key, factory: object())
+    ctx = pl.stage_vlm_extract({"doc_type": "eob", "text": "x", "markdown": "x"}, {"endpoint": "http://x", "model": "m"},
+                               {"eob": {"fields": ["billed_amount_usd", "service_lines", "provider_name"]}})
+    ex = ctx["extracted"]
+    assert ex["billed_amount_usd"] in ("$1,850.00", 1850.0) and len(ex["service_lines"]) == 2
+    assert ex["provider_name"] == "Northgate Health, P.C."
+    assert ctx["vlm_field_probability"]["billed_amount_usd"] == 0.9

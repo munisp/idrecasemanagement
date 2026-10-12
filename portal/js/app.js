@@ -201,6 +201,8 @@
   // program rules, so this stays reachable independent of that gate.
   if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/team", "⚉", "Team"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
+  // Payment rails and OFAC screening: money screens, so the money roles (the page itself checks too).
+  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/payments", "🏦", "Payments"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
@@ -380,6 +382,7 @@
     [/^#\/rules$/, Views.rulesAdmin],
     [/^#\/team$/, Views.teamAdmin],
     [/^#\/mail$/, Views.mailLog],
+    [/^#\/payments$/, Views.paymentsView],
     [/^#\/audit$/, Views.auditLog],
   ];
 
