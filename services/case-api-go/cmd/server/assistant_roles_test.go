@@ -65,3 +65,20 @@ func TestAssistantDraftsTakeTheProgramsQAGate(t *testing.T) {
 		t.Errorf("no templates, no gate; got %q", got)
 	}
 }
+
+func TestGeneralAssistantTellsOwnQueueFromProgramWide(t *testing.T) {
+	own := []string{"my open cases", "what is assigned to me", "do I have anything due this week?", "My tasks"}
+	wide := []string{"give me the summary of the current cases", "i mean current disputes in the system",
+		"give me the details of all disputes in the system", "how many disputes are open?",
+		"show me all disputes in the system", "which service lines have the most disputes?"}
+	for _, q := range own {
+		if !aboutOwnQueue(q) {
+			t.Errorf("%q is about the asker's own queue", q)
+		}
+	}
+	for _, q := range wide {
+		if aboutOwnQueue(q) {
+			t.Errorf("%q is about the whole program, not the asker's queue", q)
+		}
+	}
+}

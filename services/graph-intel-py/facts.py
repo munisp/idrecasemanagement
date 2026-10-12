@@ -30,7 +30,8 @@ _lock = threading.Lock()
 # The categories, in the order they are shown, with the words that send a
 # question to each. A question matching none gets the overview.
 CATEGORIES: list[tuple[str, str]] = [
-    ("caseload", r"how many|total|status|stage|open|closed|summary|overview|backlog|caseload|waiting|opened|new"),
+    ("caseload", r"how many|total|status|stage|open|closed|summary|summar|overview|backlog|caseload|waiting|opened|new|"
+                 r"current|all (the )?(cases|disputes)|in the (system|program|platform)|details? of|list (of )?(the )?(cases|disputes)"),
     ("parties", r"who|filer|filed|files?\b|filing|provider|plan|payer|organi[sz]ation|most often|top"),
     ("services", r"service|line\b|radiology|ambulance|anesthesia|lab\b|emergency|\ber\b|imaging|specialt"),
     ("deadlines", r"deadline|late|overdue|breach|sla|older|aging|ageing|days|limit|due\b|missed|escalat|"

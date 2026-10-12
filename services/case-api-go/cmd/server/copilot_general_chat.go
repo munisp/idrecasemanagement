@@ -10,10 +10,12 @@ package main
 // one bounded call, advisory only.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -127,6 +129,7 @@ single case in deep detail.
 
 HARD RULES:
 - Use ONLY the JSON data below. Never invent case numbers, amounts, dates, or details not present here.
+- The data below is ONLY what is assigned to this worker. An empty list means nothing is assigned to THEM -- never say the system, the program or the platform has no cases or disputes. If they ask about cases overall and you have nothing on it, say you can only see their own queue here and point them to the Disputes page.
 - For anything about ONE case beyond what's listed here (eligibility posture, documents, deadlines in depth), tell them to open that case and ask its own case Assistant, which is grounded on that case's full record.
 - A casual greeting gets a casual, friendly reply — this is a chat surface, not a report. Respond naturally.
 - Be concise (under 100 words unless more detail is asked for).
@@ -193,6 +196,26 @@ func (s *server) copilotGeneralChat(w http.ResponseWriter, r *http.Request) {
 
 	facts, _ := s.gatherGeneralCopilotFacts(r, tenant, p)
 
+	// A question about the program as a whole ("the current disputes", "all
+	// cases in the system") is not about this worker's queue. The fact sheet
+	// below holds only what is assigned to them, so the model answered "there
+	// are no disputes" to an admin with nothing assigned and two hundred
+	// disputes in the tenant. Those questions go to the program's own records
+	// instead -- the same source, and the same role limits, as Ask the graph.
+	if !aboutOwnQueue(in.Message) {
+		if ans, src, ok := s.programAnswer(r, tenant, p, in.Message); ok {
+			_, _ = s.db.Exec(r.Context(), `
+				INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body) VALUES ($1,$2,'user',$3)`,
+				tenant, p.Subject, in.Message)
+			_, _ = s.db.Exec(r.Context(), `
+				INSERT INTO public.copilot_general_threads (tenant, user_sub, role, body, model) VALUES ($1,$2,'assistant',$3,$4)`,
+				tenant, p.Subject, ans, src)
+			s.logAudit(r.Context(), tenant, "", "COPILOT_GENERAL_CHAT", map[string]any{"by": p.Subject, "model": src})
+			writeJSON(w, http.StatusOK, map[string]any{"reply": ans, "model": src, "advisory": true})
+			return
+		}
+	}
+
 	rows, err := s.db.Query(r.Context(), `
 		SELECT role, body FROM (SELECT role, body, created_at FROM public.copilot_general_threads
 		  WHERE tenant=$1 AND user_sub=$2 ORDER BY created_at DESC LIMIT $3) t
@@ -239,4 +262,58 @@ func (s *server) copilotGeneralChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"reply": reply, "model": s.cfg.CopilotModel, "advisory": true,
 	})
+}
+
+// ownQueueRE matches a question about the asker's own work: "my open cases",
+// "what's assigned to me", "do I have anything due".
+var ownQueueRE = regexp.MustCompile(`(?i)\b(my|mine|assigned to me|for me to|do i|am i|have i|i have|i need|should i)\b`)
+
+// programWideRE matches wording that is plainly about everything, which wins
+// over a stray "my" ("show me all disputes in the system").
+var programWideRE = regexp.MustCompile(`(?i)\b(all (the )?(cases|disputes)|in the (system|program|platform|tenant)|across the (program|platform|team)|whole (program|team)|every (case|dispute)|overall|program[- ]wide|current (cases|disputes))\b`)
+
+func aboutOwnQueue(msg string) bool {
+	if programWideRE.MatchString(msg) {
+		return false
+	}
+	return ownQueueRE.MatchString(msg)
+}
+
+// programAnswer answers a program-wide question from the program's records,
+// through the same service and the same per-role limits as Ask the graph
+// (graphFactCategories): a role is told what its screens show, and told
+// plainly when a figure is not its to see. ok is false when that source is
+// not available to this caller or did not answer -- the caller then falls
+// back to the worker-scoped chat.
+func (s *server) programAnswer(r *http.Request, tenant string, p principal, question string) (answer, source string, ok bool) {
+	if s.cfg.GraphIntelURL == "" || !mayAskGraph(p) {
+		return "", "", false
+	}
+	payload, _ := json.Marshal(map[string]any{"tenant": tenant, "question": question, "k": 5,
+		"allow": graphFactCategories(p)})
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.GraphIntelURL+"/ask", bytes.NewReader(payload))
+	if err != nil {
+		return "", "", false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := graphHTTP.Do(req)
+	if err != nil {
+		return "", "", false
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Answer    string `json:"answer"`
+		Generator string `json:"generator"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&out) != nil || strings.TrimSpace(out.Answer) == "" {
+		return "", "", false
+	}
+	source = "program records"
+	switch {
+	case out.Generator == "role-boundary":
+		source = "role limits"
+	case strings.HasPrefix(out.Generator, "ollama:"):
+		source = strings.TrimPrefix(out.Generator, "ollama:")
+	}
+	return out.Answer, source, true
 }

@@ -233,7 +233,8 @@ def _records_answer(question: str, lines: list[str]) -> str:
     # well. Everything else considered is listed under the answer anyway.
     hits = [ln for ln in ranked if score(ln) > 0]
     if not hits:
-        return "\n".join(ranked[:2])
+        # A general question ("the disputes in the system"): the overview.
+        return "\n".join(lines[:4])
     best = hits[:1] + [ln for ln in hits[1:2] if score(ln) >= 0.6 * score(hits[0])]
     return "\n".join(best)
 

@@ -229,3 +229,13 @@ def test_a_role_with_every_screen_is_unaffected():
         r = k.ask("t1", "What is the total amount in dispute?",
                   allow=["caseload", "services", "parties", "eligibility", "outcomes", "deadlines", "money"])
     assert "$12,850,595.98" in r["answer"] and r["withheld"] == []
+
+
+def test_a_general_question_about_the_disputes_gets_the_overview():
+    _wire()
+    import facts
+    with mock.patch.object(facts, "gather", lambda tenant: FACTS):
+        for q in ("give me the summary of the current cases", "i mean current disputes in the system",
+                  "give me the details of all disputes in the system"):
+            r = k.ask("t1", q, allow=["caseload", "services"])
+            assert r["generator"] == "program-records" and "213 disputes in total" in r["answer"], q
