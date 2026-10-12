@@ -221,6 +221,26 @@ def _service_line_from_cpt(codes_raw: str | None) -> str | None:
         return "LAB"
     return None
 
+def _service_line_from_text(line) -> str | None:
+    """Category of one EOB service line, or None. The line arrives either as
+    free text or as a row ({"service": ..., "billed_amount_usd": ...}); only
+    the description is read, never the column names. Keywords match whole
+    words: a bare substring test found "ER" inside "SERVICE" and "LAB" inside
+    "AVAILABLE", and filed an office visit under the emergency room. A
+    procedure code written into the description is the better evidence, so
+    it is tried first -- and when it names a category the keywords do not get
+    a vote (99215, an office visit, is not an ER line whatever the text says)."""
+    if isinstance(line, dict):
+        line = line.get("service") or line.get("description") or ""
+    text = str(line).upper()
+    if re.search(r"\b([A-Z]\d{4}|\d{5})\b", text):
+        return _service_line_from_cpt(text)
+    for kw, canon in _SERVICE_LINE_KEYWORDS:
+        if re.search(rf"\b{re.escape(kw)}\b", text):
+            return canon
+    return None
+
+
 # CMS place-of-service codes unambiguous enough to map to an eligibility
 # provider_type without guessing: 21 (Inpatient Hospital) and 22/19 (on/off
 # -campus Outpatient Hospital) are explicit facility-type statements; 11
@@ -474,11 +494,7 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
         if not cur_service_line:
             service_line = _service_line_from_cpt(extracted.get("cpt_hcpcs_codes"))
             if not service_line and service_lines:
-                first = str(service_lines[0]).upper()
-                for kw, canon in _SERVICE_LINE_KEYWORDS:
-                    if kw in first:
-                        service_line = canon
-                        break
+                service_line = _service_line_from_text(service_lines[0])
             if service_line:
                 c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (service_line, case_id))
                 changed.append(f"service line {service_line}")
@@ -832,17 +848,33 @@ def main() -> None:
                 except Exception as mark_exc:  # noqa: BLE001
                     print(f"doc-intel error (while marking a previous error): {mark_exc}",
                           file=sys.stderr, flush=True)
-            consumer.commit(msg)
+            try:
+                consumer.commit(msg)
+            except Exception as exc:  # noqa: BLE001
+                # The partition moved to another consumer while this document
+                # was being read. It will be delivered again; the work is
+                # idempotent, so losing the commit costs time, not correctness.
+                print(f"doc-intel: commit skipped ({exc})", file=sys.stderr, flush=True)
             pending.popleft()
             block = False
 
     print(f"doc-intel consuming {TOPIC_PREFIX}.*.documents as group {CONSUMER_GROUP} (workers={workers}) ...", flush=True)
+    paused = False
     while running:
         drain()
-        if len(pending) >= workers * 2:
-            time.sleep(0.05)  # backpressure: don't outrun the pool
-            continue
-        msg = consumer.poll(0.5)
+        # Backpressure: don't outrun the pool. The consumer must keep polling
+        # while it waits -- a scanned fax takes minutes, and a consumer silent
+        # for max.poll.interval.ms is thrown out of the group and its
+        # documents handed out again. So pause the partitions and poll on.
+        # Re-pause every pass: a rebalance hands back unpaused partitions.
+        full = len(pending) >= workers * 2
+        if full:
+            consumer.pause(consumer.assignment())
+            paused = True
+        elif paused:
+            consumer.resume(consumer.assignment())
+            paused = False
+        msg = consumer.poll(0.2 if full else 0.5)
         if msg is None or msg.error():
             continue
         try:
