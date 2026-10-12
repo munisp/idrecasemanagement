@@ -180,6 +180,13 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
     # Low text coverage => scanned document => conditionally dock PaddleOCR.
     n_pages = max(1, len(ctx.get("pages", [])) or 1)
     ctx["low_text_coverage"] = len(ctx["text"].strip()) < 40 * n_pages
+    # An uploaded IMAGE (photo, scan, fax) is all pixels: Docling's built-in
+    # OCR may return a little text from a faint page and so look "covered",
+    # which skipped the full OCR pass (quality assessment, enhancement,
+    # second-engine check). Sparse text on an image always gets that pass.
+    if sniff_doc_kind(ctx.get("raw_bytes", b""), ctx.get("content_type", "")) == "image" \
+            and len(ctx["text"].strip()) < 400 * n_pages:
+        ctx["low_text_coverage"] = True
     return ctx
 
 
@@ -493,7 +500,12 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
         ctx["ocr_low_confidence_pages"] = low_conf_pages
     ctx["ocr_pages"] = page_audit
 
-    ctx["text"] = "\n\n".join(t for t, _ in page_reads if t)
+    ocr_text = "\n\n".join(t for t, _ in page_reads if t)
+    # Keep whichever read is fuller: this pass now also runs on images Docling
+    # already got some text from, and a weaker OCR read must not replace it.
+    if len(ocr_text.strip()) < len(str(ctx.get("text") or "").strip()):
+        return ctx
+    ctx["text"] = ocr_text
     # OCR recovered text for a scanned doc: markdown has no structure, but
     # downstream stages read markdown first, so mirror it.
     ctx["markdown"] = ctx["text"]
@@ -768,11 +780,21 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         if cfg.get("vision"):
             max_px = cfg.get("vlm_image_max_px", 650)
             for page in pages[i * max_pages:(i + 1) * max_pages] or pages[:max_pages]:
-                thumb = page.copy()
-                thumb.thumbnail((max_px, max_px))
-                content.append({"type": "image_url",
-                                # upstream context fix (thumbnail) + JPEG encoding
-                                "image_url": {"url": f"data:image/jpeg;base64,{pil_to_b64(thumb)}"}})
+                # The thumbnail is a layout cue, not the source of the values
+                # (those come from the transcribed text). If the page image
+                # cannot be decoded, extract from the text alone -- a bad
+                # thumbnail used to abandon the whole extraction, which left
+                # every scanned image with its text read and nothing taken
+                # from it.
+                try:
+                    thumb = page.copy()
+                    thumb.thumbnail((max_px, max_px))
+                    content.append({"type": "image_url",
+                                    # upstream context fix (thumbnail) + JPEG encoding
+                                    "image_url": {"url": f"data:image/jpeg;base64,{pil_to_b64(thumb)}"}})
+                except Exception as exc:  # noqa: BLE001
+                    ctx.setdefault("findings", []).append(
+                        {"field": None, "issue": f"Page image could not be attached ({type(exc).__name__}); values were read from the transcribed text only"})
                 break  # one page image per chunk keeps token cost bounded
         parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
         # A "not in domain" verdict reached WITH a page image attached is not
@@ -1250,5 +1272,18 @@ def bytes_to_pages(data: bytes, content_type: str,
     if k == "pdf":
         return pdf_to_pages(data)
     if k == "image":
-        return [Image.open(io.BytesIO(data))], False
+        # Decode NOW and keep a plain RGB copy. Image.open() is lazy: it only
+        # reads the header, and the pixels were decoded later from the same
+        # stream by whichever stage touched the page first -- which failed
+        # mid-pipeline ("unrecognized data stream contents"). A file that is
+        # slightly truncated still loads what it has.
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        except Exception:
+            from PIL import ImageFile
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        return [img.convert("RGB")], False
     return [], False  # office/text: Docling reads raw bytes; no raster pages
