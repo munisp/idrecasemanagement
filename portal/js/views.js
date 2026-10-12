@@ -1781,8 +1781,8 @@ const Views = (() => {
       <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
       <form id="p-send" class="inline-form">
         ${corrTplCache = cfg.correspondence?.templates || [], ""}
-        <select name="template" onchange="Views.corrTemplateBody(this)">${(cfg.correspondence?.templates || []).map((tp) =>
-          `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
+        ${(setTimeout(() => corrTemplatesFor(id, "#p-send"), 0), "")}
+        <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(cfg.correspondence?.templates || [])}</select>
         <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
         <input name="to" placeholder="to emails (comma-separated)" required />
         <input name="cc" placeholder="cc emails" />
@@ -3574,15 +3574,17 @@ const Views = (() => {
   // land in the gate (whose card renders inline above) and nothing sends
   // without the human approve.
   async function asstMailHtml(caseId) {
-    const prog = await Api.program.get().catch(() => null);
-    const tpls = prog?.config?.correspondence?.templates || [];
+    let tpls = await corrTemplatesFor(caseId, "");
+    if (!tpls.length) {
+      const prog = await Api.program.get().catch(() => null);
+      tpls = prog?.config?.correspondence?.templates || [];
+    }
     if (!tpls.length)
       return `<div class="card"><h3>✉ Send mail</h3><p class="muted">This program defines no correspondence templates — use the case screen's correspondence tools.</p></div>`;
     corrTplCache = tpls;
     return `<div class="card"><h3>✉ Send mail</h3>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.asstSendMail('${caseId}', this)">
-        <select name="template" onchange="Views.corrTemplateBody(this)">${tpls.map((tp) =>
-          `<option value="${esc(tp.key)}">${esc(tp.key)}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("")}</select>
+        <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(tpls)}</select>
         <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
         <input name="to" placeholder="to emails (comma-separated)" required />
         <input name="cc" placeholder="cc emails" />
@@ -4012,6 +4014,28 @@ const Views = (() => {
   // document). Fills only when the body is empty or still holds another
   // template's untouched text — staff edits are never clobbered.
   let corrTplCache = [];
+  // The templates a letter on this case can be drafted from, with the wording
+  // the "When to use" rules choose for it. Fills the compose form's list (and
+  // the cache its pre-fill reads) once the case's own list arrives.
+  async function corrTemplatesFor(caseId, formSel) {
+    try {
+      const r = await Api.program.caseTemplates(caseId);
+      const tpls = r.templates || [];
+      if (!tpls.length) return tpls;
+      corrTplCache = tpls;
+      const sel = formSel && document.querySelector(formSel + " select[name=template]");
+      if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = corrTemplateOptions(tpls);
+        if (tpls.some((t) => t.key === cur)) sel.value = cur;
+      }
+      return tpls;
+    } catch { return []; }
+  }
+  function corrTemplateOptions(tpls) {
+    return tpls.map((tp) => `<option value="${esc(tp.key)}">${esc(tplName(tp))}${tp.custom ? " (added)" : ""}${tp.qa_role ? " (QA: " + esc(tp.qa_role) + ")" : ""}</option>`).join("");
+  }
+
   function corrTemplateBody(sel) {
     const form = sel.form;
     const tp = corrTplCache.find((t) => t.key === sel.value);
@@ -4260,6 +4284,214 @@ const Views = (() => {
       try { await Api.time.remove(id); UI.toast("Entry deleted"); myTimesheetBoxes(); }
       catch (err) { UI.toast(err.message, { kind: "warn" }); }
     }, "Deleting…");
+  }
+
+  // ---- Templates: the program's emails, and which one is used when ----------
+  // Two tabs. "Templates" lists every email template; the PM and admins can
+  // change the wording and recipients, add their own and retire those. "When
+  // to use" has one row per point in the process and says which template is
+  // drafted there -- for every case, or differently for some. Whatever is
+  // chosen, the step keeps its own approver: the wording changes, the QA gate
+  // does not.
+  const TPL_ROLE_LABELS = { requester: "The person who asked to file", filing_party: "Filing party", provider: "Provider",
+    health_plan: "Health plan", provider_or_plan: "Provider or plan (chosen when sent)", billed_party: "Whoever is billed",
+    all_parties: "Both parties", agency: "The Agency (AHCA)", pm: "Program Manager" };
+  const tplRole = (r) => TPL_ROLE_LABELS[r] || r;
+  const tplName = (t) => t.name || t.key.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()).replace(/^Rfi$/, "RFI");
+  let tplData = null, tplTab = "templates";
+
+  async function templatesPage() {
+    afterRender(tplLoad);
+    return `<div class="view-head"><h1>Templates</h1>
+      <span class="muted">the emails this program sends, and which one is used when</span></div>
+      <div id="tpl-root"><p class="muted">Loading…</p></div>`;
+  }
+
+  async function tplLoad() {
+    const root = document.getElementById("tpl-root");
+    if (!root) return;
+    try { tplData = await Api.program.templates(); }
+    catch (e) { root.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    tplRender();
+  }
+
+  function tplRender() {
+    const root = document.getElementById("tpl-root");
+    if (!root || !tplData) return;
+    const d = tplData, edit = d.can_edit;
+    const approver = (t) => t.qa_role ? (t.qa_pre_role ? `${t.qa_pre_role} checks, then ${t.qa_role}` : t.qa_role) : "Sent without approval";
+    const status = (t) => t.inactive ? `<span class="badge">Retired</span>` : t.custom ? `<span class="badge s-info">Added</span>`
+      : t.edited ? `<span class="badge warn">Edited</span>` : `<span class="badge s-paid">Standard</span>`;
+    const rows = d.templates.map((t) => `<tr class="${t.inactive ? "tpl-retired" : ""}">
+      <td><button type="button" class="tt-link" onclick="Views.tplEdit('${esc(t.key)}')">${esc(tplName(t))}</button>
+        <div class="muted mono">${esc(t.key)}</div></td>
+      <td>${t.custom ? (t.used_by.length ? `Used for: ${esc(t.used_by.map((e) => (d.events.find((x) => x.event === e) || {}).label || e).join("; "))}` : `<span class="muted">Picked by hand</span>`) : esc(t.when || "")}</td>
+      <td>${esc((t.to || []).map(tplRole).join(", "))}</td>
+      <td>${esc(approver(t))}</td><td>${status(t)}</td>
+      <td class="muted">${t.updated_by ? `${esc(t.updated_by)} · ${fmtDate(t.updated_at)}` : "—"}</td></tr>`).join("");
+    const active = d.templates.filter((t) => !t.inactive);
+    const options = (sel) => active.map((t) => `<option value="${esc(t.key)}" ${t.key === sel ? "selected" : ""}>${esc(tplName(t))}${t.custom ? " (added)" : ""}</option>`).join("");
+    const cond = (u) => [u.filing_party_type && (u.filing_party_type === "HEALTH_PLAN" ? "filed by a health plan" : "filed by a provider"),
+      u.line_of_business && `line of business ${u.line_of_business}`].filter(Boolean).join(" and ");
+    const eventRows = d.events.map((ev) => {
+      const def = ev.rules.find((u) => !u.filing_party_type && !u.line_of_business);
+      const exceptions = ev.rules.filter((u) => u.filing_party_type || u.line_of_business);
+      const nameOf = (k) => { const t = d.templates.find((x) => x.key === k); return t ? tplName(t) : k; };
+      return `<tr><td><b>${esc(ev.label)}</b><div class="muted mono">${esc(ev.event)}</div></td>
+        <td>${edit ? `<select onchange="Views.tplUsageDefault('${esc(ev.event)}', this.value)" aria-label="Template for ${esc(ev.label)}">${options(def ? def.template : ev.event)}</select>`
+                   : esc(nameOf(def ? def.template : ev.event))}</td>
+        <td>${exceptions.map((u) => `<div class="tpl-exc">When ${esc(cond(u))}: <b>${esc(nameOf(u.template))}</b>
+            ${edit ? `<button type="button" class="tt-link tt-only" onclick="Views.tplUsageRemove(${u.id})">remove</button>` : ""}</div>`).join("") || `<span class="muted">None</span>`}
+          ${edit ? `<details class="tpl-add"><summary>Add an exception</summary>
+            <form class="inline-form" onsubmit="event.preventDefault(); Views.tplUsageAdd('${esc(ev.event)}', this)">
+              <select name="party" aria-label="Filed by"><option value="">Filed by anyone</option><option value="PROVIDER">Filed by a provider</option><option value="HEALTH_PLAN">Filed by a health plan</option></select>
+              <select name="lob" aria-label="Line of business"><option value="">Any line of business</option>${(d.lines_of_business || []).map((x) => `<option>${esc(x)}</option>`).join("")}</select>
+              <select name="template" aria-label="Template">${options("")}</select>
+              <button class="mini">Add</button></form></details>` : ""}</td></tr>`;
+    }).join("");
+    root.innerHTML = `
+      <div class="rpt-tabs" role="tablist">
+        <button type="button" role="tab" class="rpt-tab rpt-accent-1 ${tplTab === "templates" ? "active" : ""}" onclick="Views.tplShowTab('templates')">Templates (${d.templates.length})</button>
+        <button type="button" role="tab" class="rpt-tab rpt-accent-1 ${tplTab === "usage" ? "active" : ""}" onclick="Views.tplShowTab('usage')">When to use</button>
+      </div>
+      <div class="tpl-panel" ${tplTab === "templates" ? "" : "hidden"}>
+        <div class="tpl-bar">${edit ? `<button onclick="Views.tplEdit('')">New template</button>` : `<span class="muted">Templates are changed by the Program Manager or an administrator.</span>`}</div>
+        <table><thead><tr><th>Template</th><th>When it is used</th><th>Goes to</th><th>Approved by</th><th>Status</th><th>Last change</th></tr></thead><tbody>${rows}</tbody></table>
+        <div id="tpl-editor"></div>
+      </div>
+      <div class="tpl-panel" ${tplTab === "usage" ? "" : "hidden"}>
+        <p class="muted">Each row is a point in the process. Choose which template is drafted there. An exception uses a different one for some cases; the most specific match wins.
+          The approver belongs to the step and does not change with the template.</p>
+        <table><thead><tr><th>When</th><th>Template used</th><th>Exceptions</th></tr></thead><tbody>${eventRows}</tbody></table>
+      </div>`;
+  }
+
+  function tplShowTab(tab) { tplTab = tab; tplRender(); }
+
+  // The editor, for an existing template or (key "") a new one.
+  function tplEdit(key) {
+    const d = tplData, box = document.getElementById("tpl-editor");
+    if (!d || !box) return;
+    const t = d.templates.find((x) => x.key === key) || { key: "", custom: true, to: [], cc: [], subject: "", body: "" };
+    const isNew = !key, edit = d.can_edit, ro = edit ? "" : "disabled";
+    const checks = (name, chosen) => d.recipient_roles.map((r) =>
+      `<label class="tpl-check"><input type="checkbox" name="${name}" value="${esc(r)}" ${(chosen || []).includes(r) ? "checked" : ""} ${ro} /> ${esc(tplRole(r))}</label>`).join("");
+    box.innerHTML = `<form class="card tpl-form" onsubmit="event.preventDefault(); Views.tplSave(this)">
+      <h2>${isNew ? "New template" : esc(tplName(t))}</h2>
+      ${isNew ? "" : `<p class="muted">${t.custom ? "A template added from this screen." : `Standard template — ${esc(t.when || "")}.`}
+        ${t.qa_role ? `Approved by ${esc(t.qa_pre_role ? t.qa_pre_role + " then " + t.qa_role : t.qa_role)} before it is sent.` : "Sent without approval."}</p>`}
+      <input type="hidden" name="key" value="${esc(t.key)}" />
+      <div class="tt-grid">
+        <label>Name <input name="name" value="${esc(t.name || (isNew ? "" : tplName(t)))}" maxlength="120" placeholder="e.g. Holiday closure notice" ${ro} ${isNew ? `oninput="Views.tplSlug(this)"` : ""} /></label>
+        ${isNew ? `<label>Short name <input name="newkey" required pattern="[a-z][a-z0-9_]{2,40}" placeholder="holiday_closure_notice" title="Lowercase letters, digits and underscores" /></label>` : ""}
+      </div>
+      <label class="tpl-field">Subject <input name="subject" value="${esc(t.subject || "")}" maxlength="300" required ${ro} /></label>
+      <label class="tpl-field">Message
+        <textarea name="body" rows="14" required ${ro}>${esc(t.body || "")}</textarea></label>
+      ${edit ? `<div class="tpl-ph"><span class="muted">Insert:</span> ${d.placeholders.map((p) =>
+        `<button type="button" class="tt-preset" title="${esc(p.meaning)}" onclick="Views.tplInsert('${esc(p.token)}')">${esc(p.token)}</button>`).join("")}</div>` : ""}
+      <fieldset class="tpl-set"><legend>Goes to</legend>${checks("to", t.to)}</fieldset>
+      <fieldset class="tpl-set"><legend>Copied to</legend>${checks("cc", t.cc)}</fieldset>
+      ${edit && t.custom && !isNew ? `<label class="tpl-check"><input type="checkbox" name="active" ${t.inactive ? "" : "checked"} /> In use (untick to retire it)</label>` : ""}
+      <div class="tt-actions">
+        ${edit ? `<button>Save</button>` : ""}
+        <button type="button" class="mini ghost" onclick="Views.tplPreview(this.form)">Preview with a real case</button>
+        ${isNew ? "" : `<button type="button" class="mini ghost" onclick="Views.tplHistory('${esc(t.key)}')">History</button>`}
+        ${edit && !isNew && t.custom ? `<button type="button" class="mini danger" onclick="Views.tplDelete('${esc(t.key)}', false)">Delete</button>` : ""}
+        ${edit && !isNew && !t.custom && t.edited ? `<button type="button" class="mini ghost" onclick="Views.tplDelete('${esc(t.key)}', true)">Restore the standard wording</button>` : ""}
+        <button type="button" class="mini ghost" onclick="document.getElementById('tpl-editor').innerHTML=''">Close</button>
+      </div>
+      <div id="tpl-extra"></div></form>`;
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // A new template's short name follows its name until the person types one.
+  function tplSlug(input) {
+    const f = input.form;
+    if (!f.newkey || f.newkey.dataset.touched) return;
+    f.newkey.value = input.value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^[^a-z]+|_+$/g, "").slice(0, 41);
+    f.newkey.oninput = () => { f.newkey.dataset.touched = "1"; };
+  }
+
+  function tplInsert(token) {
+    const ta = document.querySelector("#tpl-editor textarea[name=body]");
+    if (!ta) return;
+    const a = ta.selectionStart ?? ta.value.length, b = ta.selectionEnd ?? ta.value.length;
+    ta.value = ta.value.slice(0, a) + token + ta.value.slice(b);
+    ta.focus(); ta.selectionStart = ta.selectionEnd = a + token.length;
+  }
+
+  const tplChecked = (form, name) => [...form.querySelectorAll(`input[name=${name}]:checked`)].map((i) => i.value);
+
+  async function tplSave(form) {
+    const key = form.key.value || (form.newkey ? form.newkey.value.trim() : "");
+    const body = { name: form.name.value.trim(), subject: form.subject.value, body: form.body.value,
+      to: tplChecked(form, "to"), cc: tplChecked(form, "cc") };
+    if (form.active) body.active = form.active.checked;
+    if (!form.key.value && tplData.templates.some((t) => t.key === key)) {
+      UI.toast(`A template called ${key} already exists — pick another short name`, { kind: "warn" }); return;
+    }
+    await UI.run(form.querySelector(".tt-actions button"), async () => {
+      try {
+        await Api.program.templateSave(key, body);
+        UI.toast("Template saved");
+        await tplLoad();
+        tplEdit(key);
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Saving…");
+  }
+
+  async function tplDelete(key, restore) {
+    const ok = await UI.confirm(restore ? "Restore the standard wording?" : "Delete this template?",
+      restore ? "Your edits are removed and the program's own text is used again. The edited version stays in the history."
+              : "It will no longer be offered. Its history is kept.", restore ? "Restore" : "Delete");
+    if (!ok) return;
+    try { await Api.program.templateDelete(key); UI.toast(restore ? "Standard wording restored" : "Template deleted"); await tplLoad(); if (restore) tplEdit(key); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function tplPreview(form) {
+    const out = document.getElementById("tpl-extra");
+    out.innerHTML = `<p class="muted">Filling in the placeholders…</p>`;
+    try {
+      const r = await Api.program.templatePreview({ subject: form.subject.value, body: form.body.value });
+      out.innerHTML = `<div class="tpl-preview"><div class="muted">As it would read for case ${esc(r.case_number || "—")}. Links are created only when a message is really sent.</div>
+        <div class="tpl-prev-subject">${esc(r.subject)}</div><pre>${esc(r.body)}</pre></div>`;
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tplHistory(key) {
+    const out = document.getElementById("tpl-extra");
+    try {
+      const r = await Api.program.templateHistory(key);
+      const label = { CREATED: "Created", EDITED: "Edited", DELETED: "Deleted", RESTORED_TO_STANDARD: "Restored to the standard wording" };
+      out.innerHTML = (r.history || []).length ? `<div class="tpl-preview"><b>History</b>` + r.history.map((h) =>
+        `<details><summary>${esc(label[h.action] || h.action)} by ${esc(h.changed_by || "—")} · ${fmtDate(h.changed_at)}</summary>
+          ${h.before ? `<div class="muted">Before this change${h.before.source ? ` (${esc(h.before.source)})` : ""}:</div>
+            <div class="tpl-prev-subject">${esc(h.before.subject || "")}</div><pre>${esc(h.before.body || "")}</pre>` : `<div class="muted">Nothing before it — this is where the template was created.</div>`}
+        </details>`).join("") + `</div>` : `<p class="muted">No changes recorded — this is the program's standard wording.</p>`;
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tplUsageDefault(event, template) {
+    try { await Api.program.templateUsageSet({ event, template }); UI.toast("Saved"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    await tplLoad();
+  }
+
+  async function tplUsageAdd(event, form) {
+    if (!form.party.value && !form.lob.value) { UI.toast("Choose who filed or a line of business — or change the main template for this row instead", { kind: "warn" }); return; }
+    try {
+      await Api.program.templateUsageSet({ event, template: form.template.value, filing_party_type: form.party.value, line_of_business: form.lob.value });
+      UI.toast("Exception added");
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    await tplLoad();
+  }
+
+  async function tplUsageRemove(id) {
+    try { await Api.program.templateUsageDelete(id); UI.toast("Exception removed"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    await tplLoad();
   }
 
   // ---- Team time: the whole team's hours, searchable and filterable --------
@@ -6043,5 +6275,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
 })();

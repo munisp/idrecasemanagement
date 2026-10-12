@@ -655,3 +655,30 @@ ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 .tt-more{margin-top:14px}
 .tt-more>summary{cursor:pointer;font-weight:600}
 .tt-more[open]>summary{margin-bottom:10px}
+
+/* ---- Templates ---------------------------------------------------------- */
+.tpl-panel{margin-top:12px}
+.tpl-panel[hidden]{display:none}
+.tpl-bar{display:flex;align-items:center;gap:10px;margin:0 0 10px}
+.tpl-retired td{opacity:.55}
+.tpl-form{display:flex;flex-direction:column;gap:14px;margin-top:18px}
+.tpl-form h2{margin:0}
+.tpl-field{display:flex;flex-direction:column;gap:5px;font-size:12px;font-weight:600;color:var(--text-secondary)}
+.tpl-field input,.tpl-field textarea{padding:9px 11px;border:1px solid var(--border-default);border-radius:8px;background:var(--surface-base);color:var(--text-primary);font:inherit;font-weight:400;width:100%}
+.tpl-field textarea{line-height:1.5;resize:vertical;font-family:var(--font-mono,ui-monospace,monospace);font-size:13px}
+.tpl-field input:focus,.tpl-field textarea:focus{outline:2px solid var(--accent-primary);outline-offset:1px}
+.tpl-ph{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.tpl-ph .tt-preset{font-family:var(--font-mono,ui-monospace,monospace);font-size:12px}
+.tpl-set{border:1px solid var(--border-subtle);border-radius:10px;padding:10px 12px;display:flex;flex-wrap:wrap;gap:6px 18px;margin:0}
+.tpl-set legend{font-size:12px;font-weight:600;color:var(--text-secondary);padding:0 6px}
+.tpl-check{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:400;color:var(--text-primary)}
+.tpl-preview{border:1px solid var(--border-subtle);border-radius:10px;padding:12px 14px;background:var(--surface-base);margin-top:4px}
+.tpl-preview pre{white-space:pre-wrap;word-break:break-word;font:inherit;font-size:13px;line-height:1.55;margin:8px 0 0;padding:0;background:none;color:var(--text-primary);border:0}
+.tpl-preview details{margin-top:8px}
+.tpl-prev-subject{font-weight:600;margin-top:8px}
+.tpl-exc{margin-bottom:4px;font-size:13px}
+.tpl-add{margin-top:6px}
+.tpl-add>summary{cursor:pointer;color:var(--accent-primary);font-size:12.5px}
+.tpl-add .inline-form{padding:8px 0 0}
+.tpl-panel td select{padding:7px 10px;border:1px solid var(--border-default);border-radius:8px;background:var(--surface-base);color:var(--text-primary);font:inherit;max-width:100%}
+.badge.s-info{background:#e0e7ff;color:#3730a3;border:1px solid #6366f155}

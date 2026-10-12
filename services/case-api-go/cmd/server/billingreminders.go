@@ -84,13 +84,7 @@ func (s *server) sweepPaymentReminders() int {
 		if exists {
 			continue
 		}
-		var tpl *CorrTemplate
-		for _, t := range s.corrTemplates(r, x.tenant) {
-			if t.Key == tplKey {
-				cp := t
-				tpl = &cp
-			}
-		}
+		tpl := s.effectiveTemplate(r, x.tenant, x.caseID, tplKey)
 		if tpl == nil || tpl.QARole == "" {
 			continue // no template, or one that would send unreviewed: leave it to a person
 		}

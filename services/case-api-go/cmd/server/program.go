@@ -143,6 +143,15 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label})
 		return
 	}
+	// The templates the portal offers: the standard ones as edited on the
+	// Templates screen, plus the ones added there, minus the retired.
+	offered := []CorrTemplate{}
+	for _, t := range s.corrTemplates(r, tenant) {
+		if !t.Inactive {
+			offered = append(offered, t)
+		}
+	}
+	cfg.Correspondence.Templates = offered
 	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label})
 }
 

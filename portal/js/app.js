@@ -183,6 +183,8 @@
   if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
+  // Everyone who drafts letters can read the templates; the PM and admins change them.
+  if (has("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/templates", "✎", "Templates"]);
   // CASE_MANAGER deliberately excluded from all four -- standalone finance
   // screens, not case-detail info; matches billingViewRoles/arapReadRoles/
   // reconReadRoles/financialReadRoles (access-control follow-up).
@@ -369,6 +371,7 @@
     [/^#\/reports$/, Views.reports],
     [/^#\/timesheet$/, Views.myTimesheet],
     [/^#\/time$/, Views.timeReport],
+    [/^#\/templates$/, Views.templatesPage],
     [/^#\/billing$/, Views.billingInvoices],
     [/^#\/arap$/, Views.arapView],
     [/^#\/recon$/, Views.reconView],

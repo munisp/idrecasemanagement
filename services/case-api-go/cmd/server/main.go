@@ -644,6 +644,14 @@ func main() {
 		r.Put("/program/contract-dates", s.setContractDates)            // admin: contract execution/effective/end dates
 		r.Get("/program/recipients", s.getCorrespondenceRecipients)     // agency contacts + PM copy addresses
 		r.Put("/program/recipients", s.setCorrespondenceRecipients)     // admin
+		r.Get("/program/templates", s.listTemplates)                    // the Templates screen
+		r.Post("/program/templates/preview", s.previewTemplate)         // placeholders filled from a real case
+		r.Put("/program/templates/usage", s.putTemplateUsage)           // which template is used when (PM/admin)
+		r.Delete("/program/templates/usage/{id}", s.deleteTemplateUsage)
+		r.Get("/program/templates/{key}/history", s.templateHistory)
+		r.Put("/program/templates/{key}", s.putTemplate)                // add or change a template (PM/admin)
+		r.Delete("/program/templates/{key}", s.deleteTemplate)          // remove one, or restore the standard wording
+		r.Get("/cases/{caseId}/correspondence/templates", s.caseTemplates)
 		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
 		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary)   // Coder's Dispute Summary + cost estimate
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)        // Attorney rules on a flagged AOR

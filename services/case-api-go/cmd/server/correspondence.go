@@ -53,18 +53,26 @@ type CorrTemplate struct {
 	// pre-fills it; staff edit before sending, exactly as they used to fill
 	// the Word templates. The caller's body still wins on send.
 	Body string `json:"body"`
+
+	// Set for what the Templates screen manages (templates_admin.go); a
+	// program's own config carries none of these.
+	Name        string `json:"name,omitempty"`         // the name people see; the key when empty
+	Inactive    bool   `json:"inactive,omitempty"`     // retired: kept, no longer offered
+	Custom      bool   `json:"custom,omitempty"`       // added from the dashboard, not a standard template
+	Edited      bool   `json:"edited,omitempty"`       // a standard template whose wording was changed
+	UpdatedBy   string `json:"updated_by,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	ContentFrom string `json:"content_from,omitempty"` // the template whose content a usage rule put here
 }
 
+// corrTemplates is every template of the tenant: the program's standard
+// ones with any dashboard edits applied, then the ones people added.
 func (s *server) corrTemplates(r *http.Request, tenant string) []CorrTemplate {
-	var raw []byte
-	err := s.db.QueryRow(r.Context(),
-		`SELECT config->'correspondence'->'templates' FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&raw)
-	if err != nil {
+	base := s.baseCorrTemplates(r, tenant)
+	if base == nil {
 		return nil
 	}
-	var out []CorrTemplate
-	_ = json.Unmarshal(raw, &out)
-	return out
+	return overlayTemplates(base, s.templateRows(r, tenant))
 }
 
 // resolveRecipients turns correspondence-template role labels (provider,
@@ -180,10 +188,28 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 		SELECT case_number, coalesce(provider_id,''), coalesce(payer_id,''), coalesce(qpa_cents,0)
 		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
 		Scan(&caseNumber, &providerID, &payerID, &qpa)
+	// Names as people know them: what was read from the documents or given
+	// at intake. The internal ids these placeholders used to print mean
+	// nothing in a letter.
+	var provider, plan, filer string
+	var disputed int64
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT coalesce(details->>'provider_org',''), coalesce(details->>'health_plan',''),
+		       coalesce(details->>'requester_org',''), coalesce(disputed_amount_cents,0)
+		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &disputed)
+	if provider == "" {
+		provider = s.accountName(r, tenant, providerID)
+	}
+	if plan == "" {
+		plan = s.accountName(r, tenant, payerID)
+	}
 	repl := map[string]string{
 		"{case_number}":     caseNumber,
-		"{provider_name}":   providerID,
-		"{payer_name}":      payerID,
+		"{provider_name}":   orWord(provider, "the provider"),
+		"{payer_name}":      orWord(plan, "the health plan"),
+		"{filing_party}":    orWord(filer, "the filing party"),
+		"{disputed_amount}": fmt.Sprintf("$%s.%02d", groupThousands(disputed/100), disputed%100),
+		"{today}":           templateToday(),
 		"{qpa}":             fmt.Sprintf("$%d.%02d", qpa/100, qpa%100),
 		"{case_url_suffix}": "#/cases/" + caseID,
 	}
@@ -219,16 +245,11 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"template required"}`, http.StatusBadRequest)
 		return
 	}
-	var tpl *CorrTemplate
-	for _, t := range s.corrTemplates(r, tenant) {
-		if t.Key == in.Template {
-			cp := t
-			tpl = &cp
-			break
-		}
-	}
+	// The template for this point on THIS case: the usage rules may put
+	// another template's wording and recipients in its place.
+	tpl := s.effectiveTemplate(r, tenant, caseID, in.Template)
 	if tpl == nil {
-		http.Error(w, `{"error":"unknown template for this program"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"unknown or retired template for this program"}`, http.StatusBadRequest)
 		return
 	}
 	// The stage letters (acceptance, plan notification, Final Order...) are
@@ -1043,4 +1064,32 @@ func defaultQARole(templates []CorrTemplate) string {
 		}
 	}
 	return best
+}
+
+func orWord(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+// groupThousands writes 1234567 as 1,234,567.
+func groupThousands(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
+// accountName is the legal name of a linked CRM account, "" when there is
+// none (the id is not a name and is never printed in its place).
+func (s *server) accountName(r *http.Request, tenant, accountID string) string {
+	if accountID == "" {
+		return ""
+	}
+	var name string
+	_ = s.db.QueryRow(r.Context(),
+		`SELECT coalesce(legal_name,'') FROM public.accounts WHERE tenant=$1 AND id::text=$2`, tenant, accountID).Scan(&name)
+	return name
 }

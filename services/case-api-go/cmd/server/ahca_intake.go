@@ -300,24 +300,12 @@ func (s *server) sendIntakeLinks(r *http.Request, tenant, caseID, caseNumber, em
 	// per draftCorrespondence's own semantics for a template with none) --
 	// there's no account/contact to resolve "requester" against yet, so the
 	// email just submitted is the recipient, directly.
-	var tpl *CorrTemplate
-	for _, t := range s.corrTemplates(r, tenant) {
-		if t.Key == "submission_instructions" {
-			cp := t
-			tpl = &cp
-			break
-		}
-	}
+	tpl := s.effectiveTemplate(r, tenant, caseID, "submission_instructions")
 	if tpl != nil {
 		subject := s.renderTemplate(r, tenant, caseID, tpl.Subject)
 		shareBase := strings.TrimRight(s.cfg.PortalBaseURL, "/")
-		body := fmt.Sprintf(
-			"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
-				"Case number: %s\n\n"+
-				"Download the filing instructions and packet: %s/api/share/%s\n"+
-				"Upload your completed filing packet: %s/api/share/%s",
-			caseNumber, shareBase, downloadToken, shareBase, uploadToken,
-		)
+		body := intakeLinksBody(s.renderTemplate(r, tenant, caseID, tpl.Body), caseNumber,
+			shareBase+"/api/share/"+downloadToken, shareBase+"/api/share/"+uploadToken)
 		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
 			s.logCorrespondenceInquiry(r, tenant, caseID, email, fmt.Sprintf("%s: %s", tpl.Key, subject), "system:ahca-intake")
@@ -385,4 +373,34 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 		tenant, caseID, invID, sessID, amountCents, raw)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amountCents, "PROVIDER", sessID, "system:ahca-intake")
 	return checkoutURL, nil
+}
+
+// intakeLinksBody is the email that opens a case for its filer: the
+// template's own wording with its two links put in. Whatever the template
+// says, the filer must end up with the case number and both links, so each
+// one the wording leaves out is added underneath. A template with no wording
+// at all gets the short standard text. Pure, so it is tested.
+func intakeLinksBody(text, caseNumber, downloadURL, uploadURL string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		text = "Thank you for contacting us regarding the claims dispute resolution program."
+	}
+	hasDownload := strings.Contains(text, "{download_link}")
+	hasUpload := strings.Contains(text, "{share_link}")
+	text = strings.ReplaceAll(text, "{download_link}", downloadURL)
+	text = strings.ReplaceAll(text, "{share_link}", uploadURL)
+	var extra []string
+	if caseNumber != "" && !strings.Contains(text, caseNumber) {
+		extra = append(extra, "Case number: "+caseNumber)
+	}
+	if !hasDownload {
+		extra = append(extra, "Download the filing instructions and packet: "+downloadURL)
+	}
+	if !hasUpload {
+		extra = append(extra, "Upload your completed filing packet: "+uploadURL)
+	}
+	if len(extra) > 0 {
+		text += "\n\n" + strings.Join(extra, "\n")
+	}
+	return text
 }

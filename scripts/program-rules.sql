@@ -339,6 +339,59 @@ CREATE TABLE IF NOT EXISTS public.deliverables (
 -- received by day 13 => Ineligible. After plan notification, internal
 -- status reads 'Plan Notification Packet Issued'.
 -- ---------------------------------------------------------------------------
+-- Email templates managed from the dashboard (templates_admin.go). They live
+-- outside program_rules.config ON PURPOSE: the INSERT below rewrites that
+-- whole config on every deploy, and nothing a person edits may be lost to it.
+--   corr_templates          an edited standard template, or one somebody added
+--   corr_template_usage     which template is used at which point, for which cases
+--   corr_template_versions  what a template was before each change
+CREATE TABLE IF NOT EXISTS public.corr_templates (
+    tenant      text        NOT NULL,
+    key         text        NOT NULL,
+    name        text,
+    subject     text        NOT NULL,
+    body        text        NOT NULL,
+    to_roles    jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    cc_roles    jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    active      boolean     NOT NULL DEFAULT true,
+    custom      boolean     NOT NULL DEFAULT false,
+    updated_by  text,
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant, key)
+);
+CREATE TABLE IF NOT EXISTS public.corr_template_usage (
+    id                bigserial   PRIMARY KEY,
+    tenant            text        NOT NULL,
+    event             text        NOT NULL,
+    template          text        NOT NULL,
+    filing_party_type text        NOT NULL DEFAULT '',
+    line_of_business  text        NOT NULL DEFAULT '',
+    updated_by        text,
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, event, filing_party_type, line_of_business)
+);
+CREATE TABLE IF NOT EXISTS public.corr_template_versions (
+    id          bigserial   PRIMARY KEY,
+    tenant      text        NOT NULL,
+    key         text        NOT NULL,
+    action      text        NOT NULL,
+    snapshot    jsonb,
+    changed_by  text,
+    changed_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS corr_template_versions_key ON public.corr_template_versions (tenant, key, changed_at DESC);
+DO $own$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'idre') THEN
+        ALTER TABLE public.corr_templates OWNER TO idre;
+        ALTER TABLE public.corr_template_usage OWNER TO idre;
+        ALTER TABLE public.corr_template_versions OWNER TO idre;
+        ALTER SEQUENCE public.corr_template_usage_id_seq OWNER TO idre;
+        ALTER SEQUENCE public.corr_template_versions_id_seq OWNER TO idre;
+    END IF;
+END
+$own$;
+
 INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHCA CDR', $$
 {
   "case_number": {"pattern": "FL{yy}-{seq}", "seq_pad": 6},
