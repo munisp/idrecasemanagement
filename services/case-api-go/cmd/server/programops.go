@@ -45,6 +45,10 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = "INITIAL_FEE"
 	}
+	// The review invoice is a step of its own (after the Attorney's review).
+	if in.Kind != "INITIAL_FEE" && !s.stepGuard(w, r, tenant, caseID, "invoice") {
+		return
+	}
 	if in.DueDays <= 0 {
 		in.DueDays = 30
 		if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Fees.InvoiceDueDays != nil {

@@ -323,12 +323,15 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 // minutes-per-touch saving.
 func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Reviewer"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
+	if !s.stepGuard(w, r, tenant, id, "eligibility") {
+		return
+	}
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
 		http.Error(w, `{"error":"no program rules for tenant"}`, http.StatusBadRequest)

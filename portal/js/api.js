@@ -227,6 +227,7 @@ const Api = (() => {
       copilotUnshareThread: (caseId, userId) => req("DELETE", `${t()}/cases/${caseId}/copilot/chat/shares/${userId}`),
       briefing: () => req("GET", `${t()}/assistant/briefing`),
       eligibilityHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/eligibility`),
+      workflow: (caseId) => req("GET", `${t()}/cases/${caseId}/workflow`),
       eligibilityChecklist: (caseId) => download(`${t()}/cases/${caseId}/eligibility/checklist`, "Eligibility Checklist.html"),
       setReviewNote: (caseId, field, text) => req("PUT", `${t()}/cases/${caseId}/review-notes`, { field, text }),
       setDisputeSummary: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/dispute-summary`, body),

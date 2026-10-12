@@ -636,6 +636,7 @@ func main() {
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
+		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)               // the SOP steps: done, next, upcoming
 		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
 		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary)   // Coder's Dispute Summary + cost estimate
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)        // Attorney rules on a flagged AOR
@@ -1198,9 +1199,18 @@ var signalRoleFloors = map[string][]string{
 	// sending it by hand would walk a case past its QA gate.
 	"LETTER_SENT":              {"FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ELIGIBILITY_RESULT":       {"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"CODING_REVIEW_COMPLETE":   {"CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"ATTORNEY_REVIEW_COMPLETE": {"ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	// Each SOP step belongs to one role (workflowsteps.go); admins stand in.
+	"CODING_REVIEW_COMPLETE":   {"CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"ATTORNEY_REVIEW_COMPLETE": {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PACKET_COMPLETE":          {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"AOR_REVISED":              {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"ESTIMATE_PERMISSION":      {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PLAN_RESPONSE_RECEIVED":   {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"FINAL_ORDER_ISSUED":       {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"PROVIDER_WITHDRAW":        {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"OUTREACH_DONE":            {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"RFI_RESPONSE_RECEIVED":    {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 }
 
 func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
@@ -1232,6 +1242,10 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRow(r.Context(),
 		fmt.Sprintf(`SELECT case_number, status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&caseNumber, &status); err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	// Only the case's next step may be signalled, and only by its owner.
+	if !s.stepGuard(w, r, tenant, id, "signal:"+body.Signal) {
 		return
 	}
 	// Workflow IDs are never persisted to the cases table (confirmed: no

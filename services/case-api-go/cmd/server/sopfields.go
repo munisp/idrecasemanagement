@@ -112,6 +112,9 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	if !s.stepGuard(w, r, tenant, caseID, "summary") {
+		return
+	}
 	var in struct {
 		PlanType             string `json:"plan_type"`
 		VerifiedFromLetter   bool   `json:"plan_type_verified_from_letterhead"`
@@ -170,6 +173,9 @@ func (s *server) confirmAOR(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	if !s.stepGuard(w, r, tenant, caseID, "aor_confirm") {
+		return
+	}
 	var in struct {
 		Valid  *bool  `json:"valid"`
 		Reason string `json:"reason"`

@@ -100,7 +100,7 @@ const Views = (() => {
     const ro = mine ? "" : "disabled";
     const matrix = (cfg.estimate && cfg.estimate.cost_matrix) || [];
     const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : "";
-    return `<details class="prog-sec"><summary>Dispute Summary (Coder)</summary>
+    return `<details class="prog-sec" id="p-summary-details" data-wf="summary" data-wf-roles="CODER"><summary>Dispute Summary (Coder)</summary>
       <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead, the summary of the dispute,
         and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${sopStamp(ds)}</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveDisputeSummary('${id}',this)">
@@ -156,6 +156,133 @@ const Views = (() => {
   async function eligChecklist(id) {
     try { await Api.program.eligibilityChecklist(id); }
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+
+  // ---- Workflow steps: one next step, owned by one role -------------------------
+  // The server derives the SOP's steps from the case and says which ONE is
+  // next and whether this user owns it (GET .../workflow). This renders that
+  // list and makes the rest of the panel agree with it: sections that serve a
+  // step are greyed out until that step is next, and hidden from roles that
+  // never perform it. The server refuses out-of-order actions regardless.
+  const WF_MARK = { done: "✓", skipped: "–", next: "▶", upcoming: "○" };
+  const WF_STAGE_LETTERS = ["acceptance", "ineligible", "estimate_cost", "plan_notification", "final_order", "final_order_rationale_copy"];
+  const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate"
+    : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "aor_confirm" ? "Give the ruling"
+    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : "Open");
+  async function wfLoad(id, cfg) {
+    const box = document.getElementById("wf-steps");
+    if (!box) return;
+    let r;
+    try { r = await Api.program.workflow(id); }
+    catch (e) { box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return; }
+    if (!r.programmed) { box.remove(); return; }
+    const steps = r.steps || [];
+    const next = steps.find((x) => x.state === "next");
+    window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin };
+    box.innerHTML = `<h3>Steps</h3>
+      <p class="muted">${next ? `Only the next step can be acted on, by the ${esc(next.owner)} (or an admin). Everything else is greyed out until its turn.`
+        : "No open step — nothing further is due on this case."}</p>
+      <ol class="wf">${steps.map((x) => `<li class="wf-${x.state}">
+        <span class="wf-mark" aria-hidden="true">${WF_MARK[x.state] || ""}</span>
+        <span class="wf-label">${esc(x.label)}</span> <span class="chip">${esc(x.owner)}</span>
+        ${x.state === "next" ? (x.can_act
+          ? `<button type="button" class="mini" onclick="Views.wfAct('${esc(x.key)}')">${WF_BUTTON(x.action)}</button>`
+          : `<span class="muted">waiting on the ${esc(x.owner)}</span>`) : ""}
+        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol>`;
+    wfApplyLocks();
+  }
+  function wfApplyLocks() {
+    const { next, isAdmin } = window._wf || {};
+    const mine = (action) => !!(next && next.can_act && next.action === action);
+    document.querySelectorAll("[data-wf-admin]").forEach((el) => { if (!isAdmin) el.remove(); });
+    document.querySelectorAll("[data-wf]").forEach((el) => {
+      const roles = (el.dataset.wfRoles || "").split(" ").filter(Boolean);
+      if (el.dataset.wfHide !== undefined && roles.length && !can(...roles, "FEDERAL_ADMIN", "PLATFORM_ADMIN")) { el.remove(); return; }
+      const open = el.dataset.wf.split(" ").some(mine);
+      el.classList.toggle("wf-locked", !open);
+      const inner = el.tagName === "DETAILS" ? [...el.children].filter((c) => c.tagName !== "SUMMARY") : [el];
+      inner.forEach((c) => { c.inert = !open; });
+      if (el.tagName === "DETAILS") {
+        const sum = el.querySelector("summary");
+        sum.querySelector(".wf-note")?.remove();
+        if (!open) sum.insertAdjacentHTML("beforeend", ` <span class="muted wf-note">— not the current step</span>`);
+        else el.open = true;
+      }
+    });
+    // Stage letters can only be drafted on their own step.
+    const sel = document.querySelector('#p-send select[name="template"]');
+    if (sel) {
+      [...sel.options].forEach((o) => {
+        if (!WF_STAGE_LETTERS.includes(o.value)) return;
+        o.disabled = !mine("letter:" + o.value);
+        o.textContent = o.textContent.replace(/ — not yet$/, "") + (o.disabled ? " — not yet" : "");
+      });
+      if (sel.selectedOptions[0]?.disabled) {
+        const first = [...sel.options].find((o) => !o.disabled);
+        if (first) { sel.value = first.value; corrTemplateBody(sel); }
+      }
+    }
+  }
+  async function wfSend(id, signal, data, label) {
+    try { await Api.cases.signal(id, signal, data || {}); UI.toast(label || "Recorded"); setTimeout(() => App.rerender(), 1200); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
+  const WF_YESNO = [["", "choose…"], ["yes", "Yes"], ["no", "No"]];
+  async function wfAct(key) {
+    const { id, cfg, steps } = window._wf || {};
+    const st = (steps || []).find((x) => x.key === key);
+    if (!st || st.state !== "next" || !st.can_act) return;
+    const a = st.action;
+    const open = (sel) => { const el = document.querySelector(sel); if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+    if (a.startsWith("letter:")) {
+      const tpl = a.slice(7), sel = document.querySelector('#p-send select[name="template"]');
+      if (sel) { sel.value = tpl; corrTemplateBody(sel); }
+      return open("#p-send-details");
+    }
+    if (a.startsWith("qa:")) { location.hash = "#/qa"; return; }
+    if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
+    if (a === "summary") return open("#p-summary-details");
+    if (a === "invoice") return open("#p-inv-details");
+    if (a === "settle") { location.hash = "#/finance"; return; }
+    if (!a.startsWith("signal:")) return;
+    const sig = a.slice(7);
+    if (sig === "PACKET_COMPLETE") {
+      const v = await UI.modal({ title: "Filing packet complete", body: "Payment and documents have both arrived.", submitLabel: "Confirm",
+        fields: [{ name: "est", label: "Did the filer tick “estimate requested” in the packet?", required: true, options: WF_YESNO }] });
+      if (v) wfSend(id, sig, { estimate_requested: v.est === "yes" }, "Packet recorded as complete");
+    } else if (sig === "ESTIMATE_PERMISSION") {
+      const v = await UI.modal({ title: "Provider's permission to proceed", submitLabel: "Record",
+        fields: [{ name: "g", label: "Did the provider give permission to proceed with the full review?", required: true, options: WF_YESNO }] });
+      if (v) wfSend(id, sig, { granted: v.g === "yes" }, "Permission recorded");
+    } else if (sig === "CODING_REVIEW_COMPLETE") {
+      const v = await UI.modal({ title: "Coding review complete", submitLabel: "Complete",
+        fields: [{ name: "c", label: "Is clinical review by the Nurse / Physician needed?", required: true, options: WF_YESNO }] });
+      if (v) wfSend(id, sig, { clinical_requested: v.c === "yes" }, "Coding review recorded");
+    } else if (sig === "ATTORNEY_REVIEW_COMPLETE") {
+      const fs = (cfg && cfg.field_schema) || {};
+      const opts = (xs) => [["", "choose…"]].concat((xs || []).map((x) => [x, x]));
+      const v = await UI.modal({ title: "Final rationale complete", submitLabel: "Complete", wide: true,
+        body: "Record the outcome with the rationale. The case then goes to the PM for the invoice and QA.",
+        fields: [{ name: "case_outcome", label: "Case outcome", options: opts(fs.case_outcome) },
+          { name: "party_billed", label: "Party billed", options: opts(fs.party_billed) },
+          { name: "amount", label: "Final amount awarded (USD)", type: "number", step: "0.01" },
+          { name: "num_claims", label: "Number of claims reviewed", type: "number" }] });
+      if (!v) return;
+      const data = {};
+      if (v.case_outcome) data.case_outcome = v.case_outcome;
+      if (v.party_billed) data.party_billed = v.party_billed;
+      if (v.amount) data.final_amount_awarded_cents = Math.round(parseFloat(v.amount) * 100);
+      if (v.num_claims) data.num_claims_reviewed = parseInt(v.num_claims, 10);
+      wfSend(id, sig, data, "Review recorded");
+    } else if (await UI.confirm(st.label, "Record this step as done?", "Record")) {
+      wfSend(id, sig, {}, "Recorded");
+    }
+  }
+  async function wfAnytime(id, signal) {
+    const what = { PROVIDER_WITHDRAW: "The provider asked to withdraw. The case will close when the Withdrawal letter has been sent through QA.",
+      RFI_RESPONSE_RECEIVED: "The response to the request for additional documentation has arrived.",
+      OUTREACH_DONE: "Payment arrived but the packet did not, and you have contacted the filer. This starts the 7-day refund window." }[signal];
+    if (await UI.confirm("Record this?", what, "Record", signal === "PROVIDER_WITHDRAW")) wfSend(id, signal, {}, "Recorded");
   }
 
   // ---- Statutory clock helpers -------------------------------------------------
@@ -1417,7 +1544,8 @@ const Views = (() => {
     }
     let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
       ${facts.length ? `<p class="fact-row">${facts.join(" ")}</p>` : ""}
-      <details class="prog-sec" open><summary>Dual status</summary>
+      <div id="wf-steps" class="card wf-card"><p class="muted">Loading the steps…</p></div>
+      <details class="prog-sec" data-wf-admin><summary>Dual status (admin override)</summary>
       <p class="muted">Current: ${c.internal_status ? badge(c.internal_status) : "<em>none</em>"} / ${c.agency_status ? badge(c.agency_status) : "<em>none</em>"}</p>
       <p class="muted">Case details: ${c.details && Object.keys(c.details).length
         ? Object.entries(c.details).filter(([, v]) => v === null || typeof v !== "object").map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
@@ -1438,7 +1566,7 @@ const Views = (() => {
         <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
         <input type="date" name="value" required /><button>Record date</button></form></details>
 
-      <details class="prog-sec"><summary>Eligibility review</summary>
+      <details class="prog-sec" id="p-elig-details" data-wf="eligibility aor_confirm letter:acceptance letter:ineligible" data-wf-roles="CASE_MANAGER ATTORNEY" data-wf-hide><summary>Eligibility review</summary>
       <p class="muted">The engine applies this program's rules in order and records the evidence with the verdict:
         <b>1)</b> an explicit ineligibility flag wins immediately; <b>2)</b> the filing window (e.g. final
         determination + 12 months) is checked; <b>3)</b> the disputed amount is tested against the provider-type
@@ -1481,8 +1609,8 @@ const Views = (() => {
         <label><input type="checkbox" name="auto_download" /> Attach a download link to the latest generated document (minted on send)</label>
         <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
 
-      <details class="prog-sec"><summary>Invoices & claims</summary>
-      ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form">
+      <details class="prog-sec" id="p-inv-details"><summary>Invoices & claims</summary>
+      ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form" data-wf="invoice">
         <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
         <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
         <input name="amount" type="number" step="0.01" placeholder="amount $" required />
@@ -1499,38 +1627,17 @@ const Views = (() => {
       <div class="actions">
         <button id="p-share-up">Create upload link</button>
         <button id="p-share-dl">Create download link</button></div><div id="p-share-out"></div>
-      <form id="p-optout" class="inline-form">
+      ${can("ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-optout" class="inline-form">
         <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
-        <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form></details>
+        <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form>` : ""}</details>
 
-      <details class="prog-sec"><summary>Workflow signals</summary>
-      <p class="muted">Tells the running case workflow what happened — distinct from the status/date forms above, which only update the database.</p>
-      <form id="p-signal" class="inline-form">
-        <select name="signal">
-          <option value="PACKET_COMPLETE">Packet complete</option>
-          <option value="OUTREACH_DONE">Outreach done (payment arrived, packet didn't)</option>
-          <option value="PROVIDER_WITHDRAW">Provider withdrew</option>
-          <option value="AOR_REVISED">AOR revised (resolves a hold)</option>
-          <option value="ESTIMATE_PERMISSION">Provider permission decided</option>
-          <option value="PLAN_RESPONSE_RECEIVED">Plan response received</option>
-          <option value="CODING_REVIEW_COMPLETE">Coder review complete</option>
-          <option value="CLINICAL_REVIEW_COMPLETE">Clinical review complete</option>
-          <option value="ATTORNEY_REVIEW_COMPLETE">Attorney review complete</option>
-          <option value="FINAL_ORDER_ISSUED">Final order issued (by AHCA)</option>
-          <option value="RFI_RESPONSE_RECEIVED">RFI response received</option>
-        </select>
-        <label>granted / estimate requested / clinical review needed <input type="checkbox" name="flag" /></label>
-        <br/><span class="muted">Only used for "Attorney review complete" — leave blank if not applicable:</span><br/>
-        <select name="case_outcome"><option value="">case outcome…</option>
-          ${(cfg.field_schema?.case_outcome || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
-        <select name="party_billed"><option value="">party billed…</option>
-          ${(cfg.field_schema?.party_billed || []).map((s) => `<option>${esc(s)}</option>`).join("")}</select>
-        <input name="amount" type="number" step="0.01" placeholder="final amount awarded $" />
-        <input name="num_claims" type="number" placeholder="number of claims reviewed" />
-        <button>Send signal</button></form></details>
-
-      ${sopNotesHtml(id, c)}
-      ${sopSummaryHtml(id, c, cfg)}
+      ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<details class="prog-sec"><summary>At any time</summary>
+      <p class="muted">These are not steps: they can happen at any point in a case. Everything else follows the step list at the top.</p>
+      <div class="actions">
+        <button type="button" onclick="Views.wfAnytime('${id}','PROVIDER_WITHDRAW')">Provider asked to withdraw</button>
+        <button type="button" onclick="Views.wfAnytime('${id}','RFI_RESPONSE_RECEIVED')">RFI response received</button>
+        <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
+      </div></details>` : ""}
 
       <details class="prog-sec"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
@@ -1550,6 +1657,7 @@ const Views = (() => {
 
     afterRender(() => {
       const money = (v) => Math.round(parseFloat(v) * 100);
+      wfLoad(id, cfg);
       $("#p-status")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;
@@ -5502,5 +5610,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime };
 })();

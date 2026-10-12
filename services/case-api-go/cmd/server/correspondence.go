@@ -191,6 +191,11 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"unknown template for this program"}`, http.StatusBadRequest)
 		return
 	}
+	// The stage letters (acceptance, plan notification, Final Order...) are
+	// steps: each can be drafted only when it is the case's next step.
+	if !s.stepGuard(w, r, tenant, caseID, "letter:"+tpl.Key) {
+		return
+	}
 	// Resolve the template's role-keyed to/cc policy to real addresses when
 	// the caller didn't already supply them -- previously the template's
 	// own to/cc config was never actually used for anything, only its

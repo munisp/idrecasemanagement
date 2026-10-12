@@ -605,3 +605,15 @@ th.sortable:focus-visible{outline:2px solid var(--accent-fg);outline-offset:-2px
 .elig-flags label{display:flex;gap:6px;align-items:flex-start;font-weight:400}
 .case-lock{border:1px solid #c0392b;background:rgba(192,57,43,.08);border-radius:8px;padding:10px 14px;margin:8px 0 14px;line-height:1.45}
 [data-frozen]{opacity:.45;cursor:not-allowed}
+
+/* Workflow steps on the case page */
+.wf-card h3{margin:0 0 4px}
+ol.wf{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:2px}
+ol.wf li{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;font-size:13px}
+ol.wf .wf-mark{width:1.2em;text-align:center;font-weight:700}
+ol.wf li.wf-done,ol.wf li.wf-skipped,ol.wf li.wf-upcoming{opacity:.5}
+ol.wf li.wf-done .wf-label{text-decoration:line-through}
+ol.wf li.wf-next{background:var(--surface-2,rgba(127,127,127,.12));font-weight:600;outline:1px solid var(--border,rgba(127,127,127,.35))}
+ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
+.wf-locked{opacity:.5}
+.wf-locked > *:not(summary){pointer-events:none}
