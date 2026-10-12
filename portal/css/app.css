@@ -27,6 +27,10 @@
   --focus-ring:var(--brand-300);
   --action-primary-bg:var(--brand-500); --action-primary-bg-hover:var(--brand-700);
   --action-primary-fg:var(--text-on-accent);
+  /* The one accent for selected and focused things. It was used in a dozen
+     rules and defined nowhere, so they fell back to nothing. Follows the
+     primary action colour, which the dark theme redefines. */
+  --accent-primary:var(--action-primary-bg);
   --accent-bg:var(--brass-500); --accent-fg:var(--brass-700);
   --success-bg:var(--green-50); --success-fg:var(--green-700);
   --warning-bg:var(--amber-50); --warning-fg:var(--amber-700);
@@ -626,3 +630,28 @@ ol.wf li.wf-next{background:var(--surface-2,rgba(127,127,127,.12));font-weight:6
 ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 .wf-locked{opacity:.5}
 .wf-locked > *:not(summary){pointer-events:none}
+
+/* ---- Team time ---------------------------------------------------------- */
+.tt-filters{display:flex;flex-direction:column;gap:14px;margin:14px 0}
+.tt-presets{display:flex;flex-wrap:wrap;gap:6px}
+.tt-preset{padding:6px 12px;border-radius:999px;border:1px solid var(--border-subtle);background:var(--surface-base);color:var(--text-secondary);font-size:12.5px;cursor:pointer}
+.tt-preset:hover{border-color:var(--accent-primary);color:var(--text-primary)}
+.tt-preset.active{background:var(--accent-primary);border-color:var(--accent-primary);color:var(--action-primary-fg);font-weight:600}
+.tt-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.tt-grid label{display:flex;flex-direction:column;gap:5px;font-size:12px;font-weight:600;color:var(--text-secondary)}
+.tt-grid input,.tt-grid select{padding:8px 10px;border:1px solid var(--border-default);border-radius:8px;background:var(--surface-base);color:var(--text-primary);font:inherit;font-weight:400;min-width:0;width:100%}
+.tt-grid input:focus,.tt-grid select:focus{outline:2px solid var(--accent-primary);outline-offset:1px}
+.tt-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tt-actions>button:first-child{padding:8px 18px}
+.tt-period{margin:18px 0 0;font-size:15px}
+.tt-panel{margin-top:10px;overflow-x:auto}
+.tt-panel[hidden]{display:none}
+.tt-panel th.num,.tt-panel td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tt-link{background:none;border:0;padding:0;font:inherit;color:var(--accent-primary);cursor:pointer;text-align:left}
+.tt-link:hover{text-decoration:underline}
+.tt-only{margin-left:8px;font-size:11.5px;color:var(--text-tertiary)}
+.tt-note{max-width:34ch;color:var(--text-secondary);font-size:12.5px}
+.tt-empty{margin:14px 0;padding:22px}
+.tt-more{margin-top:14px}
+.tt-more>summary{cursor:pointer;font-weight:600}
+.tt-more[open]>summary{margin-bottom:10px}

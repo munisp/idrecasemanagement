@@ -212,7 +212,7 @@ func (s *server) timeReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, perr.Error()), http.StatusBadRequest)
 		return
 	}
-	resp := s.buildTimeReport(r, tenant, from, to, label, hasAnyRole(p, timeRateViewRoles...))
+	resp := s.buildTimeReport(r, tenant, from, to, label, hasAnyRole(p, timeRateViewRoles...), timeReportFilterFrom(q.Get))
 	if resp == nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -237,36 +237,90 @@ type timeReportAcc struct {
 	Unrated    *int64 `json:"unrated_billable_minutes,omitempty"`
 }
 
-// buildTimeReport aggregates everyone's timesheet hours over [from, to) —
-// per dispute and per person — with role-rated dollar amounts when the
-// caller may see money. Shared verbatim by the on-screen report and the
-// email-out path; returns nil on a database error.
-func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string, showMoney bool) map[string]any {
-	rows, err := s.queryRows(r, `
-		SELECT case_id, subject, role, sum(minutes) AS minutes,
-		       sum(minutes) FILTER (WHERE billable) AS billable_minutes
-		FROM public.time_entries
-		WHERE tenant=$1 AND entry_date >= $2::date AND entry_date < $3::date
-		GROUP BY case_id, subject, role`, tenant, from, to)
-	if err != nil {
-		return nil
+// timeReportFilter narrows the report inside its period. Every field is
+// optional; an empty filter is the whole team's time.
+type timeReportFilter struct {
+	Who      string // part of a team member's name, or their exact account id
+	Case     string // part of a case number, or an exact case id
+	Role     string // exact role the time was logged under
+	Billable string // "yes" | "no" | "" (both)
+}
+
+func (f timeReportFilter) empty() bool { return f == timeReportFilter{} }
+
+// describe is the filter in words, for the report's heading and the email.
+func (f timeReportFilter) describe() string {
+	var parts []string
+	if f.Who != "" {
+		parts = append(parts, "team member \""+f.Who+"\"")
 	}
-	// Resolve case numbers in one pass.
-	numbers := map[string]string{}
-	for _, row := range rows {
-		cid, _ := row["case_id"].(string)
-		if cid == "" || numbers[cid] != "" {
-			continue
-		}
-		var num string
-		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-			`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), cid).Scan(&num)
-		numbers[cid] = num
+	if f.Case != "" {
+		parts = append(parts, "case \""+f.Case+"\"")
 	}
-	rates := map[string]int64{}
-	if showMoney {
-		rates = s.timeRateMap(r, tenant)
+	if f.Role != "" {
+		parts = append(parts, "role "+f.Role)
 	}
+	switch f.Billable {
+	case "yes":
+		parts = append(parts, "billable only")
+	case "no":
+		parts = append(parts, "non-billable only")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func timeReportFilterFrom(get func(string) string) timeReportFilter {
+	f := timeReportFilter{
+		Who: strings.TrimSpace(get("who")), Case: strings.TrimSpace(get("case")),
+		Role: strings.ToUpper(strings.TrimSpace(get("role"))), Billable: strings.ToLower(strings.TrimSpace(get("billable"))),
+	}
+	if f.Billable != "yes" && f.Billable != "no" {
+		f.Billable = ""
+	}
+	return f
+}
+
+// timeEntryRow is one logged entry, as the report reads it.
+type timeEntryRow struct {
+	ID         int64  `json:"id"`
+	CaseID     string `json:"case_id"`
+	CaseNumber string `json:"case_number"`
+	Subject    string `json:"subject"`
+	Who        string `json:"who"`
+	Role       string `json:"role"`
+	Date       string `json:"entry_date"`
+	Minutes    int64  `json:"minutes"`
+	Billable   bool   `json:"billable"`
+	Note       string `json:"note,omitempty"`
+}
+
+// keeps reports whether an entry passes the filter. CaseNumber and Who must
+// already be filled in: a search is made on what people see, not on ids.
+func (f timeReportFilter) keeps(e timeEntryRow) bool {
+	if f.Role != "" && !strings.EqualFold(e.Role, f.Role) {
+		return false
+	}
+	if (f.Billable == "yes" && !e.Billable) || (f.Billable == "no" && e.Billable) {
+		return false
+	}
+	if f.Who != "" && e.Subject != f.Who && !strings.Contains(strings.ToLower(e.Who), strings.ToLower(f.Who)) {
+		return false
+	}
+	if f.Case != "" && e.CaseID != f.Case && !strings.Contains(strings.ToLower(e.CaseNumber), strings.ToLower(f.Case)) {
+		return false
+	}
+	return true
+}
+
+// timeReportMaxEntries bounds the entry list sent to the page; the totals
+// always cover every matching entry.
+const timeReportMaxEntries = 5000
+
+// summarizeTime turns the (already filtered) entries into the report: per
+// dispute, per person, totals, and the entries themselves. Amounts are
+// attached only when showMoney -- money never leaks to plain viewers -- and a
+// role with no configured rate adds hours but no dollars. Pure, so tested.
+func summarizeTime(entries []timeEntryRow, rates map[string]int64, showMoney bool) map[string]any {
 	byCase := map[string]*timeReportAcc{}
 	byPerson := map[string]*timeReportAcc{}
 	seen := map[string]map[string]bool{}
@@ -275,10 +329,8 @@ func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string
 			return
 		}
 		if a.Amount == nil {
-			var zero int64
-			a.Amount = &zero
-			var z2 int64
-			a.Unrated = &z2
+			var zero, z2 int64
+			a.Amount, a.Unrated = &zero, &z2
 		}
 		if rate, ok := rates[role]; ok {
 			*a.Amount += bill * rate / 60
@@ -286,33 +338,31 @@ func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string
 			*a.Unrated += bill
 		}
 	}
-	for _, row := range rows {
-		cid, _ := row["case_id"].(string)
-		subj, _ := row["subject"].(string)
-		role, _ := row["role"].(string)
-		mins := toInt64(row["minutes"])
-		bill := toInt64(row["billable_minutes"])
-		if byCase[cid] == nil {
-			byCase[cid] = &timeReportAcc{CaseID: cid, CaseNumber: numbers[cid]}
-			seen[cid] = map[string]bool{}
+	people := map[string]bool{}
+	for _, e := range entries {
+		bill := int64(0)
+		if e.Billable {
+			bill = e.Minutes
 		}
-		byCase[cid].Minutes += mins
-		byCase[cid].Billable += bill
-		addMoney(byCase[cid], role, bill)
-		if !seen[cid][subj] {
-			seen[cid][subj] = true
-			byCase[cid].People++
+		if byCase[e.CaseID] == nil {
+			byCase[e.CaseID] = &timeReportAcc{CaseID: e.CaseID, CaseNumber: e.CaseNumber}
+			seen[e.CaseID] = map[string]bool{}
 		}
-		key := subj + "|" + role
+		byCase[e.CaseID].Minutes += e.Minutes
+		byCase[e.CaseID].Billable += bill
+		addMoney(byCase[e.CaseID], e.Role, bill)
+		if !seen[e.CaseID][e.Subject] {
+			seen[e.CaseID][e.Subject] = true
+			byCase[e.CaseID].People++
+		}
+		key := e.Subject + "|" + e.Role
 		if byPerson[key] == nil {
-			// Who starts as the raw Keycloak subject and is overwritten with
-			// a display name per resolveSubjectNames below -- never shown
-			// to staff as a bare UUID.
-			byPerson[key] = &timeReportAcc{Who: subj, Role: role}
+			byPerson[key] = &timeReportAcc{Who: e.Who, Role: e.Role}
 		}
-		byPerson[key].Minutes += mins
+		byPerson[key].Minutes += e.Minutes
 		byPerson[key].Billable += bill
-		addMoney(byPerson[key], role, bill)
+		addMoney(byPerson[key], e.Role, bill)
+		people[e.Subject] = true
 	}
 	caseList, personList := []*timeReportAcc{}, []*timeReportAcc{}
 	for _, a := range byCase {
@@ -321,16 +371,18 @@ func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string
 	for _, a := range byPerson {
 		personList = append(personList, a)
 	}
-	var subjects []string
-	for _, a := range personList {
-		subjects = append(subjects, a.Who)
-	}
-	names := s.resolveSubjectNames(r.Context(), subjects)
-	for _, a := range personList {
-		a.Who = names[a.Who]
-	}
-	sort.Slice(caseList, func(i, j int) bool { return caseList[i].Minutes > caseList[j].Minutes })
-	sort.Slice(personList, func(i, j int) bool { return personList[i].Minutes > personList[j].Minutes })
+	sort.Slice(caseList, func(i, j int) bool {
+		if caseList[i].Minutes != caseList[j].Minutes {
+			return caseList[i].Minutes > caseList[j].Minutes
+		}
+		return caseList[i].CaseNumber < caseList[j].CaseNumber
+	})
+	sort.Slice(personList, func(i, j int) bool {
+		if personList[i].Minutes != personList[j].Minutes {
+			return personList[i].Minutes > personList[j].Minutes
+		}
+		return personList[i].Who < personList[j].Who
+	})
 	var total, totalBillable, totalAmount, totalUnrated int64
 	for _, a := range caseList {
 		total += a.Minutes
@@ -342,15 +394,94 @@ func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string
 			totalUnrated += *a.Unrated
 		}
 	}
+	shown := entries
+	if len(shown) > timeReportMaxEntries {
+		shown = shown[:timeReportMaxEntries]
+	}
 	resp := map[string]any{
-		"period": label, "from": from, "to": to,
-		"by_case": caseList, "by_person": personList,
+		"by_case": caseList, "by_person": personList, "entries": shown,
+		"entry_count": len(entries), "people_count": len(people),
 		"total_minutes": total, "billable_minutes": totalBillable,
 	}
 	if showMoney {
 		resp["total_amount_cents"] = totalAmount
 		resp["unrated_billable_minutes"] = totalUnrated
 	}
+	return resp
+}
+
+// buildTimeReport reads everyone's timesheet entries over [from, to), keeps
+// those the filter asks for, and summarizes them. Shared verbatim by the
+// on-screen report and the email-out path; returns nil on a database error.
+func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string, showMoney bool, f timeReportFilter) map[string]any {
+	rows, err := s.db.Query(r.Context(), `
+		SELECT id, case_id::text, subject, role, to_char(entry_date,'YYYY-MM-DD'), minutes, billable, coalesce(note,'')
+		FROM public.time_entries
+		WHERE tenant=$1 AND entry_date >= $2::date AND entry_date < $3::date
+		ORDER BY entry_date DESC, id DESC`, tenant, from, to)
+	if err != nil {
+		return nil
+	}
+	var all []timeEntryRow
+	for rows.Next() {
+		var e timeEntryRow
+		if rows.Scan(&e.ID, &e.CaseID, &e.Subject, &e.Role, &e.Date, &e.Minutes, &e.Billable, &e.Note) == nil {
+			all = append(all, e)
+		}
+	}
+	rows.Close()
+	// Case numbers and people's names, each looked up once.
+	numbers, subjectSet := map[string]string{}, map[string]bool{}
+	for _, e := range all {
+		subjectSet[e.Subject] = true
+		if _, ok := numbers[e.CaseID]; ok || e.CaseID == "" {
+			continue
+		}
+		var num string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+			`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), e.CaseID).Scan(&num)
+		numbers[e.CaseID] = num
+	}
+	subjects := make([]string, 0, len(subjectSet))
+	for sub := range subjectSet {
+		subjects = append(subjects, sub)
+	}
+	names := s.resolveSubjectNames(r.Context(), subjects)
+	// Everyone and every role with time in the period -- what the page
+	// offers to pick from -- taken before the filter narrows the entries.
+	type person struct {
+		Subject string `json:"subject"`
+		Name    string `json:"name"`
+	}
+	people, roleSet := []person{}, map[string]bool{}
+	for _, sub := range subjects {
+		people = append(people, person{Subject: sub, Name: names[sub]})
+	}
+	sort.Slice(people, func(i, j int) bool { return strings.ToLower(people[i].Name) < strings.ToLower(people[j].Name) })
+	kept := make([]timeEntryRow, 0, len(all))
+	for _, e := range all {
+		e.CaseNumber, e.Who = numbers[e.CaseID], names[e.Subject]
+		roleSet[e.Role] = true
+		if f.keeps(e) {
+			kept = append(kept, e)
+		}
+	}
+	roles := make([]string, 0, len(roleSet))
+	for role := range roleSet {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	rates := map[string]int64{}
+	if showMoney {
+		rates = s.timeRateMap(r, tenant)
+	}
+	resp := summarizeTime(kept, rates, showMoney)
+	if d := f.describe(); d != "" {
+		label += " — " + d
+	}
+	resp["period"], resp["from"], resp["to"] = label, from, to
+	resp["people"], resp["roles"] = people, roles
+	resp["filtered"] = !f.empty()
 	return resp
 }
 
@@ -372,7 +503,9 @@ func timeReportPeriod(week, month, start, end string) (from, to, label string, e
 		if t1.Sub(t0) > 366*24*time.Hour {
 			return "", "", "", fmt.Errorf("range too large (max 366 days)")
 		}
-		return start, end, start + " .. " + end, nil
+		// The window is [start, end): the label names its last day, which is
+		// what a person reading "1 Oct to 31 Oct" expects.
+		return start, end, start + " to " + t1.AddDate(0, 0, -1).Format("2006-01-02"), nil
 	}
 	if month != "" {
 		t0, e := time.Parse("2006-01", month)
@@ -410,6 +543,12 @@ func (s *server) timeReportSend(w http.ResponseWriter, r *http.Request) {
 		End     string   `json:"end"`
 		Emails  []string `json:"emails"`
 		Message string   `json:"message"`
+		// The same filters as the on-screen report, so what is emailed is
+		// what was on the page.
+		Who      string `json:"who"`
+		Case     string `json:"case"`
+		Role     string `json:"role"`
+		Billable string `json:"billable"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
@@ -435,7 +574,15 @@ func (s *server) timeReportSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, perr.Error()), http.StatusBadRequest)
 		return
 	}
-	rpt := s.buildTimeReport(r, tenant, from, to, label, true) // money included: sender is PM/FINANCE/admin
+	filter := timeReportFilterFrom(func(k string) string {
+		return map[string]string{"who": in.Who, "case": in.Case, "role": in.Role, "billable": in.Billable}[k]
+	})
+	rpt := s.buildTimeReport(r, tenant, from, to, label, true, filter) // money included: sender is PM/FINANCE/admin
+	if rpt == nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	label, _ = rpt["period"].(string)
 
 	hrs := func(m int64) string { return fmt.Sprintf("%.2f", float64(m)/60) }
 	usd := func(c int64) string { return fmt.Sprintf("$%d.%02d", c/100, c%100) }
@@ -464,12 +611,20 @@ func (s *server) timeReportSend(w http.ResponseWriter, r *http.Request) {
 	body.WriteString("\nFull detail in the attached CSV.\n")
 
 	var csv strings.Builder
-	csv.WriteString("section,who_or_case,role,hours,billable_hours,amount\n")
+	csv.WriteString("section,who_or_case,role,hours,billable_hours,amount,date,case,note\n")
 	for _, a := range rpt["by_person"].([]*timeReportAcc) {
 		fmt.Fprintf(&csv, "person,%s,%s,%s,%s,%s\n", csvCell(a.Who), csvCell(a.Role), hrs(a.Minutes), hrs(a.Billable), moneyCell(a.Amount))
 	}
 	for _, a := range rpt["by_case"].([]*timeReportAcc) {
 		fmt.Fprintf(&csv, "case,%s,%s,%s,%s,%s\n", csvCell(a.CaseNumber), "", hrs(a.Minutes), hrs(a.Billable), moneyCell(a.Amount))
+	}
+	for _, e := range rpt["entries"].([]timeEntryRow) {
+		bill := int64(0)
+		if e.Billable {
+			bill = e.Minutes
+		}
+		fmt.Fprintf(&csv, "entry,%s,%s,%s,%s,,%s,%s,%s\n", csvCell(e.Who), csvCell(e.Role), hrs(e.Minutes), hrs(bill),
+			e.Date, csvCell(e.CaseNumber), csvCell(e.Note))
 	}
 
 	subject := fmt.Sprintf("Team timesheet report — %s (%s)", label, strings.ToUpper(tenant))

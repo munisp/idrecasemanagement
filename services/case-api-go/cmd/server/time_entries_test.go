@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestTimeEntryNormalize(t *testing.T) {
 	// minutes win over hours
@@ -91,5 +94,104 @@ func TestCsvCell(t *testing.T) {
 	var c int64 = 123456
 	if got := moneyCell(&c); got != "1234.56" {
 		t.Fatal(got)
+	}
+}
+
+// ---- team-time filters -------------------------------------------------------
+
+func timeFixture() []timeEntryRow {
+	return []timeEntryRow{
+		{ID: 1, CaseID: "c1", CaseNumber: "FL26-001", Subject: "u-ada", Who: "Ada Reviewer", Role: "CASE_MANAGER", Date: "2026-10-05", Minutes: 60, Billable: true},
+		{ID: 2, CaseID: "c1", CaseNumber: "FL26-001", Subject: "u-ben", Who: "Ben Coder", Role: "CODER", Date: "2026-10-06", Minutes: 30, Billable: true},
+		{ID: 3, CaseID: "c2", CaseNumber: "FL26-002", Subject: "u-ada", Who: "Ada Reviewer", Role: "CASE_MANAGER", Date: "2026-10-06", Minutes: 45, Billable: false},
+		{ID: 4, CaseID: "c2", CaseNumber: "FL26-002", Subject: "u-cy", Who: "Cy Attorney", Role: "ATTORNEY", Date: "2026-10-07", Minutes: 120, Billable: true},
+	}
+}
+
+func keptIDs(f timeReportFilter) []int64 {
+	var ids []int64
+	for _, e := range timeFixture() {
+		if f.keeps(e) {
+			ids = append(ids, e.ID)
+		}
+	}
+	return ids
+}
+
+func TestTimeReportFilterKeeps(t *testing.T) {
+	cases := []struct {
+		name string
+		f    timeReportFilter
+		want []int64
+	}{
+		{"no filter keeps everything", timeReportFilter{}, []int64{1, 2, 3, 4}},
+		{"by part of a name, any case", timeReportFilter{Who: "ada"}, []int64{1, 3}},
+		{"by exact account id", timeReportFilter{Who: "u-ben"}, []int64{2}},
+		{"by part of a case number", timeReportFilter{Case: "26-002"}, []int64{3, 4}},
+		{"by exact case id", timeReportFilter{Case: "c1"}, []int64{1, 2}},
+		{"by role", timeReportFilter{Role: "attorney"}, []int64{4}},
+		{"billable only", timeReportFilter{Billable: "yes"}, []int64{1, 2, 4}},
+		{"non-billable only", timeReportFilter{Billable: "no"}, []int64{3}},
+		{"person and case together", timeReportFilter{Who: "Ada", Case: "FL26-001"}, []int64{1}},
+		{"nobody by that name", timeReportFilter{Who: "zed"}, nil},
+	}
+	for _, c := range cases {
+		got := keptIDs(c.f)
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%s: kept %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTimeReportFilterFromIgnoresJunk(t *testing.T) {
+	f := timeReportFilterFrom(func(k string) string {
+		return map[string]string{"who": "  Ada ", "role": "coder", "billable": "maybe"}[k]
+	})
+	if f.Who != "Ada" || f.Role != "CODER" || f.Billable != "" {
+		t.Errorf("got %+v", f)
+	}
+	if !(timeReportFilter{}).empty() || f.empty() {
+		t.Error("empty() is wrong")
+	}
+	if d := (timeReportFilter{Who: "Ada", Billable: "yes"}).describe(); d != `team member "Ada", billable only` {
+		t.Errorf("describe: %q", d)
+	}
+}
+
+func TestSummarizeTimeTotalsAndMoney(t *testing.T) {
+	rates := map[string]int64{"CASE_MANAGER": 6000, "ATTORNEY": 30000} // cents per hour; CODER has no rate
+	r := summarizeTime(timeFixture(), rates, true)
+	if r["total_minutes"].(int64) != 255 || r["billable_minutes"].(int64) != 210 {
+		t.Errorf("totals: %v / %v", r["total_minutes"], r["billable_minutes"])
+	}
+	// 60 min at $60/h + 120 min at $300/h; the Coder's 30 billable minutes have no rate.
+	if r["total_amount_cents"].(int64) != 6000+60000 || r["unrated_billable_minutes"].(int64) != 30 {
+		t.Errorf("money: %v unrated %v", r["total_amount_cents"], r["unrated_billable_minutes"])
+	}
+	if r["people_count"].(int) != 3 || r["entry_count"].(int) != 4 {
+		t.Errorf("counts: %v people, %v entries", r["people_count"], r["entry_count"])
+	}
+	byCase := r["by_case"].([]*timeReportAcc)
+	if len(byCase) != 2 || byCase[0].CaseNumber != "FL26-002" || byCase[0].People != 2 || byCase[0].Minutes != 165 {
+		t.Errorf("by case: %+v", byCase[0])
+	}
+	byPerson := r["by_person"].([]*timeReportAcc)
+	if byPerson[0].Who != "Cy Attorney" || byPerson[1].Who != "Ada Reviewer" || byPerson[1].Minutes != 105 || byPerson[1].Billable != 60 {
+		t.Errorf("by person: %+v %+v", byPerson[0], byPerson[1])
+	}
+	// A viewer who may not see money gets hours and no amounts at all.
+	plain := summarizeTime(timeFixture(), rates, false)
+	if _, ok := plain["total_amount_cents"]; ok || plain["by_person"].([]*timeReportAcc)[0].Amount != nil {
+		t.Error("amounts leaked to a viewer without the money screens")
+	}
+	if empty := summarizeTime(nil, rates, true); empty["total_minutes"].(int64) != 0 || len(empty["by_case"].([]*timeReportAcc)) != 0 {
+		t.Error("an empty period should summarize to zero")
+	}
+}
+
+func TestTimeReportRangeLabelNamesItsLastDay(t *testing.T) {
+	from, to, label, err := timeReportPeriod("", "", "2026-10-01", "2026-11-01")
+	if err != nil || from != "2026-10-01" || to != "2026-11-01" || label != "2026-10-01 to 2026-10-31" {
+		t.Errorf("got %s %s %q %v", from, to, label, err)
 	}
 }

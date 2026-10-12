@@ -4262,32 +4262,102 @@ const Views = (() => {
     }, "Deleting…");
   }
 
+  // ---- Team time: the whole team's hours, searchable and filterable --------
+  // One filter bar drives everything on the page: the date range, a team
+  // member (search by name), a case, a role, billable or not. The summary,
+  // the three tables, the CSV and the emailed report all show the same slice.
+  const TT_PRESETS = [["this-week", "This week"], ["last-week", "Last week"], ["this-month", "This month"],
+    ["last-month", "Last month"], ["last-30", "Last 30 days"]];
+  let ttTab = "people";
+
+  function ttIso(d) { return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+  // [from, to], both inclusive, for a preset.
+  function ttPresetRange(key) {
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    const monday = new Date(t); monday.setDate(t.getDate() - ((t.getDay() + 6) % 7));
+    const day = (base, n) => { const d = new Date(base); d.setDate(d.getDate() + n); return d; };
+    if (key === "this-week") return [monday, day(monday, 6)];
+    if (key === "last-week") return [day(monday, -7), day(monday, -1)];
+    if (key === "last-month") return [new Date(t.getFullYear(), t.getMonth() - 1, 1), new Date(t.getFullYear(), t.getMonth(), 0)];
+    if (key === "last-30") return [day(t, -29), t];
+    return [new Date(t.getFullYear(), t.getMonth(), 1), new Date(t.getFullYear(), t.getMonth() + 1, 0)];
+  }
+
   async function timeReport() {
     if (!can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
       return `<div class="view-head"><h1>Team time</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
-    const now = new Date();
-    const defMonth = now.toISOString().slice(0, 7);
-    // Role-based billable rates: only PM/admin may set them; only
-    // PM/FINANCE/admin ever see dollar amounts.
-    if (can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-      afterRender(() => timeRatesBox());
+    afterRender(() => { timeRatesBox(); timeReportPreset("this-month"); });
     return `<div class="view-head"><h1>Team time</h1>
-      <span class="muted">hours worked per dispute — weekly and monthly rollups for billing review</span></div>
-      <form class="inline-form" onsubmit="event.preventDefault(); Views.timeReportRun(this)">
-        <label>Week containing <input name="week" type="date" /></label>
-        <label>or month <input name="month" type="month" value="${defMonth}" /></label>
-        <label>or range <input name="start" type="date" /> → <input name="end" type="date" /></label>
-        <button>Run report</button></form>
-      <div id="time-rpt"></div>
-      ${can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
-      <div class="card"><h2>Send this report out</h2>
+      <span class="muted">who worked on what, and for how long</span></div>
+      <form id="tt-filters" class="card tt-filters" onsubmit="event.preventDefault(); Views.timeReportRun()">
+        <div class="tt-presets" role="group" aria-label="Date range shortcuts">
+          ${TT_PRESETS.map(([k, label]) => `<button type="button" class="tt-preset" data-preset="${k}" onclick="Views.timeReportPreset('${k}')">${label}</button>`).join("")}
+        </div>
+        <div class="tt-grid">
+          <label>From <input name="from" type="date" required onchange="Views.timeReportDates()" /></label>
+          <label>To <input name="to" type="date" required onchange="Views.timeReportDates()" /></label>
+          <label>Team member <input name="who" list="tt-people" placeholder="Search by name" autocomplete="off" /></label>
+          <datalist id="tt-people"></datalist>
+          <label>Case <input name="case" placeholder="Case number" autocomplete="off" /></label>
+          <label>Role <select name="role"><option value="">Any role</option></select></label>
+          <label>Time <select name="billable"><option value="">Billable and non-billable</option>
+            <option value="yes">Billable only</option><option value="no">Non-billable only</option></select></label>
+        </div>
+        <div class="tt-actions"><button>Apply</button>
+          <button type="button" class="mini ghost" onclick="Views.timeReportReset()">Clear filters</button>
+          <span id="tt-active" class="muted"></span></div>
+      </form>
+      <div id="time-rpt"><p class="muted">Loading…</p></div>
+      <details class="card tt-more"><summary>Email or download this report</summary>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.timeReportSend(this)">
           <input name="emails" placeholder="recipients (comma-separated emails)" required style="min-width:20em" />
           <input name="message" placeholder="optional message" style="min-width:14em" />
           <button class="mini">Email report</button>
           <button class="mini ghost" type="button" onclick="Views.timeReportCsv()">Download CSV</button></form>
-        <p class="muted">Sends the period currently shown above — run the report first. Body carries the summary; the CSV attachment carries per-person and per-dispute detail with billable amounts. Sends are audit-logged.</p></div>` : ""}
-      <div id="time-rates"></div>`;
+        <p class="muted">Sends exactly what is shown above, filters included. The CSV carries every entry. Sends are audit-logged.</p></details>
+      <details class="card tt-more"><summary>Billable rates by role</summary><div id="time-rates"></div></details>`;
+  }
+
+  function ttForm() { return document.getElementById("tt-filters"); }
+
+  function timeReportPreset(key) {
+    const f = ttForm(); if (!f) return;
+    const [from, to] = ttPresetRange(key);
+    f.from.value = ttIso(from); f.to.value = ttIso(to);
+    timeReportDates();
+    timeReportRun();
+  }
+
+  // Lights the shortcut that matches the dates in the boxes, if one does.
+  function timeReportDates() {
+    const f = ttForm(); if (!f) return;
+    f.querySelectorAll(".tt-preset").forEach((b) => {
+      const [from, to] = ttPresetRange(b.dataset.preset);
+      b.classList.toggle("active", ttIso(from) === f.from.value && ttIso(to) === f.to.value);
+    });
+  }
+
+  function timeReportReset() {
+    const f = ttForm(); if (!f) return;
+    f.who.value = ""; f.case.value = ""; f.role.value = ""; f.billable.value = "";
+    timeReportRun();
+  }
+
+  // Clicking a name or a case in the results narrows the report to it.
+  function timeReportPick(field, value) {
+    const f = ttForm(); if (!f) return;
+    f[field].value = value;
+    if (field === "who") ttTab = "cases";
+    if (field === "case") ttTab = "people";
+    timeReportRun();
+  }
+
+  function timeReportTab(key) {
+    ttTab = key;
+    document.querySelectorAll("#time-rpt .tt-tab").forEach((b) => {
+      const on = b.dataset.tab === key; b.classList.toggle("active", on); b.setAttribute("aria-selected", on);
+    });
+    document.querySelectorAll("#time-rpt .tt-panel").forEach((p) => { p.hidden = p.dataset.tab !== key; });
   }
 
   async function timeRatesBox() {
@@ -4306,7 +4376,7 @@ const Views = (() => {
             <input name="rate" type="number" step="0.01" min="0" placeholder="$/hour" required />
             <button class="mini">Set rate</button></form>`
         : "";
-      box.innerHTML = `<h2>Billable rates by role</h2>
+      box.innerHTML = `
         ${rows ? `<table><thead><tr><th>Role</th><th>Rate</th><th>Last set</th></tr></thead><tbody>${rows}</tbody></table>`
                : `<p class="muted">No rates configured — reports show hours only until rates are set.</p>`}
         ${manage || `<p class="muted">Rates are set by PM / administrators.</p>`}`;
@@ -4325,40 +4395,80 @@ const Views = (() => {
     }, "Saving…");
   }
 
-  async function timeReportRun(form) {
+  async function timeReportRun() {
+    const f = ttForm();
     const box = document.getElementById("time-rpt");
-    const btn = form.querySelector("button");
-    box.innerHTML = `<p class="muted">Computing…</p>`;
+    if (!f || !box) return;
+    if (!f.from.value || !f.to.value) { UI.toast("Pick a start and an end date", { kind: "warn" }); return; }
+    if (f.to.value < f.from.value) { UI.toast("The end date is before the start date", { kind: "warn" }); return; }
+    // The boxes show the last day included; the API takes the day after it.
+    const end = new Date(f.to.value + "T00:00:00"); end.setDate(end.getDate() + 1);
+    const opts = { start: f.from.value, end: ttIso(end), who: f.who.value.trim(), case: f.case.value.trim(),
+      role: f.role.value, billable: f.billable.value };
+    Object.keys(opts).forEach((k) => { if (!opts[k]) delete opts[k]; });
+    const btn = f.querySelector(".tt-actions button");
     await UI.run(btn, async () => {
       try {
-        const opts = form.start.value && form.end.value
-          ? { start: form.start.value, end: form.end.value }
-          : form.week.value ? { week: form.week.value } : { month: form.month.value };
-        window._timeRptOpts = opts;
         const r = await Api.program.timeReport(opts);
+        window._timeRptOpts = opts;
         window._timeRpt = r;
-        const usd2 = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
-        const money = r.total_amount_cents !== undefined; // server attaches amounts only to PM/FINANCE/admin
-        const caseRows = (r.by_case || []).map((c) => `<tr>
-          <td class="mono"><a href="#/cases/${c.case_id}">${esc(c.case_number || c.case_id.slice(0, 8) + "…")}</a></td>
-          <td>${fmtMins(c.minutes)}</td><td>${fmtMins(c.billable_minutes)}</td><td>${c.people}</td>
-          ${money ? `<td>${c.amount_cents != null ? usd2(c.amount_cents) : "—"}${c.unrated_billable_minutes ? ` <span class="muted" title="billable minutes with no configured role rate">+${fmtMins(c.unrated_billable_minutes)} unrated</span>` : ""}</td>` : ""}</tr>`).join("");
-        const personRows = (r.by_person || []).map((p) => `<tr>
-          <td>${esc(p.who)}</td><td>${badge(p.role)}</td><td>${fmtMins(p.minutes)}</td><td>${fmtMins(p.billable_minutes)}</td>
-          ${money ? `<td>${p.amount_cents != null ? usd2(p.amount_cents) : "—"}</td>` : ""}</tr>`).join("");
-        box.innerHTML = `<h2>${esc(r.period)}</h2>
-          <p><b>${fmtMins(r.total_minutes)}</b> total · <b>${fmtMins(r.billable_minutes)}</b> billable${money ? ` · <b>${usd2(r.total_amount_cents)}</b> billable amount` : ""}${money && r.unrated_billable_minutes ? ` · <span class="muted">${fmtMins(r.unrated_billable_minutes)} unrated</span>` : ""}</p>
-          <h3>By dispute</h3>
-          ${caseRows ? `<table><thead><tr><th>Case</th><th>Hours</th><th>Billable</th><th>People</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${caseRows}</tbody></table>` : `<p class="muted">No time logged in this period.</p>`}
-          <h3>By team member</h3>
-          ${personRows ? `<table><thead><tr><th>Who</th><th>Role</th><th>Hours</th><th>Billable</th>${money ? "<th>Amount</th>" : ""}</tr></thead><tbody>${personRows}</tbody></table>` : ""}`;
+        ttRender(r, f);
       } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
-    }, "Computing…");
+    }, "Loading…");
+  }
+
+  function ttRender(r, f) {
+    const box = document.getElementById("time-rpt");
+    const usd2 = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+    const money = r.total_amount_cents !== undefined; // the server attaches amounts only for roles that may see money
+    const attr = (v) => esc(String(v)).replace(/'/g, "&#39;");
+
+    // What can be picked: everyone and every role with time in this period.
+    document.getElementById("tt-people").innerHTML = (r.people || []).map((p) => `<option value="${attr(p.name)}"></option>`).join("");
+    const role = f.role.value;
+    f.role.innerHTML = `<option value="">Any role</option>` + (r.roles || []).map((x) => `<option ${x === role ? "selected" : ""}>${esc(x)}</option>`).join("");
+    const active = [f.who.value && `team member “${f.who.value}”`, f.case.value && `case “${f.case.value}”`,
+      f.role.value && `role ${f.role.value}`, f.billable.value && (f.billable.value === "yes" ? "billable only" : "non-billable only")].filter(Boolean);
+    document.getElementById("tt-active").textContent = active.length ? `Filtered by ${active.join(", ")}` : "";
+
+    const people = r.by_person || [], cases = r.by_case || [], entries = r.entries || [];
+    if (!entries.length) {
+      box.innerHTML = `<div class="card tt-empty"><b>No time logged ${active.length ? "for these filters" : "in this period"}.</b>
+        <p class="muted">${esc(String(r.from))} to ${esc(f.to.value)}${active.length ? ` — try clearing a filter or widening the dates.` : "."}</p></div>`;
+      return;
+    }
+    const tiles = [[fmtMins(r.total_minutes), "Total time"], [fmtMins(r.billable_minutes), "Billable"]]
+      .concat(money ? [[usd2(r.total_amount_cents), "Billable amount" + (r.unrated_billable_minutes ? ` (+${fmtMins(r.unrated_billable_minutes)} with no rate)` : "")]] : [])
+      .concat([[r.people_count, r.people_count === 1 ? "Team member" : "Team members"], [cases.length, cases.length === 1 ? "Dispute" : "Disputes"], [r.entry_count, r.entry_count === 1 ? "Entry" : "Entries"]]);
+    const personRows = people.map((p) => `<tr>
+      <td><button type="button" class="tt-link" title="Show only this team member" onclick="Views.timeReportPick('who','${attr(p.who)}')">${esc(p.who)}</button></td>
+      <td>${badge(p.role)}</td><td class="num">${fmtMins(p.minutes)}</td><td class="num">${fmtMins(p.billable_minutes)}</td>
+      ${money ? `<td class="num">${p.amount_cents != null ? usd2(p.amount_cents) : "—"}</td>` : ""}</tr>`).join("");
+    const caseRows = cases.map((c) => { const num = c.case_number || c.case_id.slice(0, 8) + "…"; return `<tr>
+      <td class="mono"><a href="#/cases/${c.case_id}">${esc(num)}</a>
+        <button type="button" class="tt-link tt-only" title="Show only this case" onclick="Views.timeReportPick('case','${attr(c.case_number || c.case_id)}')">only this</button></td>
+      <td class="num">${fmtMins(c.minutes)}</td><td class="num">${fmtMins(c.billable_minutes)}</td><td class="num">${c.people}</td>
+      ${money ? `<td class="num">${c.amount_cents != null ? usd2(c.amount_cents) : "—"}${c.unrated_billable_minutes ? ` <span class="muted" title="billable time logged under a role with no rate set">+${fmtMins(c.unrated_billable_minutes)} no rate</span>` : ""}</td>` : ""}</tr>`; }).join("");
+    const entryRows = entries.map((e) => `<tr>
+      <td class="mono">${esc(e.entry_date)}</td><td>${esc(e.who)}</td><td>${badge(e.role)}</td>
+      <td class="mono"><a href="#/cases/${e.case_id}">${esc(e.case_number || e.case_id.slice(0, 8) + "…")}</a></td>
+      <td class="num">${fmtMins(e.minutes)}</td><td>${e.billable ? "Billable" : `<span class="muted">Non-billable</span>`}</td>
+      <td class="tt-note">${esc(e.note || "")}</td></tr>`).join("");
+    const tabs = [["people", `By team member (${people.length})`], ["cases", `By dispute (${cases.length})`], ["entries", `Entries (${r.entry_count})`]];
+    box.innerHTML = `<h2 class="tt-period">${esc(r.period)}</h2>
+      <div class="kpi-row">${tiles.map(([n, l]) => `<div class="kpi"><span class="kpi-n">${esc(String(n))}</span><span class="kpi-l">${esc(l)}</span></div>`).join("")}</div>
+      <div class="rpt-tabs" role="tablist">${tabs.map(([k, label]) =>
+        `<button type="button" role="tab" class="rpt-tab rpt-accent-1 tt-tab" data-tab="${k}" onclick="Views.timeReportTab('${k}')">${esc(label)}</button>`).join("")}</div>
+      <div class="tt-panel" data-tab="people"><table><thead><tr><th>Team member</th><th>Role</th><th class="num">Time</th><th class="num">Billable</th>${money ? `<th class="num">Amount</th>` : ""}</tr></thead><tbody>${personRows}</tbody></table></div>
+      <div class="tt-panel" data-tab="cases"><table><thead><tr><th>Case</th><th class="num">Time</th><th class="num">Billable</th><th class="num">People</th>${money ? `<th class="num">Amount</th>` : ""}</tr></thead><tbody>${caseRows}</tbody></table></div>
+      <div class="tt-panel" data-tab="entries"><table><thead><tr><th>Date</th><th>Team member</th><th>Role</th><th>Case</th><th class="num">Time</th><th>Type</th><th>Note</th></tr></thead><tbody>${entryRows}</tbody></table>
+        ${r.entry_count > entries.length ? `<p class="muted">Showing the ${entries.length} most recent of ${r.entry_count} entries — the totals above cover all of them. Narrow the filters to see the rest.</p>` : ""}</div>`;
+    timeReportTab(ttTab);
   }
 
   // Email / export the team-hours report currently on screen.
   async function timeReportSend(form) {
-    if (!window._timeRptOpts) { UI.toast("Run the report for a period first", { kind: "warn" }); return; }
+    if (!window._timeRptOpts) { UI.toast("The report has not loaded yet", { kind: "warn" }); return; }
     const emails = form.emails.value.split(",").map((x) => x.trim()).filter(Boolean);
     if (!emails.length) { UI.toast("At least one recipient", { kind: "warn" }); return; }
     const btn = form.querySelector("button");
@@ -4373,13 +4483,16 @@ const Views = (() => {
 
   function timeReportCsv() {
     const r = window._timeRpt;
-    if (!r) { UI.toast("Run the report for a period first", { kind: "warn" }); return; }
+    if (!r) { UI.toast("The report has not loaded yet", { kind: "warn" }); return; }
     const money = r.total_amount_cents !== undefined;
     const hrs = (m) => (m / 60).toFixed(2);
     const cell = (v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
     const lines = [["section", "who_or_case", "hours", "billable_hours"].concat(money ? ["amount"] : []).join(",")];
     (r.by_person || []).forEach((p) => lines.push(["person", cell(`${p.who} (${p.role})`), hrs(p.minutes), hrs(p.billable_minutes)].concat(money ? [p.amount_cents != null ? (p.amount_cents / 100).toFixed(2) : ""] : []).join(",")));
     (r.by_case || []).forEach((c) => lines.push(["case", cell(c.case_number || c.case_id), hrs(c.minutes), hrs(c.billable_minutes)].concat(money ? [c.amount_cents != null ? (c.amount_cents / 100).toFixed(2) : ""] : []).join(",")));
+    lines.push("");
+    lines.push("date,team_member,role,case,hours,billable,note");
+    (r.entries || []).forEach((e) => lines.push([e.entry_date, cell(e.who), e.role, cell(e.case_number || e.case_id), hrs(e.minutes), e.billable ? "yes" : "no", cell(e.note || "")].join(",")));
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -5930,5 +6043,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
 })();
