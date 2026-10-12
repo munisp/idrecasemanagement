@@ -564,6 +564,7 @@ func main() {
 
 		// Graph intelligence (proxied to graph-intel: FalkorDB + GraphSAGE + EPR-KGQA).
 		r.Post("/graph/ask", s.graphAsk)                  // EPR-KGQA natural-language query
+		r.Get("/graph/hints", s.graphHints)               // real names for the sample questions
 		r.Post("/graph/feedback", s.graphFeedback)        // thumbs up/down -> ART-ready log
 		r.Post("/graph/sync", s.graphSyncNow)             // Postgres -> FalkorDB -> lakehouse
 		r.Post("/graph/to-lakehouse", s.graphToLakehouse) // FalkorDB -> gold-zone export

@@ -1562,22 +1562,17 @@ const Views = (() => {
   // ---- Ask the graph (EPR-KGQA) ------------------------------------------------
   function askGraph() {
     const html = `<div class="view-head"><h1>Ask the dispute graph</h1></div>
-      <p class="muted">Natural-language questions over this state's dispute graph — entity linking, path retrieval,
-      GraphSAGE ranking, and a local LLM answer. Every claim cites its graph path; nothing leaves the platform.</p>
+      <p class="muted">Ask in plain English about this program's disputes. Answers come from two places: the dispute
+      graph (how cases, providers and plans connect) and figures counted from the program's own records. Both are
+      shown under each answer; nothing leaves the platform.</p>
       <form id="kgqa" class="kgqa-bar">
         <input name="q" required minlength="6" autocomplete="off"
-          placeholder="e.g. Which disputes share a payer with case IDR-2026-0004?" aria-label="Ask the dispute graph" />
+          placeholder="e.g. Which organizations file the most disputes?" aria-label="Ask the dispute graph" />
         <button>Ask</button>
       </form>
       <div id="kgqa-out" aria-live="polite"></div>
       <h3>Try asking</h3>
-      <div class="kgqa-hints">
-        ${["Which cases are most related to IDR-2026-0004?",
-           "What connects Lone Star Imaging and BlueShield of Texas?",
-           "Which disputes involve air ambulance service lines?",
-           "Show cases related to IDR-2026-0002 and why"].map((q) =>
-          `<button class="kgqa-hint" data-q="${esc(q)}">${esc(q)}</button>`).join("")}
-      </div>`;
+      <div id="kgqa-cats">${kgqaCategories({})}</div>`;
     afterRender(() => {
       const out = $("#kgqa-out");
       const run = async (q) => {
@@ -1597,6 +1592,8 @@ const Views = (() => {
               r.entities.map((e) => `<span class="kgqa-ent">${e.kind === "Case"
                 ? `<a href="#/cases/${esc(e.id)}">${esc(e.label)}</a>` : esc(e.label)}
                 <span class="muted">${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""}</span></span>`).join("") + `</div>` : ""}
+            ${(r.facts || []).length ? `<h3>Figures used <span class="muted">· counted from this program's records</span></h3>
+              <ul class="kgqa-facts">` + r.facts.map((f) => `<li>${esc(f)}</li>`).join("") + `</ul>` : ""}
             ${(r.citations || []).length ? `<h3>Evidence paths <span class="muted">· every claim traces to one of these</span></h3>
               <ol class="kgqa-paths">` + r.citations.map((c) => `<li class="mono">${esc(c.path)}</li>`).join("") + `</ol>` : ""}
             ${(r.gnn_ranked || []).length ? `<h3>GNN-ranked related cases</h3><table><tbody>` +
@@ -1617,10 +1614,76 @@ const Views = (() => {
         }
       };
       $("#kgqa").addEventListener("submit", (ev) => { ev.preventDefault(); run(ev.target.q.value.trim()); });
-      document.querySelectorAll(".kgqa-hint").forEach((b) =>
-        b.addEventListener("click", () => { $("#kgqa").q.value = b.dataset.q; run(b.dataset.q); }));
+      // One listener for every suggestion, present and future: the list is
+      // redrawn once the tenant's real case numbers and names arrive.
+      $("#kgqa-cats").addEventListener("click", (ev) => {
+        const b = ev.target.closest(".kgqa-hint");
+        if (!b) return;
+        $("#kgqa").q.value = b.dataset.q; run(b.dataset.q);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+      Api.graph.hints().then((h) => { const el = $("#kgqa-cats"); if (el) el.innerHTML = kgqaCategories(h || {}); })
+        .catch(() => {});
     });
     return html;
+  }
+
+  // The questions people ask a claims-dispute program, by category, five
+  // each. Questions about one case or one organization are written with this
+  // tenant's own case numbers and names (from /graph/hints); where the tenant
+  // has none yet, a question that needs no name takes its place.
+  function kgqaCategories(h) {
+    const [c1, c2] = h.case_numbers || [];
+    const [f1] = h.filers || [];
+    const [p1] = h.plans || [];
+    const svc = ((h.service_lines || [])[0] || "").replace(/_/g, " ").toLowerCase();
+    const cats = [
+      ["Caseload and status", [
+        "How many disputes do we have, and what stage is each in?",
+        "How many disputes are open right now versus closed?",
+        "How many disputes were opened in the last 30 days?",
+        "Which internal status has the most cases waiting?",
+        "How many cases are waiting on the provider and how many on the plan?"]],
+      ["Who is filing", [
+        "Which organizations file the most disputes?",
+        "Which health plans are named in the most disputes?",
+        "How many disputes were filed by providers versus health plans?",
+        f1 ? `Which cases did ${f1} file?` : "Which providers are named in the most disputes?",
+        f1 && p1 ? `What connects ${f1} and ${p1}?` : "Which provider and plan pairs appear together most often?"]],
+      ["Related cases", c1 ? [
+        `Tell me about ${c1}`,
+        `Which cases are most related to ${c1}?`,
+        `Which disputes share a filer or plan with ${c1}?`,
+        c2 ? `What connects ${c1} and ${c2}?` : `Who filed ${c1}, and against which plan?`,
+        c2 ? `Show cases related to ${c2} and why` : `Show cases related to ${c1} and why`] : []],
+      ["Services in dispute", [
+        "Which service lines have the most disputes?",
+        svc ? `Which disputes involve ${svc} services?` : "Which disputes involve emergency services?",
+        "Which service line has the highest average disputed amount?",
+        "How many disputes have no service line recorded?",
+        "How many emergency (ER) disputes do we have?"]],
+      ["Deadlines and turnaround", [
+        "Which open cases are older than 60 days?",
+        "How many open cases are past the 90-day limit?",
+        "Which deadlines have been missed, by type?",
+        "Which contract deliverables are due or late?",
+        "How long do cases take from opening to closing on average?"]],
+      ["Eligibility", [
+        "How many disputes were found eligible versus ineligible?",
+        "What are the most common reasons a dispute is ineligible?",
+        "How many cases are on hold for an invalid authorization of representative?",
+        "How many eligibility decisions were borderline and sent for a second look?",
+        "How many open cases past payment have no eligibility decision yet?"]],
+      ["Money and outcomes", [
+        "What is the total amount in dispute?",
+        "What are the five largest disputes by amount?",
+        "How many disputes are $1 million or more?",
+        "What is the average disputed amount?",
+        "How many cases have been decided, and what was awarded?"]],
+    ];
+    return cats.filter(([, qs]) => qs.length).map(([name, qs]) => `<div class="kgqa-cat"><h4>${esc(name)}</h4>
+        <div class="kgqa-hints">${qs.map((q) =>
+          `<button type="button" class="kgqa-hint" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div></div>`).join("");
   }
 
   // ---- Program rules UI (G1–G15 surfaces) ---------------------------------

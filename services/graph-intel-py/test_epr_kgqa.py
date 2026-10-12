@@ -98,3 +98,59 @@ def test_ask_general_summary_also_feeds_the_ollama_prompt():
         k.ask("t1", "what's the summary of the disputes we have currently")
     assert "no graph paths retrieved" not in captured["prompt"]
     assert "3 total case(s)" in captured["prompt"]
+
+
+# ---- program figures (facts.py) ----------------------------------------------
+
+FACTS = {
+    "caseload": ["There are 213 disputes in total: 158 open and 55 closed or decided.", "12 opened in the last 30 days.",
+                 "Disputes by status: PENDING_INTAKE: 100."],
+    "parties": ["Organizations that filed the most disputes: Tri-County Air Rescue: 15."],
+    "services": ["Disputes by service line: AIR_AMBULANCE: 32."],
+    "deadlines": ["Of 158 open disputes, 40 have been open more than 60 days and 22 more than 90 days."],
+    "eligibility": ["Latest eligibility decision per dispute: ELIGIBLE: 46, INELIGIBLE: 18."],
+    "money": ["Total amount in dispute: $12,850,595.98 across 195 disputes."],
+    "outcomes": ["Finished disputes: Closed: 46, Decided: 9."],
+}
+
+
+def test_each_sample_question_reaches_its_own_figures():
+    import facts
+    for question, must in [
+        ("How many disputes are open right now versus closed?", "213 disputes"),
+        ("Which organizations file the most disputes?", "Tri-County"),
+        ("Which service lines have the most disputes?", "AIR_AMBULANCE"),
+        ("Which open cases are older than 60 days?", "more than 60 days"),
+        ("What are the most common reasons a dispute is ineligible?", "INELIGIBLE"),
+        ("What is the total amount in dispute?", "$12,850,595.98"),
+        ("How many cases have been decided, and what was awarded?", "Decided: 9"),
+    ]:
+        assert any(must in line for line in facts.select(question, FACTS)), question
+    # a narrower question keeps the caseload lines to context, not the whole list
+    lines = facts.select("How many disputes are $1 million or more?", FACTS)
+    assert lines[-1].startswith("Total amount") and len([x for x in lines if x in FACTS["caseload"]]) <= 2
+    # a question that matches no category gets a little of everything
+    assert len(facts.select("anything interesting?", FACTS)) >= 7
+    assert facts.select("anything", {}) == []
+
+
+def test_ordinary_question_words_are_not_looked_up_as_names():
+    for q in ("Which health plans are named in the most disputes?",
+              "How many disputes were filed by providers versus health plans?",
+              "How many open cases past payment have no eligibility decision yet?"):
+        ts = {t.lower() for t in k._terms(q)}
+        assert not ts & {"plan", "plans", "health", "providers", "open", "eligibility", "filed"}, (q, ts)
+    assert "sunshine" in {t.lower() for t in k._terms("Which cases name Sunshine Coast Health Plan?")}
+
+
+def test_figures_go_to_the_model_and_come_back_with_the_answer():
+    _wire()
+    seen = {}
+    with mock.patch.object(k, "_facts_for", return_value=FACTS["money"]), \
+         mock.patch.object(k, "_ollama_generate", side_effect=lambda p: (seen.setdefault("p", p) and "ok", "ollama:x")):
+        r = k.ask("t1", "What is the total amount in dispute?")
+    assert "$12,850,595.98" in seen["p"] and r["facts"] == FACTS["money"]
+    with mock.patch.object(k, "_facts_for", return_value=FACTS["money"]), \
+         mock.patch.object(k, "_ollama_generate", side_effect=Exception("down")):
+        r = k.ask("t1", "What is the total amount in dispute?")
+    assert "$12,850,595.98" in r["answer"]

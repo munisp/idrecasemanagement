@@ -190,6 +190,7 @@ const Api = (() => {
     },
     graph: {
       ask: (question, k) => req("POST", `${t()}/graph/ask`, { question, k }),
+      hints: () => req("GET", `${t()}/graph/hints`),
       feedback: (logId, rating) => req("POST", `${t()}/graph/feedback`, { log_id: logId, rating }),
       related: (caseId) => req("GET", `${t()}/cases/${caseId}/related`),
       neighbors: (caseId) => req("GET", `${t()}/cases/${caseId}/graph-neighbors`),

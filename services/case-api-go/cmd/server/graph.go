@@ -99,6 +99,17 @@ func (s *server) graphAsk(w http.ResponseWriter, r *http.Request) {
 	s.proxyGraph(w, r, http.MethodPost, "/ask", payload)
 }
 
+// graphHints handles GET /graph/hints -- real case numbers and party names
+// from this tenant, so the portal's sample questions are about things that
+// exist. Same audience as graphAsk.
+func (s *server) graphHints(w http.ResponseWriter, r *http.Request) {
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	s.proxyGraph(w, r, http.MethodGet, "/hints", nil)
+}
+
 // graphFeedback handles POST /graph/feedback {log_id, rating}.
 func (s *server) graphFeedback(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)

@@ -45,6 +45,21 @@ _STOP = {
     "the", "and", "for", "with", "from", "that", "this", "what", "which", "how",
     "many", "much", "are", "was", "were", "did", "does", "show", "list", "tell",
     "about", "between", "related", "cases", "case", "dispute", "disputes",
+    # Ordinary words of a question about the program. Left in, they are
+    # looked up as names: "plan" matched every "... Health Plan", and a
+    # question about all plans was answered about one of them.
+    "health", "plan", "plans", "provider", "providers", "payer", "payers", "service", "services", "line", "lines",
+    "open", "opened", "closed", "eligible", "ineligible", "eligibility", "amount", "amounts", "average", "total",
+    "status", "organizations", "organization", "filed", "file", "files", "filer", "filing", "most", "often", "right",
+    "now", "last", "days", "day", "have", "has", "been", "each", "stage", "who", "why", "more", "than", "older",
+    "past", "limit", "type", "deadline", "deadlines", "missed", "contract", "deliverables", "due", "late", "long",
+    "take", "opening", "closing", "found", "versus", "common", "reasons", "reason", "hold", "invalid",
+    "authorization", "representative", "decisions", "decision", "borderline", "sent", "second", "look", "paid",
+    "yet", "largest", "five", "million", "decided", "awarded", "share", "involve", "recorded", "emergency",
+    "highest", "waiting", "internal", "currently", "summary", "overview", "our", "all", "any", "them", "their",
+    "there", "you", "can", "give", "name", "names", "number", "numbers", "top", "against", "together", "appear",
+    "pairs", "connects", "connect", "new", "old", "one", "two", "disputed", "money", "worth", "value", "they",
+    "where", "when", "not", "but", "yes", "per", "its", "out", "into", "over", "under", "still", "also",
 }
 
 
@@ -116,23 +131,35 @@ def _extractive_answer(question: str, entities: list[dict], paths: list[str],
     if ranked:
         top = ", ".join(f"{r['case_id']} (score {r['score']})" for r in ranked[:3])
         lines.append(f"GNN link prediction ranks these as most related: {top}.")
-    if not (entities or paths):
-        if general:
-            lines.extend(general)
-        else:
-            lines.append("No matching cases or parties were found in this tenant's graph.")
+    if general:
+        lines.extend(general)
+    elif not (entities or paths):
+        lines.append("No matching cases or parties were found in this tenant's graph.")
     return "\n".join(lines)
 
 
 def _prompt(question: str, paths: list[str], general: list[str] | None = None) -> str:
-    evidence_lines = paths[:12] or (general or [])
-    evidence = "\n".join(f"- {p}" for p in evidence_lines) or "(no graph paths retrieved)"
+    evidence_lines = paths[:12] + list(general or [])
+    evidence = "\n".join(f"- {p}" for p in evidence_lines) or "(no evidence retrieved)"
     return (
-        "You are the IDRE dispute-graph analyst for a federal No Surprises Act "
-        "platform. Answer ONLY from the evidence paths below — every claim must "
-        "trace to a path. If the evidence is insufficient, say so.\n\n"
-        f"Evidence paths:\n{evidence}\n\nQuestion: {question}\nAnswer (concise, cite paths):"
+        "You are the analyst for a healthcare claims dispute resolution program. "
+        "The evidence below is of two kinds: graph paths linking cases and parties, "
+        "and figures computed from the program's own records. Answer ONLY from it. "
+        "Give the exact numbers and names the evidence gives; do not round, add or "
+        "invent any. If the evidence does not answer the question, say what is "
+        "missing in one sentence.\n\n"
+        f"Evidence:\n{evidence}\n\nQuestion: {question}\nAnswer (short, plain English):"
     )
+
+
+def _facts_for(tenant: str, question: str) -> list[str]:
+    """The program figures that bear on the question; [] when they cannot be
+    computed (no database in reach) -- the graph answer still stands."""
+    try:
+        import facts
+        return facts.select(question, facts.gather(tenant))
+    except Exception:
+        return []
 
 
 def ask(tenant: str, question: str, k: int = 5) -> dict:
@@ -140,7 +167,11 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
     entities = link_entities(tenant, question)
     entity_ids = [e["id"] for e in entities]
     paths = graphdb.retrieve_paths(tenant, entity_ids) if entity_ids else []
-    general = _general_summary(tenant) if not entity_ids else []
+    # Figures from the program's records go with every question: alone when
+    # it names no case or party, beside the graph paths when it does.
+    general = _facts_for(tenant, question)
+    if not general and not entity_ids:
+        general = _general_summary(tenant)
 
     # GNN ranking for the first linked case (graph <-> gnn <-> kgqa)
     ranked: list[dict] = []
@@ -174,6 +205,7 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
         "answer": answer,
         "entities": entities,
         "citations": [{"path": p} for p in paths],
+        "facts": general,
         "gnn_ranked": ranked,
         "generator": generator,
         "latency_ms": int((time.time() - t0) * 1000),
