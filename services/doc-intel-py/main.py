@@ -388,6 +388,24 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
                 (json.dumps({"contracted": contracted}), case_id),
             )
             changed.append(f"contracted={contracted}")
+        # Report fields the documents already state, so nobody re-types them:
+        # out-of-network (the same network-status reading as "contracted"),
+        # and the provider's and the plan's names as printed on the claim.
+        # Like everything here: only where the case has no value yet.
+        extra = {}
+        if contracted is not None and "out_of_network" not in details:
+            extra["out_of_network"] = "No" if contracted else "Yes"
+        for key, field in (("provider_org", "provider_name"), ("health_plan", "payer_name")):
+            val = str(extracted.get(field) or "").strip()
+            if val and len(val) <= 200 and key not in details:
+                extra[key] = val
+        if extra:
+            c.execute(
+                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                (json.dumps(extra), case_id),
+            )
+            labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan"}
+            changed.extend(f"{labels[k]} {v}" for k, v in extra.items())
         # A document that contradicts what the case already has is recorded,
         # never applied: the eligibility review reads this list and sends the
         # result for a second look.
