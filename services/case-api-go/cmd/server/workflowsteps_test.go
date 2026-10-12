@@ -194,3 +194,20 @@ func TestWorkflowOwnerOrAdmin(t *testing.T) {
 		}
 	}
 }
+
+func TestChecklistItemOwner(t *testing.T) {
+	as := func(r string) principal { return principal{Roles: []string{r}} }
+	for _, c := range []struct {
+		role, owner string
+		want        bool
+	}{
+		{"CODER", "CODER", true}, {"CASE_MANAGER", "CODER", false}, {"PM", "CODER", false},
+		{"TENANT_ADMIN", "CODER", true}, {"FEDERAL_ADMIN", "ATTORNEY", true},
+		{"FINANCE", "FINANCE", true}, {"CASE_MANAGER", "FINANCE", false},
+		{"CASE_MANAGER", "", true}, // no owner configured: the old rule applies
+	} {
+		if got := mayCheckItem(as(c.role), c.owner); got != c.want {
+			t.Errorf("%s ticking a %q item: got %v, want %v", c.role, c.owner, got, c.want)
+		}
+	}
+}

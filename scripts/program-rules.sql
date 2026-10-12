@@ -443,6 +443,27 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "DETERMINATION": ["Coder plan-type verification complete","clinical review complete if requested from Nurse/Physician","Attorney rationale QA-approved","case outcome recorded","invoice issued to non-prevailing party"],
     "PAYMENT": ["invoice paid or past-due reminder sent","recommendation sent to the Agency within 60 days of receipt"]
   },
+  "checklist_owners": {
+      "requester email + organization on file": "CASE_MANAGER",
+      "initial review fee paid ($123.59)": "FINANCE",
+      "case number assigned (FL{yy}-{seq})": "CASE_MANAGER",
+      "disputed amount meets threshold for provider type/contracted status": "CASE_MANAGER",
+      "proof of timely filing attached (last EOB date, service date, or appeal documents)": "CASE_MANAGER",
+      "filing window not expired (12 months from final determination)": "CASE_MANAGER",
+      "AOR valid": "CASE_MANAGER",
+      "no ineligibility reason present (late payment/interest only, Medicare grievance, non-FL-regulated plan, etc.)": "CASE_MANAGER",
+      "cost estimate sent to filing party": "CODER",
+      "provider permission received or 15-day window elapsed without response": "CASE_MANAGER",
+      "health plan notified of the dispute": "CASE_MANAGER",
+      "plan response received, opted out, or 15-day window elapsed (default determination)": "CASE_MANAGER",
+      "Coder plan-type verification complete": "CODER",
+      "clinical review complete if requested from Nurse/Physician": "NURSE_PHYSICIAN",
+      "Attorney rationale QA-approved": "ATTORNEY",
+      "case outcome recorded": "CASE_MANAGER",
+      "invoice issued to non-prevailing party": "PM",
+      "invoice paid or past-due reminder sent": "FINANCE",
+      "recommendation sent to the Agency within 60 days of receipt": "CASE_MANAGER"
+  },
   "field_schema": {
     "line_of_business": ["Medicaid","Commercial","Medicare","Medicare Advantage","Marketplace","Other"],
     "disputed_issue": ["Medicaid Medical Necessity","Underpayment","Overpayment","Denial","Other"],

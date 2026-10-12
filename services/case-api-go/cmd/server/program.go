@@ -89,6 +89,9 @@ type ProgramConfig struct {
 	NotesStreamRoles map[string][]string `json:"notes_stream_roles"`
 	FieldSchema  map[string][]string `json:"field_schema"`
 	Checklist    map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
+	// ChecklistOwners: checklist item -> the role that ticks it. An item
+	// with no owner here can be ticked by any case staff, as before.
+	ChecklistOwners map[string]string `json:"checklist_owners"`
 	// Correspondence was never on this struct, so getProgram's response
 	// (what the portal's template dropdown reads) never carried it --
 	// corrTemplates() below did its own separate raw DB read instead,

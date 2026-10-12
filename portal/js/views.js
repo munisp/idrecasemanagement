@@ -83,15 +83,16 @@ const Views = (() => {
   const sopStamp = (x) => (x && x.by ? `<span class="muted"> — ${esc(x.by)}, ${fmtDate(x.at)}</span>` : "");
   function sopNotesHtml(id, c) {
     const rn = (c.details && c.details.review_notes) || {};
-    return `<details class="prog-sec"><summary>Review notes</summary>
-      <p class="muted">One field per role. Everyone on the case can read all of them; each is written only by its owner.</p>` +
-      SOP_NOTE_FIELDS.map(([f, label, roles, owner]) => {
-        const mine = can(...roles, "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    // Each person sees only the field(s) their role writes; admins see all.
+    const fields = SOP_NOTE_FIELDS.filter(([, , roles]) => can(...roles, "FEDERAL_ADMIN", "PLATFORM_ADMIN"));
+    if (!fields.length) return "";
+    return `<details class="prog-sec"><summary>Review notes</summary>` +
+      fields.map(([f, label]) => {
         const n = rn[f] || {};
         return `<form class="form" onsubmit="event.preventDefault(); Views.saveReviewNote('${id}','${f}',this)">
           <label><b>${esc(label)}</b>${sopStamp(n)}
-            <textarea name="text" rows="3" ${mine ? "" : "readonly"} placeholder="${mine ? "" : "Written by the " + esc(owner)}">${esc(n.text || "")}</textarea></label>
-          ${mine ? `<button class="mini">Save</button>` : ""}</form>`;
+            <textarea name="text" rows="3">${esc(n.text || "")}</textarea></label>
+          <button class="mini">Save</button></form>`;
       }).join("") + `</details>`;
   }
   function sopSummaryHtml(id, c, cfg) {
@@ -925,11 +926,17 @@ const Views = (() => {
       }).catch(() => { const b = document.getElementById("gnn-rel"); if (b) b.innerHTML = ""; });
       const stages = {};
       checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
-      html += `<h2>Stage checklists</h2>` + Object.entries(stages).map(([stage, items]) =>
-        `<h3>${esc(stage)}</h3><ul class="checklist">` + items.map((i) =>
-          `<li>${i.done ? "✅" : (can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN")
+      // Role-based: the server says whose each item is (owner) and whether
+      // this user may tick it (can_check). Items with no owner keep the old
+      // rule. Stages are listed in the order a case moves through them.
+      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
+      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
+      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
+      html += `<h2>Stage checklists</h2>` + Object.entries(stages).sort((a, b) => stageRank(a[0]) - stageRank(b[0])).map(([stage, items]) =>
+        `<h3>${esc(stage.replace(/_/g, " "))}</h3><ul class="checklist">` + items.map((i) =>
+          `<li>${i.done ? "✅" : (mayTick(i)
             ? `<button class="mini" onclick="Views.check('${i.id}')">check</button>` : "⬜")}
-            ${esc(i.item)}${i.required ? " *" : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
+            ${esc(i.item)}${i.required ? " *" : ""}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
         `</ul>`).join("");
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         html += `<div class="actions">

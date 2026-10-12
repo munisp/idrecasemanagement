@@ -551,6 +551,20 @@ func (s *server) getChecklist(w http.ResponseWriter, r *http.Request) {
 		SELECT id, stage, item, required, done, COALESCE(done_by,'') AS done_by, done_at
 		FROM public.case_checklists WHERE tenant=$1 AND case_id=$2
 		ORDER BY stage, id`, tenant, id)
+	// Each item belongs to one role: say whose it is, and whether the
+	// caller is that role (or an admin) so the page offers the tick only
+	// to them.
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	var owners map[string]string
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		owners = cfg.ChecklistOwners
+	}
+	for _, row := range out {
+		role := owners[fmt.Sprint(row["item"])]
+		row["owner_role"] = role
+		row["owner"] = wfOwnerLabels[role]
+		row["can_check"] = mayCheckItem(p, role)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -561,11 +575,26 @@ func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 	// (views.js) has always shown the check button to ARBITRATOR -- a real,
 	// actively-used federal NSA role -- so the gate matches what's already
 	// exposed rather than silently 403ing a working interaction.
-	if !hasAnyRole(p, "ARBITRATOR") && !hasAnyRole(p, caseStaffRoles...) {
+	if !hasAnyRole(p, "ARBITRATOR", "FINANCE") && !hasAnyRole(p, caseStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
 	itemID := chi.URLParam(r, "itemId")
+	// Role-based: an item with an owner in the program's checklist_owners
+	// is ticked by that role (or an admin) and nobody else.
+	if cfg := s.loadProgram(r, tenant); cfg != nil && len(cfg.ChecklistOwners) > 0 {
+		var item string
+		if err := s.db.QueryRow(r.Context(),
+			`SELECT item FROM public.case_checklists WHERE tenant=$1 AND id=$2`, tenant, itemID).Scan(&item); err != nil {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		if role := cfg.ChecklistOwners[item]; !mayCheckItem(p, role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("forbidden: this checklist item is ticked by the %s", wfOwnerLabels[role])})
+			return
+		}
+	}
 	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.case_checklists SET done=true, done_by=$3, done_at=now()
 		WHERE tenant=$1 AND id=$2`, tenant, itemID, p.Subject)
@@ -819,4 +848,13 @@ func truncate(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
+}
+
+// mayCheckItem: the item's owner role, or an admin. An item with no owner
+// keeps the old rule (any case staff, already checked by the caller).
+func mayCheckItem(p principal, ownerRole string) bool {
+	if ownerRole == "" {
+		return true
+	}
+	return hasAnyRole(p, ownerRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 }
