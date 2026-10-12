@@ -99,6 +99,20 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"kind must be determination_rationale or correspondence"}`, http.StatusBadRequest)
 		return
 	}
+	// In a program with role-owned steps, the assistant drafts only what the
+	// caller could draft by hand: letters are the Reviewer's, the legal
+	// rationale is the Attorney's. (TENANT_ADMIN passes either, as elsewhere.)
+	if s.loadProgram(r, tenant) != nil {
+		owner := "CASE_MANAGER"
+		if in.Kind == draftKindDetermination {
+			owner = "ATTORNEY"
+		}
+		if !hasAnyRole(p, owner, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf(
+				"forbidden: a %s draft belongs to the %s", strings.ReplaceAll(in.Kind, "_", " "), wfOwnerLabels[owner])})
+			return
+		}
+	}
 	// Instructions are reviewer guidance, not a prompt-injection vector into
 	// fact-space, but bound them anyway.
 	in.Instructions = truncate(in.Instructions, 2000)

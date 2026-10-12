@@ -157,7 +157,7 @@
   if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
-  if (!has("TPA")) links.push(["#/ask", "✦", "Ask the graph"]);
+  if (!has("TPA") && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);

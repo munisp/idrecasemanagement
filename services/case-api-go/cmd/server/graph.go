@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -74,12 +75,44 @@ func (s *server) proxyGraph(w http.ResponseWriter, r *http.Request, method, path
 // graphAsk handles POST /graph/ask {question, k?} — EPR-KGQA: entity linking,
 // path retrieval, GNN ranking, ollama answer with citations. The tenant is
 // injected server-side so a caller can never query across the state line.
+// graphAskRoles may question the dispute graph: staff who can already open
+// the whole case list. A filing party and a TPA cannot -- the graph answers
+// from every dispute in the tenant, and they have standing only in their own.
+var graphAskRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY",
+	"ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
+
+func mayAskGraph(p principal) bool {
+	return !hasRole(p, "TPA") && !hasRole(p, "PARTY") && hasAnyRole(p, graphAskRoles...)
+}
+
+// graphFactCategories is which of the program's figures a caller may be
+// answered from. The assistant is one more way to read the same data, so it
+// follows the screens: a role without the Reports, Ops or money screens does
+// not get their contents by asking for them in a sentence.
+//
+//	caseload, services  anyone who may ask -- the case list shows as much
+//	parties, eligibility, outcomes   the Reports roles (program-wide rankings and totals)
+//	deadlines           the Reports and Ops roles
+//	money               the roles that read invoices and payments
+func graphFactCategories(p principal) []string {
+	cats := []string{"caseload", "services"}
+	reports := hasAnyRole(p, reportsReadRoles...)
+	if reports {
+		cats = append(cats, "parties", "eligibility", "outcomes")
+	}
+	if reports || hasAnyRole(p, opsRoles...) {
+		cats = append(cats, "deadlines")
+	}
+	if hasAnyRole(p, financialReadRoles...) {
+		cats = append(cats, "money")
+	}
+	return cats
+}
+
 func (s *server) graphAsk(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	// TPA excluded -- see listCases' comment (main.go): the KGQA graph
-	// answers from the WHOLE tenant's case data, which a TPA has no
-	// standing to query beyond the disputes it filed itself.
-	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !mayAskGraph(p) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -94,7 +127,8 @@ func (s *server) graphAsk(w http.ResponseWriter, r *http.Request) {
 	if in.K <= 0 || in.K > 20 {
 		in.K = 5
 	}
-	payload, _ := json.Marshal(map[string]any{"tenant": tenant, "question": in.Question, "k": in.K})
+	payload, _ := json.Marshal(map[string]any{"tenant": tenant, "question": in.Question, "k": in.K,
+		"allow": graphFactCategories(p)})
 	s.logActivity(r.Context(), tenant, "", "KGQA_ASK", truncate("KGQA: "+in.Question, 400))
 	s.proxyGraph(w, r, http.MethodPost, "/ask", payload)
 }
@@ -103,18 +137,18 @@ func (s *server) graphAsk(w http.ResponseWriter, r *http.Request) {
 // from this tenant, so the portal's sample questions are about things that
 // exist. Same audience as graphAsk.
 func (s *server) graphHints(w http.ResponseWriter, r *http.Request) {
-	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !mayAskGraph(p) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
-	s.proxyGraph(w, r, http.MethodGet, "/hints", nil)
+	s.proxyGraph(w, r, http.MethodGet, "/hints?allow="+url.QueryEscape(strings.Join(graphFactCategories(p), ",")), nil)
 }
 
 // graphFeedback handles POST /graph/feedback {log_id, rating}.
 func (s *server) graphFeedback(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	// TPA excluded -- see graphAsk's comment just above.
-	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+	if !mayAskGraph(r.Context().Value(ctxPrincipal{}).(principal)) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}

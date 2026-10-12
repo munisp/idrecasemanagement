@@ -1646,53 +1646,57 @@ const Views = (() => {
     const [f1] = h.filers || [];
     const [pairA, pairB] = h.pair || [];   // a provider and a plan that really appear on the same dispute
     const svc = ((h.service_lines || [])[0] || "").replace(/_/g, " ").toLowerCase();
+    // The server says which kinds of figures this role may ask about (it
+    // refuses the others whatever the page shows). Until it has answered,
+    // only what every staff role may ask is offered.
+    const may = new Set(h.categories || ["caseload", "services"]);
     const cats = [
-      ["Caseload and status", [
+      ["Caseload and status", "caseload", [
         "How many disputes do we have, and what stage is each in?",
         "How many disputes are open right now versus closed?",
         "How many disputes were opened in the last 30 days?",
         "Which internal status holds the most cases?",
         "How many cases are waiting on the provider and how many on the plan?"]],
-      ["Who is filing", [
+      ["Who is filing", "parties", [
         "Which organizations file the most disputes?",
         "Which health plans are named in the most disputes?",
         "How many disputes were filed by providers versus health plans?",
         f1 ? `Which cases did ${f1} file?` : "Which providers are named in the most disputes?",
         pairA && pairB ? `What connects ${pairA} and ${pairB}?` : "Which provider and plan pairs appear together most often?"]],
-      ["Related cases", c1 ? [
+      ["Related cases", "caseload", c1 ? [
         `Tell me about ${c1}`,
         `Which cases are most related to ${c1}?`,
         `Which disputes share a filer or plan with ${c1}?`,
         c2 ? `What connects ${c1} and ${c2}?` : `Who filed ${c1}, and against which plan?`,
         c2 ? `Show cases related to ${c2} and why` : `Show cases related to ${c1} and why`] : []],
-      ["Services in dispute", [
+      ["Services in dispute", "services", [
         "Which service lines have the most disputes?",
         svc ? `Which disputes involve ${svc} services?` : "Which disputes involve emergency services?",
-        "Which service line has the highest average disputed amount?",
+        may.has("money") ? "Which service line has the highest average disputed amount?" : "Which service line has the fewest disputes?",
         "How many disputes have no service line recorded?",
         "How many emergency (ER) disputes do we have?"]],
-      ["Deadlines and turnaround", [
+      ["Deadlines and turnaround", "deadlines", [
         "Which open cases are older than 60 days?",
         "How many open cases are past the 90-day limit?",
         "Which deadlines have been missed, by type?",
         "Which contract deliverables are due or late?",
         "How long do cases take from opening to closing on average?"]],
-      ["Eligibility", [
+      ["Eligibility", "eligibility", [
         "How many disputes were found eligible versus ineligible?",
         "What are the most common reasons a dispute is ineligible?",
         "How many cases are on hold for an invalid authorization of representative?",
         "How many eligibility decisions were borderline and sent for a second look?",
         "How many open cases past payment have no eligibility decision yet?"]],
-      ["Money and outcomes", [
+      ["Money and outcomes", "money", [
         "What is the total amount in dispute?",
         "What are the five largest disputes by amount?",
         "How many disputes are $1 million or more?",
         "What is the average disputed amount?",
-        "How many cases have been decided, and what was awarded?"]],
+        may.has("outcomes") ? "How many cases have been decided, and what was awarded?" : "How much has been awarded so far?"]],
     ];
     // One tab per category; the open tab survives the redraw that brings
     // in the tenant's real names.
-    const shown = cats.filter(([, qs]) => qs.length);
+    const shown = cats.filter(([, need, qs]) => qs.length && may.has(need)).map(([name, , qs]) => [name, qs]);
     const open = shown.some(([name]) => name === kgqaTab) ? kgqaTab : shown[0][0];
     return `<div class="kgqa-tabs" role="tablist" aria-label="Question categories">${shown.map(([name]) =>
         `<button type="button" role="tab" class="kgqa-tab${name === open ? " active" : ""}" data-cat="${esc(name)}"

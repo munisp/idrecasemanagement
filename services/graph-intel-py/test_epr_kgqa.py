@@ -180,3 +180,52 @@ def test_service_words_are_not_party_names_and_full_names_rank_first():
     ] if term.lower() in ("sunshine", "coast") else []
     ents = k.link_entities("t1", "What connects Northgate and Sunshine Coast Health Plan?")
     assert ents[0]["label"] == "Sunshine Coast Health Plan"
+
+
+# ---- role boundaries: the assistant reads no more than the caller's screens do
+
+def _facts_stub(allow_seen):
+    """A stand-in for facts.py that records which categories were consulted."""
+    import facts
+
+    def gather(tenant):
+        return FACTS
+    return mock.patch.object(facts, "gather", gather)
+
+
+def test_a_role_without_the_money_screens_is_told_so_and_gets_no_figures():
+    _wire()
+    reviewer = ["caseload", "services"]
+    with _facts_stub(None), mock.patch.object(k, "_ollama_generate", side_effect=AssertionError("no model")):
+        for q in ("What is the total amount in dispute?", "Which organizations file the most disputes?",
+                  "What are the most common reasons a dispute is ineligible?", "Which deadlines have been missed, by type?",
+                  "How many disputes are $1 million or more?"):
+            r = k.ask("t1", q, allow=reviewer)
+            assert r["generator"] == "role-boundary" and r["facts"] == [], q
+            assert "$" not in r["answer"] and "Tri-County" not in r["answer"] and "INELIGIBLE" not in r["answer"], q
+
+
+def test_the_same_role_is_still_answered_on_what_its_screens_show():
+    _wire()
+    with _facts_stub(None):
+        r = k.ask("t1", "How many disputes are open right now versus closed?", allow=["caseload", "services"])
+        assert r["generator"] == "program-records" and "213 disputes" in r["answer"]
+        r = k.ask("t1", "Which service lines have the most disputes?", allow=["caseload", "services"])
+        assert "AIR_AMBULANCE" in r["answer"] and all("$" not in f for f in r["facts"])
+
+
+def test_withheld_figures_never_reach_the_model_either():
+    _wire()
+    seen = {}
+    with _facts_stub(None), mock.patch.object(
+            k, "_ollama_generate", side_effect=lambda p: (seen.setdefault("p", p) and "ok", "ollama:x")):
+        k.ask("t1", "How does IDR-2026-0004 compare with the total amount in dispute?", allow=["caseload", "services"])
+    assert "$12,850,595.98" not in seen["p"] and "Tri-County" not in seen["p"]
+
+
+def test_a_role_with_every_screen_is_unaffected():
+    _wire()
+    with _facts_stub(None):
+        r = k.ask("t1", "What is the total amount in dispute?",
+                  allow=["caseload", "services", "parties", "eligibility", "outcomes", "deadlines", "money"])
+    assert "$12,850,595.98" in r["answer"] and r["withheld"] == []

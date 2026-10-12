@@ -205,6 +205,14 @@ func (s *server) briefing(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db (tenant migrated?)"}`, http.StatusInternalServerError)
 		return
 	}
+	// The tenant-wide queue counts follow the screens they come from: the
+	// check-review count is the finance screen's, the pending count the QA gate's.
+	if !hasAnyRole(p, financialReadRoles...) {
+		d.ChecksReview = 0
+	}
+	if !hasAnyRole(p, qaReadRoles...) {
+		d.PendingQA = 0
+	}
 	narration, model := "", ""
 	if s.cfg.CopilotEndpoint != "" {
 		narration, err = ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel,

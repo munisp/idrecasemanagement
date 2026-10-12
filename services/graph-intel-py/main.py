@@ -71,10 +71,13 @@ def _load_cases(tenant: str) -> list[dict]:
 
 
 @app.get("/hints")
-def hints(tenant: str = Query(...)):
-    """Real case numbers and party names for the portal's sample questions."""
+def hints(tenant: str = Query(...), allow: str | None = Query(None)):
+    """Real case numbers and party names for the portal's sample questions,
+    and the categories this caller's role may ask about."""
     import facts
-    return facts.hints(tenant)
+    out = facts.hints(tenant)
+    out["categories"] = [c for c in allow.split(",") if c] if allow is not None else [n for n, _ in facts.CATEGORIES]
+    return out
 
 
 @app.get("/healthz")
@@ -137,11 +140,14 @@ class AskRequest(BaseModel):
     tenant: str
     question: str
     k: int = 5
+    # The figure categories the caller's role may read, set by case-api from
+    # the signed-in user's roles. None (a direct, in-cluster call) = all.
+    allow: list[str] | None = None
 
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    return epr_kgqa.ask(req.tenant, req.question, k=req.k)
+    return epr_kgqa.ask(req.tenant, req.question, k=req.k, allow=req.allow)
 
 
 class FeedbackRequest(BaseModel):

@@ -526,7 +526,16 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	nameMatch := name != "" && !strings.Contains(draftedBy, "batch approved by") && strings.Contains(draftedBy, name)
 	requesterMatch := requestedBySub != "" && requestedBySub == p.Subject
 	selfApproval := nameMatch || requesterMatch
-	copilotRequesterExempt := strings.HasPrefix(artifact, "copilot_") && requesterMatch
+	// A program with a QA gate (every template names the role that approves
+	// it -- the PM in FL) applies that gate to an assistant-written draft
+	// too. Without this, a Reviewer could have the assistant write a letter
+	// and approve it personally: no template matched, so no approving role
+	// was required, and the exemption below waived the second person.
+	programQARole := ""
+	if strings.HasPrefix(artifact, "copilot_") {
+		programQARole = defaultQARole(s.corrTemplates(r, tenant))
+	}
+	copilotRequesterExempt := strings.HasPrefix(artifact, "copilot_") && requesterMatch && programQARole == ""
 	if selfApproval && !copilotRequesterExempt {
 		http.Error(w, `{"error":"forbidden: cannot approve or reject your own draft -- needs a second reviewer"}`, http.StatusForbidden)
 		return
@@ -544,6 +553,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			qaRole, qaPreRole = t.QARole, t.QAPreRole
 			break
 		}
+	}
+	if qaRole == "" {
+		qaRole = programQARole
 	}
 	// Two-stage QA: until the first role has checked the draft, an APPROVE
 	// from that role records the check and leaves the draft pending for the
@@ -1013,4 +1025,22 @@ func (s *server) qaSend(w http.ResponseWriter, r *http.Request) {
 		out = map[string]any{"status": "APPROVED", "email_delivery_error": deliveryError}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// defaultQARole is the role a program's QA gate belongs to: the one most of
+// its templates name. "" for a tenant whose templates name none (no gate).
+func defaultQARole(templates []CorrTemplate) string {
+	n := map[string]int{}
+	for _, t := range templates {
+		if t.QARole != "" {
+			n[t.QARole]++
+		}
+	}
+	best, most := "", 0
+	for role, c := range n {
+		if c > most || (c == most && role < best) {
+			best, most = role, c
+		}
+	}
+	return best
 }

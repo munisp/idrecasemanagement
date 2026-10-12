@@ -36,7 +36,7 @@ CATEGORIES: list[tuple[str, str]] = [
     ("deadlines", r"deadline|late|overdue|breach|sla|older|aging|ageing|days|limit|due\b|missed|escalat|"
                   r"deliverable|how long|turnaround|take\b"),
     ("eligibility", r"eligib|ineligib|threshold|authorization|\baor\b|borderline|second look|reason"),
-    ("money", r"amount|dollar|\$|value|largest|biggest|million|average|disputed|money|fee|worth"),
+    ("money", r"amount|dollar|\$|value|largest|biggest|million|average|disputed|money|fee|worth|award"),
     ("outcomes", r"outcome|decided|decision|award|prevail|won\b|win\b|result|determin"),
 ]
 
@@ -143,7 +143,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
         rs = rows(f"SELECT service_line, round(avg(disputed_amount_cents)) FROM {t}.cases "
                   f"WHERE service_line IS NOT NULL AND disputed_amount_cents > 0 GROUP BY service_line "
                   f"ORDER BY avg(disputed_amount_cents) DESC")
-        add("services", rs and "Average disputed amount by service line: "
+        add("money", rs and "Average disputed amount by service line: "
             + ", ".join(f"{n}: {_money(v)}" for n, v in rs) + ".")
         rs = rows(f"SELECT service_line, string_agg(case_number, ', ') FROM ("
                   f"SELECT service_line, case_number, row_number() OVER (PARTITION BY service_line ORDER BY opened_at DESC) rn "
@@ -223,13 +223,25 @@ def _compute(tenant: str) -> dict[str, list[str]]:
         r = one(f"SELECT count(*), sum((details->>'final_amount_awarded_cents')::bigint) FROM {t}.cases "
                 f"WHERE details->>'final_amount_awarded_cents' ~ '^[0-9]+$'")
         if r and r[0]:
-            add("outcomes", f"Final amount awarded is recorded on {r[0]} disputes, totalling {_money(r[1])}.")
+            add("money", f"Final amount awarded is recorded on {r[0]} disputes, totalling {_money(r[1])}.")
         else:
-            add("outcomes", "No final award amounts have been recorded yet.")
+            add("money", "No final award amounts have been recorded yet.")
         rs = rows(f"SELECT status_reason, count(*) FROM {t}.cases WHERE {closed} AND coalesce(status_reason,'') <> '' "
                   f"GROUP BY status_reason ORDER BY count(*) DESC LIMIT 6")
         add("outcomes", rs and "Why disputes closed: " + _pairs(rs) + ".")
     return out
+
+
+# What each category is called when a caller is told it is not theirs to ask.
+LABELS = {"caseload": "caseload", "parties": "who files (Reports)", "services": "services",
+          "deadlines": "deadlines and turnaround (Ops and Reports)", "eligibility": "eligibility totals (Reports)",
+          "money": "amounts and awards (Financials)", "outcomes": "outcomes (Reports)"}
+
+
+def matching(question: str) -> list[str]:
+    """The categories a question is about."""
+    q = (question or "").lower()
+    return [name for name, words in CATEGORIES if re.search(words, q)]
 
 
 def select(question: str, facts: dict[str, list[str]], limit: int = 40) -> list[str]:

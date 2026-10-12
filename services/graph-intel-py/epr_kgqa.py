@@ -166,12 +166,37 @@ def _prompt(question: str, paths: list[str], general: list[str] | None = None) -
     )
 
 
-def _facts_for(tenant: str, question: str) -> list[str]:
+def _facts_for(tenant: str, question: str, allow: list[str] | None = None) -> list[str]:
     """The program figures that bear on the question; [] when they cannot be
-    computed (no database in reach) -- the graph answer still stands."""
+    computed (no database in reach) -- the graph answer still stands.
+    `allow` is the categories the caller's role may read (None = all): the
+    others are not looked at, so they can reach neither the answer nor the model."""
     try:
         import facts
-        return facts.select(question, facts.gather(tenant))
+        got = facts.gather(tenant)
+        if allow is not None:
+            got = {name: lines for name, lines in got.items() if name in allow}
+        return facts.select(question, got)
+    except Exception:
+        return []
+
+
+def _withheld(question: str, allow: list[str] | None) -> list[str]:
+    """Labels of the figures this question asks for that the caller's role
+    may not read."""
+    if allow is None:
+        return []
+    try:
+        import facts
+        return [facts.LABELS.get(c, c) for c in facts.matching(question) if c not in allow]
+    except Exception:
+        return []
+
+
+def _matched(question: str) -> list[str]:
+    try:
+        import facts
+        return facts.matching(question)
     except Exception:
         return []
 
@@ -213,14 +238,29 @@ def _records_answer(question: str, lines: list[str]) -> str:
     return "\n".join(best)
 
 
-def ask(tenant: str, question: str, k: int = 5) -> dict:
+def ask(tenant: str, question: str, k: int = 5, allow: list[str] | None = None) -> dict:
     t0 = time.time()
     entities = link_entities(tenant, question)
     entity_ids = [e["id"] for e in entities]
     paths = graphdb.retrieve_paths(tenant, entity_ids) if entity_ids else []
     # Figures from the program's records go with every question: alone when
     # it names no case or party, beside the graph paths when it does.
-    general = _facts_for(tenant, question)
+    general = _facts_for(tenant, question, allow)
+    withheld = _withheld(question, allow)
+    # A question about figures the caller's role may not read is told so --
+    # not answered from whatever else happened to match ("how many" matches
+    # the caseload for every count question).
+    narrow_ok = allow is None or any(c != "caseload" and c in allow for c in _matched(question))
+    if withheld and not entity_ids and not narrow_ok:
+        answer = ("Your role does not have access to " + " or ".join(withheld) + ", so I can't answer that here. "
+                  "You can ask about the caseload, services, or any single case.")
+        return {"log_id": lakehouse_io.append_kgqa_log({
+                    "tenant": tenant, "ts": int(time.time()), "question": question, "entities_json": "[]",
+                    "retrieved_paths_json": "[]", "answer": answer, "generator": "role-boundary",
+                    "gnn_ranked_json": "[]"}),
+                "tenant": tenant, "question": question, "answer": answer, "entities": [], "citations": [],
+                "facts": [], "gnn_ranked": [], "generator": "role-boundary", "withheld": withheld,
+                "latency_ms": int((time.time() - t0) * 1000)}
     from_records = bool(general) and not entity_ids
     # A question about one case also gets that case's own record, and the
     # other disputes that share its filer or plan.
@@ -240,6 +280,8 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
     generator = ""
     if from_records:
         answer, generator = _records_answer(question, general), "program-records"
+        if withheld:
+            answer += "\n(Not included: " + ", ".join(withheld) + " -- your role does not have access to those figures.)"
     else:
         try:
             answer, generator = _ollama_generate(_prompt(question, paths, general))
@@ -266,6 +308,7 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
         "entities": entities,
         "citations": [{"path": p} for p in paths],
         "facts": general,
+        "withheld": withheld,
         "gnn_ranked": ranked,
         "generator": generator,
         "latency_ms": int((time.time() - t0) * 1000),
