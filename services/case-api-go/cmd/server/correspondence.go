@@ -912,7 +912,7 @@ func (s *server) reviewerSends(r *http.Request, tenant string) bool {
 func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub string, to, cc []string) (deliveryError string) {
 	var sendErr error
 	if len(to) == 0 && len(cc) == 0 {
-		sendErr = fmt.Errorf("no recipient email address on this draft -- add one above and approve again")
+		sendErr = fmt.Errorf("no recipient email address on this draft — enter one and send again")
 	} else {
 		sendErr = s.sendMail(to, cc, subject, body)
 	}

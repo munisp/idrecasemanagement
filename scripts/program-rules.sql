@@ -596,3 +596,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS deliverables_period ON public.deliverables (te
 -- Two-stage QA (a first check before the approving role sends).
 ALTER TABLE public.qa_reviews ADD COLUMN IF NOT EXISTS pre_approved_by text;
 ALTER TABLE public.qa_reviews ADD COLUMN IF NOT EXISTS pre_approved_at timestamptz;
+
+-- Case numbers come from a counter that only moves forward (never reused).
+CREATE TABLE IF NOT EXISTS public.case_sequences (
+    tenant text NOT NULL,
+    yy     text NOT NULL,
+    last   bigint NOT NULL,
+    PRIMARY KEY (tenant, yy)
+);

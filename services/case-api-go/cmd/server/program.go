@@ -564,11 +564,24 @@ func (s *server) eligibilityHistory(w http.ResponseWriter, r *http.Request) {
 
 // nextCaseNumber generates per-program case numbers (G11): "FL26-042" etc.
 func (s *server) nextCaseNumber(r *http.Request, tenant string, cfg *ProgramConfig) string {
-	var n int
-	_ = s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT count(*) FROM tenant_%s.cases`, sanitizeTenant(tenant))).Scan(&n)
-	seq := fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, n+1)
+	// A counter that only moves forward. The number used to be "how many
+	// cases exist, plus one", so deleting a case handed its number to the
+	// next one -- and with it the old case's workflow id, audit trail and
+	// invoice number. The counter starts above every number already issued.
 	yy := time.Now().Format("06")
+	var n int64
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		INSERT INTO public.case_sequences (tenant, yy, last)
+		SELECT $1, $2, greatest(count(*), coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0)) + 1
+		FROM tenant_%s.cases
+		ON CONFLICT (tenant, yy) DO UPDATE SET last = public.case_sequences.last + 1
+		RETURNING last`, sanitizeTenant(tenant)), tenant, yy).Scan(&n)
+	if err != nil {
+		// No counter table yet (older database): fall back to the count.
+		_ = s.db.QueryRow(r.Context(),
+			fmt.Sprintf(`SELECT count(*) + 1 FROM tenant_%s.cases`, sanitizeTenant(tenant))).Scan(&n)
+	}
+	seq := fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, n)
 	out := strings.ReplaceAll(cfg.CaseNumber.Pattern, "{yy}", yy)
 	out = strings.ReplaceAll(out, "{seq}", seq)
 	return out
