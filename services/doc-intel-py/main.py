@@ -23,6 +23,7 @@ from confluent_kafka import Consumer
 from minio import Minio
 from opensearchpy import OpenSearch
 
+from eobshape import as_lines, as_money, as_text, line_text, lines_text
 from pipeline import bytes_to_pages, ooxml_safe, run_pipeline, sniff_doc_kind
 from rules_engine import expand_template, fire_rules, load_rules
 from check_processor import extract_check
@@ -202,7 +203,7 @@ _CPT_AIR_AMBULANCE = {"A0430", "A0431", "A0435", "A0436"}
 
 
 def _service_line_from_cpt(codes_raw: str | None) -> str | None:
-    m = re.search(r"\b([A-Z]\d{4}|\d{5})\b", str(codes_raw or "").upper())
+    m = re.search(r"\b([A-Z]\d{4}|\d{5})\b", as_text(codes_raw).upper())
     if not m:
         return None
     code = m.group(1)
@@ -230,9 +231,7 @@ def _service_line_from_text(line) -> str | None:
     procedure code written into the description is the better evidence, so
     it is tried first -- and when it names a category the keywords do not get
     a vote (99215, an office visit, is not an ER line whatever the text says)."""
-    if isinstance(line, dict):
-        line = line.get("service") or line.get("description") or ""
-    text = str(line).upper()
+    text = line_text(line).upper()
     if re.search(r"\b([A-Z]\d{4}|\d{5})\b", text):
         return _service_line_from_cpt(text)
     for kw, canon in _SERVICE_LINE_KEYWORDS:
@@ -307,16 +306,12 @@ def infer_provider_type(provider_name: str | None, text: str | None, cpt_codes=N
     A hospital with neither wording, a rural hospital, and anything else stay
     unknown: None, for a person to decide.
     """
-    name = str(provider_name or "").upper()
-    t = str(text or "").upper()
-    # An EOB's service lines arrive as rows ({"service": "Office visit (99215)", ...}),
-    # not strings: read each row's description, never join the rows blind.
-    if isinstance(cpt_codes, list):
-        codes = " ".join(
-            str(c.get("service") or c.get("description") or "") if isinstance(c, dict) else str(c)
-            for c in cpt_codes)
-    else:
-        codes = str(cpt_codes or "")
+    name = as_text(provider_name).upper()
+    t = as_text(text).upper()
+    # Codes and service lines arrive as strings, lists, or rows
+    # ({"service": "Office visit (99215)", ...}): lines_text reads the
+    # describing cells of whatever it is given (joining rows blind crashed).
+    codes = lines_text(cpt_codes)
     if _HOSPITAL_NAME.search(name):
         if _INPATIENT.search(t):
             return "hospital_inpatient", f"provider is a hospital ({provider_name}) and the document describes inpatient services"
@@ -338,7 +333,7 @@ def line_of_business_from(value: str | None) -> str | None:
     Advantage HMO", "Employer group PPO") onto the program's Line of Business
     list. Order matters: Medicare Advantage before Medicare. None when the
     document's wording matches nothing -- never a default."""
-    t = str(value or "").lower()
+    t = as_text(value).lower()
     if not t.strip():
         return None
     if "medicaid" in t:
@@ -375,10 +370,10 @@ def provider_address_from(extracted: dict) -> dict:
     2-letter code and a US ZIP. A part that does not fit its format is left
     out rather than stored wrong."""
     out = {}
-    street = str(extracted.get("provider_street") or "").strip()
-    city = str(extracted.get("provider_city") or "").strip()
-    state = str(extracted.get("provider_state") or "").strip().upper()
-    zipc = str(extracted.get("provider_zip") or "").strip()
+    street = as_text(extracted.get("provider_street"))
+    city = as_text(extracted.get("provider_city"))
+    state = as_text(extracted.get("provider_state")).upper()
+    zipc = as_text(extracted.get("provider_zip"))
     if street and len(street) <= 200:
         out["provider_street"] = street
     if city and len(city) <= 100:
@@ -393,13 +388,16 @@ def provider_address_from(extracted: dict) -> dict:
 def _contracted_from_network_status(text: str | None) -> bool | None:
     """True/False only on an explicit in-/out-of-network statement in the
     document; None (don't guess) for anything else, including silence."""
-    t = (text or "").strip().lower()
+    if isinstance(text, bool):
+        return None  # a bare true/false does not say which way the question was asked
+    t = re.sub(r"[\s_\-]+", " ", as_text(text).lower()).strip()
     if not t:
         return None
-    if any(k in t for k in ("out-of-network", "out of network", "non-participating",
-                             "nonparticipating", "non-par")):
+    # The "out" wordings first: "non participating" contains "participating".
+    if re.search(r"\b(out of network|oon|non ?participating|not participating|non ?par|non ?contracted|"
+                 r"not contracted|non ?network|not in network|out of plan)\b", t):
         return False
-    if any(k in t for k in ("in-network", "in network", "participating")):
+    if re.search(r"\b(in network|inn|participating|par|contracted|in plan)\b", t):
         return True
     return None
 
@@ -456,18 +454,39 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
     other way: nothing else in the platform persists these two fields.
     """
     changed: list[str] = []
-    qpa_usd = extracted.get("qpa_usd")
-    billed_amount_usd = extracted.get("billed_amount_usd")
-    service_lines = extracted.get("service_lines") or []
-    pos_match = re.match(r"\s*(\d{1,2})", str(extracted.get("place_of_service") or ""))
-    provider_type = _POS_PROVIDER_TYPE.get(pos_match.group(1)) if pos_match else None
-    if not provider_type:
-        provider_type = provider_type_from_text(text)
-    provider_type_basis = ""
-    if not provider_type:
-        provider_type, provider_type_basis = infer_provider_type(
-            extracted.get("provider_name"), text, extracted.get("cpt_hcpcs_codes") or extracted.get("service_lines"))
-    contracted = _contracted_from_network_status(extracted.get("network_status"))
+    if not isinstance(extracted, dict):
+        extracted = {}
+
+    def reading(what: str, fn, default=None):
+        """One field's reading. A value in a shape nobody expected costs that
+        field, logged -- never the other fields, never the document."""
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            print(f"doc-intel: could not read {what} from {source or 'a document'}: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return default
+
+    # Every value is coerced first: an amount may be 1850, "$1,850.00" or
+    # {"amount": 1850}; service lines may be rows, strings or one string.
+    qpa_usd = reading("the QPA", lambda: as_money(extracted.get("qpa_usd")))
+    billed_amount_usd = reading("the billed amount", lambda: as_money(extracted.get("billed_amount_usd")))
+    allowed_amount_usd = reading("the allowed amount", lambda: as_money(extracted.get("allowed_amount_usd")))
+    service_lines = reading("the service lines", lambda: as_lines(extracted.get("service_lines")), [])
+    codes = extracted.get("cpt_hcpcs_codes")
+
+    def read_provider_type():
+        pos_match = re.match(r"\s*(\d{1,2})", as_text(extracted.get("place_of_service")))
+        ptype = _POS_PROVIDER_TYPE.get(pos_match.group(1).zfill(2)) if pos_match else None
+        if not ptype:
+            ptype = provider_type_from_text(text)
+        if ptype:
+            return ptype, ""
+        return infer_provider_type(extracted.get("provider_name"), text, [codes, service_lines])
+    provider_type, provider_type_basis = reading("the provider type", read_provider_type, (None, ""))
+    contracted = reading("the network status",
+                         lambda: _contracted_from_network_status(extracted.get("network_status")))
+
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
             f"SELECT qpa_cents, service_line, details, disputed_amount_cents "
@@ -477,116 +496,116 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
         if not row:
             return changed
         cur_qpa, cur_service_line, details, cur_disputed = row
-        details = details or {}
-        if qpa_usd and not cur_qpa:
-            try:
-                cents = round(float(qpa_usd) * 100)
-            except (TypeError, ValueError):
-                cents = 0
+        if not isinstance(details, dict):
+            details = {}
+
+        def set_details(values: dict) -> None:
+            c.execute(f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                      (json.dumps(values), case_id))
+
+        def fill_qpa():
+            cents = round(qpa_usd * 100) if qpa_usd and not cur_qpa else 0
             if cents > 0:
                 c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))
                 changed.append(f"QPA ${cents / 100:,.2f}")
+
         # billed_amount_usd is the provider's own charge. A claim form prints
         # it; so does an EOB ("billed" / "charges"), which is now read too --
         # so a dispute filed with only an EOB still gets its amount. The
         # plan's allowed amount and the patient's share are never used.
-        if billed_amount_usd and not cur_disputed:
-            try:
-                cents = round(float(billed_amount_usd) * 100)
-            except (TypeError, ValueError):
-                cents = 0
+        def fill_disputed():
+            cents = round(billed_amount_usd * 100) if billed_amount_usd and not cur_disputed else 0
             if cents > 0:
                 c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s", (cents, case_id))
                 changed.append(f"disputed amount ${cents / 100:,.2f}")
-        if not cur_service_line:
-            service_line = _service_line_from_cpt(extracted.get("cpt_hcpcs_codes"))
+
+        def fill_service_line():
+            if cur_service_line:
+                return
+            service_line = _service_line_from_cpt(codes)
             if not service_line and service_lines:
                 service_line = _service_line_from_text(service_lines[0])
             if service_line:
                 c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (service_line, case_id))
                 changed.append(f"service line {service_line}")
-        if provider_type and "provider_type" not in details:
-            c.execute(
-                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
-                (json.dumps({"provider_type": provider_type,
-                             **({"provider_type_basis": "inferred: " + provider_type_basis} if provider_type_basis else {})}), case_id),
-            )
-            changed.append(f"provider type {provider_type}" + (f" (INFERRED — {provider_type_basis}; confirm)" if provider_type_basis else ""))
-        if contracted is not None and "contracted" not in details:
-            c.execute(
-                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
-                (json.dumps({"contracted": contracted}), case_id),
-            )
-            changed.append(f"contracted={contracted}")
+
+        def fill_provider_type():
+            if provider_type and "provider_type" not in details:
+                set_details({"provider_type": provider_type,
+                             **({"provider_type_basis": "inferred: " + provider_type_basis} if provider_type_basis else {})})
+                changed.append(f"provider type {provider_type}" + (f" (INFERRED — {provider_type_basis}; confirm)" if provider_type_basis else ""))
+
+        def fill_contracted():
+            if contracted is not None and "contracted" not in details:
+                set_details({"contracted": contracted})
+                changed.append(f"contracted={contracted}")
+
         # Report fields the documents already state, so nobody re-types them:
         # out-of-network (the same network-status reading as "contracted"),
         # and the provider's and the plan's names as printed on the claim.
         # Like everything here: only where the case has no value yet.
-        extra = {}
-        if contracted is not None and "out_of_network" not in details:
-            extra["out_of_network"] = "No" if contracted else "Yes"
-        for key, field in (("provider_org", "provider_name"), ("health_plan", "payer_name")):
-            val = str(extracted.get(field) or "").strip()
-            if val and len(val) <= 200 and key not in details:
-                extra[key] = val
-        for key, val in provider_address_from(extracted).items():
-            if key not in details:
-                extra[key] = val
-        lob = line_of_business_from(extracted.get("line_of_business"))
-        if lob and "line_of_business" not in details:
-            extra["line_of_business"] = lob
+        def fill_report_fields():
+            extra = {}
+            if contracted is not None and "out_of_network" not in details:
+                extra["out_of_network"] = "No" if contracted else "Yes"
+            for key, field in (("provider_org", "provider_name"), ("health_plan", "payer_name")):
+                val = reading(field, lambda field=field: as_text(extracted.get(field)), "")
+                if val and len(val) <= 200 and key not in details:
+                    extra[key] = val
+            for key, val in reading("the provider address", lambda: provider_address_from(extracted), {}).items():
+                if key not in details:
+                    extra[key] = val
+            lob = reading("the line of business", lambda: line_of_business_from(extracted.get("line_of_business")))
+            if lob and "line_of_business" not in details:
+                extra["line_of_business"] = lob
+            issue = disputed_issue_from(billed_amount_usd, allowed_amount_usd, extracted.get("denial_codes"))
+            if issue and "disputed_issue" not in details:
+                extra["disputed_issue"] = issue
+            if extra:
+                set_details(extra)
+                labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan",
+                          "provider_street": "street", "provider_city": "city", "provider_state": "state",
+                          "provider_postal": "postal code", "line_of_business": "line of business",
+                          "disputed_issue": "disputed issue"}
+                changed.extend(f"{labels[k]} {v}" for k, v in extra.items())
 
-        def _amt(v):
-            try:
-                return float(str(v).replace("$", "").replace(",", ""))
-            except (TypeError, ValueError):
-                return None
-        issue = disputed_issue_from(_amt(billed_amount_usd), _amt(extracted.get("allowed_amount_usd")), extracted.get("denial_codes"))
-        if issue and "disputed_issue" not in details:
-            extra["disputed_issue"] = issue
         # How many distinct claims the analyzed documents carry. Kept under
         # its own key and refreshed on every document: it is what the reader
         # FOUND, offered to the Reviewer, who records the filing packet's count.
-        n_claims = c.execute(
-            "SELECT count(DISTINCT nullif(trim(result->'extracted'->>'claim_number'),'')) FROM public.doc_analysis "
-            "WHERE tenant=%s AND case_id=%s AND status LIKE 'ANALYZED%%'", (tenant, case_id)).fetchone()[0]
-        if n_claims and details.get("claims_detected") != n_claims:
-            c.execute(
-                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
-                (json.dumps({"claims_detected": n_claims}), case_id))
-        if extra:
-            c.execute(
-                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
-                (json.dumps(extra), case_id),
-            )
-            labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan",
-                      "provider_street": "street", "provider_city": "city", "provider_state": "state",
-                      "provider_postal": "postal code", "line_of_business": "line of business",
-                      "disputed_issue": "disputed issue"}
-            changed.extend(f"{labels[k]} {v}" for k, v in extra.items())
+        def count_claims():
+            n_claims = c.execute(
+                "SELECT count(DISTINCT nullif(trim(result->'extracted'->>'claim_number'),'')) FROM public.doc_analysis "
+                "WHERE tenant=%s AND case_id=%s AND status LIKE 'ANALYZED%%'", (tenant, case_id)).fetchone()[0]
+            if n_claims and details.get("claims_detected") != n_claims:
+                set_details({"claims_detected": n_claims})
+
         # A document that contradicts what the case already has is recorded,
         # never applied: the eligibility review reads this list and sends the
         # result for a second look.
-        try:
-            billed_cents = round(float(billed_amount_usd) * 100) if billed_amount_usd else None
-        except (TypeError, ValueError):
-            billed_cents = None
-        known = details.get("eligibility_conflicts") or []
-        new_conflicts = eligibility_conflicts(
-            {"disputed_amount_cents": cur_disputed, "provider_type": details.get("provider_type"),
-             "contracted": details.get("contracted")},
-            {"disputed_amount_cents": billed_cents or None, "provider_type": provider_type, "contracted": contracted},
-            source or "a document", known,
-        )
-        if new_conflicts:
-            c.execute(
-                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
-                (json.dumps({"eligibility_conflicts": known + new_conflicts}), case_id),
+        def record_conflicts():
+            billed_cents = round(billed_amount_usd * 100) if billed_amount_usd else None
+            known = details.get("eligibility_conflicts")
+            known = known if isinstance(known, list) else []
+            new_conflicts = eligibility_conflicts(
+                {"disputed_amount_cents": cur_disputed, "provider_type": details.get("provider_type"),
+                 "contracted": details.get("contracted")},
+                {"disputed_amount_cents": billed_cents or None, "provider_type": provider_type, "contracted": contracted},
+                source or "a document", known,
             )
-            for cf in new_conflicts:
-                changed.append(
-                    f"CONFLICT on {cf['field'].replace('_', ' ')}: case has {cf['case_value']}, "
-                    f"{cf['document']} says {cf['document_value']} (case value kept)")
+            if new_conflicts:
+                set_details({"eligibility_conflicts": known + new_conflicts})
+                for cf in new_conflicts:
+                    changed.append(
+                        f"CONFLICT on {cf['field'].replace('_', ' ')}: case has {cf['case_value']}, "
+                        f"{cf['document']} says {cf['document_value']} (case value kept)")
+
+        # Each field is its own step: one that fails is logged and skipped,
+        # and the rest are still filled.
+        for what, step in (("QPA", fill_qpa), ("disputed amount", fill_disputed), ("service line", fill_service_line),
+                           ("provider type", fill_provider_type), ("network status", fill_contracted),
+                           ("report fields", fill_report_fields), ("claim count", count_claims),
+                           ("conflicts", record_conflicts)):
+            reading(what, step)
     return changed
 
 
@@ -664,8 +683,26 @@ def persist(evt: dict, ctx: dict) -> None:
             source = (row[0] if row and row[0] else "") or ""
     except Exception:
         source = ""  # the name only labels a conflict; never worth failing the analysis for
-    changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source,
-                                  str(ctx.get("text") or ctx.get("markdown") or ""))
+    # The analysis is already stored. Filling the case from it is a second
+    # step: if it fails, the document stays analyzed and the failure is put
+    # on the case timeline for a person, instead of marking the document ERROR.
+    try:
+        changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source,
+                                      str(ctx.get("text") or ctx.get("markdown") or ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"doc-intel: case fields not filled from {evt.get('doc_id')}: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        changed = []
+        try:
+            with psycopg.connect(DSN, autocommit=True) as c:
+                c.execute(
+                    """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                       VALUES (%s,%s,'AUTO_FILL_FAILED',%s)""",
+                    (evt["tenant"], case_id,
+                     f"The document{' ' + source if source else ''} was read, but its values could not be copied "
+                     f"onto the case ({type(exc).__name__}). Enter them from the document's analysis."))
+        except Exception:  # noqa: BLE001
+            pass
     if changed:
         with psycopg.connect(DSN, autocommit=True) as c:
             c.execute(

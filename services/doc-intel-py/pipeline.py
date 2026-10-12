@@ -47,6 +47,7 @@ from typing import Any
 import httpx
 import otel_setup
 import yaml
+from eobshape import as_money, as_text, fill_from_text, shape_extraction, split_codes
 from PIL import Image
 
 # ---------------------------------------------------------------------------
@@ -825,7 +826,10 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     in_domain_votes: list[bool] = []
     for parsed in raw_parts:
         in_domain_votes.append(_in_domain_verdict(parsed, pop=True))
-        parts.append(parsed)
+        # The model does not always answer in the flat shape it was asked
+        # for (a wrapper object, other names for the same field, a provider
+        # as an object). Read its answer onto the schema whatever the shape.
+        parts.append(shape_extraction(parsed, fields))
 
     ctx["in_domain"] = any(in_domain_votes) if in_domain_votes else True
     # Strict schema: only declared fields survive, all present (null-filled) —
@@ -847,28 +851,52 @@ _RE_DATE = re.compile(
 _MONTHS = {m.lower(): i + 1 for i, m in enumerate(
     ["January", "February", "March", "April", "May", "June", "July",
      "August", "September", "October", "November", "December"])}
+_RE_DATE_ANYWHERE = re.compile(
+    r"\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}")
+_MONTH_ABBR = {name[:3]: name for name in _MONTHS}   # "mar" -> "march"
+# Claim adjustment reason / remark codes as EOBs print them: CO-45, PR-1,
+# OA-23, N130, MA01, or the bare number.
+_RE_DENIAL_CODE = re.compile(r"^(?:(?:CO|PR|OA|PI|CR)-?\d{1,3}|(?:MA|M|N)\d{1,4}|\d{1,3})$")
 _RE_CODE = re.compile(r"^[A-Z]?\d{4}[A-Z0-9]?$")       # CPT/HCPCS/DRG-ish
 _RE_NPI = re.compile(r"^\d{10}$")
 
 
 def _norm_amount(v: Any) -> float | None:
+    if isinstance(v, bool):
+        return None
     if isinstance(v, (int, float)):
         return round(float(v), 2)
     if isinstance(v, str):
         m = _RE_AMOUNT.match(v.strip())
         if m:
             return round(float(m.group(1).replace(",", "")), 2)
-    return None
+    # "1,850.00 USD", "(82.40)", {"amount": 1850}, [1850] -- one amount in
+    # another wrapping. Still None for anything holding several amounts.
+    return as_money(v)
 
 
 def _norm_date(v: Any) -> str | None:
-    """Canonicalize a date-ish value to ISO YYYY-MM-DD; None when unparseable."""
+    """Canonicalize a date-ish value to ISO YYYY-MM-DD; None when unparseable.
+    A value that wraps one date -- a range ("03/12/2026 - 03/14/2026": its
+    first day), a timestamp, "Mar. 12, 2026", a one-item list or an object --
+    is read for that date."""
+    if isinstance(v, (list, tuple, dict)):
+        v = as_text(v)
     if not isinstance(v, str):
         return None
     s = v.strip()
     m = _RE_DATE.match(s)
     if not m:
-        return None
+        inner = _RE_DATE_ANYWHERE.search(s)
+        if not inner:
+            return None
+        s = re.sub(r"\.", "", inner.group(0)).strip()
+        mon = re.match(r"([A-Za-z]+)(.*)", s)
+        if mon and mon.group(1).lower()[:3] in _MONTH_ABBR:
+            s = _MONTH_ABBR[mon.group(1).lower()[:3]] + mon.group(2)
+        m = _RE_DATE.match(s)
+        if not m:
+            return None
     if m.group(1):
         mm, dd = int(m.group(2)), int(m.group(3))
         if 1 <= mm <= 12 and 1 <= dd <= 31:
@@ -892,11 +920,25 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
     copies live under ctx['normalized']; originals are never overwritten.
     Values that fail their shape check are recorded as normalize_warnings so
     verify()/validate() can weigh them."""
-    ex = ctx.get("extracted", {})
+    # Before anything is canonicalized: a field the model left empty, but
+    # which the page prints next to its own label, is read from the page.
+    # This also covers a document whose model extraction failed outright.
+    try:
+        ex, filled, summed = fill_from_text(ctx.get("extracted") or {},
+                                            ctx.get("markdown") or ctx.get("text") or "", ctx.get("doc_type"))
+    except Exception:  # noqa: BLE001 -- a fallback must never cost the extraction it backs up
+        ex, filled, summed = ctx.get("extracted") or {}, [], []
+    if not isinstance(ex, dict):
+        ex = {}
+    ctx["extracted"] = ex
+    if filled:
+        ctx["text_filled_fields"] = filled
+    if summed:
+        ctx["summed_fields"] = summed
     norm: dict[str, Any] = {}
     warnings: list[dict] = []
     for field, value in ex.items():
-        if value in (None, "", [], {}):
+        if _is_blank(value):
             continue
         if field.endswith("_usd") or "amount" in field or field.startswith(("qpa", "billed", "allowed", "awarded", "patient_responsibility")):
             n = _norm_amount(value)
@@ -916,8 +958,15 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
                 norm[field] = digits
             else:
                 warnings.append({"field": field, "issue": "NPI is not 10 digits"})
-        elif field in ("cpt_hcpcs_codes", "denial_codes") and isinstance(value, list):
-            cleaned = [str(c).strip().upper() for c in value]
+        elif field == "denial_codes":
+            cleaned = [c.upper() for c in split_codes(value)]
+            bad = [c for c in cleaned if not _RE_DENIAL_CODE.match(c) and not _RE_CODE.match(c)]
+            norm[field] = cleaned
+            if bad:
+                warnings.append({"field": field, "issue": f"implausible code(s): {', '.join(bad[:5])}"})
+        elif field == "cpt_hcpcs_codes" and isinstance(value, (list, str)):
+            cleaned = [as_text(c).upper() for c in value] if isinstance(value, list) \
+                else [c for c in re.split(r"[\s,;/]+", value.strip().upper()) if c]
             bad = [c for c in cleaned if not _RE_CODE.match(c)]
             norm[field] = cleaned
             if bad:
@@ -927,13 +976,29 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
     return ctx
 
 
+def _is_blank(v: Any) -> bool:
+    """None, "", [], {} -- written out because `v in (None, "", [], {})`
+    compares with ==, and 0 == False == "" surprises live there."""
+    return v is None or (isinstance(v, (str, list, dict, tuple)) and len(v) == 0)
+
+
 def _flatten_values(v: Any) -> list[str]:
-    """Scalar string forms of an extracted value (lists flattened one level)."""
-    if isinstance(v, list):
+    """Scalar string forms of an extracted value. Lists are flattened, and a
+    row ({"service": ..., "billed_amount_usd": ...}) contributes its VALUES:
+    its printed form, braces and column names and all, is on no document."""
+    if isinstance(v, (list, tuple)):
         out: list[str] = []
         for x in v:
             out.extend(_flatten_values(x))
         return out
+    if isinstance(v, dict):
+        out = []
+        for x in v.values():
+            if not _is_blank(x):
+                out.extend(_flatten_values(x))
+        return out
+    if isinstance(v, bool):
+        return []
     if isinstance(v, (int, float)):
         return [str(v), f"{float(v):,.2f}", f"${float(v):,.2f}"]
     return [str(v)]
@@ -1038,8 +1103,16 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     if ctx.get("classify_ambiguous") and ctx.get("doc_type") != "unrelated":
         findings.append({"field": None, "issue": f"Document type '{ctx['doc_type']}' is a low-margin classification — confirm type on review"})
     # Hallucination guard from verify().
+    summed = ctx.get("summed_fields", [])
     for field in ctx.get("ungrounded_fields", []):
+        if field in summed:
+            continue  # said below, in its own words
         findings.append({"field": field, "issue": "Extracted value not found in document text — possible extraction error; verify before use"})
+    for field in summed:
+        findings.append({"field": field, "issue": "The document prints no total: this is the sum of its service lines — verify before use"})
+    if ctx.get("text_filled_fields"):
+        findings.append({"field": None, "issue": "Read directly from the page next to its label (the extraction model did not return it): "
+                         + ", ".join(ctx["text_filled_fields"]) + " — verify before use"})
     # Shape warnings from normalize().
     for w in ctx.get("normalize_warnings", []):
         findings.append({"field": w["field"], "issue": w["issue"]})
@@ -1061,6 +1134,13 @@ def _index_safe_extracted(extracted: dict, normalized: dict) -> dict:
             if normalized.get(k):
                 out[k] = normalized[k]
             continue
+        # The index maps these fields as text. A row or an object is refused
+        # there (and took the whole document's indexing with it), so anything
+        # that is not a plain value goes in as its text.
+        if isinstance(v, dict):
+            v = as_text(v)
+        elif isinstance(v, (list, tuple)):
+            v = [x if isinstance(x, (str, int, float)) and not isinstance(x, bool) else as_text(x) for x in v]
         out[k] = v
     return out
 

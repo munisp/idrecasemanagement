@@ -596,3 +596,83 @@ def test_infer_provider_type_from_an_eob():
             {"service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0}]
     assert f("Northgate Health, P.C.", "", rows)[0] == "physician_dentist"
     assert f("", "", rows) == ("physician_dentist", "office-visit procedure codes (99202-99215) are billed")
+
+
+# ---- an EOB in any shape (see also test_eobshape.py) ------------------------
+
+ROWS = [{"date": "03/12/2026", "service": "Office visit, established patient (99215)", "billed_amount_usd": 1450.0},
+        {"date": "03/12/2026", "service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0}]
+
+
+def test_provider_type_and_service_line_for_every_service_line_shape():
+    from main import _service_line_from_text, infer_provider_type as f
+    for lines in (ROWS, [r["service"] for r in ROWS], "Office visit (99215)\nECG (93000)", ROWS[0],
+                  {"service": ["Office visit (99215)", "ECG (93000)"], "billed": [1450, 400]},
+                  [None, ROWS], [[ROWS[0]]], {"1": ROWS[0]}):
+        assert f("", "", lines)[0] == "physician_dentist", lines
+        assert f("", "", [None, lines])[0] == "physician_dentist", lines
+    for junk in (None, 5, {}, [], [[]], [{}], {"a": None}, object()):
+        assert f(None, None, junk) == (None, "")
+        assert f({"name": "Northgate Health, P.C."}, ["x"], junk)[0] == "physician_dentist"
+        assert _service_line_from_text(junk) is None
+    assert _service_line_from_text(ROWS[0]) is None                      # an office visit is not the ER
+    assert _service_line_from_text({"description": "Emergency dept visit", "cpt": "99284"}) == "ER"
+    assert _service_line_from_text({"x": "Lab panel", "y": "90.00"}) == "LAB"
+
+
+def test_network_status_in_every_wording():
+    from main import _contracted_from_network_status as f
+    for v in ("Out-of-network", "OUT OF NETWORK", "out_of_network", "OON", "Non-Participating", "nonparticipating",
+              "Non-Par", "Not contracted", "non-contracted provider", {"status": "Out of Network"}, ["out-of-network"]):
+        assert f(v) is False, v
+    for v in ("In-network", "IN NETWORK", "INN", "Participating", "PAR", "Contracted", {"value": "in-network"}):
+        assert f(v) is True, v
+    for v in (None, "", "unknown", True, False, 5, {}, []):
+        assert f(v) is None, v
+
+
+def test_normalize_reads_amounts_dates_and_codes_in_other_wrappings():
+    ctx = pl.stage_normalize({"doc_type": "eob", "text": "", "extracted": {
+        "billed_amount_usd": "1,850.00 USD", "allowed_amount_usd": {"amount": 412}, "patient_responsibility_usd": [82.4],
+        "service_date": "03/12/2026 - 03/14/2026", "determination_date": "Mar. 20, 2026",
+        "denial_codes": "CO-45, PR-1", "service_lines": ROWS}}, {})
+    n = ctx["normalized"]
+    assert (n["billed_amount_usd"], n["allowed_amount_usd"], n["patient_responsibility_usd"]) == (1850.0, 412.0, 82.4)
+    assert n["service_date"] == "2026-03-12" and n["determination_date"] == "2026-03-20"
+    assert n["denial_codes"] == ["CO-45", "PR-1"]
+    assert not ctx["normalize_warnings"]                                  # CO-45 is a real code, not an implausible one
+
+
+def test_normalize_fills_from_the_page_when_the_model_returned_nothing():
+    text = "EXPLANATION OF BENEFITS\nProvider: Northgate Health, P.C.\nTotal Billed: $1,850.00\nTotal Allowed: $412.00\n"
+    for extracted in ({}, None, {"billed_amount_usd": None}):               # incl. the extraction stage having failed
+        ctx = pl.stage_normalize({"doc_type": "eob", "text": text, "extracted": extracted}, {})
+        assert ctx["extracted"]["billed_amount_usd"] == 1850.0 and ctx["normalized"]["billed_amount_usd"] == 1850.0
+        assert ctx["extracted"]["provider_name"] == "Northgate Health, P.C."
+        assert "billed_amount_usd" in ctx["text_filled_fields"]
+    ctx = pl.stage_validate(pl.stage_verify(ctx, {}), {}, None)
+    assert any("Read directly from the page" in f["issue"] for f in ctx["findings"])
+    assert ctx["field_confidence"]["billed_amount_usd"] == "high"
+
+
+def test_service_line_rows_are_grounded_by_their_values_and_indexed_as_text():
+    text = "03/12/2026 Office visit, established patient (99215) 1,450.00\n03/12/2026 Electrocardiogram (93000) 400.00"
+    ctx = pl.stage_verify({"text": text, "extracted": {"service_lines": ROWS}, "normalized": {}}, {})
+    assert ctx["field_confidence"]["service_lines"] == "high"
+    safe = pl._index_safe_extracted({"service_lines": ROWS, "provider_name": {"name": "X"}, "n": 3}, {})
+    assert all(isinstance(x, str) for x in safe["service_lines"]) and safe["provider_name"] == "X" and safe["n"] == 3
+
+
+def test_vlm_answer_in_another_shape_is_read_onto_the_schema(monkeypatch):
+    answer = {"eob": {"claimNumber": "A-1", "totals": {"billed": "$1,850.00"}, "provider": {"name": "Northgate Health, P.C."},
+                      "lineItems": ROWS, "in_network": False}}
+    monkeypatch.setattr(pl, "_vlm_call", lambda *a, **k: dict(answer))
+    monkeypatch.setattr(pl, "_model", lambda key, factory: object())
+    ctx = pl.stage_vlm_extract({"doc_type": "eob", "text": "x", "markdown": "x"},
+                               {"endpoint": "http://x", "model": "m"},
+                               {"eob": {"fields": ["claim_number", "billed_amount_usd", "provider_name",
+                                                   "service_lines", "network_status"]}})
+    ex = ctx["extracted"]
+    assert ex["claim_number"] == "A-1" and ex["billed_amount_usd"] == "$1,850.00"
+    assert ex["provider_name"] == "Northgate Health, P.C." and len(ex["service_lines"]) == 2
+    assert ex["network_status"] == "Out-of-network"
