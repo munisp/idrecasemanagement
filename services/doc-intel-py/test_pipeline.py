@@ -556,3 +556,23 @@ def test_provider_type_from_text_reads_only_explicit_codes():
     assert f("Place of Service:\n\nDischarge Date:\n\n21 (Inpatient Hospital)") == "hospital_inpatient"
     assert f("Units: 11 (Office visits)") is None   # no place-of-service field on the page
     assert f("") is None and f(None) is None
+
+
+def test_report_fields_from_documents():
+    from main import line_of_business_from as lob, disputed_issue_from as issue, provider_address_from as addr
+    assert lob("Florida Medicaid MMA") == "Medicaid"
+    assert lob("Medicare Advantage HMO") == "Medicare Advantage"
+    assert lob("Medicare Part B") == "Medicare"
+    assert lob("Health Insurance Marketplace") == "Marketplace"
+    assert lob("Employer group PPO") == "Commercial"
+    assert lob("") is None and lob(None) is None and lob("Sunshine Plan") is None
+    assert issue(1850.0, 412.0, []) == "Underpayment"
+    assert issue(500.0, 0.0, ["CO-29"]) == "Denial"
+    assert issue(100.0, 150.0, []) == "Overpayment"
+    assert issue(100.0, 100.0, []) is None      # paid in full: nothing to name
+    assert issue(None, 412.0, []) is None and issue(1850.0, None, []) is None
+    a = addr({"provider_street": "1200 Bayshore Blvd", "provider_city": "Tampa", "provider_state": "fl", "provider_zip": "33606-1234"})
+    assert a == {"provider_street": "1200 Bayshore Blvd", "provider_city": "Tampa", "provider_state": "FL", "provider_postal": "33606-1234"}
+    # parts that do not fit the report's formats are left out, not stored wrong
+    assert addr({"provider_state": "Florida", "provider_zip": "3360", "provider_city": "Tampa"}) == {"provider_city": "Tampa"}
+    assert addr({}) == {}

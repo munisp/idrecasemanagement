@@ -391,6 +391,11 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
             use_doc_orientation_classify=cfg.get("use_doc_orientation_classify", True),
             use_doc_unwarping=cfg.get("use_doc_unwarping", True),
             use_textline_orientation=cfg.get("use_textline_orientation", True),
+            # Same oneDNN regression stage_layout already works around below
+            # (PaddlePaddle/Paddle#79749): without this, predict() raises
+            # NotImplementedError on CPU for EVERY image, so no scanned page,
+            # photo or fax was ever read -- only PDFs with a text layer were.
+            enable_mkldnn=False,
         ),
     )
     # Batched inference: predict() accepts a LIST of images and pipelines
@@ -414,9 +419,15 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
     except Exception:
         page_reads = [("", None)] * len(arrays)
         for i, arr in enumerate(arrays):
-            for res in ocr.predict(arr):
-                page_reads[i] = _unpack(res)
-                break
+            # A page Paddle cannot read at all stays empty here and is handed
+            # to the Tesseract pass below; one engine failing must never
+            # leave the whole document unread.
+            try:
+                for res in ocr.predict(arr):
+                    page_reads[i] = _unpack(res)
+                    break
+            except Exception as exc:  # noqa: BLE001
+                ctx.setdefault("ocr_engine_errors", []).append(f"page {i}: {type(exc).__name__}: {str(exc)[:160]}")
 
     # Low-yield retry: ink on the page but almost no text means the read —
     # not the page — failed. One 400dpi enhanced retry; keep the better read.

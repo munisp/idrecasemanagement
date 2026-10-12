@@ -152,6 +152,9 @@ func (s *server) flReportCases(r *http.Request, tenant, from, to string) ([]flCa
 		}
 		// claims submitted: what staff recorded wins, then the case's own
 		// count, then the imported claim lines.
+		// (claims_detected -- what the document reader found -- is NOT used
+		// here: the report carries the filing packet's count as the Reviewer
+		// recorded it. The detected count is offered to the Reviewer instead.)
 		if n := dget(cr.Details, "claims_submitted", "number_of_claims_submitted"); n != "" {
 			cr.ClaimsSubmitted, _ = strconv.Atoi(n)
 		} else if n := int(toInt64(row["num_claims"])); n > 0 {

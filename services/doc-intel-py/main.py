@@ -265,6 +265,63 @@ def provider_type_from_text(text: str | None) -> str | None:
     return None
 
 
+def line_of_business_from(value: str | None) -> str | None:
+    """Map what a document calls the coverage ("Medicaid MMA", "Medicare
+    Advantage HMO", "Employer group PPO") onto the program's Line of Business
+    list. Order matters: Medicare Advantage before Medicare. None when the
+    document's wording matches nothing -- never a default."""
+    t = str(value or "").lower()
+    if not t.strip():
+        return None
+    if "medicaid" in t:
+        return "Medicaid"
+    if "medicare advantage" in t or "medicare part c" in t or re.search(r"\bma\b", t):
+        return "Medicare Advantage"
+    if "medicare" in t:
+        return "Medicare"
+    if "marketplace" in t or "exchange" in t or "aca" in t.split():
+        return "Marketplace"
+    if any(k in t for k in ("commercial", "employer", "group", "ppo", "hmo", "epo", "pos plan")):
+        return "Commercial"
+    return None
+
+
+def disputed_issue_from(billed: float | None, allowed: float | None, denial_codes) -> str | None:
+    """What kind of dispute an EOB describes, from its own numbers: nothing
+    allowed on a billed claim is a Denial; less allowed than billed is an
+    Underpayment; more is an Overpayment. None when the EOB does not carry
+    both figures -- the Reviewer decides then."""
+    if billed is None or allowed is None or billed <= 0 or allowed < 0:
+        return None
+    if allowed == 0:
+        return "Denial"
+    if allowed < billed:
+        return "Underpayment"
+    if allowed > billed:
+        return "Overpayment"
+    return None
+
+
+def provider_address_from(extracted: dict) -> dict:
+    """The provider's address parts in the report's formats: the state as a
+    2-letter code and a US ZIP. A part that does not fit its format is left
+    out rather than stored wrong."""
+    out = {}
+    street = str(extracted.get("provider_street") or "").strip()
+    city = str(extracted.get("provider_city") or "").strip()
+    state = str(extracted.get("provider_state") or "").strip().upper()
+    zipc = str(extracted.get("provider_zip") or "").strip()
+    if street and len(street) <= 200:
+        out["provider_street"] = street
+    if city and len(city) <= 100:
+        out["provider_city"] = city
+    if re.fullmatch(r"[A-Z]{2}", state):
+        out["provider_state"] = state
+    if re.fullmatch(r"\d{5}(-\d{4})?", zipc):
+        out["provider_postal"] = zipc
+    return out
+
+
 def _contracted_from_network_status(text: str | None) -> bool | None:
     """True/False only on an explicit in-/out-of-network statement in the
     document; None (don't guess) for anything else, including silence."""
@@ -357,6 +414,10 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
             if cents > 0:
                 c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))
                 changed.append(f"QPA ${cents / 100:,.2f}")
+        # billed_amount_usd is the provider's own charge. A claim form prints
+        # it; so does an EOB ("billed" / "charges"), which is now read too --
+        # so a dispute filed with only an EOB still gets its amount. The
+        # plan's allowed amount and the patient's share are never used.
         if billed_amount_usd and not cur_disputed:
             try:
                 cents = round(float(billed_amount_usd) * 100)
@@ -399,12 +460,40 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
             val = str(extracted.get(field) or "").strip()
             if val and len(val) <= 200 and key not in details:
                 extra[key] = val
+        for key, val in provider_address_from(extracted).items():
+            if key not in details:
+                extra[key] = val
+        lob = line_of_business_from(extracted.get("line_of_business"))
+        if lob and "line_of_business" not in details:
+            extra["line_of_business"] = lob
+
+        def _amt(v):
+            try:
+                return float(str(v).replace("$", "").replace(",", ""))
+            except (TypeError, ValueError):
+                return None
+        issue = disputed_issue_from(_amt(billed_amount_usd), _amt(extracted.get("allowed_amount_usd")), extracted.get("denial_codes"))
+        if issue and "disputed_issue" not in details:
+            extra["disputed_issue"] = issue
+        # How many distinct claims the analyzed documents carry. Kept under
+        # its own key and refreshed on every document: it is what the reader
+        # FOUND, offered to the Reviewer, who records the filing packet's count.
+        n_claims = c.execute(
+            "SELECT count(DISTINCT nullif(trim(result->'extracted'->>'claim_number'),'')) FROM public.doc_analysis "
+            "WHERE tenant=%s AND case_id=%s AND status LIKE 'ANALYZED%%'", (tenant, case_id)).fetchone()[0]
+        if n_claims and details.get("claims_detected") != n_claims:
+            c.execute(
+                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                (json.dumps({"claims_detected": n_claims}), case_id))
         if extra:
             c.execute(
                 f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
                 (json.dumps(extra), case_id),
             )
-            labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan"}
+            labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan",
+                      "provider_street": "street", "provider_city": "city", "provider_state": "state",
+                      "provider_postal": "postal code", "line_of_business": "line of business",
+                      "disputed_issue": "disputed issue"}
             changed.extend(f"{labels[k]} {v}" for k, v in extra.items())
         # A document that contradicts what the case already has is recorded,
         # never applied: the eligibility review reads this list and sends the

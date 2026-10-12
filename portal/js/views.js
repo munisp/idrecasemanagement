@@ -152,6 +152,7 @@ const Views = (() => {
           ${sel("disputed_issue", "Disputed issue", fs.disputed_issue)}
           ${sel("out_of_network", "Out-of-network provider", fs.out_of_network || ["Yes", "No"])}
           ${inp("claims_submitted", "Claims in the filing packet", 'type="number" min="0" style="width:7em"')}
+          ${d.claims_detected && !d.claims_submitted ? `<span class="muted">the documents show ${esc(d.claims_detected)} claim(s)</span>` : ""}
         </div>
         <div class="inline-form">
           ${inp("provider_org", "Provider organization")}${inp("provider_contact", "Provider contact")}${inp("health_plan", "Health plan")}
