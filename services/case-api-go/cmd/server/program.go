@@ -572,7 +572,7 @@ func (s *server) nextCaseNumber(r *http.Request, tenant string, cfg *ProgramConf
 	var n int64
 	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO public.case_sequences (tenant, yy, last)
-		SELECT $1, $2, greatest(count(*), coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0)) + 1
+		SELECT $1::text, $2::text, greatest(count(*), coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0)) + 1
 		FROM tenant_%s.cases
 		ON CONFLICT (tenant, yy) DO UPDATE SET last = public.case_sequences.last + 1
 		RETURNING last`, sanitizeTenant(tenant)), tenant, yy).Scan(&n)
