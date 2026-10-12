@@ -162,6 +162,25 @@ def _facts_for(tenant: str, question: str) -> list[str]:
         return []
 
 
+def _records_answer(question: str, lines: list[str]) -> str:
+    """The answer to a question about the program as a whole: the figures
+    themselves, most relevant first. No model writes this one. Tried live, the
+    model restated a ranked list as "each with 10 disputes" when the figures
+    said 12, 12, 10, 10 -- and a count that is nearly right is worse than a
+    plain line that is exactly right."""
+    words = {w for w in re.findall(r"[a-z0-9$]+", question.lower()) if len(w) > 2} - {
+        "the", "and", "are", "was", "were", "how", "many", "what", "which", "with", "have", "has", "been", "for",
+        "from", "that", "this", "does", "did", "our", "all", "any", "per", "each", "there"}
+    stems = {w[:6] for w in words}
+
+    def score(line: str) -> int:
+        low = line.lower()
+        return sum(1 for st in stems if st in low)
+    ranked = sorted(lines, key=score, reverse=True)       # stable: ties keep the category order
+    best = [ln for ln in ranked if score(ln) > 0][:4] or ranked[:3]
+    return "\n".join(best)
+
+
 def ask(tenant: str, question: str, k: int = 5) -> dict:
     t0 = time.time()
     entities = link_entities(tenant, question)
@@ -170,7 +189,9 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
     # Figures from the program's records go with every question: alone when
     # it names no case or party, beside the graph paths when it does.
     general = _facts_for(tenant, question)
+    from_records = bool(general) and not entity_ids
     if not general and not entity_ids:
+        # No database in reach: the graph's own status count, put to the model as before.
         general = _general_summary(tenant)
 
     # GNN ranking for the first linked case (graph <-> gnn <-> kgqa)
@@ -181,11 +202,14 @@ def ask(tenant: str, question: str, k: int = 5) -> dict:
         ranked = pred.get("predictions", [])
 
     generator = ""
-    try:
-        answer, generator = _ollama_generate(_prompt(question, paths, general))
-    except Exception:
-        answer = _extractive_answer(question, entities, paths, ranked, general)
-        generator = "extractive-fallback"
+    if from_records:
+        answer, generator = _records_answer(question, general), "program-records"
+    else:
+        try:
+            answer, generator = _ollama_generate(_prompt(question, paths, general))
+        except Exception:
+            answer = _extractive_answer(question, entities, paths, ranked, general)
+            generator = "extractive-fallback"
 
     log_id = lakehouse_io.append_kgqa_log({
         "tenant": tenant,

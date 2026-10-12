@@ -143,14 +143,20 @@ def test_ordinary_question_words_are_not_looked_up_as_names():
     assert "sunshine" in {t.lower() for t in k._terms("Which cases name Sunshine Coast Health Plan?")}
 
 
-def test_figures_go_to_the_model_and_come_back_with_the_answer():
+def test_a_whole_program_question_is_answered_with_the_figures_themselves():
+    _wire()
+    lines = FACTS["money"] + ["Five largest disputes by amount: FL26-000193 ($1,000,000.00)."]
+    with mock.patch.object(k, "_facts_for", return_value=lines), \
+         mock.patch.object(k, "_ollama_generate", side_effect=AssertionError("no model for a count")):
+        r = k.ask("t1", "What are the five largest disputes by amount?")
+    assert r["generator"] == "program-records" and r["answer"].startswith("Five largest disputes")
+    assert "$12,850,595.98" in r["answer"] and r["facts"] == lines
+
+
+def test_a_question_naming_a_case_gets_the_figures_beside_the_graph_paths():
     _wire()
     seen = {}
     with mock.patch.object(k, "_facts_for", return_value=FACTS["money"]), \
          mock.patch.object(k, "_ollama_generate", side_effect=lambda p: (seen.setdefault("p", p) and "ok", "ollama:x")):
-        r = k.ask("t1", "What is the total amount in dispute?")
-    assert "$12,850,595.98" in seen["p"] and r["facts"] == FACTS["money"]
-    with mock.patch.object(k, "_facts_for", return_value=FACTS["money"]), \
-         mock.patch.object(k, "_ollama_generate", side_effect=Exception("down")):
-        r = k.ask("t1", "What is the total amount in dispute?")
-    assert "$12,850,595.98" in r["answer"]
+        r = k.ask("t1", "How does IDR-2026-0004 compare with the total amount in dispute?")
+    assert "$12,850,595.98" in seen["p"] and "AGAINST" in seen["p"] and r["generator"] == "ollama:x"
