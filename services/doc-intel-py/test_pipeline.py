@@ -676,3 +676,26 @@ def test_vlm_answer_in_another_shape_is_read_onto_the_schema(monkeypatch):
     assert ex["claim_number"] == "A-1" and ex["billed_amount_usd"] == "$1,850.00"
     assert ex["provider_name"] == "Northgate Health, P.C." and len(ex["service_lines"]) == 2
     assert ex["network_status"] == "Out-of-network"
+
+
+def test_a_faint_page_with_a_line_taken_for_the_total_is_corrected_and_says_so():
+    page = "Office visit, established patient (99215) 1,450.00 330.00 66.00\nElectrocardiogram (93000) 400.00 82.00 16.40\nTotal 1,850.00 412.00 82.40"
+    lines = [{"service": "Office visit, established patient (99215)", "billed_amount_usd": 1450.0, "allowed_amount_usd": 330.0, "patient_responsibility_usd": 66.0},
+             {"service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0, "allowed_amount_usd": 82.0, "patient_responsibility_usd": 16.4}]
+    ctx = {"doc_type": "eob", "text": page, "extracted": {"billed_amount_usd": 1850.0, "allowed_amount_usd": 330.0,
+                                                          "patient_responsibility_usd": 66.0, "service_lines": lines}}
+    ctx = pl.stage_validate(pl.stage_verify(pl.stage_normalize(ctx, {}), {}), {}, None)
+    assert ctx["extracted"]["allowed_amount_usd"] == 412.0 and ctx["normalized"]["allowed_amount_usd"] == 412.0
+    assert ctx["normalized"]["patient_responsibility_usd"] == 82.4
+    said = " ".join(f["issue"] for f in ctx["findings"])
+    assert "first read as $330.00" in said and "$412.00" in said and ctx["status"] == "ANALYZED_WITH_FINDINGS"
+
+
+def test_an_unreadable_page_is_called_unreadable_not_unrelated():
+    base = {"extracted": {"billed_amount_usd": None}, "in_domain": False, "text": "~~ .. ,,"}
+    faint = pl.stage_validate(dict(base, scan_quality_poor=True, ocr_low_confidence=True, ocr_confidence=0.28), {}, None)
+    assert faint["doc_type"] == "unreadable"
+    assert any("could not be read well enough" in f["issue"] for f in faint["findings"])
+    assert not any("not related to medical billing" in f["issue"] for f in faint["findings"])
+    clear = pl.stage_validate(dict(base), {}, None)                    # a legible page about something else
+    assert clear["doc_type"] == "unrelated" and any("not related to medical billing" in f["issue"] for f in clear["findings"])

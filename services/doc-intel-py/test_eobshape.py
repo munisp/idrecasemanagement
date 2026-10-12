@@ -225,3 +225,66 @@ def test_fill_from_text_leaves_other_documents_alone_and_survives_junk():
         for junk_text in (None, "", 5, ["x"]):
             got, filled, summed = es.fill_from_text(junk_ex, junk_text, "eob")
             assert isinstance(got, dict)
+
+
+# ---- totals checked against their own service lines --------------------------
+
+FAX_LINES = [{"service": "Office visit (99215)", "billed_amount_usd": 1450.0, "allowed_amount_usd": 330.0, "patient_responsibility_usd": 66.0},
+             {"service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0, "allowed_amount_usd": 82.0, "patient_responsibility_usd": 16.4}]
+FAX_PAGE = "Office visit 1,450.00 330.00 66.00\nElectrocardiogram 400.00 82.00 16.40\nTotal $1,850.00 $412.00 $82.40"
+
+
+def test_a_line_figure_taken_for_the_total_is_corrected_to_the_printed_sum():
+    # exactly what the faint fax produced: the first line's allowed and patient figures as the claim totals
+    ex = {"billed_amount_usd": 1850.0, "allowed_amount_usd": 330.0, "patient_responsibility_usd": 66.0, "service_lines": FAX_LINES}
+    got, notes = es.reconcile_totals(ex, FAX_PAGE)
+    assert got["allowed_amount_usd"] == 412.0 and got["patient_responsibility_usd"] == 82.4
+    assert got["billed_amount_usd"] == 1850.0                       # already right: untouched, no note
+    assert {n["field"]: (n["was"], n["now"]) for n in notes if n["field"] != "service_lines"} == {
+        "allowed_amount_usd": (330.0, 412.0), "patient_responsibility_usd": (66.0, 82.4)}
+    assert ex["allowed_amount_usd"] == 330.0                        # the caller's dict is not changed in place
+
+
+def test_totals_that_agree_with_their_lines_say_nothing():
+    ex = {"billed_amount_usd": "$1,850.00", "allowed_amount_usd": 412, "patient_responsibility_usd": "82.40", "service_lines": FAX_LINES}
+    got, notes = es.reconcile_totals(ex, FAX_PAGE)
+    assert notes == [] and got == ex
+
+
+def test_a_disagreement_is_reported_but_never_guessed():
+    # the sum is NOT printed on the page (a line was misread): report, do not "correct"
+    lines = [dict(FAX_LINES[0]), dict(FAX_LINES[1], allowed_amount_usd=92.0)]     # 82 misread as 92 -> lines sum 422
+    got, notes = es.reconcile_totals({"allowed_amount_usd": 330.0, "service_lines": lines}, FAX_PAGE)
+    assert got["allowed_amount_usd"] == 330.0 and notes == [{"field": "allowed_amount_usd", "was": 330.0, "now": None, "lines_sum": 422.0}]
+    # the total is no line's figure (a different kind of error): report only
+    got, notes = es.reconcile_totals({"allowed_amount_usd": 500.0, "service_lines": FAX_LINES}, FAX_PAGE)
+    assert got["allowed_amount_usd"] == 500.0 and notes[0]["now"] is None and notes[0]["lines_sum"] == 412.0
+
+
+def test_nothing_is_checked_without_complete_lines():
+    one = [FAX_LINES[0]]                                               # one line: its figure IS the total
+    assert es.reconcile_totals({"allowed_amount_usd": 330.0, "service_lines": one}, FAX_PAGE)[1] == []
+    gap = [FAX_LINES[0], {"service": "ECG", "billed_amount_usd": 400.0}]   # a line without an allowed figure
+    assert es.reconcile_totals({"allowed_amount_usd": 330.0, "service_lines": gap}, FAX_PAGE)[1] == []
+    assert es.reconcile_totals({"allowed_amount_usd": None, "service_lines": FAX_LINES}, FAX_PAGE)[1] == []
+    assert es.reconcile_totals({"allowed_amount_usd": 330.0, "service_lines": ["a", "b"]}, FAX_PAGE)[1] == []
+    for junk in (None, [], "x", 5, {"service_lines": 7}):
+        got, notes = es.reconcile_totals(junk, None)
+        assert isinstance(got, dict) and notes == []
+
+
+def test_on_page_matches_whole_amounts_only():
+    assert es._on_page(412.0, "Total $1,850.00 $412.00") and es._on_page(1850.0, "TOTAL 1,850.00")
+    assert es._on_page(412.0, "allowed 412") and not es._on_page(412.0, "allowed 1412.00") and not es._on_page(412.0, "4120.00")
+    assert not es._on_page(412.0, "") and not es._on_page(412.0, None)
+
+
+def test_a_line_that_does_not_add_up_is_reported():
+    lines = [{"service": "Office visit (99215)", "allowed_amount_usd": 330.0, "patient_responsibility_usd": 66.0, "plan_paid_usd": 264.0},
+             {"service": "Electrocardiogram (93000)", "allowed_amount_usd": 82.0, "patient_responsibility_usd": 16.4, "plan_paid_usd": 85.6}]  # 65.60 misread
+    got, notes = es.reconcile_totals({"service_lines": lines}, "")
+    assert notes == [{"field": "service_lines", "line": 2, "what": "Electrocardiogram (93000)", "allowed": 82.0, "patient": 16.4, "paid": 85.6}]
+    assert got["service_lines"] == lines                                  # reported, never changed
+    lines[1]["plan_paid_usd"] = 65.6
+    assert es.reconcile_totals({"service_lines": lines}, "")[1] == []      # every line adds up: silent
+    assert es.reconcile_totals({"service_lines": [{"service": "x", "allowed_amount_usd": 10.0}]}, "")[1] == []  # nothing to compare

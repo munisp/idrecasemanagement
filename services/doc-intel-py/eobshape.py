@@ -161,22 +161,103 @@ _BILLED_KEYS = ("billed", "billed_amount", "billed_amount_usd", "charge", "charg
                 "total_charge", "total_charges")
 
 
-def lines_billed_total(v: Any) -> float | None:
-    """The sum of the lines' billed amounts -- only when EVERY line has one.
-    A partial sum would be a wrong total, so it is not returned."""
+_ALLOWED_KEYS = ("allowed", "allowed_amount", "allowed_amount_usd", "amount_allowed", "plan_allowed",
+                 "eligible_amount", "allowed_charges", "approved_amount")
+_PATIENT_KEYS = ("patient_responsibility", "patient_responsibility_usd", "patient_resp", "pt_resp",
+                 "member_responsibility", "patient_owes", "you_owe", "patient_liability", "patient_share")
+_PAID_KEYS = ("plan_paid", "plan_paid_usd", "paid", "paid_amount", "amount_paid", "plan_payment", "payment", "net_paid")
+# claim-level field -> the names its per-line figure goes by in a service-line row
+LINE_KEYS = {"billed_amount_usd": _BILLED_KEYS, "allowed_amount_usd": _ALLOWED_KEYS,
+             "patient_responsibility_usd": _PATIENT_KEYS}
+
+
+def line_amounts(v: Any, keys: tuple) -> list[float] | None:
+    """One figure from every service line, or None unless EVERY line has it:
+    a list with a gap cannot be summed to a total."""
     rows = as_lines(v)
     if not rows:
         return None
-    total = 0.0
+    out = []
     for row in rows:
         if not isinstance(row, dict):
             return None
         amt = next((as_money(val) for key, val in row.items()
-                    if canon_key(key) in _BILLED_KEYS and as_money(val) is not None), None)
+                    if canon_key(key) in keys and as_money(val) is not None), None)
         if amt is None:
             return None
-        total += amt
-    return round(total, 2) if total > 0 else None
+        out.append(amt)
+    return out
+
+
+def lines_billed_total(v: Any) -> float | None:
+    """The sum of the lines' billed amounts -- only when EVERY line has one.
+    A partial sum would be a wrong total, so it is not returned."""
+    amts = line_amounts(v, _BILLED_KEYS)
+    total = round(sum(amts), 2) if amts else 0
+    return total if total > 0 else None
+
+
+def _on_page(amount: float, text: str) -> bool:
+    """Whether the page prints this amount (1,850.00 / 1850.00 / 1850)."""
+    hay = re.sub(r"[,$]", "", str(text or ""))   # keep the spaces: they are what separates one amount from the next
+    forms = {f"{amount:.2f}"}
+    if float(amount).is_integer():
+        forms.add(str(int(amount)))
+    return any(re.search(rf"(?<![\d.]){re.escape(f)}(?!\d)", hay) for f in forms)
+
+
+def reconcile_totals(extracted: dict, text: str) -> tuple[dict, list[dict]]:
+    """Check each claim total against its own service lines.
+
+    A total and the lines it sums are printed on the same page, so they can
+    be checked against each other -- and a faint page made that worth doing:
+    the first line's allowed amount was taken for the claim's, and because
+    that figure IS on the page it passed the "is it in the document" check.
+
+    For each of billed / allowed / patient responsibility where every line
+    carries the figure and there are at least two lines:
+      * total equals the lines' sum          -> nothing to say
+      * total is one line's own figure, and the page prints the sum
+                                             -> the total is corrected to the sum
+      * anything else that disagrees         -> left alone and reported
+    A correction is only ever to a figure the page itself prints. Returns
+    (extracted, notes); each note is {field, was, now|None, lines_sum}.
+    Never raises.
+    """
+    out = dict(extracted) if isinstance(extracted, dict) else {}
+    notes: list[dict] = []
+    try:
+        lines = out.get("service_lines")
+        for field, keys in LINE_KEYS.items():
+            total = as_money(out.get(field))
+            amts = line_amounts(lines, keys)
+            if total is None or not amts or len(amts) < 2:
+                continue
+            line_sum = round(sum(amts), 2)
+            if abs(line_sum - total) < 0.005:
+                continue
+            note = {"field": field, "was": total, "now": None, "lines_sum": line_sum}
+            if any(abs(a - total) < 0.005 for a in amts) and _on_page(line_sum, text):
+                out[field] = line_sum
+                note["now"] = line_sum
+            notes.append(note)
+        # Within one line: what the plan allowed is what it paid plus what the
+        # patient owes. A line that does not add up has a misread figure in it
+        # (a faint "6" read as "8"). Reported, never corrected: nothing says
+        # which of the three is the wrong one.
+        for i, row in enumerate(as_lines(lines), start=1):
+            if not isinstance(row, dict):
+                continue
+            pick = lambda keys: next((as_money(val) for k, val in row.items()  # noqa: E731
+                                      if canon_key(k) in keys and as_money(val) is not None), None)
+            allowed, patient, paid = pick(_ALLOWED_KEYS), pick(_PATIENT_KEYS), pick(_PAID_KEYS)
+            if None in (allowed, patient, paid) or abs(allowed - patient - paid) < 0.005:
+                continue
+            notes.append({"field": "service_lines", "line": i, "what": line_text(row),
+                          "allowed": allowed, "patient": patient, "paid": paid})
+    except Exception:  # noqa: BLE001 -- a cross-check must never cost the extraction
+        return (dict(extracted) if isinstance(extracted, dict) else {}), []
+    return out, notes
 
 
 # ---------------------------------------------------------------------------

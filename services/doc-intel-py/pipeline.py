@@ -47,7 +47,7 @@ from typing import Any
 import httpx
 import otel_setup
 import yaml
-from eobshape import as_money, as_text, fill_from_text, shape_extraction, split_codes
+from eobshape import as_money, as_text, fill_from_text, reconcile_totals, shape_extraction, split_codes
 from PIL import Image
 
 # ---------------------------------------------------------------------------
@@ -930,6 +930,12 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
         ex, filled, summed = ctx.get("extracted") or {}, [], []
     if not isinstance(ex, dict):
         ex = {}
+    # A claim total is checked against the service lines it sums: a line's
+    # own figure taken for the total is corrected (only to a sum the page
+    # prints), any other disagreement is reported.
+    ex, total_notes = reconcile_totals(ex, ctx.get("markdown") or ctx.get("text") or "")
+    if total_notes:
+        ctx["total_notes"] = total_notes
     ctx["extracted"] = ex
     if filled:
         ctx["text_filled_fields"] = filled
@@ -1072,7 +1078,15 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # all-null extraction each independently mean a human should look before
     # this document is treated as case evidence.
     ex_fields = {k: v for k, v in ex.items() if v not in (None, "", [], {})}
-    if ctx.get("in_domain") is False:
+    unreadable = bool(ctx.get("scan_quality_poor") or ctx.get("ocr_low_confidence"))
+    if ctx.get("in_domain") is False and unreadable:
+        # The model saw too little legible text to recognise the page. That is
+        # a page nobody could read, not a page about something else -- and
+        # "unrelated, possible mis-upload" sends a person looking for the
+        # wrong problem.
+        findings.append({"field": None, "issue": "This page could not be read well enough to tell what it is — it is too faint, blurred or skewed. Nothing was taken from it: read it by hand, or ask the sender for a clearer copy"})
+        ctx["doc_type"] = "unreadable"
+    elif ctx.get("in_domain") is False:
         findings.append({"field": None, "issue": "Document is not related to medical billing or IDR — possible mis-upload; routed for manual review"})
         ctx["doc_type"] = "unrelated"
     elif ctx.get("classify_score", 1) == 0 and not ex_fields and not ctx.get("scan_quality_poor"):
@@ -1100,9 +1114,21 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
         pct = f" (mean recognizer confidence {conf:.0%})" if isinstance(conf, float) else ""
         findings.append({"field": None, "issue": f"Low OCR confidence{pct} — one or more pages needed fallback OCR or scored below threshold; manual verification of all values required"})
     # Ambiguous classification: the winning type barely beat the runner-up.
-    if ctx.get("classify_ambiguous") and ctx.get("doc_type") != "unrelated":
+    if ctx.get("classify_ambiguous") and ctx.get("doc_type") not in ("unrelated", "unreadable"):
         findings.append({"field": None, "issue": f"Document type '{ctx['doc_type']}' is a low-margin classification — confirm type on review"})
     # Hallucination guard from verify().
+    money = lambda v: f"${v:,.2f}"  # noqa: E731
+    labels = {"billed_amount_usd": "billed total", "allowed_amount_usd": "allowed total",
+              "patient_responsibility_usd": "patient responsibility total"}
+    for n in ctx.get("total_notes", []):
+        what = labels.get(n["field"], n["field"])
+        if n["field"] == "service_lines":
+            findings.append({"field": "service_lines", "issue": f"Service line {n['line']} ({n['what'][:60]}) does not add up: allowed {money(n['allowed'])} is not plan paid {money(n['paid'])} plus patient {money(n['patient'])} — one of the three was misread; verify against the document"})
+            continue
+        if n.get("now") is not None:
+            findings.append({"field": n["field"], "issue": f"The {what} was first read as {money(n['was'])}, which is one service line's figure. The lines add up to {money(n['lines_sum'])}, which the page also prints, so that is used — verify"})
+        else:
+            findings.append({"field": n["field"], "issue": f"The {what} reads {money(n['was'])} but the service lines add up to {money(n['lines_sum'])} — one of them was misread; verify against the document"})
     summed = ctx.get("summed_fields", [])
     for field in ctx.get("ungrounded_fields", []):
         if field in summed:
