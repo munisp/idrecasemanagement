@@ -572,6 +572,22 @@ func main() {
 		r.Post("/arap/payouts/nacha", s.createNachaPayout)     // FINANCE: ACH file from open payables
 		r.Get("/arap/payouts", s.listPayoutBatches)
 		r.Get("/arap/payouts/{batchId}/file", s.payoutBatchFile)
+		// Payment rails (moov-io stack): vault-sealed accounts, ACH debits/returns,
+		// Fedwire, X9.37 image cash letters, Metro 2 furnishing, OFAC screening.
+		r.Post("/payments/accounts", s.createPaymentAccount)
+		r.Get("/payments/accounts", s.listPaymentAccounts)
+		r.Delete("/payments/accounts/{accountId}", s.deletePaymentAccount)
+		r.Get("/payments/routing/{routing}", s.lookupRoutingNumber)
+		r.Post("/payments/ach/debits", s.createACHDebitBatch)
+		r.Post("/payments/ach/returns", s.ingestACHReturns)
+		r.Post("/payments/wire", s.createWireFile)
+		r.Post("/payments/icl", s.createImageCashLetter)
+		r.Post("/payments/metro2", s.createMetro2File)
+		r.Get("/payments/files", s.listPaymentFiles)
+		r.Get("/payments/files/{fileId}/items", s.paymentFileItems)
+		r.Get("/payments/files/{fileId}/file", s.paymentFileBody)
+		r.Get("/screening/status", s.screeningStatus)
+		r.Post("/screening/check", s.screenSubject)
 		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
@@ -735,6 +751,8 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	}()
+
+	s.startWatchmanRefresher() // OFAC SDN list: refresh now + every 24h (best-effort)
 
 	slog.Info("case-api listening", "addr", cfg.Addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
