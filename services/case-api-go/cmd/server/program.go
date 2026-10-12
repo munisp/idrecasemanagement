@@ -31,6 +31,10 @@ type ClockRule struct {
 	Label    string     `json:"label"`
 	Basis    string     `json:"basis"` // key into program_dates (received_at, plan_notified_at, …)
 	Days     int        `json:"days"`
+	// MaxDays: the contract's hard limit when it is longer than the target
+	// ("60 days, never more than 90"; "10 days, +3 for notification").
+	// Past Days the clock is late; past MaxDays it is in breach.
+	MaxDays  int        `json:"max_days"`
 	DayType  string     `json:"day_type"` // calendar|business
 	Cite     string     `json:"cite"`
 	Breach   string     `json:"breach"`
@@ -250,6 +254,18 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 			Due: due.Format("2006-01-02"), State: clockState(remaining, rl.Days),
 			Cite:      rl.Cite,
 			BasisNote: fmt.Sprintf("from %s %s", rl.Basis, raw[:minI(10, len(raw))]),
+		}
+		// Past the target but inside the contract's hard limit is "late",
+		// not yet a breach.
+		if rl.MaxDays > rl.Days {
+			hard := basis.AddDate(0, 0, rl.MaxDays)
+			if rl.DayType == "business" {
+				hard = addBusinessDays(basis, rl.MaxDays)
+			}
+			cv.HardDue = hard.Format("2006-01-02")
+			if remaining < 0 && !today.After(hard) {
+				cv.State = "late"
+			}
 		}
 		out = append(out, cv)
 	}
@@ -567,6 +583,12 @@ func (s *server) escalationTrigger(r *http.Request, tenant, caseID string, dispu
 		INSERT INTO public.escalations (tenant, case_id, clock, level, escalated_to, detail)
 		VALUES ($1,$2,'PROGRAM_TRIGGER',2,$3,$4)`, tenant, caseID, cfg.Escalation.RouteRole, detail)
 	s.logActivity(r.Context(), tenant, caseID, "ESCALATION_AUTO", detail)
+	// The same review the SOP prescribes for suspected fraud, waste or
+	// abuse: the PM assigns an independent reviewer (sopdeadlines.go).
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET details = jsonb_build_object('fwa', jsonb_build_object(
+		  'status','REPORTED','reason',$2::text,'reported_by','system','reported_at',$3::text)) || details
+		WHERE id::text=$1 AND NOT (details ? 'fwa')`, sanitizeTenant(tenant)), caseID, detail, time.Now().UTC().Format(time.RFC3339))
 	s.notify(r, tenant, "*", "ESCALATION", detail, "#/cases/"+caseID)
 }
 

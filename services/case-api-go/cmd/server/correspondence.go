@@ -32,6 +32,9 @@ var templateDateKeys = map[string][]string{
 	"ineligible":        {"date_acknowledgment_letter_sent_to_provider"},
 	"dismissal":         {"date_acknowledgment_letter_sent_to_provider"},
 	"plan_notification": {"date_acknowledgment_letter_sent_to_health_plan"},
+	// Clock bases: each clock starts when its email actually goes out.
+	"estimate_cost": {"estimate_sent_at"},
+	"rfi":           {"rfi_sent_at"},
 }
 
 type CorrTemplate struct {
@@ -40,6 +43,9 @@ type CorrTemplate struct {
 	To      []string `json:"to"`      // party roles: provider|health_plan|filing_party|requester|agency…
 	CC      []string `json:"cc"`      // copied parties per program CC matrix
 	QARole  string   `json:"qa_role"` // "" = send immediately; else gated on that role
+	// QAPreRole: a role that must check the draft BEFORE the QA role's
+	// approval sends it (FL dismissal: the PM, then the Attorney).
+	QAPreRole string `json:"qa_pre_role"`
 	Thread  bool     `json:"thread"`  // reply-all on the existing thread
 	// Body is the program's standard message text (FL: verbatim from the
 	// "Email Templates FL AHCA" source document) with {case_number},
@@ -475,11 +481,39 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	// doesn't match a known correspondence template (e.g. a lettergen-py
 	// DOCX letter review, which opens a qa_reviews row with no qa_role
 	// concept at all).
-	qaRole := ""
+	qaRole, qaPreRole := "", ""
 	for _, t := range s.corrTemplates(r, tenant) {
 		if t.Key == artifact {
-			qaRole = t.QARole
+			qaRole, qaPreRole = t.QARole, t.QAPreRole
 			break
+		}
+	}
+	// Two-stage QA: until the first role has checked the draft, an APPROVE
+	// from that role records the check and leaves the draft pending for the
+	// second role; nothing is sent yet.
+	if qaPreRole != "" && in.Decision == "APPROVE" && status == "PENDING" {
+		var pre string
+		_ = s.db.QueryRow(r.Context(),
+			`SELECT coalesce(pre_approved_by,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`, tenant, qid).Scan(&pre)
+		if pre == "" {
+			if !hasAnyRole(p, qaPreRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": fmt.Sprintf("forbidden: the %s checks this draft first, then the %s approves and sends it", wfOwnerLabels[qaPreRole], wfOwnerLabels[qaRole])})
+				return
+			}
+			_, _ = s.db.Exec(r.Context(),
+				`UPDATE public.qa_reviews SET pre_approved_by=$3, pre_approved_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid, displayName(p))
+			s.logActivity(r.Context(), tenant, caseID, "QA_FIRST_CHECK",
+				fmt.Sprintf("%s checked by %s — now with the %s for approval", subject, displayName(p), wfOwnerLabels[qaRole]))
+			s.notify(r, tenant, "role:"+qaRole, "QA_REVIEW",
+				fmt.Sprintf("%s draft on case %s has passed the %s's check and awaits your approval", artifact, caseID, wfOwnerLabels[qaPreRole]), "#/qa")
+			writeJSON(w, http.StatusOK, map[string]any{"status": "PENDING", "first_check": "recorded",
+				"next": "awaiting " + wfOwnerLabels[qaRole] + " approval"})
+			return
+		}
+		if pre == displayName(p) && !wfIsAdmin(p) {
+			http.Error(w, `{"error":"forbidden: the second approval must come from a different person than the first check"}`, http.StatusForbidden)
+			return
 		}
 	}
 	if qaRole != "" {

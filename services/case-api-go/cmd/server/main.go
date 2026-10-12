@@ -637,6 +637,8 @@ func main() {
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
 		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)               // the SOP steps: done, next, upcoming
+		r.Post("/cases/{caseId}/fwa", s.fwaAction)                      // fraud/waste/abuse: report, assign reviewer, conclude
+		r.Put("/program/contract-dates", s.setContractDates)            // admin: contract execution/effective/end dates
 		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
 		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary)   // Coder's Dispute Summary + cost estimate
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)        // Attorney rules on a flagged AOR
@@ -774,6 +776,9 @@ func main() {
 			}
 			if n := s.sweepIntakeDay13(); n > 0 {
 				slog.Info("day-13 sweep", "ineligible", n)
+			}
+			if n := s.sweepReportDeliverables(); n > 0 {
+				slog.Info("report deliverables sweep", "opened", n)
 			}
 			select {
 			case <-sweepStop:
@@ -1270,6 +1275,12 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", body.Signal, body.Data); err != nil {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return
+	}
+	// The withdrawal letter is due one business day from the request.
+	if body.Signal == "PROVIDER_WITHDRAW" {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+			`UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object('withdrawal_requested_at', $2::text) WHERE id=$1`,
+			sanitizeTenant(tenant)), id, time.Now().UTC().Format("2006-01-02"))
 	}
 	detail, _ := json.Marshal(body.Data)
 	s.logActivity(r.Context(), tenant, id, body.Signal,

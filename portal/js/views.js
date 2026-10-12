@@ -68,6 +68,10 @@ const Views = (() => {
     date_acknowledgment_letter_sent_to_provider: "Date Acknowledgment Letter Sent to Provider",
     date_acknowledgment_letter_sent_to_health_plan: "Date Acknowledgment Letter Sent to Health Plan",
     date_provider_responded: "Date Provider Responded",
+    date_provider_response_due: "Date Provider's Response is Due",
+    estimate_sent_at: "Cost estimate email sent",
+    rfi_sent_at: "RFI sent",
+    withdrawal_requested_at: "Withdrawal requested",
     date_health_plan_response_due: "Date Health Plan's Response is Due",
     date_plan_responded: "Date Plan Responded",
     date_recommendation_sent_to_agency: "Date the Recommendation is Sent to the Agency",
@@ -129,6 +133,38 @@ const Views = (() => {
     return `<div class="err-box"><b>⚠ Documents disagree with the case.</b> The case value was kept — check which is right before deciding.
       <ul>${cs.map((x) => `<li>${esc(String(x.field).replace(/_cents$/, "").replace(/_/g, " "))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
         ${esc(x.document || "a document")} says <b>${esc(show(x.field, x.document_value))}</b></li>`).join("")}</ul></div>`;
+  }
+  // Fraud, waste and abuse: anyone on the case can raise it; the PM assigns
+  // an independent reviewer and records the outcome.
+  const FWA_LABEL = { REPORTED: "Reported — awaiting the PM", UNDER_REVIEW: "With the independent reviewer",
+    REFERRED_TO_AGENCY: "Referred to the agency", NOT_SUBSTANTIATED: "Reviewed — not substantiated" };
+  function sopFwaHtml(id, c) {
+    const f = (c.details && c.details.fwa) || {};
+    const isPM = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const open = f.status === "REPORTED" || f.status === "UNDER_REVIEW";
+    let body = f.status ? `<p><b>${esc(FWA_LABEL[f.status] || f.status)}</b></p>
+      <p class="muted">Reason: ${esc(f.reason || "—")} — ${esc(f.reported_by || "")}, ${fmtDate(f.reported_at)}
+      ${f.reviewer ? `<br/>Independent reviewer: <b>${esc(f.reviewer)}</b> (assigned by ${esc(f.assigned_by || "")})` : ""}
+      ${f.summary ? `<br/>Findings: ${esc(f.summary)} — ${esc(f.concluded_by || "")}, ${fmtDate(f.concluded_at)}` : ""}</p>` : "";
+    if (!open) body += `<form class="inline-form" onsubmit="event.preventDefault(); Views.fwaAct('${id}','report',this)">
+      <input name="reason" required placeholder="why you suspect fraud, waste or abuse" style="flex:1;min-width:260px" />
+      <button class="mini">Report to the PM</button></form>`;
+    if (isPM && open) body += `<form class="inline-form" onsubmit="event.preventDefault(); Views.fwaAct('${id}','assign',this)">
+      <input name="reviewer" required placeholder="independent reviewer (medical expertise)" value="${esc(f.reviewer || "")}" />
+      <button class="mini">${f.reviewer ? "Change reviewer" : "Assign reviewer"}</button></form>`;
+    if (isPM && f.status === "UNDER_REVIEW") body += `<form class="inline-form" onsubmit="event.preventDefault(); Views.fwaAct('${id}','conclude',this)">
+      <select name="agree" required><option value="">outcome…</option><option value="true">Reviewer agrees — refer to the agency</option><option value="false">Not substantiated</option></select>
+      <input name="summary" required placeholder="findings and summary" style="flex:1;min-width:260px" /><button class="mini">Record outcome</button></form>`;
+    return `<details class="prog-sec" ${open ? "open" : ""}><summary>Fraud, waste or abuse${open ? " — review open" : ""}</summary>
+      <p class="muted">Any staff member who suspects fraud, waste or abuse records the reason here; it goes to the PM, who assigns an independent reviewer. Disputes of $1,000,000 or more are raised automatically.</p>${body}</details>`;
+  }
+  async function fwaAct(id, action, form) {
+    const body = { action };
+    if (action === "report") body.reason = form.reason.value;
+    if (action === "assign") body.reviewer = form.reviewer.value;
+    if (action === "conclude") { body.agree = form.agree.value === "true"; body.summary = form.summary.value; }
+    try { await Api.program.fwa(id, body); UI.toast("Recorded"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
   }
   function sopAorHtml(id, c) {
     const a = c.details && c.details.aor_confirmation;
@@ -1646,6 +1682,7 @@ const Views = (() => {
         <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
       </div></details>` : ""}
 
+      ${sopFwaHtml(id, c)}
       ${sopNotesHtml(id, c)}
       ${sopSummaryHtml(id, c, cfg)}
 
@@ -2089,7 +2126,9 @@ const Views = (() => {
     await UI.run(el, async () => {
       try {
         const r = await Api.program.qaDecision(qaId, decision, note, edited, to, cc);
-        if (r.email_delivery_error) {
+        if (r.first_check) {
+          UI.toast(`Your check is recorded — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
+        } else if (r.email_delivery_error) {
           UI.toast(`Approved, but email delivery failed: ${r.email_delivery_error} — still APPROVED, fix the address above and approve again to retry`,
             { kind: "warn", sticky: true });
         } else {
@@ -2333,6 +2372,44 @@ const Views = (() => {
     });
   }
 
+  // How a delivery compared with its deadline: the target date, and the
+  // contract's hard limit where it allows longer.
+  const DELIV_GRADE = {
+    ON_TIME: `<span class="badge s-paid">on time</span>`,
+    LATE_WITHIN_LIMIT: `<span class="badge warn" title="After the target date, inside the contract's limit">late, within limit</span>`,
+    BREACH: `<span class="badge s-denied" title="Past the contract's limit">breach</span>`,
+  };
+  const DELIV_STATE = { ...DELIV_GRADE, ON_TRACK: `<span class="badge s-paid">on track</span>`, DUE_SOON: `<span class="badge warn">due soon</span>`,
+    LATE_WITHIN_LIMIT: `<span class="badge warn" title="Past the target date, inside the contract's limit">late, within limit</span>` };
+  function delivOutstandingHtml(rows) {
+    if (!rows.length) return `<h2>Owed per case</h2><p class="muted">No open case is waiting on a contract deliverable.</p>`;
+    const rank = { BREACH: 0, LATE_WITHIN_LIMIT: 1, DUE_SOON: 2, ON_TRACK: 3 };
+    rows = rows.slice().sort((a, b) => (rank[a.state] - rank[b.state]) || a.days_left - b.days_left);
+    return `<h2>Owed per case</h2>
+      <p class="muted">Each open case owes these under the contract. They are marked delivered automatically when the letter that carries them is sent.</p>
+      <table><thead><tr><th>Case</th><th>Deliverable</th><th>Target date</th><th>Contract limit</th><th>Days left</th><th>State</th></tr></thead><tbody>` +
+      rows.map((x) => `<tr><td><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td>
+        <td>${esc(x.name)} <span class="muted">§${esc(x.contract_ref)}</span></td><td>${esc(x.due_date)}</td>
+        <td class="muted">${x.hard_due_date !== x.due_date ? esc(x.hard_due_date) : "—"}</td>
+        <td>${x.days_left}</td><td>${DELIV_STATE[x.state] || esc(x.state)}</td></tr>`).join("") + `</tbody></table>`;
+  }
+  function delivContractHtml(c) {
+    if (!can("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) return "";
+    return `<details class="prog-sec" ${c.execution_date || c.effective_date || c.end_date ? "" : "open"}><summary>Contract dates</summary>
+      <p class="muted">The contract-level deliverables (background screening policy, disaster recovery plan, transition documents, final report) are dated from these.</p>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.saveContractDates(this)">
+        <label>executed <input type="date" name="execution_date" value="${esc(c.execution_date || "")}" /></label>
+        <label>effective <input type="date" name="effective_date" value="${esc(c.effective_date || "")}" /></label>
+        <label>ends <input type="date" name="end_date" value="${esc(c.end_date || "")}" /></label>
+        <button class="mini">Save contract dates</button></form></details>`;
+  }
+  async function saveContractDates(form) {
+    try {
+      await Api.program.setContractDates({ execution_date: form.execution_date.value, effective_date: form.effective_date.value, end_date: form.end_date.value });
+      UI.toast("Contract dates saved"); App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+
   async function deliverables() {
     try {
       const r = await Api.program.deliverables();
@@ -2342,7 +2419,7 @@ const Views = (() => {
         .sort((a, b) => String(b.delivered_at).localeCompare(String(a.delivered_at)))[0];
       const daysUntil = (due) => Math.ceil((new Date(due + "T00:00:00") - Date.now()) / 864e5);
       const dueChip = (due) => {
-        if (!due) return `<span class="muted">—</span>`;
+        if (!due || !/^\d{4}-\d{2}-\d{2}$/.test(due)) return `<span class="muted">—</span>`;
         const n = daysUntil(due);
         if (n < 0) return `<span class="badge s-denied">${Math.abs(n)}d overdue</span>`;
         if (n <= 3) return `<span class="badge warn">due in ${n}d</span>`;
@@ -2364,14 +2441,18 @@ const Views = (() => {
           const last = lastDelivered(x.name);
           return `<div class="deliv-card">
             <div class="deliv-head"><b>${esc(x.name)}</b>${dueChip(x.next_due)}</div>
-            <div class="muted mono">${esc(x.due_rule)}</div>
+            <div class="muted mono">${x.contract_ref ? "§" + esc(x.contract_ref) + " · " : ""}${esc(x.due_rule)}</div>
             <div class="deliv-meta">next due <b>${esc(x.next_due || "—")}</b><br/>
               last delivered ${last ? fmtDate(last.delivered_at) : `<span class="muted">never</span>`}</div>
             <button class="mini" onclick="Views.submitDeliverable('${esc(x.name)}', this)">✓ mark delivered</button></div>`;
         }).join("") + `</div>` : `<p class="muted">No deliverables configured for this program.</p>`) +
-        (hist.length ? `<h2>Delivery history</h2><table><thead><tr><th>Deliverable</th><th>Status</th><th>Delivered</th></tr></thead><tbody>` +
-          hist.map((h) => `<tr><td>${esc(h.name)}</td><td>${badge(h.status)}</td>
-            <td class="muted">${fmtDate(h.delivered_at)}</td></tr>`).join("") + `</tbody></table>` : "");
+        delivOutstandingHtml(r.outstanding || []) + delivContractHtml(r.contract || {}) +
+        (hist.length ? `<h2>Delivery history</h2><table><thead><tr><th>Deliverable</th><th>Case / period</th><th>Due</th><th>Status</th><th>Against the deadline</th><th>Delivered</th></tr></thead><tbody>` +
+          hist.map((h) => `<tr><td>${esc(h.name)}${h.contract_ref ? ` <span class="muted">§${esc(h.contract_ref)}</span>` : ""}</td>
+            <td>${h.case_id ? `<a href="#/cases/${esc(h.case_id)}">${esc(h.case_number || "case")}</a>` : esc(h.period || "—")}</td>
+            <td class="muted">${esc(h.due_date || "—")}</td><td>${badge(h.status)}</td>
+            <td>${DELIV_GRADE[h.timeliness] || (h.status === "DUE" ? dueChip(h.due_date) : `<span class="muted">—</span>`)}</td>
+            <td class="muted">${h.delivered_at ? fmtDate(h.delivered_at) : "—"}</td></tr>`).join("") + `</tbody></table>` : "");
     } catch (e) { return err(e); }
   }
 
@@ -5620,5 +5701,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
     } catch (e) { alert(e.message); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates };
 })();

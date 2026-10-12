@@ -745,20 +745,24 @@ func (s *server) listDeliverables(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"deliverables": []any{}})
 		return
 	}
-	var rules []struct {
-		Name    string `json:"name"`
-		DueRule string `json:"due_rule"`
-		Format  string `json:"format"`
-	}
+	var rules []deliverableRule
 	_ = json.Unmarshal(raw, &rules)
 	type dv struct {
-		Name    string `json:"name"`
-		DueRule string `json:"due_rule"`
-		Format  string `json:"format"`
-		NextDue string `json:"next_due"`
+		Name        string `json:"name"`
+		ContractRef string `json:"contract_ref"`
+		DueRule     string `json:"due_rule"`
+		Format      string `json:"format"`
+		NextDue     string `json:"next_due"`
 	}
 	out := []dv{}
 	now := time.Now()
+	// The contract's own dates drive the contract-level deliverables.
+	contract := map[string]string{}
+	var craw []byte
+	if s.db.QueryRow(r.Context(),
+		`SELECT coalesce(config->'contract','{}'::jsonb) FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&craw) == nil {
+		_ = json.Unmarshal(craw, &contract)
+	}
 	for _, d := range rules {
 		next := ""
 		switch {
@@ -777,19 +781,37 @@ func (s *server) listDeliverables(w http.ResponseWriter, r *http.Request) {
 				cand = cand.AddDate(0, 1, 0)
 			}
 			next = cand.Format("2006-01-02")
+		case strings.HasPrefix(d.DueRule, "contract:"):
+			next = contractDue(d.DueRule, contract)
+			if next == "" {
+				next = "set the contract dates"
+				if d.DueRule == "contract:standing" {
+					next = "standing"
+				}
+			}
+		case strings.HasPrefix(d.DueRule, "case:"):
+			next = "per case"
 		default:
 			next = "event-driven"
 		}
-		out = append(out, dv{d.Name, d.DueRule, d.Format, next})
+		out = append(out, dv{d.Name, d.ContractRef, d.DueRule, d.Format, next})
 	}
 	// persisted deliverable instances (status + delivery timestamps) --
 	// sorted by when it was actually delivered, not by due date: this is a
 	// delivery HISTORY, and due_date DESC put next-due-soonest items above
 	// ones delivered just now, which read as backwards live.
-	rows, _ := s.queryRows(r, `
-		SELECT name, case_id, due_date, status, delivered_at FROM public.deliverables
-		WHERE tenant=$1 ORDER BY delivered_at DESC NULLS LAST, due_date DESC LIMIT 50`, tenant)
-	writeJSON(w, http.StatusOK, map[string]any{"deliverables": out, "history": rows})
+	rows, _ := s.queryRows(r, fmt.Sprintf(`
+		SELECT d.name, d.case_id, c.case_number, d.due_date::text AS due_date, d.hard_due_date::text AS hard_due_date,
+		       d.status, d.delivered_at, coalesce(d.timeliness,'') AS timeliness, coalesce(d.period,'') AS period,
+		       coalesce(d.contract_ref,'') AS contract_ref
+		FROM public.deliverables d LEFT JOIN tenant_%s.cases c ON c.id::text = d.case_id
+		WHERE d.tenant=$1 ORDER BY (d.status='DUE') DESC, d.delivered_at DESC NULLS LAST, d.due_date DESC LIMIT 500`,
+		sanitizeTenant(tenant)), tenant)
+	resp := map[string]any{"deliverables": out, "history": rows, "contract": contract}
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		resp["outstanding"] = s.outstandingDeliverables(r, tenant, cfg)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
@@ -810,6 +832,20 @@ func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.DueRule == "" {
 		in.DueRule = "adhoc"
+	}
+	// A calendar report has a DUE entry for its period (sweepReportDeliverables):
+	// delivering it closes the oldest open one, graded against its due date.
+	if in.CaseID == "" {
+		if res, err := s.db.Exec(r.Context(), `
+			UPDATE public.deliverables SET status='DELIVERED', delivered_at=now(),
+			       timeliness = CASE WHEN current_date <= due_date THEN 'ON_TIME' ELSE 'BREACH' END
+			WHERE id = (SELECT id FROM public.deliverables
+			            WHERE tenant=$1 AND name=$2 AND status='DUE' ORDER BY due_date LIMIT 1)`, tenant, in.Name); err == nil && res.RowsAffected() > 0 {
+			s.logAudit(r.Context(), tenant, "", "DELIVERABLE_SUBMITTED", map[string]any{
+				"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "name": in.Name, "closed_due_entry": true})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "DELIVERED"})
+			return
+		}
 	}
 	_, insErr := s.db.Exec(r.Context(), `
 		INSERT INTO public.deliverables (tenant, name, due_rule, case_id, due_date, status, delivered_at)

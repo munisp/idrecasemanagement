@@ -64,6 +64,7 @@ class AhcaDisputeWorkflow:
         # signals each send). The stage gates in _run_stages wait on these.
         self.letters_sent: set[str] = set()
         self._rfi_round = 0  # numbers each RFI wait (see _wait's `site`)
+        self.closed_early = False  # dismissed / refunded / opted out: stops the 60-day watcher
 
     async def _wait(self, cond, timeout: timedelta, site: str) -> bool:
         """Wait for cond, at most `timeout`. True: it happened. False: time ran out.
@@ -203,12 +204,17 @@ class AhcaDisputeWorkflow:
             )
             if not self.rfi_pending:
                 return
-            status = "RFI Pending Plan Response" if self.rfi_to == "plan" else "RFI Pending Provider Response"
-            agency = "Awaiting Plan Response" if self.rfi_to == "plan" else "Awaiting Provider Response"
-            await workflow.execute_activity(
-                set_dual_status, args=[tenant, case_id, status, agency],
-                start_to_close_timeout=timedelta(seconds=30),
-            )
+            # The "RFI Pending ..." Internal Statuses are marked for removal in
+            # the program's status mapping: an RFI no longer moves the case's
+            # status, it only runs its 15-day clock. (Histories that already
+            # set the old status replay it.)
+            if not workflow.patched("rfi-keeps-status"):
+                status = "RFI Pending Plan Response" if self.rfi_to == "plan" else "RFI Pending Provider Response"
+                agency = "Awaiting Plan Response" if self.rfi_to == "plan" else "Awaiting Provider Response"
+                await workflow.execute_activity(
+                    set_dual_status, args=[tenant, case_id, status, agency],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
             self._rfi_round += 1
             responded = await self._wait(
                 lambda: self.rfi_response_received, timedelta(days=15), f"rfi-{self._rfi_round}")
@@ -256,7 +262,7 @@ class AhcaDisputeWorkflow:
         # CLOSED_REFUNDED (Stage 1/3's other early returns) have no such
         # flag today and are a known remaining gap, not fixed here.
         met = await self._wait(
-            lambda: (self.determination_sent or self.provider_withdrawn
+            lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
                      or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
             timedelta(days=60), "agency-recommendation")
         if not met:
@@ -271,7 +277,13 @@ class AhcaDisputeWorkflow:
         # set by case-api at creation time); no CRM trace beyond that until a
         # complete packet+payment arrives, same as the source narrative. No
         # statutory clock covers this wait at all -- it's genuinely open-ended.
-        await workflow.wait_condition(lambda: self.packet_complete or self.provider_withdrawn)
+        # The refund path starts with outreach, which happens BEFORE the
+        # packet is complete -- so this wait must also end on it. (It used to
+        # wait for the packet alone, which made the refund path unreachable.)
+        if workflow.patched("refund-path-reachable"):
+            await workflow.wait_condition(lambda: self.packet_complete or self.outreach_done or self.provider_withdrawn)
+        else:
+            await workflow.wait_condition(lambda: self.packet_complete or self.provider_withdrawn)
         if self.provider_withdrawn:
             return await self._withdraw(tenant, case_id)
 
@@ -282,11 +294,34 @@ class AhcaDisputeWorkflow:
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             await workflow.execute_activity(
-                set_program_date, args=[tenant, case_id, "outreach_at", today],
+                set_program_date, args=[tenant, case_id, "outreach_at", workflow.now().date().isoformat()],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            completed = await self._wait(lambda: self.packet_complete, timedelta(days=7), "refund-window")
+            completed = await self._wait(
+                lambda: self.packet_complete or self.provider_withdrawn, timedelta(days=7), "refund-window")
+            if self.provider_withdrawn:
+                return await self._withdraw(tenant, case_id)
             if not completed:
+                # 7 days after outreach with no complete packet: the case is
+                # closed and the fee refunded. The filer is told, and Finance
+                # is asked to make the refund.
+                if workflow.patched("refund-notice"):
+                    try:
+                        await workflow.execute_activity(
+                            send_correspondence,
+                            args=[tenant, case_id, "refund", ""],
+                            start_to_close_timeout=timedelta(seconds=30),
+                        )
+                    except Exception:
+                        pass  # the closure and the refund request must not wait on mail
+                    await workflow.execute_activity(
+                        notify_roles,
+                        args=[tenant, case_id, ["FINANCE", "CASE_MANAGER"], "REFUND_DUE",
+                              "No complete filing packet 7 days after outreach — case closed. Finance: refund the initial fee "
+                              "(Financials → the case's invoice → Refund)."],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                self.closed_early = True
                 await workflow.execute_activity(
                     set_dual_status, args=[tenant, case_id, "Closed-Refunded", "Closed"],
                     start_to_close_timeout=timedelta(seconds=30),
@@ -295,7 +330,7 @@ class AhcaDisputeWorkflow:
 
         # --- Stage 2: initial review (10cd from packet_complete_at) ----------
         await workflow.execute_activity(
-            set_program_date, args=[tenant, case_id, "packet_complete_at", today],
+            set_program_date, args=[tenant, case_id, "packet_complete_at", workflow.now().date().isoformat()],
             start_to_close_timeout=timedelta(seconds=30),
         )
         await workflow.execute_activity(
@@ -372,10 +407,29 @@ class AhcaDisputeWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
         )
         if self.estimate_requested:
-            await workflow.execute_activity(
-                set_program_date, args=[tenant, case_id, "estimate_sent_at", today],
-                start_to_close_timeout=timedelta(seconds=30),
-            )
+            if workflow.patched("gate-estimate-email-sent"):
+                # The provider's 15 days run from the estimate email, so the
+                # clock waits for it (case-api records estimate_sent_at when
+                # the email goes out).
+                if "estimate_cost" not in self.letters_sent:
+                    await workflow.execute_activity(
+                        notify_roles,
+                        args=[tenant, case_id, ["CODER"], "ESTIMATE_DUE",
+                              "The filer asked for a cost estimate — record it in the Dispute Summary and send the "
+                              "Full Review Estimated Cost email (same day as the acceptance letter)."],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                await workflow.wait_condition(
+                    lambda: "estimate_cost" in self.letters_sent or self.provider_withdrawn or self.rfi_lapsed)
+                if self.provider_withdrawn:
+                    return await self._withdraw(tenant, case_id)
+                if self.rfi_lapsed:
+                    return "RFI_LAPSED"
+            else:
+                await workflow.execute_activity(
+                    set_program_date, args=[tenant, case_id, "estimate_sent_at", today],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
             # PROVIDER_PERMISSION: 15cd, day-13 follow-up (call_and_reply_all).
             got_followup = await self._wait(
                 lambda: self.estimate_permission is not None or self.provider_withdrawn or self.rfi_lapsed,
@@ -429,6 +483,7 @@ class AhcaDisputeWorkflow:
                         return await self._withdraw(tenant, case_id)
             if self.estimate_permission is not True:
                 # No permission (or explicit decline) → Dismissal.
+                self.closed_early = True
                 await workflow.execute_activity(
                     set_dual_status, args=[tenant, case_id, "Dismissed", "Closed"],
                     start_to_close_timeout=timedelta(seconds=30),
@@ -502,14 +557,43 @@ class AhcaDisputeWorkflow:
 
         if self.plan_opted_out is not None:
             if self.plan_opted_out:
+                # The Attorney allowed the opt-out: the case closes with the
+                # Plan Opt-out letter to the provider, through QA.
+                if workflow.patched("gate-opt-out-letter-sent"):
+                    if "plan_opt_out" not in self.letters_sent:
+                        await workflow.execute_activity(
+                            notify_roles,
+                            args=[tenant, case_id, ["CASE_MANAGER"], "OPT_OUT_LETTER_DUE",
+                                  "The Attorney allowed the plan's opt-out — send the Plan Opt-out letter to the provider "
+                                  "through QA (copy AHCA and the plan). The case closes when it has been sent."],
+                            start_to_close_timeout=timedelta(seconds=30),
+                        )
+                    await workflow.wait_condition(lambda: "plan_opt_out" in self.letters_sent)
+                self.closed_early = True
                 await workflow.execute_activity(
                     set_dual_status, args=[tenant, case_id, "Plan Opt-Out", "Closed"],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 return "PLAN_OPT_OUT"
-            # Not eligible to opt out: treated as a plan response: continues
-            # into full review with the opt-out request itself as a finding.
-            self.plan_response_received = True
+            if workflow.patched("opt-out-refused-keeps-clock"):
+                # The Attorney refused the opt-out: the plan is told to respond
+                # within its 15 days, which keep running. No response by then
+                # is still a default determination.
+                await workflow.execute_activity(
+                    notify_roles,
+                    args=[tenant, case_id, ["CASE_MANAGER"], "OPT_OUT_REFUSED",
+                          "The Attorney refused the plan's opt-out — email the plan (template plan_opt_out_refused) to "
+                          "respond within its 15 days."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                elapsed = (workflow.now().date() - date.fromisoformat(plan_notified_day)).days
+                await self._wait(lambda: self.plan_response_received or self.rfi_lapsed,
+                                 timedelta(days=max(1, 15 - elapsed)), "plan-after-opt-out-refused")
+                if self.rfi_lapsed:
+                    return "RFI_LAPSED"
+            else:
+                # Not eligible to opt out: treated as a plan response.
+                self.plan_response_received = True
 
         if not self.plan_response_received:
             # Day 15 passed with no response: default determination for the
@@ -567,7 +651,10 @@ class AhcaDisputeWorkflow:
         await workflow.wait_condition(lambda: self.attorney_done)
 
         await workflow.execute_activity(
-            set_dual_status, args=[tenant, case_id, "QA Final Determination", "Under Review"],
+            # FL AHCA Status is "Decided" for the whole determination stage
+            # (status mapping: QA Final Determination → Determination Sent to
+            # FL → Final Order Issued).
+            set_dual_status, args=[tenant, case_id, "QA Final Determination", "Decided"],
             start_to_close_timeout=timedelta(seconds=30),
         )
         if self.outcome_data:

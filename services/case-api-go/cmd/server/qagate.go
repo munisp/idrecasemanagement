@@ -118,6 +118,19 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 					sanitizeTenant(tenant)), caseID, key, today)
 		}
 	}
+	s.recordCaseDeliverables(r, tenant, caseID, template)
+	s.setProviderResponseDue(r, tenant, caseID, template)
+	// A closure letter records why and how the case closed, once.
+	var eligReason string
+	_ = s.db.QueryRow(r.Context(), `
+		SELECT coalesce(reason,'') FROM public.eligibility_reviews WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC LIMIT 1`,
+		tenant, caseID).Scan(&eligReason)
+	if reason, outcome := closureReasonFor(template, eligReason); reason != "" {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.cases SET details =
+			  jsonb_build_object('withdrawal_dismissed_reason', $2::text, 'case_outcome', $3::text) || details
+			WHERE id::text=$1`, sanitizeTenant(tenant)), caseID, reason, outcome)
+	}
 	// The Ineligible Dispute letter is what closes an ineligible case.
 	if template == "ineligible" && s.caseLock(r.Context(), tenant, caseID) == lockIneligible {
 		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
@@ -140,4 +153,25 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 		_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "RFI_SENT", map[string]any{"to": rfiTo})
 	}
 	_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "LETTER_SENT", map[string]any{"template": template})
+}
+
+// setProviderResponseDue keeps "Date Provider's Response is Due" as the Field
+// Criteria sheet defines it: the acceptance date + 15 days when an RFI or a
+// cost estimate was sent, otherwise the acceptance date itself.
+func (s *server) setProviderResponseDue(r *http.Request, tenant, caseID, template string) {
+	if template != "acceptance" && template != "rfi" && template != "estimate_cost" {
+		return
+	}
+	dates := s.programDates(r, tenant, caseID)
+	accepted, err := time.Parse("2006-01-02", dates["date_case_accepted"])
+	if err != nil {
+		return // not accepted yet: nothing is due from the provider
+	}
+	due := accepted
+	if dates["rfi_sent_at"] != "" || dates["estimate_sent_at"] != "" {
+		due = accepted.AddDate(0, 0, 15)
+	}
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+		`UPDATE tenant_%s.cases SET program_dates = program_dates || jsonb_build_object('date_provider_response_due', $2::text) WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID, due.Format("2006-01-02"))
 }

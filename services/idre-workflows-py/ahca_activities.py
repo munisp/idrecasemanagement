@@ -112,19 +112,37 @@ async def set_case_outcome(
 
 @activity.defn
 async def record_followup_action(tenant: str, case_id: str, action: str, detail: str) -> None:
-    """A day-13/14/15 follow_ups[] action firing — a reminder to staff to
-    make a call/send a reply-all, not yet a breach. Logged on the case
-    timeline (same table doc-intel writes analysis results to) and
-    broadcast in-app so the Reviewer actually sees it. No HTTP route
-    exposes s.notify directly (confirmed -- only called internally by
-    handlers), so this writes public.notifications straight, same shape
-    as a '*'-broadcast call to s.notify."""
+    """A deadline follow-up firing (day 13/14/15 calls and emails, "send
+    this letter" prompts): something a person must now do, not yet a breach.
+
+    It becomes three things: a line on the case timeline, a notification to
+    the Reviewers (the role that chases deadlines -- not the whole tenant),
+    and an open TASK due today, assigned to whoever holds the case, so it
+    sits in someone's task list until it is done.
+
+    The "tell AHCA at day 13" follow-up applies to Medicaid plans only: for a
+    case recorded as another line of business it is skipped."""
     with _conn() as c:
+        row = c.execute(
+            f"SELECT case_number, coalesce(assigned_to,''), coalesce(details->>'line_of_business','') "
+            f"FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),
+        ).fetchone()
+        case_number, assignee, lob = row if row else ("", "", "")
+        if action == "medicaid_ahca_notify":
+            if lob and lob.lower() != "medicaid":
+                return
+            if not lob:
+                detail += " (only if this is a Medicaid plan — the line of business is not recorded on the case)"
         c.execute(
             "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,'FOLLOWUP_ACTION',%s)",
             (tenant, case_id, f"{action}: {detail}"),
         )
         c.execute(
-            "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,'*','FOLLOWUP_ACTION',%s,%s)",
-            (tenant, f"Case {case_id}: {action} — {detail}", f"#/cases/{case_id}"),
+            "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,'role:CASE_MANAGER','FOLLOWUP_ACTION',%s,%s)",
+            (tenant, f"Case {case_number or case_id}: {detail}", f"#/cases/{case_id}"),
+        )
+        c.execute(
+            "INSERT INTO public.tasks (tenant, subject, case_id, assignee, due_date, created_by) "
+            "VALUES (%s,%s,%s,%s,current_date,'system:deadlines')",
+            (tenant, f"{case_number or 'Case'}: {detail}"[:480], case_id, assignee),
         )

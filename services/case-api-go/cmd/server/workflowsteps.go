@@ -69,6 +69,7 @@ var wfOwnerLabels = map[string]string{
 var wfClosedStatuses = map[string]bool{
 	"Provider Closure Letter Issued": true, "Ineligible": true, "Dismissed": true, "Withdrawn": true,
 	"Provider - Withdrawal": true, "Plan Opt-Out": true, "Invoice Paid": true, "Decided - Invoice Paid": true,
+	"Closed-Refunded": true,
 }
 
 // wfStatusReached: for cases that got where they are before the steps were

@@ -30,6 +30,7 @@ type ClockView struct {
 	State     string `json:"state"`      // ok | watch | risk | breach | closed | paused
 	Cite      string `json:"cite"`       // 45 CFR citation
 	BasisNote string `json:"basis_note"` // provenance of the start timestamp
+	HardDue   string `json:"hard_due,omitempty"` // contract hard limit, when later than Due (state "late" in between)
 }
 
 // addBusinessDays returns the date n business days after start (weekend-aware;
