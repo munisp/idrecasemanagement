@@ -265,6 +265,47 @@ def provider_type_from_text(text: str | None) -> str | None:
     return None
 
 
+_HOSPITAL_NAME = re.compile(r"\b(HOSPITAL|MEDICAL CENTER|HEALTH SYSTEM|REGIONAL MEDICAL)\b")
+_PRACTICE_NAME = re.compile(
+    r"\b(P\.?C\.?|P\.?A\.?|M\.?D\.?|D\.?O\.?|D\.?D\.?S\.?|D\.?M\.?D\.?|PHYSICIANS?|DENTAL|DENTISTRY|"
+    r"MEDICAL GROUP|ASSOCIATES|FAMILY (?:MEDICINE|PRACTICE)|CLINIC)(?=$|[\s,.])")
+_INPATIENT = re.compile(r"\b(INPATIENT|ROOM (?:AND|&) BOARD|ADMISSION|ADMITTED|DISCHARGE|DRG)\b")
+_OUTPATIENT = re.compile(r"\b(OUTPATIENT|EMERGENCY (?:ROOM|DEPARTMENT)|OBSERVATION|AMBULATORY SURGERY)\b")
+
+
+def infer_provider_type(provider_name: str | None, text: str | None, cpt_codes=None) -> tuple[str | None, str]:
+    """Provider type for a document that prints no place-of-service code --
+    an EOB. Returns (type, basis). It is an INFERENCE and is stored as one:
+    the eligibility review shows the basis and sends the result for a second
+    look, because the provider type picks the dollar threshold.
+
+      a hospital by name + inpatient wording   -> hospital_inpatient
+      a hospital by name + outpatient wording  -> hospital_outpatient
+      a practice by name (P.C., M.D., D.D.S., Physicians, Dental...) or
+      office-visit / dental procedure codes    -> physician_dentist
+
+    A hospital with neither wording, a rural hospital, and anything else stay
+    unknown: None, for a person to decide.
+    """
+    name = str(provider_name or "").upper()
+    t = str(text or "").upper()
+    codes = " ".join(cpt_codes) if isinstance(cpt_codes, list) else str(cpt_codes or "")
+    if _HOSPITAL_NAME.search(name):
+        if _INPATIENT.search(t):
+            return "hospital_inpatient", f"provider is a hospital ({provider_name}) and the document describes inpatient services"
+        if _OUTPATIENT.search(t):
+            return "hospital_outpatient", f"provider is a hospital ({provider_name}) and the document describes outpatient services"
+        return None, ""
+    if name and _PRACTICE_NAME.search(name):
+        return "physician_dentist", f"provider is a professional practice ({provider_name})"
+    hay = codes.upper() + " " + t
+    if re.search(r"\b992(0[2-9]|1[0-5])\b", hay):
+        return "physician_dentist", "office-visit procedure codes (99202-99215) are billed"
+    if re.search(r"\bD\d{4}\b", hay) and "DENTAL" in t:
+        return "physician_dentist", "dental procedure codes are billed"
+    return None, ""
+
+
 def line_of_business_from(value: str | None) -> str | None:
     """Map what a document calls the coverage ("Medicaid MMA", "Medicare
     Advantage HMO", "Employer group PPO") onto the program's Line of Business
@@ -395,6 +436,10 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
     provider_type = _POS_PROVIDER_TYPE.get(pos_match.group(1)) if pos_match else None
     if not provider_type:
         provider_type = provider_type_from_text(text)
+    provider_type_basis = ""
+    if not provider_type:
+        provider_type, provider_type_basis = infer_provider_type(
+            extracted.get("provider_name"), text, extracted.get("cpt_hcpcs_codes") or extracted.get("service_lines"))
     contracted = _contracted_from_network_status(extracted.get("network_status"))
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
@@ -440,9 +485,10 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
         if provider_type and "provider_type" not in details:
             c.execute(
                 f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
-                (json.dumps({"provider_type": provider_type}), case_id),
+                (json.dumps({"provider_type": provider_type,
+                             **({"provider_type_basis": "inferred: " + provider_type_basis} if provider_type_basis else {})}), case_id),
             )
-            changed.append(f"provider type {provider_type}")
+            changed.append(f"provider type {provider_type}" + (f" (INFERRED — {provider_type_basis}; confirm)" if provider_type_basis else ""))
         if contracted is not None and "contracted" not in details:
             c.execute(
                 f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",

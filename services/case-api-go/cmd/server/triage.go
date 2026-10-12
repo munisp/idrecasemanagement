@@ -377,6 +377,10 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 		evidence["document_conflicts"] = conflicts
 		bl = append(bl, conflicts...)
 	}
+	if inferred := s.inferredInputs(r, tenant, id); len(inferred) > 0 {
+		evidence["inferred_inputs"] = inferred
+		bl = append(bl, inferred...)
+	}
 	if len(bl) > 0 {
 		evidence["borderline"] = true
 		evidence["borderline_reasons"] = bl
@@ -438,6 +442,21 @@ func (s *server) eligibilityConflicts(r *http.Request, tenant, caseID string) []
 		return nil
 	}
 	return conflictSentences(raw)
+}
+
+// inferredInputs returns a sentence for each eligibility input the document
+// reader worked out rather than read (today: the provider type, on a
+// document with no place-of-service code). The decision still stands; the
+// sentence makes it a borderline one, so the PM takes a second look.
+func (s *server) inferredInputs(r *http.Request, tenant, caseID string) []string {
+	var basis string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT coalesce(details->>'provider_type_basis','') FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&basis)
+	if strings.HasPrefix(basis, "inferred") {
+		return []string{"provider type was " + basis + " — confirm it before relying on the result"}
+	}
+	return nil
 }
 
 func conflictSentences(raw []byte) []string {

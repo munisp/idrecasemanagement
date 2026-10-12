@@ -576,3 +576,18 @@ def test_report_fields_from_documents():
     # parts that do not fit the report's formats are left out, not stored wrong
     assert addr({"provider_state": "Florida", "provider_zip": "3360", "provider_city": "Tampa"}) == {"provider_city": "Tampa"}
     assert addr({}) == {}
+
+
+def test_infer_provider_type_from_an_eob():
+    from main import infer_provider_type as f
+    assert f("Northgate Health, P.C.", "Explanation of Benefits ... Office visit, established patient (99215)")[0] == "physician_dentist"
+    assert f("Bayside Dental Associates", "")[0] == "physician_dentist"
+    assert f("Jane Roe, M.D.", "")[0] == "physician_dentist"
+    assert f("St. Luke's Regional Hospital", "Inpatient admission 02/03/2026, room and board, DRG 470")[0] == "hospital_inpatient"
+    assert f("Gulf Coast Medical Center", "Emergency department visit, outpatient")[0] == "hospital_outpatient"
+    assert f("St. Luke's Regional Hospital", "claim processed")[0] is None       # a hospital, setting not stated
+    assert f("Acme Ambulance Transport", "ground transport A0429")[0] is None
+    assert f("", "Office visit 99213")[0] == "physician_dentist"                 # by procedure code alone
+    assert f(None, None)[0] is None
+    typ, basis = f("Northgate Health, P.C.", "")
+    assert "Northgate Health, P.C." in basis
