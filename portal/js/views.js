@@ -251,6 +251,8 @@ const Views = (() => {
   async function wfLoad(id, cfg) {
     const box = document.getElementById("wf-steps");
     if (!box) return;
+    // The step list is for the people who work the case (and Finance, for its steps).
+    if (!can("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) { box.remove(); return; }
     let r;
     try { r = await Api.program.workflow(id); }
     catch (e) { box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return; }
@@ -849,7 +851,32 @@ const Views = (() => {
   }
 
   // ---- Case detail workspace -------------------------------------------------
+  // What a TPA sees of a dispute it filed: where it stands, its deadlines and
+  // its documents. The office's working page -- notes, review, letters,
+  // money -- is not a filer's, and the API gives a filer none of it.
+  async function filerCase(id) {
+    let c;
+    try { c = await Api.cases.get(id); }
+    catch { return `<div class="view-head"><h1>Dispute not found</h1></div>
+      <p class="muted">This dispute isn't one your organization filed, or it no longer exists.</p><p><a href="#/tpa">Back to your disputes</a></p>`; }
+    const [docs, clocks] = await Promise.all([Api.cases.documents(id).catch(() => []), Api.cm.clocks(id).catch(() => [])]);
+    const d = c.details || {};
+    const list = Array.isArray(docs) ? docs : (docs.documents || []);
+    return `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>${badge(c.status)}</div>
+      <p class="muted">Filed for ${esc(d.initiating_party || "your client")} · opened ${fmtDate(c.opened_at)}</p>
+      ${c.lock === "AWAITING_PAYMENT" ? `<div class="case-lock" role="status"><b>Awaiting payment.</b> The review starts once the initial fee is paid — the payment link was sent to your TPA contact email.</div>` : ""}
+      ${clocks.length ? `<div class="sla-cluster">` + clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
+        <span class="lbl">${esc(cl.label)}</span><span class="cite">due ${esc(cl.due)}</span></div>`).join("") + `</div>` : ""}
+      <div class="card"><h2>Documents</h2>${list.length ? `<table><thead><tr><th>File</th><th>Type</th><th>Received</th><th></th></tr></thead><tbody>` +
+        list.map((x) => `<tr><td>${esc(x.filename || x.name || "document")}</td><td>${esc(x.doc_type || "")}</td><td>${fmtDate(x.uploaded_at || x.created_at)}</td>
+          <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
+        : `<p class="muted">No documents yet. Use the upload link in your email to send the claim documents.</p>`}</div>
+      <p><a href="#/tpa">Back to your disputes</a></p>`;
+  }
+
   async function caseDetail(id) {
+    if (can("TPA") && !can("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR",
+      "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) return filerCase(id);
     try {
       const [c, docs, activities, checklist, rels, clocks, notesRes, prog] = await Promise.all([
         Api.cases.get(id), Api.cases.documents(id), Api.cases.activities(id),
@@ -2022,7 +2049,9 @@ const Views = (() => {
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
       };
-      const refreshInv = () => Api.program.invoices(id).then(renderInvoices).catch(() => {});
+      // Invoices belong to the money roles; everyone else's case page leaves the list out.
+      const seesInvoices = can("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN");
+      const refreshInv = () => (seesInvoices ? Api.program.invoices(id).then(renderInvoices).catch(() => {}) : Promise.resolve());
       refreshInv();
       // Card payments settle via Stripe webhook — poll so status flips live
       // instead of requiring a manual reload.
@@ -3873,7 +3902,7 @@ const Views = (() => {
     try {
       const [shares, staff] = await Promise.all([
         Api.program.copilotThreadShares(caseId),
-        Api.admin.listTenantStaff(Api.getTenant()).catch(() => []),
+        Api.admin.listStaffNames(Api.getTenant()).catch(() => []),
       ]);
       const byId = {};
       (staff || []).forEach((s) => { byId[s.id] = s.username; });
@@ -3889,7 +3918,7 @@ const Views = (() => {
 
   async function asstShareAdd(caseId) {
     try {
-      const staff = await Api.admin.listTenantStaff(Api.getTenant());
+      const staff = await Api.admin.listStaffNames(Api.getTenant());
       const me = Auth.claims()?.sub;
       const options = (staff || []).filter((s) => s.id && s.id !== me).map((s) => [s.id, s.username]);
       if (!options.length) { UI.toast("No other staff found on this tenant", { kind: "warn" }); return; }
@@ -4018,6 +4047,8 @@ const Views = (() => {
   // the "When to use" rules choose for it. Fills the compose form's list (and
   // the cache its pre-fill reads) once the case's own list arrives.
   async function corrTemplatesFor(caseId, formSel) {
+    // Only the roles that write letters have templates to choose from.
+    if (!can("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) return [];
     try {
       const r = await Api.program.caseTemplates(caseId);
       const tpls = r.templates || [];
@@ -5864,6 +5895,8 @@ const Views = (() => {
   async function tpaBoot() {
     const orgBox = document.getElementById("tpa-org");
     try {
+      // Finance sees the oversight table only; it never acts as a TPA.
+      if (!can("TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) { orgBox.innerHTML = ""; tpaAdminBox(); return; }
       const r = await Api.program.tpaMe();
       const code = r.tpa.invite_code;
       const isStaff = can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");

@@ -29,6 +29,12 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	appID := chi.URLParam(r, "appId")
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// Any signed-in member of the tenant could attach files to any
+	// application. Attaching evidence is part of working an application.
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: application documents are added by onboarding staff"}`, http.StatusForbidden)
+		return
+	}
 
 	var exists bool
 	if err := s.db.QueryRow(r.Context(),

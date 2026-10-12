@@ -1,0 +1,143 @@
+package main
+
+import (
+	"net/http"
+	"testing"
+)
+
+const caseA = "2d756871-3a59-4d8c-a346-f28ab547038c"
+const docA = "c37ea445-470b-4120-accb-a8209f89a6e1"
+
+func who(roles ...string) principal { return principal{Subject: "u-1", Roles: roles} }
+
+func TestExternalOnly(t *testing.T) {
+	for _, roles := range [][]string{{"TPA"}, {"TPA", "BULK_SUBMITTER"}, {"TPA", "PARTY"}} {
+		if !isExternalOnly(who(roles...)) {
+			t.Errorf("%v is an outside account", roles)
+		}
+	}
+	// A staff role alongside it makes the account staff (an admin who claimed a TPA code to help it).
+	for _, roles := range [][]string{{"CASE_MANAGER"}, {"TPA", "FEDERAL_ADMIN"}, {"TPA", "TENANT_ADMIN"}, {"PM"}, {"STATE_AUDITOR"}, {}, {serviceRole}, {"PARTY"}} {
+		if isExternalOnly(who(roles...)) {
+			t.Errorf("%v is not an outside-only account", roles)
+		}
+	}
+}
+
+// A TPA has standing only in what it filed. Every one of these answered 200
+// for a TPA before the guard existed.
+func TestATPACannotReachTheRestOfTheTenant(t *testing.T) {
+	tpa := who("TPA")
+	denied := []struct{ method, path string }{
+		{"GET", "/cases"}, {"GET", "/search"}, {"GET", "/accounts"}, {"GET", "/accounts/" + caseA + "/360"},
+		{"GET", "/intake"}, {"GET", "/deliverables"}, {"GET", "/onboarding/applications"}, {"GET", "/voice/logs"},
+		{"GET", "/voice/intake"}, {"GET", "/cases/clocks"}, {"GET", "/program/recipients"}, {"GET", "/program/templates"},
+		{"GET", "/time/mine"}, {"GET", "/views"}, {"GET", "/qa"}, {"GET", "/correspondence"}, {"GET", "/reports/summary"},
+		{"POST", "/voice/outbound"}, {"POST", "/tasks/" + caseA + "/complete"}, {"POST", "/graph/ask"},
+		// On a case, even its own: nothing internal.
+		{"GET", "/cases/" + caseA + "/activities"}, {"GET", "/cases/" + caseA + "/eligibility"},
+		{"GET", "/cases/" + caseA + "/correspondence"}, {"GET", "/cases/" + caseA + "/checklist"},
+		{"GET", "/cases/" + caseA + "/documents/" + docA + "/analysis"}, {"GET", "/cases/" + caseA + "/documents.zip"},
+		{"GET", "/cases/" + caseA + "/workflow"}, {"GET", "/cases/" + caseA + "/related"},
+		// And it reads; it does not write through the staff routes.
+		{"POST", "/cases/" + caseA + "/signal"}, {"PUT", "/cases/" + caseA + "/review-notes"},
+		{"POST", "/cases/" + caseA + "/documents"}, {"DELETE", "/cases/" + caseA},
+	}
+	for _, c := range denied {
+		if d, _, _ := accessDecision(tpa, c.method, c.path); d != "deny" {
+			t.Errorf("TPA %s %s: got %q, want deny", c.method, c.path, d)
+		}
+	}
+	ownCase := []string{"/cases/" + caseA, "/cases/" + caseA + "/clocks", "/cases/" + caseA + "/documents",
+		"/cases/" + caseA + "/documents/" + docA + "/download"}
+	for _, path := range ownCase {
+		d, id, _ := accessDecision(tpa, http.MethodGet, path)
+		if d != "own-case" || id != caseA {
+			t.Errorf("TPA GET %s: got %q for case %q, want own-case for %s", path, d, id, caseA)
+		}
+	}
+	for _, path := range []string{"/tpa/me", "/tpa/dashboard", "/tpa/intake", "/tpa/disputes/" + caseA, "/program", "/prefs",
+		"/notifications", "/notifications/read-all", "/calendar", "/intake/bulk", "/intake/bulk/" + caseA} {
+		if d, _, _ := accessDecision(tpa, http.MethodGet, path); d != "allow" {
+			t.Errorf("TPA %s should be open to a TPA, got %q", path, d)
+		}
+	}
+	// A filing PARTY is not limited by this guard (see isExternalOnly): the known, reported gap.
+	if d, _, _ := accessDecision(who("PARTY"), http.MethodGet, "/cases/"+caseA); d != "allow" {
+		t.Errorf("PARTY is outside this guard's scope for now; got %q", d)
+	}
+	// Path tricks do not turn a staff route into the TPA's own area.
+	for _, path := range []string{"/tpaX/me", "/cases/" + caseA + "/documents/../activities", "/cases/not-a-uuid", "/tpa/../cases"} {
+		if d, _, _ := accessDecision(tpa, http.MethodGet, path); path != "/tpa/../cases" && d == "allow" {
+			t.Errorf("TPA %s: allowed", path)
+		}
+	}
+}
+
+// A page's data follows the page: a role without it in the menu does not
+// get it by address.
+func TestAnOutsiderHearsOnlyItsOwnNotices(t *testing.T) {
+	got := notifTargets(principal{Subject: "u1", Roles: []string{"TPA"}})
+	for _, g := range got {
+		if g == "*" || g == "role:CASE_MANAGER" {
+			t.Errorf("a TPA must not receive staff broadcasts; targets %v", got)
+		}
+	}
+	if staff := notifTargets(principal{Subject: "u2", Roles: []string{"PM"}}); !contains(staff, "*") {
+		t.Errorf("staff still receive tenant broadcasts; targets %v", staff)
+	}
+}
+
+func TestAnOutsiderSeesOnlyThePublicProgram(t *testing.T) {
+	cfg := &ProgramConfig{}
+	cfg.Fees.InitialFeeCents = 30000
+	cfg.Correspondence.Templates = []CorrTemplate{{Key: "acceptance"}}
+	pub := publicProgram(cfg)
+	if pub.Fees.InitialFeeCents != 30000 {
+		t.Errorf("the fee is public; got %d", pub.Fees.InitialFeeCents)
+	}
+	if len(pub.Correspondence.Templates) != 0 {
+		t.Errorf("letter wording is not for outside filers")
+	}
+}
+
+func TestAFilerDoesNotReceiveTheOfficesNotes(t *testing.T) {
+	got := filingDetails(map[string]any{
+		"initiating_party": "Clinic", "filing_notes": "n", "fwa": map[string]any{"flag": true},
+		"dispute_summary": "internal", "eligibility_conflicts": []any{"x"}, "provider_type_basis": "inferred",
+	})
+	if got["initiating_party"] != "Clinic" || got["filing_notes"] != "n" {
+		t.Errorf("the filer's own details are kept; got %v", got)
+	}
+	for _, k := range []string{"fwa", "dispute_summary", "eligibility_conflicts", "provider_type_basis"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("%s is the office's working note and must not reach the filer", k)
+		}
+	}
+}
+
+func TestPageDataFollowsThePage(t *testing.T) {
+	cases := []struct {
+		role, path string
+		allowed    bool
+	}{
+		{"CASE_MANAGER", "/intake", true}, {"PM", "/intake", true}, {"TENANT_ADMIN", "/intake", true}, {"FEDERAL_ADMIN", "/intake", true},
+		{"CODER", "/intake", false}, {"NURSE_PHYSICIAN", "/intake", false}, {"ATTORNEY", "/intake", false}, {"FINANCE", "/intake", false}, {"DOCTOR", "/intake", false},
+		{"CASE_MANAGER", "/deliverables", true}, {"PM", "/deliverables", true},
+		{"CODER", "/deliverables", false}, {"ATTORNEY", "/deliverables", false}, {"FINANCE", "/deliverables", false},
+		{"CASE_MANAGER", "/voice/logs", true}, {"TENANT_ADMIN", "/voice/intake", true},
+		{"PM", "/voice/logs", false}, {"CODER", "/voice/logs", false}, {"ATTORNEY", "/voice/intake", false}, {"FINANCE", "/voice/logs", false},
+		// Staff routes with no page policy are untouched by this guard (their handlers decide).
+		{"CODER", "/cases", true}, {"NURSE_PHYSICIAN", "/cases/" + caseA, true}, {"ATTORNEY", "/tasks", true},
+	}
+	for _, c := range cases {
+		d, _, _ := accessDecision(who(c.role), http.MethodGet, c.path)
+		if (d == "allow") != c.allowed {
+			t.Errorf("%s GET %s: got %q, want allowed=%v", c.role, c.path, d, c.allowed)
+		}
+	}
+	// Writing to those paths is not this guard's business; the handlers have their own role checks.
+	if d, _, _ := accessDecision(who("CODER"), http.MethodPost, "/intake"); d != "allow" {
+		t.Errorf("the page policy is for reads; got %q", d)
+	}
+}

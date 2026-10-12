@@ -135,6 +135,13 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"summary is too long (20,000 characters at most)"}`, http.StatusBadRequest)
 		return
 	}
+	// An empty summary was accepted and recorded, and the workflow then
+	// counted the Dispute Summary step as done. It is done when it says
+	// something: the plan type and the summary itself.
+	if strings.TrimSpace(in.PlanType) == "" || strings.TrimSpace(in.Summary) == "" {
+		http.Error(w, `{"error":"the Dispute Summary needs the health plan type and the summary text"}`, http.StatusBadRequest)
+		return
+	}
 	sum := map[string]any{
 		"plan_type": strings.TrimSpace(in.PlanType), "plan_type_verified_from_letterhead": in.VerifiedFromLetter,
 		"summary": strings.TrimSpace(in.Summary), "estimate_basis": strings.TrimSpace(in.EstimateBasis),

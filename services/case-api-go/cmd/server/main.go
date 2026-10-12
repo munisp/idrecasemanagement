@@ -485,7 +485,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, tenancy, s.caseLockGuard)
+		r.Use(a.middleware, tenancy, s.accessGuard, s.caseLockGuard)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
@@ -1207,6 +1207,9 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(details, &dj)
 	var pd map[string]any
 	_ = json.Unmarshal(programDates, &pd)
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isExternalOnly(p) {
+		dj, internal = filingDetails(dj), nil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": c.ID, "case_number": c.CaseNumber, "tenant": c.Tenant, "status": c.Status,
 		"service_line": c.ServiceLine, "qpa_cents": c.QPA, "disputed_amount_cents": c.DisputedAmount, "opened_at": c.OpenedAt,

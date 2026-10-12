@@ -843,10 +843,17 @@ func (s *server) listTenantStaff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// TENANT_ADMIN added back -- see createTenantStaff for why.
+	// brief=1 is the colleague picker (sharing an Assistant thread): any case
+	// staff of the tenant may ask, and gets names only -- no emails, no
+	// roles, no disabled accounts. The full list stays with PM and admins.
+	brief := false
 	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		if !hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, tenant) {
-			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN viewing their own tenant"}`, http.StatusForbidden)
-			return
+			brief = r.URL.Query().Get("brief") == "1" && hasAnyRole(p, caseStaffRoles...) && contains(p.Tenants, tenant)
+			if !brief {
+				http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN viewing their own tenant"}`, http.StatusForbidden)
+				return
+			}
 		}
 	}
 	tok, err := s.kcAdminToken(r.Context())
@@ -891,6 +898,12 @@ func (s *server) listTenantStaff(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(membersResp.Body).Decode(&kcUsers)
 	out := make([]staffMember, 0, len(kcUsers))
 	for _, u := range kcUsers {
+		if brief {
+			if u.Enabled {
+				out = append(out, staffMember{ID: u.ID, Username: u.Username, Enabled: true, Roles: []string{}})
+			}
+			continue
+		}
 		out = append(out, staffMember{
 			ID: u.ID, Username: u.Username, Email: u.Email, Enabled: u.Enabled,
 			Roles: s.kcUserRoles(r.Context(), tok, u.ID),

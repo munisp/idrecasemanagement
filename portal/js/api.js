@@ -74,6 +74,8 @@ const Api = (() => {
       createTenantStaff: (payload) => req("POST", "/v1/admin/tenant-staff", payload),
       listFederalAdmins: () => req("GET", "/v1/admin/federal-admins"),
       listTenantStaff: (tenant) => req("GET", `/v1/admin/tenant-staff?tenant=${encodeURIComponent(tenant)}`),
+      // Names only, for picking a colleague; open to any case staff of the tenant.
+      listStaffNames: (tenant) => req("GET", `/v1/admin/tenant-staff?tenant=${encodeURIComponent(tenant)}&brief=1`),
       setTenantStaffEnabled: (tenant, username, enabled) =>
         req("PATCH", `/v1/admin/tenant-staff/${encodeURIComponent(username)}`, { tenant, enabled }),
       deleteTenantStaff: (tenant, username) =>

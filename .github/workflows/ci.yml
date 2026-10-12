@@ -40,6 +40,16 @@ jobs:
           # module-level imports -- needed just to collect test_pipeline.py.
           pip install -q numpy opencv-python-headless pytesseract pillow httpx pyyaml
           cd services/doc-intel-py && python -m pytest -q
+  portal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      # The portal has no build step, so a syntax slip in any script would
+      # only show up as a blank page in the browser. Parse every one.
+      - run: |
+          for f in portal/js/*.js; do node --check "$f"; done
   yaml:
     runs-on: ubuntu-latest
     steps:

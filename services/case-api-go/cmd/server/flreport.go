@@ -20,7 +20,9 @@ import (
 	"time"
 )
 
-var flReportRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
+// The Reviewer is not here: the Reports page is the PM's, and this list had
+// let a Reviewer pull every report by address while the page was hidden.
+var flReportRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
 
 type flCaseRow struct {
 	CaseNumber, Status, CaseID string

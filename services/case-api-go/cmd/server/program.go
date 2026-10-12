@@ -152,7 +152,23 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg.Correspondence.Templates = offered
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isExternalOnly(p) {
+		cfg = publicProgram(cfg)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label})
+}
+
+// publicProgram is what an outside filer may know about the program: how
+// cases are numbered, the public eligibility rules, the fee, and the status
+// names. The rest -- banking, billing, reconciliation, letter wording and
+// recipients, internal checklists and their owners -- is the office's own.
+func publicProgram(cfg *ProgramConfig) *ProgramConfig {
+	out := &ProgramConfig{}
+	out.CaseNumber = cfg.CaseNumber
+	out.Statuses = cfg.Statuses
+	out.Eligibility = cfg.Eligibility
+	out.Fees = cfg.Fees
+	return out
 }
 
 // setTenantLabel: PUT /v1/tenants/{tenant}/program/label {"label":"AHCA"} --

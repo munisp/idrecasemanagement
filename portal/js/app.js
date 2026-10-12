@@ -184,7 +184,7 @@
   if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
   // Everyone who drafts letters can read the templates; the PM and admins change them.
-  if (has("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/templates", "✎", "Templates"]);
+  if (has("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/templates", "✎", "Templates"]);
   // CASE_MANAGER deliberately excluded from all four -- standalone finance
   // screens, not case-detail info; matches billingViewRoles/arapReadRoles/
   // reconReadRoles/financialReadRoles (access-control follow-up).
@@ -383,6 +383,29 @@
     [/^#\/audit$/, Views.auditLog],
   ];
 
+  // One rule for every way of reaching a page -- the rail, a typed or
+  // bookmarked address, a link in an email, the palette, the back button:
+  // a page opens only if this account's menu offers it. The menu used to be
+  // the only thing that knew, so a hidden page still opened by its address.
+  // This is for a clear answer on screen; the API refuses the data itself.
+  const menu = new Set(links.map(([h]) => h.slice(2)));
+  const pageOf = (h) => {
+    const parts = h.replace(/^#\//, "").split("?")[0].split("/");
+    return parts[0] === "crm" ? parts.slice(0, 2).join("/") : parts[0];
+  };
+  function canOpen(h) {
+    const page = pageOf(h);
+    if (menu.has(page)) return true;
+    // Pages reached from another page rather than from the menu.
+    if (page === "search") return menu.has("cases");
+    // A TPA has no Disputes list, but opens the disputes it filed from its own page.
+    if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return has("TPA");
+    return false;
+  }
+  const noAccess = () => `<div class="view-head"><h1>No access</h1></div>
+    <p class="muted">Your account doesn't include this page. If you think it should, ask your program manager or administrator.</p>
+    <p><a href="#/dashboard">Back to Home</a></p>`;
+
   async function render() {
     const h = location.hash || "#/dashboard";
     nav.querySelectorAll("a").forEach((a) => {
@@ -392,6 +415,7 @@
     for (const [re, fn] of routes) {
       const m = h.match(re);
       if (m) {
+        if (!canOpen(h)) { view.innerHTML = noAccess(); return; }
         const result = await fn(m);
         // Views that need to wire up listeners after rendering return
         // {html, wire} instead of a plain string: wire() must run AFTER
@@ -416,7 +440,7 @@
   }
   // Soft refresh: re-render the current route without a full page reload
   // (no Keycloak round-trip, no shell flash, preserves rail/scroll context).
-  window.App = { rerender: render };
+  window.App = { rerender: render, canOpen };
   // Last-resort feedback net: any async handler that still throws without its
   // own try/catch surfaces as an error toast instead of failing silently.
   addEventListener("unhandledrejection", (e) => {

@@ -327,7 +327,7 @@ func (s *server) createNachaPayout(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listPayoutBatches(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, arapReadRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}

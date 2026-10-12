@@ -466,9 +466,18 @@ func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := chi.URLParam(r, "taskId")
+	// Anyone on staff could close anyone's task -- a Coder could mark the
+	// PM's escalation done. The Reviewer and the PM run the task list and
+	// may close any task; everyone else closes the ones that are theirs
+	// (assigned to them, or raised by them).
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	mine := `AND (assignee=$3 OR created_by=$3 OR created_by=$4)`
+	if hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		mine = `AND ($3::text IS NOT NULL OR $4::text IS NOT NULL)`
+	}
 	res, err := s.db.Exec(r.Context(), `
-		UPDATE public.tasks SET status='DONE', completed_at=now() WHERE tenant=$1 AND id=$2`,
-		tenant, taskID)
+		UPDATE public.tasks SET status='DONE', completed_at=now() WHERE tenant=$1 AND id::text=$2 `+mine,
+		tenant, taskID, p.Subject, displayName(p))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -479,6 +488,11 @@ func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 		s.logAudit(r.Context(), tenant, "", "TASK_COMPLETED", map[string]any{
 			"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "task_id": taskID,
 		})
+	}
+	if res.RowsAffected() == 0 {
+		// Unknown, or not the caller's to close: say so instead of "DONE".
+		http.Error(w, `{"error":"task not found, or not yours to complete"}`, http.StatusNotFound)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "DONE"})
 }

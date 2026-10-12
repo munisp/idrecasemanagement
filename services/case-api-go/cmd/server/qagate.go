@@ -41,6 +41,12 @@ func qaInternalStatus(template string) string {
 // own, the tenant-wide broadcast, and one per role they hold ("role:PM").
 // A tenant admin stands in for every tenant staff role.
 func notifTargets(p principal) []string {
+	// An outside filer hears only what is addressed to it. The tenant-wide
+	// broadcasts ("*") are staff news -- which document was read, which case
+	// moved -- and none of an outsider's business.
+	if isExternalOnly(p) {
+		return []string{p.Subject, "role:TPA"}
+	}
 	out := []string{p.Subject, "*"}
 	for _, r := range p.Roles {
 		out = append(out, "role:"+r)
