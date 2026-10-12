@@ -150,7 +150,7 @@ def test_a_whole_program_question_is_answered_with_the_figures_themselves():
          mock.patch.object(k, "_ollama_generate", side_effect=AssertionError("no model for a count")):
         r = k.ask("t1", "What are the five largest disputes by amount?")
     assert r["generator"] == "program-records" and r["answer"].startswith("Five largest disputes")
-    assert "$12,850,595.98" in r["answer"] and r["facts"] == lines
+    assert "$12,850,595.98" not in r["answer"] and r["facts"] == lines   # the answer is the line that answers
 
 
 def test_a_question_naming_a_case_gets_the_figures_beside_the_graph_paths():

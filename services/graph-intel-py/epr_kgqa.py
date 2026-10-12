@@ -204,7 +204,12 @@ def _records_answer(question: str, lines: list[str]) -> str:
         low = line.lower()
         return sum(min(low.count(st), 2) * w for st, w in rarity.items())
     ranked = sorted(lines, key=score, reverse=True)       # stable: ties keep the category order
-    best = [ln for ln in ranked if score(ln) > 0][:4] or ranked[:3]
+    # The line that answers, and a second only when it matches nearly as
+    # well. Everything else considered is listed under the answer anyway.
+    hits = [ln for ln in ranked if score(ln) > 0]
+    if not hits:
+        return "\n".join(ranked[:2])
+    best = hits[:1] + [ln for ln in hits[1:2] if score(ln) >= 0.6 * score(hits[0])]
     return "\n".join(best)
 
 

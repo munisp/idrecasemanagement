@@ -107,7 +107,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
             add("caseload", f"There are {r[0]} disputes in total: {r[0] - r[1]} open and {r[1]} closed or decided.")
             add("caseload", f"{r[2]} disputes were opened in the last 30 days.")
         rs = rows(f"SELECT status, count(*) FROM {t}.cases GROUP BY status ORDER BY count(*) DESC")
-        add("caseload", rs and "Disputes by status: " + _pairs(rs) + ".")
+        add("caseload", rs and "Disputes by status (the stage each is in): " + _pairs(rs) + ".")
         rs = rows(f"SELECT internal_status, count(*) FROM {t}.cases WHERE internal_status IS NOT NULL "
                   f"GROUP BY internal_status ORDER BY count(*) DESC LIMIT 12")
         add("caseload", rs and "Disputes by internal status (where the work is): " + _pairs(rs) + ".")
@@ -184,7 +184,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
         add("eligibility", rs and "Latest eligibility decision per dispute: " + _pairs(rs) + ".")
         rs = rows(f"SELECT reason, count(*) FROM {latest} WHERE result='INELIGIBLE' GROUP BY reason "
                   f"ORDER BY count(*) DESC LIMIT 8", (tenant,))
-        add("eligibility", rs and "Reasons disputes were found ineligible: "
+        add("eligibility", rs and "Reasons for ineligibility: "
             + _pairs([(str(n or '').replace('_', ' '), c) for n, c in rs]) + ".")
         r = one(f"SELECT count(*) FILTER (WHERE result='HOLD_AOR'), count(*) FILTER (WHERE borderline) FROM {latest}",
                 (tenant,))
@@ -216,7 +216,7 @@ def _compute(tenant: str) -> dict[str, list[str]]:
         # ---- outcomes ---------------------------------------------------
         rs = rows(f"SELECT agency_status, count(*) FROM {t}.cases WHERE agency_status IN ('Decided','Closed') "
                   f"GROUP BY agency_status")
-        add("outcomes", rs and "Finished disputes: " + _pairs(rs) + ".")
+        add("outcomes", rs and "Decided and closed disputes: " + _pairs(rs) + ".")
         rs = rows(f"SELECT details->>'case_outcome', count(*) FROM {t}.cases "
                   f"WHERE coalesce(details->>'case_outcome','') <> '' GROUP BY 1 ORDER BY count(*) DESC")
         add("outcomes", rs and "Recorded outcomes: " + _pairs(rs) + ".")

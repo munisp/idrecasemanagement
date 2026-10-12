@@ -1617,6 +1617,15 @@ const Views = (() => {
       // One listener for every suggestion, present and future: the list is
       // redrawn once the tenant's real case numbers and names arrive.
       $("#kgqa-cats").addEventListener("click", (ev) => {
+        const tab = ev.target.closest(".kgqa-tab");
+        if (tab) {
+          kgqaTab = tab.dataset.cat;
+          $("#kgqa-cats").querySelectorAll(".kgqa-tab").forEach((t) => {
+            const on = t === tab; t.classList.toggle("active", on); t.setAttribute("aria-selected", on);
+          });
+          $("#kgqa-cats").querySelectorAll(".kgqa-panel").forEach((p) => { p.hidden = p.dataset.cat !== kgqaTab; });
+          return;
+        }
         const b = ev.target.closest(".kgqa-hint");
         if (!b) return;
         $("#kgqa").q.value = b.dataset.q; run(b.dataset.q);
@@ -1681,10 +1690,17 @@ const Views = (() => {
         "What is the average disputed amount?",
         "How many cases have been decided, and what was awarded?"]],
     ];
-    return cats.filter(([, qs]) => qs.length).map(([name, qs]) => `<div class="kgqa-cat"><h4>${esc(name)}</h4>
-        <div class="kgqa-hints">${qs.map((q) =>
-          `<button type="button" class="kgqa-hint" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div></div>`).join("");
+    // One tab per category; the open tab survives the redraw that brings
+    // in the tenant's real names.
+    const shown = cats.filter(([, qs]) => qs.length);
+    const open = shown.some(([name]) => name === kgqaTab) ? kgqaTab : shown[0][0];
+    return `<div class="kgqa-tabs" role="tablist" aria-label="Question categories">${shown.map(([name]) =>
+        `<button type="button" role="tab" class="kgqa-tab${name === open ? " active" : ""}" data-cat="${esc(name)}"
+          aria-selected="${name === open}">${esc(name)}</button>`).join("")}</div>` +
+      shown.map(([name, qs]) => `<div class="kgqa-panel" role="tabpanel" data-cat="${esc(name)}" ${name === open ? "" : "hidden"}>
+        ${qs.map((q) => `<button type="button" class="kgqa-hint" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>`).join("");
   }
+  let kgqaTab = "";
 
   // ---- Program rules UI (G1–G15 surfaces) ---------------------------------
 
