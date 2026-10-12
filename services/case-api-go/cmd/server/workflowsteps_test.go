@@ -213,3 +213,29 @@ func TestChecklistItemOwner(t *testing.T) {
 		}
 	}
 }
+
+// With the hand-back, a letter is three steps: draft, QA, send -- and the
+// send belongs to the drafter, not the approver.
+func TestWorkflowLetterHandBack(t *testing.T) {
+	f := wfBase()
+	f.ReviewerSends = true
+	f.Act["PACKET_COMPLETE"], f.HasSummary = wfAct{At: time.Now()}, true
+	f.HasElig, f.EligResult = true, "ELIGIBLE"
+	for st, want := range map[string][2]string{
+		"": {"letter:acceptance", "Reviewer"}, "PENDING": {"qa:acceptance", "PM"},
+		"APPROVED": {"send:acceptance", "Reviewer"}, "REJECTED": {"letter:acceptance", "Reviewer"},
+		"SENT": {"letter:plan_notification", "Reviewer"},
+	} {
+		f.Letter["acceptance"] = st
+		n := wfNext(buildWorkflowSteps(f))
+		if n == nil || n.Key != want[0] || n.Owner != want[1] {
+			t.Errorf("acceptance letter %q: next is %+v, want %s (%s)", st, n, want[0], want[1])
+		}
+	}
+	// A case already past the letter by status does not ask for it again.
+	f = wfBase()
+	f.ReviewerSends, f.Internal = true, "Provider Acceptance Letter Issued"
+	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "letter:plan_notification" {
+		t.Errorf("legacy case past acceptance: next is %+v, want the plan notification draft", n)
+	}
+}

@@ -233,3 +233,55 @@ func TestValidPostal(t *testing.T) {
 		}
 	}
 }
+
+func TestERA835(t *testing.T) {
+	x12 := "ISA*00*          *00*          *ZZ*PAYER          *ZZ*PROVIDER       *260301*1200*^*00501*000000001*0*P*:~" +
+		"GS*HP*PAYER*PROVIDER*20260301*1200*1*X*005010X221A1~ST*835*0001~" +
+		"BPR*I*1500.00*C*ACH*CCP*01*999999999*DA*123456*1512345678**01*888888888*DA*654321*20260305~TRN*1*EFT778899*1512345678~" +
+		"N1*PR*GULF HEALTH PLAN~N1*PE*SUNSHINE CLINIC*XX*1234567890~" +
+		"CLP*CLM-001*1*1850.00*412.00*82.40*12*PAYERCLM1*11~NM1*QC*1*DOE*JANE~DTM*232*20260312~CAS*CO*45*1355.60~CAS*PR*2*82.40~" +
+		"CLP*CLM-002*4*500.00*0.00**12*PAYERCLM2*11~NM1*QC*1*ROE*SAM~DTM*472*20260315~CAS*CO*29*500.00~SE*20*0001~GE*1*1~IEA*1*000000001~"
+	got := parseERA835(x12)
+	if len(got) != 2 {
+		t.Fatalf("want 2 claims, got %d", len(got))
+	}
+	a := got[0]
+	if a.ClaimNumber != "CLM-001" || a.Billed != "1850.00" || a.Paid != "412.00" || a.PatientResp != "82.40" ||
+		a.Status != "Processed as primary" || a.Patient != "JANE DOE" || a.ServiceDate != "03/12/2026" ||
+		a.Payer != "GULF HEALTH PLAN" || a.Payee != "SUNSHINE CLINIC" || a.CheckNumber != "EFT778899" || a.CheckDate != "03/05/2026" {
+		t.Errorf("first claim read wrong: %+v", a)
+	}
+	if strings.Join(a.Adjustments, "; ") != "CO-45 1355.60; PR-2 82.40" {
+		t.Errorf("adjustments read wrong: %v", a.Adjustments)
+	}
+	if got[1].Status != "Denied" || got[1].ServiceDate != "03/15/2026" {
+		t.Errorf("second claim read wrong: %+v", got[1])
+	}
+	// one segment per line, no ISA header (how a text export often arrives)
+	lines := "ST*835*0001\nBPR*I*10.00*C\nTRN*1*CHK1\nN1*PR*PLAN\nCLP*A1*1*20.00*10.00*0\nSE*5*0001"
+	if c := parseERA835(strings.ReplaceAll(lines, "\\n", "\n")); len(c) != 1 || c[0].ClaimNumber != "A1" {
+		t.Errorf("newline-delimited 835 not read: %+v", c)
+	}
+	if parseERA835("Dear provider, your claim CLP was reviewed.") != nil || parseERA835("") != nil {
+		t.Error("ordinary text must not be taken for an 835")
+	}
+}
+
+func TestAdhocColumns(t *testing.T) {
+	cols := flAllColumns()
+	if len(cols) != 16+25 {
+		t.Fatalf("an ad hoc report can draw on the 16 weekly columns plus the 25 monthly-only ones, got %d", len(cols))
+	}
+	c := &flCaseRow{CaseNumber: "FL26-000001", Agency: "Under Review", Internal: "Review In Progress", Details: map[string]any{}, Dates: map[string]any{}}
+	if v, ok := flCell(c, "Case Number"); !ok || v != "FL26-000001" {
+		t.Errorf("Case Number: %q %v", v, ok)
+	}
+	if v, ok := flCell(c, "Case Status"); !ok || v != "Review In Progress" {
+		t.Errorf("Case Status (monthly-only): %q %v", v, ok)
+	}
+	for _, internal := range []string{"Legal Review notes", "Rationale", "Plan Type", "RFI Details"} {
+		if _, ok := flCell(c, internal); ok {
+			t.Errorf("internal-only field %q must not be reportable", internal)
+		}
+	}
+}

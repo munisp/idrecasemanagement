@@ -46,7 +46,7 @@ type CorrTemplate struct {
 	// QAPreRole: a role that must check the draft BEFORE the QA role's
 	// approval sends it (FL dismissal: the PM, then the Attorney).
 	QAPreRole string `json:"qa_pre_role"`
-	Thread  bool     `json:"thread"`  // reply-all on the existing thread
+	Thread    bool   `json:"thread"` // reply-all on the existing thread
 	// Body is the program's standard message text (FL: verbatim from the
 	// "Email Templates FL AHCA" source document) with {case_number},
 	// {share_link} and {download_link} placeholders. The compose screen
@@ -423,7 +423,13 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		SELECT id, case_id, subject, status, drafted_by, reviewed_by, reviewed_at
 		FROM public.qa_reviews WHERE tenant=$1 AND status<>'PENDING'
 		ORDER BY reviewed_at DESC NULLS LAST LIMIT 20`, tenant)
-	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent})
+	// Approved and handed back: waiting for the drafter to send.
+	toSend, _ := s.queryRows(r, `
+		SELECT id, case_id, artifact, subject, drafted_by, reviewed_by, reviewed_at, coalesce(requested_by_sub,'') AS requested_by_sub,
+		       to_recipients, cc_recipients
+		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
+		ORDER BY reviewed_at`, tenant)
+	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend})
 }
 
 func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
@@ -489,6 +495,10 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	isRetry := status == "APPROVED" && in.Decision == "APPROVE" && channel != "note"
 	if err != nil || (status != "PENDING" && !isRetry) {
 		http.Error(w, `{"error":"not pending"}`, http.StatusConflict)
+		return
+	}
+	if isRetry && s.reviewerSends(r, tenant) {
+		http.Error(w, `{"error":"this draft has already passed QA — it is with the Reviewer to send"}`, http.StatusConflict)
 		return
 	}
 	// Self-approval guard: the drafter and the reviewer must be different
@@ -658,50 +668,25 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		// protocol error with no indication of WHY (the case had no
 		// provider/payer account linked, so resolveRecipients had nothing to
 		// resolve at draft time, and nothing caught it before now).
-		var sendErr error
-		if len(to) == 0 && len(cc) == 0 {
-			sendErr = fmt.Errorf("no recipient email address on this draft -- add one above and approve again")
-		} else {
-			sendErr = s.sendMail(to, cc, subject, body)
+		// Hand-back (SOP stage 0): where the program has the drafter send,
+		// approval does not deliver. The draft is APPROVED and goes back to
+		// the Reviewer, who enters the addresses and sends it (qaSend).
+		if s.reviewerSends(r, tenant) && !isRetry {
+			who := requestedBySub
+			if who == "" {
+				who = "role:CASE_MANAGER"
+			}
+			s.notify(r, tenant, who, "DRAFT_APPROVED",
+				fmt.Sprintf("%q passed QA — check the addresses and send it", subject), "#/qa")
+			s.logActivity(r.Context(), tenant, caseID, "QA_APPROVED",
+				fmt.Sprintf("QA-approved by %s: %s — back with the Reviewer to send", displayName(p), subject))
+			s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+				"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "sent": false,
+			})
+			writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "next": "with the Reviewer to send"})
+			return
 		}
-		if err := sendErr; err != nil {
-			deliveryError = err.Error()
-			if !s.settleHeldMail(r, tenant, qid, "FAILED", err.Error(), body, to, cc) {
-				s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject, err.Error())
-			}
-			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
-				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
-			// The reviewer who clicked Approve already sees this in the
-			// response; the person who ASKED for the draft in the first
-			// place (often a different person, often not watching this
-			// screen at all -- that's the whole point of a QA gate) had no
-			// way to learn their mail never actually went out.
-			if requestedBySub != "" {
-				s.notify(r, tenant, requestedBySub, "DRAFT_SEND_FAILED",
-					fmt.Sprintf("Your correspondence draft %q was approved but failed to send: %s", subject, deliveryError), "#/qa")
-			}
-		} else {
-			_, _ = s.db.Exec(r.Context(),
-				`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
-			if !s.settleHeldMail(r, tenant, qid, "SENT", "", body, to, cc) {
-				s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
-			}
-			if len(to) > 0 {
-				s.logCorrespondenceInquiry(r, tenant, caseID, to[0], fmt.Sprintf("%s: %s", artifact, subject), p.Subject)
-			}
-			s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
-				fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
-			if requestedBySub != "" {
-				s.notify(r, tenant, requestedBySub, "DRAFT_SENT",
-					fmt.Sprintf("Your correspondence draft %q was approved and sent to %d recipient(s).", subject, len(to)), "#/cases/"+caseID)
-			}
-			// The letter is out: the case leaves its QA status, the dates the
-			// SOP ties to this letter are set, and the workflow hears of it.
-			s.releaseCaseFromQA(r, tenant, caseID, qid)
-			s.afterLetterSent(r, tenant, caseID, artifact, rfiTo)
-			// Notification is a fact now — the checklist follows.
-			s.autoChecklist(r, tenant, caseID)
-		}
+		deliveryError = s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub, to, cc)
 	} else {
 		s.releaseCaseFromQA(r, tenant, caseID, qid)
 		s.settleHeldMail(r, tenant, qid, "REJECTED", "rejected in QA"+orDash(": "+in.Note), body, to, cc)
@@ -908,4 +893,124 @@ func (s *server) resolveShareLink(w http.ResponseWriter, r *http.Request) {
 		"tenant": tenant, "case_id": caseID, "kind": kind,
 		"expires_at": expires.Format(time.RFC3339), "remaining_uses": maxUses - uses,
 	})
+}
+
+// reviewerSends reports whether this program hands an approved draft back to
+// its drafter to send (config correspondence.reviewer_sends), as the FL SOP
+// does, instead of sending on approval.
+func (s *server) reviewerSends(r *http.Request, tenant string) bool {
+	var on bool
+	_ = s.db.QueryRow(r.Context(),
+		`SELECT coalesce((config->'correspondence'->>'reviewer_sends')::boolean, false) FROM public.program_rules WHERE tenant=$1`,
+		tenant).Scan(&on)
+	return on
+}
+
+// deliverApproved sends an approved draft and applies everything that
+// follows a letter going out. It returns the delivery error text, "" on
+// success; a failure leaves the draft APPROVED so the send can be retried.
+func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub string, to, cc []string) (deliveryError string) {
+	var sendErr error
+	if len(to) == 0 && len(cc) == 0 {
+		sendErr = fmt.Errorf("no recipient email address on this draft -- add one above and approve again")
+	} else {
+		sendErr = s.sendMail(to, cc, subject, body)
+	}
+	if err := sendErr; err != nil {
+		deliveryError = err.Error()
+		if !s.settleHeldMail(r, tenant, qid, "FAILED", err.Error(), body, to, cc) {
+			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject, err.Error())
+		}
+		s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
+			fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
+		// The reviewer who clicked Approve already sees this in the
+		// response; the person who ASKED for the draft in the first
+		// place (often a different person, often not watching this
+		// screen at all -- that's the whole point of a QA gate) had no
+		// way to learn their mail never actually went out.
+		if requestedBySub != "" {
+			s.notify(r, tenant, requestedBySub, "DRAFT_SEND_FAILED",
+				fmt.Sprintf("Your correspondence draft %q was approved but failed to send: %s", subject, deliveryError), "#/qa")
+		}
+	} else {
+		_, _ = s.db.Exec(r.Context(),
+			`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
+		if !s.settleHeldMail(r, tenant, qid, "SENT", "", body, to, cc) {
+			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
+		}
+		if len(to) > 0 {
+			s.logCorrespondenceInquiry(r, tenant, caseID, to[0], fmt.Sprintf("%s: %s", artifact, subject), p.Subject)
+		}
+		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
+			fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
+		if requestedBySub != "" {
+			s.notify(r, tenant, requestedBySub, "DRAFT_SENT",
+				fmt.Sprintf("Your correspondence draft %q was approved and sent to %d recipient(s).", subject, len(to)), "#/cases/"+caseID)
+		}
+		// The letter is out: the case leaves its QA status, the dates the
+		// SOP ties to this letter are set, and the workflow hears of it.
+		s.releaseCaseFromQA(r, tenant, caseID, qid)
+		s.afterLetterSent(r, tenant, caseID, artifact, rfiTo)
+		// Notification is a fact now — the checklist follows.
+		s.autoChecklist(r, tenant, caseID)
+	}
+	return deliveryError
+}
+
+// qaSend: POST /qa/{qaId}/send {to, cc} — the drafter sends a draft that has
+// passed QA. The addresses can be corrected here; the text cannot (it is
+// what was approved).
+func (s *server) qaSend(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	qid := chi.URLParam(r, "qaId")
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	var in struct {
+		To *[]string `json:"to"`
+		CC *[]string `json:"cc"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	var caseID, subject, body, status, artifact, channel, requestedBySub, rfiTo string
+	var toJ, ccJ []byte
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'),
+		       coalesce(requested_by_sub,''), coalesce(rfi_to,'')
+		FROM public.qa_reviews WHERE tenant=$1 AND id=$2`, tenant, qid).
+		Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &requestedBySub, &rfiTo); err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if status != "APPROVED" || channel != "email" {
+		http.Error(w, `{"error":"only a draft that has passed QA and not yet been sent can be sent"}`, http.StatusConflict)
+		return
+	}
+	// The drafter sends; Reviewers and admins may send any approved draft
+	// (reminders the system drafted have no person behind them).
+	if requestedBySub != p.Subject && !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: an approved draft is sent by the person who drafted it, or a Reviewer"}`, http.StatusForbidden)
+		return
+	}
+	var to, cc []string
+	_ = json.Unmarshal(toJ, &to)
+	_ = json.Unmarshal(ccJ, &cc)
+	if in.To != nil {
+		to = *in.To
+		if j, err := json.Marshal(to); err == nil {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET to_recipients=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, j)
+		}
+	}
+	if in.CC != nil {
+		cc = *in.CC
+		if j, err := json.Marshal(cc); err == nil {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET cc_recipients=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, j)
+		}
+	}
+	deliveryError := s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, "", to, cc)
+	s.logAudit(r.Context(), tenant, caseID, "QA_SENT", map[string]any{
+		"by": p.Subject, "qa_id": qid, "subject": subject, "to": to, "cc": cc, "email_delivery_error": deliveryError,
+	})
+	out := map[string]any{"status": "SENT"}
+	if deliveryError != "" {
+		out = map[string]any{"status": "APPROVED", "email_delivery_error": deliveryError}
+	}
+	writeJSON(w, http.StatusOK, out)
 }

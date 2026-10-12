@@ -536,3 +536,19 @@ def test_eligibility_conflicts_reports_disagreement_once():
     assert eligibility_conflicts(current, found, "VALID-05.pdf", known=got) == []
     # a case with no value yet has nothing to disagree with (the backfill fills it)
     assert eligibility_conflicts({"disputed_amount_cents": None, "provider_type": "", "contracted": None}, found, "x") == []
+
+
+def test_provider_type_from_text_reads_only_explicit_codes():
+    from main import provider_type_from_text as f
+    assert f("Service Date: 03/12/2026 Place of Service: 11 (Office) Network Status: Out-of-network") == "physician_dentist"
+    assert f("| Place of Service | 21 (Inpatient Hospital) |") == "hospital_inpatient"
+    assert f("24B PLACE OF SERVICE 22") == "hospital_outpatient"
+    assert f("POS: 19") == "hospital_outpatient"
+    assert f("4 TYPE OF BILL 0111") == "hospital_inpatient"
+    assert f("Type of Bill: 131") == "hospital_outpatient"
+    # codes that do not state a provider type, and forms with none, stay unknown
+    assert f("Place of Service: 41 (Ambulance - Land)") is None
+    assert f("Type of Bill 0721") is None   # a dialysis clinic, not a hospital
+    assert f("HEALTH INSURANCE CLAIM FORM CMS-1500") is None
+    assert f("Explanation of Benefits — physician services") is None
+    assert f("") is None and f(None) is None

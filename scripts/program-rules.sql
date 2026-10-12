@@ -384,6 +384,7 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "external_agency": ["CASE_MANAGER","PM","FEDERAL_ADMIN","PLATFORM_ADMIN"]
   },
   "correspondence": {
+    "reviewer_sends": true,
     "agency_recipients": [],
     "templates": [
       {"key":"submission_instructions","subject":"Florida Claims Dispute Submission Process: FL AHCA","to":["requester"],"cc":[],"body":"Hello,\n\nThank you for contacting Capitol Bridge LLC regarding the Florida Agency for Health Care Administration (AHCA) Claims Dispute Resolution Program. Below are instructions on how to submit a claims dispute.\n\nCapitol Bridge has saved the Claims Dispute Resolution Filing Instructions and Filing Packet for you to download:\n{download_link}\n\nPlease fill in the Filing Packet completely and use the secure upload link below when you are ready to submit your dispute and supporting documentation. Please do not email Capitol Bridge documentation; all documentation should be uploaded using the link below.\n{share_link}\n\nIn order to process your dispute request, Capitol Bridge requires the $123.59 Initial Eligibility Determination Review Fee to be paid in full.\n\nIf you have any questions regarding this correspondence, please email flcdr@capitolbridge.com or call 1-800-889-0549."},

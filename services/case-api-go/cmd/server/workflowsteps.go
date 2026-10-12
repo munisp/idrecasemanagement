@@ -57,6 +57,7 @@ type wfFacts struct {
 	Act              map[string]wfAct  // latest timeline entry per type (signals)
 	Letter           map[string]string // template -> status of its latest draft
 	HasOutcome       bool              // the Reviewer recorded the outcome and party billed
+	ReviewerSends    bool              // an approved draft goes back to its drafter to send
 	ReviewInvoice    bool              // an invoice other than the initial fee exists
 	OpenInvoices     int
 }
@@ -107,6 +108,13 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		sent := st == "SENT"
 		add("letter:"+tpl, "Draft the "+label, drafter, "letter:"+tpl, sent || st == "PENDING" || st == "APPROVED",
 			"Compose it in Correspondence; it is held for QA, not sent.")
+		if f.ReviewerSends {
+			add("qa:"+tpl, "QA the "+label, qaRole, "qa:"+tpl, sent || st == "APPROVED",
+				"Check the parties, the analysis, the letter and the links; correct anything wrong.")
+			add("send:"+tpl, "Send the "+label, drafter, "send:"+tpl, sent,
+				"Enter the addresses and send. The send is logged and the dates are set.")
+			return sent
+		}
 		add("qa:"+tpl, "QA and send the "+label, qaRole, "qa:"+tpl, sent, "Approve it in the QA gate; approval sends it.")
 		return sent
 	}
@@ -191,7 +199,8 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 	// done before steps were tracked.
 	reached := -1
 	for i, st := range steps {
-		if done[st.Key] || st.Key == wfStatusReached[f.Internal] {
+		mapped := wfStatusReached[f.Internal]
+		if done[st.Key] || st.Key == mapped || (strings.HasPrefix(mapped, "qa:") && st.Key == "send:"+strings.TrimPrefix(mapped, "qa:")) {
 			reached = i
 		}
 	}
@@ -326,6 +335,9 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 		}
 		rows.Close()
 	}
+	_ = s.db.QueryRow(ctx,
+		`SELECT coalesce((config->'correspondence'->>'reviewer_sends')::boolean, false) FROM public.program_rules WHERE tenant=$1`,
+		tenant).Scan(&f.ReviewerSends)
 	_ = s.db.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE kind <> 'INITIAL_FEE') > 0, count(*) FILTER (WHERE status='OPEN')
 		FROM public.invoices WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&f.ReviewInvoice, &f.OpenInvoices)

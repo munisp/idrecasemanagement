@@ -158,6 +158,22 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 			msg += " (" + b + ")"
 		}
 	}
+	if in.EstimateCents != nil {
+		// "...records it in Internal Case Review notes": add a dated line to
+		// that field, leaving what the Reviewer and PM wrote in place.
+		line := fmt.Sprintf("[%s] Full review cost estimate: $%d.%02d", time.Now().UTC().Format("01/02/2006"), *in.EstimateCents/100, *in.EstimateCents%100)
+		if b := strings.TrimSpace(in.EstimateBasis); b != "" {
+			line += " (" + b + ")"
+		}
+		line += " — " + displayName(p) + " (Coder)"
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.cases SET details = jsonb_set(details, '{review_notes}',
+			  coalesce(details->'review_notes','{}'::jsonb) || jsonb_build_object('internal_case_review',
+			    coalesce(details->'review_notes'->'internal_case_review','{}'::jsonb) || jsonb_build_object('text',
+			      trim(both E'\n' from coalesce(details->'review_notes'->'internal_case_review'->>'text','') || E'\n' || $2::text))), true)
+			WHERE id::text=$1 AND position($2::text in coalesce(details->'review_notes'->'internal_case_review'->>'text','')) = 0`,
+			sanitizeTenant(tenant)), caseID, line)
+	}
 	s.logActivity(r.Context(), tenant, caseID, "DISPUTE_SUMMARY", msg)
 	s.logAudit(r.Context(), tenant, caseID, "DISPUTE_SUMMARY_UPDATED", map[string]any{"by": p.Subject, "summary": sum})
 	writeJSON(w, http.StatusOK, map[string]any{"dispute_summary": sum})

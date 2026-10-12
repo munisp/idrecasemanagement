@@ -443,7 +443,7 @@ func closureReasonFor(template, eligReason string) (reason, outcome string) {
 		switch eligReason {
 		case "over_filing_window", "over_12_months":
 			return "Dismissed-Timeliness eligibility failed", "Dismissed"
-		case "plan_not_florida_regulated", "non_fl_regulated_plan", "not_florida_regulated":
+		case "plan_not_fl_regulated":
 			return "Member plan is not regulated by Florida", "Dismissed"
 		case "self_funded_plan":
 			return "Self-Funded Plan", "Dismissed"

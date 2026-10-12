@@ -244,7 +244,7 @@ const Views = (() => {
   // never perform it. The server refuses out-of-order actions regardless.
   const WF_MARK = { done: "✓", skipped: "–", next: "▶", upcoming: "○" };
   const WF_STAGE_LETTERS = ["acceptance", "ineligible", "estimate_cost", "plan_notification", "final_order", "final_order_rationale_copy"];
-  const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate"
+  const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate" : a.startsWith("send:") ? "Send it"
     : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "aor_confirm" ? "Give the ruling"
     : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it" : "Open");
   async function wfLoad(id, cfg) {
@@ -317,7 +317,7 @@ const Views = (() => {
       if (sel) { sel.value = tpl; corrTemplateBody(sel); }
       return open("#p-send-details");
     }
-    if (a.startsWith("qa:")) { location.hash = "#/qa"; return; }
+    if (a.startsWith("qa:") || a.startsWith("send:")) { location.hash = "#/qa"; return; }
     if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
     if (a === "summary") return open("#p-summary-details");
     if (a === "invoice") return open("#p-inv-details");
@@ -944,6 +944,7 @@ const Views = (() => {
             <td class="muted">${esc(d.uploaded_by || "")} · ${fmtDate(d.uploaded_at)}</td>
             <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
             <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')">download</a>
+            ${/\.(txt|835|edi|x12)$/i.test(d.filename || "") ? ` · <a href="javascript:void(0)" title="If this is an 835 remittance (ERA), download it as a spreadsheet table" onclick="Views.era835Fn('${id}','${d.doc_id}')">835 → table</a>` : ""}
             ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
             ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
               ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">move…</option>
@@ -1508,6 +1509,7 @@ const Views = (() => {
     const geoLink = (window.IDRE_CONFIG.geoMapUrl || "")
       ? `<a class="button" href="${window.IDRE_CONFIG.geoMapUrl}" target="_blank">Geospatial audit map (GeoLibre) ↗</a>` : "";
     afterRender(() => {
+      flAdhocBox();
       RPT_TABS.forEach((t) => document.getElementById(`rpt-tab-${t.key}`)
         ?.addEventListener("click", () => switchRptTab(t.key)));
       document.getElementById("rpt-status-refresh")?.addEventListener("click", (ev) => loadRptStatus(ev.currentTarget));
@@ -1533,9 +1535,17 @@ const Views = (() => {
       <div class="card"><h2>FL AHCA contract reports</h2>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.flReportFn(this)">
           <input name="from" type="date" /> <input name="to" type="date" />
-          <select name="kind"><option value="weekly">Weekly (16 cols A–P, task 2.4.2)</option><option value="monthly">Monthly (33 fields, task 2.4.3)</option></select>
+          <select name="kind"><option value="weekly">Weekly (16 cols A–P, task 2.4.2)</option><option value="monthly">Monthly (33 fields, task 2.4.3)</option>
+            <option value="final">Final (whole contract, task 2.4.5)</option></select>
           <button class="mini">Download CSV</button></form>
-        <p class="muted">Exact contract column order; dates MM/DD/YYYY; unrecorded values render N/A; internal-only fields are never included.</p></div>
+        <p class="muted">Exact contract column order; dates MM/DD/YYYY; unrecorded values render N/A; internal-only fields are never included.
+          With no dates, the weekly covers last week and the monthly last month.</p>
+        <details class="prog-sec"><summary>Ad hoc report (task 2.4.4 — due within 10 business days of the request)</summary>
+          <p class="muted">Pick the columns AHCA asked for, the period, and optionally the statuses. Leave columns unticked for all of them.</p>
+          <form class="form" onsubmit="event.preventDefault(); Views.flAdhocFn(this)">
+            <div class="inline-form"><label>From <input name="from" type="date" /></label> <label>To <input name="to" type="date" /></label></div>
+            <div id="adhoc-cols" class="elig-flags"><span class="muted">Loading columns…</span></div>
+            <button class="mini">Download ad hoc CSV</button></form></details></div>
       <div class="rpt-tabs" role="tablist">
         ${RPT_TABS.map((t, i) => `<button class="rpt-tab rpt-accent-${t.accent} ${i === 0 ? "active" : ""}"
           id="rpt-tab-${t.key}" role="tab">${t.icon} ${esc(t.label)}</button>`).join("")}
@@ -2085,7 +2095,18 @@ const Views = (() => {
       const r = await Api.program.qaQueue();
       const q = r.queue || [];
       const recent = r.recent || [];
-      const intro = `<details class="prog-sec" ${q.length ? "" : "open"}><summary>What the QA gate does</summary>
+      const toSend = r.to_send || [];
+      const me = Auth.claims()?.sub;
+      const maySend = (i) => i.requested_by_sub === me || can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      const list = (v) => (Array.isArray(v) ? v : []).join(", ");
+      const sendHtml = toSend.length
+        ? `<h2>Passed QA — ready to send</h2>
+          <p class="muted">These drafts were approved and are back with the Reviewer. Check the addresses and send; the send is logged and the case's dates are set.</p>
+          <table><thead><tr><th>Subject</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
+          toSend.map((i) => `<tr><td>${esc(i.subject)}</td><td>${esc(i.reviewed_by || "—")}</td><td class="muted">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
+            <td>${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
+          `</tbody></table>` : "";
+      const intro = sendHtml + `<details class="prog-sec" ${q.length ? "" : "open"}><summary>What the QA gate does</summary>
         <p class="muted">Every correspondence template in this program's rules either sends <b>immediately</b>
         or carries a <b>QA role</b> (e.g. attorney, program manager). Drafts on gated templates stop here as
         <b>PENDING</b> — the named role reviews the exact subject, body, recipients, and any secure links, then
@@ -2150,6 +2171,22 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
+  // The Reviewer sends a draft that has passed QA (SOP stage 0): the
+  // addresses are entered or corrected here, the approved text is not editable.
+  async function qaSendFn(qaId, to, cc) {
+    const v = await UI.modal({ title: "Send the approved email", submitLabel: "Send now",
+      body: "This email passed QA. Enter or correct the addresses; it is delivered immediately and logged.",
+      fields: [{ name: "to", label: "To (comma-separated)", required: true, value: to },
+        { name: "cc", label: "CC (comma-separated)", value: cc }] });
+    if (!v) return;
+    const split = (x) => (x || "").split(/[,;]+/).map((e) => e.trim()).filter(Boolean);
+    try {
+      const r = await Api.program.qaSend(qaId, split(v.to), split(v.cc));
+      if (r.email_delivery_error) UI.toast(`Not sent: ${r.email_delivery_error}`, { kind: "warn", sticky: true });
+      else UI.toast("Sent and logged");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
   async function qaDecide(qaId, decision, el) {
     let note = "";
     const isNote = $("#qa-detail")?.dataset.channel === "note";
@@ -2172,7 +2209,9 @@ const Views = (() => {
     await UI.run(el, async () => {
       try {
         const r = await Api.program.qaDecision(qaId, decision, note, edited, to, cc);
-        if (r.first_check) {
+        if (r.next && r.status === "APPROVED" && !r.first_check) {
+          UI.toast(`Approved — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
+        } else if (r.first_check) {
           UI.toast(`Your check is recorded — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
         } else if (r.email_delivery_error) {
           UI.toast(`Approved, but email delivery failed: ${r.email_delivery_error} — still APPROVED, fix the address above and approve again to retry`,
@@ -5799,9 +5838,30 @@ ${canAct ? `<p class="muted" style="margin-top:6px">"Act as" links YOUR OWN acco
   async function flReportFn(form) {
     try {
       if (form.kind.value === "weekly") await Api.program.flWeeklyReport(form.from.value, form.to.value);
+      else if (form.kind.value === "final") await Api.program.flFinalReport();
       else await Api.program.flMonthlyReport(form.from.value, form.to.value);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function era835Fn(caseId, docId) {
+    try { await Api.program.documentAs835(caseId, docId); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+  async function flAdhocBox() {
+    const box = document.getElementById("adhoc-cols");
+    if (!box) return;
+    try {
+      const r = await Api.program.flReportColumns();
+      box.innerHTML = `<fieldset class="elig-flags"><legend>Columns</legend>${(r.columns || []).map((c) =>
+        `<label><input type="checkbox" name="col" value="${esc(c)}" /> ${esc(c)}</label>`).join("")}</fieldset>
+        <fieldset class="elig-flags"><legend>FL AHCA Status (none ticked = all)</legend>${(r.statuses || []).map((c) =>
+        `<label><input type="checkbox" name="st" value="${esc(c)}" /> ${esc(c)}</label>`).join("")}</fieldset>`;
+    } catch (e) { box.innerHTML = `<p class="muted">⚠ ${esc(e.message)}</p>`; }
+  }
+  async function flAdhocFn(form) {
+    const ticked = (name) => [...form.querySelectorAll(`input[name="${name}"]:checked`)].map((i) => i.value);
+    try { await Api.program.flAdhocReport({ columns: ticked("col").join("|"), status: ticked("st").join("|"), from: form.from.value, to: form.to.value }); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaAdminInviteCodeFn, tpaAdminActAsFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn };
 })();

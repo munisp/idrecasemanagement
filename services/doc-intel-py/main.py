@@ -235,6 +235,28 @@ _POS_PROVIDER_TYPE = {
 }
 
 
+# Type-of-bill (UB-04 form locator 4): the first digit after the leading zero
+# is the facility type (1 = hospital), the second the care setting (1 or 2 =
+# inpatient, 3 = outpatient). Only the hospital combinations are mapped.
+_TOB_PROVIDER_TYPE = {"11": "hospital_inpatient", "12": "hospital_inpatient", "13": "hospital_outpatient"}
+
+
+def provider_type_from_text(text: str | None) -> str | None:
+    """Read the provider type off the form's own printed codes when the
+    model did not extract a place of service: "Place of Service: 11" on a
+    claim form, or a UB-04's type of bill. Only the codes that state a
+    provider type outright are used -- a form with neither stays unknown
+    rather than being guessed from its layout. Pure, so it is tested."""
+    t = str(text or "").upper()
+    m = re.search(r"(?:PLACE\s+OF\s+SERVICE|\bPOS\b)[\s:|.#(A-Z]{0,24}?\b(\d{2})\b", t)
+    if m and m.group(1) in _POS_PROVIDER_TYPE:
+        return _POS_PROVIDER_TYPE[m.group(1)]
+    m = re.search(r"TYPE\s+OF\s+BILL[\s:|.#]{0,12}0?(\d{2})\d\b", t)
+    if m and m.group(1) in _TOB_PROVIDER_TYPE:
+        return _TOB_PROVIDER_TYPE[m.group(1)]
+    return None
+
+
 def _contracted_from_network_status(text: str | None) -> bool | None:
     """True/False only on an explicit in-/out-of-network statement in the
     document; None (don't guess) for anything else, including silence."""
@@ -273,7 +295,7 @@ def eligibility_conflicts(current: dict, found: dict, source: str, known: list |
     return out
 
 
-def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "") -> list[str]:
+def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "", text: str = "") -> list[str]:
     """Fill a couple of case fields from analyzed-document facts so staff
     don't have to re-type what the document already states -- but only
     fields with an unambiguous semantic match, and only where the case
@@ -306,6 +328,8 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
     service_lines = extracted.get("service_lines") or []
     pos_match = re.match(r"\s*(\d{1,2})", str(extracted.get("place_of_service") or ""))
     provider_type = _POS_PROVIDER_TYPE.get(pos_match.group(1)) if pos_match else None
+    if not provider_type:
+        provider_type = provider_type_from_text(text)
     contracted = _contracted_from_network_status(extracted.get("network_status"))
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
@@ -456,7 +480,8 @@ def persist(evt: dict, ctx: dict) -> None:
             source = (row[0] if row and row[0] else "") or ""
     except Exception:
         source = ""  # the name only labels a conflict; never worth failing the analysis for
-    changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source)
+    changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source,
+                                  str(ctx.get("text") or ctx.get("markdown") or ""))
     if changed:
         with psycopg.connect(DSN, autocommit=True) as c:
             c.execute(

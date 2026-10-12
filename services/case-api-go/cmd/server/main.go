@@ -498,6 +498,7 @@ func main() {
 		r.Get("/cases/{caseId}/documents/{docId}/download", s.downloadDocument)
 		r.Patch("/cases/{caseId}/documents/{docId}", s.moveDocument) // re-file to folder (staff only)
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
+		r.Get("/cases/{caseId}/documents/{docId}/835.csv", s.documentAs835) // an 835 ERA text file as a table
 		r.Post("/cases/{caseId}/documents/{docId}/analysis/retry", s.retryDocumentAnalysis)
 
 		// Stakeholder onboarding: applications, decisions, status.
@@ -670,6 +671,7 @@ func main() {
 		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
+		r.Post("/qa/{qaId}/send", s.qaSend) // the drafter sends a draft that has passed QA
 		r.Post("/cases/{caseId}/invoices", s.issueInvoice) // dual-party receivables (G8)
 		r.Get("/cases/{caseId}/invoices", s.listInvoices)
 		r.Get("/invoices", s.listInvoices)
@@ -681,6 +683,9 @@ func main() {
 		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
 		r.Get("/reports/fl/weekly", s.flWeeklyReport)          // contract 2.4.2: 16-col A-P CSV
 		r.Get("/reports/fl/monthly", s.flMonthlyReport)        // contract 2.4.3: 33-field CSV
+		r.Get("/reports/fl/adhoc", s.flAdhocReport)            // contract 2.4.4: chosen columns, period, statuses
+		r.Get("/reports/fl/final", s.flFinalReport)            // contract 2.4.5: every case, monthly layout
+		r.Get("/reports/fl/columns", s.flReportColumns)        // what an ad hoc report can contain
 		r.Post("/cases/{caseId}/claims", s.importClaims)       // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
 		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake

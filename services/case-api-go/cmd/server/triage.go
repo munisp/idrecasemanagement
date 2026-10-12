@@ -313,6 +313,9 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 		s.notify(r, tenant, "role:"+role, "ELIGIBILITY_RESULT",
 			fmt.Sprintf("Case %s: eligibility %s%s", orDash(caseNumber), result, reasonSuffix), "#/cases/"+caseID)
 	}
+	if caseNumber != "" {
+		s.fileEligibilityChecklist(r, tenant, caseID, caseNumber, result, reason, decidedBy, evidence)
+	}
 	s.logActivity(r.Context(), tenant, caseID, "ELIGIBILITY_REVIEW",
 		fmt.Sprintf("Eligibility %s%s — evidence recorded (review %s, by %s)", result, orDash(" — "+reason), reviewID, decidedBy))
 	s.logAudit(r.Context(), tenant, caseID, "ELIGIBILITY_DECIDED", map[string]any{

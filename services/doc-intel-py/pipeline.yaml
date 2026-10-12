@@ -126,4 +126,4 @@ schemas:
     # never supply it (only a determination letter could).
     fields: [claim_number, allowed_amount_usd, patient_responsibility_usd,
              denial_codes, service_lines, network_status, service_date,
-             determination_date]
+             determination_date, place_of_service]
