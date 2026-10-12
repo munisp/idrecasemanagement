@@ -268,6 +268,12 @@ async fn main() {
         .route("/reveal", post(reveal))
         .route("/docs/seal", post(seal_doc))
         .route("/docs/open", post(open_doc))
+        // axum refuses bodies over 2 MB unless told otherwise. Documents
+        // arrive here base64-encoded inside JSON, so anything past ~1.5 MB
+        // (a phone photo, a scanned fax) was rejected and the upload failed
+        // with "seal failed". The portal caps a file at 100 MB; base64 and
+        // the JSON envelope bring that to ~134 MB, so allow 160.
+        .layer(axum::extract::DefaultBodyLimit::max(160 * 1024 * 1024))
         .layer(axum::middleware::from_fn(otel::trace_request))
         .with_state(st);
 

@@ -450,6 +450,9 @@ func (s *server) vaultSealDoc(r *http.Request, tenant, key string, pt []byte) ([
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("vault refused to seal the document: HTTP %d", resp.StatusCode)
+	}
 	var out struct {
 		SealedB64 string `json:"sealed_b64"`
 	}
@@ -466,6 +469,9 @@ func (s *server) vaultOpenDoc(r *http.Request, tenant, key string, ct []byte) ([
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("vault refused to open the document: HTTP %d", resp.StatusCode)
+	}
 	var out struct {
 		DataB64 string `json:"data_b64"`
 	}
