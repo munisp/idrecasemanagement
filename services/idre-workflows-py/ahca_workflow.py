@@ -29,7 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from activities import flag_cms_breach
     from ahca_activities import (
         set_dual_status, set_program_date, record_followup_action,
-        send_correspondence, set_case_outcome, notify_roles,
+        send_correspondence, set_case_outcome, notify_roles, recommendation_days_left,
     )
     from calendar_engine import add_business_days
 
@@ -265,6 +265,24 @@ class AhcaDisputeWorkflow:
             lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
                      or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
             timedelta(days=60), "agency-recommendation")
+        # The timer above started when the request to file came in, but the 60
+        # days run from Date Received -- the day the fee was paid, which can
+        # be later. Before raising the alert, ask how long the case really
+        # has left and keep waiting for that long.
+        if not met and workflow.patched("recommendation-clock-from-date-received"):
+            for extra in range(1, 8):
+                left = await workflow.execute_activity(
+                    recommendation_days_left, args=[tenant, case_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                if left <= 0:
+                    break
+                met = await self._wait(
+                    lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
+                             or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
+                    timedelta(days=left), f"agency-recommendation-extra-{extra}")
+                if met:
+                    break
         if not met:
             await workflow.execute_activity(
                 flag_cms_breach,

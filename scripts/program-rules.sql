@@ -373,7 +373,7 @@ INSERT INTO public.program_rules (tenant, program, config) VALUES ('fl', 'FL AHC
     "dispute_types": ["denied_in_full","denied_in_part","underpaid","overpaid"]
   },
   "time": {"quarter_hours": true},
-  "fees": {"initial_fee_cents": 12359, "refund_window_days": 7, "invoice_due_days": null, "invoice_number_equals_case_number": true, "invoiced_filer_orgs": []},
+  "fees": {"initial_fee_cents": 12359, "refund_window_days": 7, "invoice_due_days": 30, "reminder_lead_days": 7, "invoice_number_equals_case_number": true, "invoiced_filer_orgs": []},
   "escalation": {"amount_trigger_cents": 100000000, "route_role": "PM", "reasons": ["fraud_waste_abuse","over_1m"]},
   "notes_streams": ["internal","coder","clinical","legal","external_agency"],
   "notes_stream_roles": {

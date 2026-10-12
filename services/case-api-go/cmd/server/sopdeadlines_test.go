@@ -125,7 +125,7 @@ func TestReminderDue(t *testing.T) {
 		"2026-11-11": "past_due_reminder", // the day after
 		"2026-12-25": "past_due_reminder",
 	} {
-		if got := reminderDue(due, d(today)); got != want {
+		if got := reminderDue(due, d(today), 7); got != want {
 			t.Errorf("invoice due Nov 10, today %s: got %q, want %q", today, got, want)
 		}
 	}
@@ -186,8 +186,8 @@ func TestFlReportReadsRecordedFields(t *testing.T) {
 	// Nothing recorded: N/A, never a zero or an engine code.
 	empty := &flCaseRow{CaseNumber: "FL26-000002", Status: "PENDING_INTAKE", Details: map[string]any{}, Dates: map[string]any{}}
 	e := empty.weeklyRow()
-	if e[0] != "N/A" || e[4] != "N/A" || e[10] != "N/A" {
-		t.Errorf("unrecorded status and counts should read N/A, got %q %q %q", e[0], e[4], e[10])
+	if e[0] != "Pending Initial Review" || e[4] != "N/A" || e[10] != "N/A" {
+		t.Errorf("a paid case with no status reads Pending Initial Review, unrecorded counts N/A; got %q %q %q", e[0], e[4], e[10])
 	}
 }
 
@@ -198,5 +198,25 @@ func TestFlDefaultPeriod(t *testing.T) {
 	}
 	if f, to := flDefaultPeriod("fl-monthly-report", now); f != "2026-09-01" || to != "2026-09-30" {
 		t.Errorf("monthly covers the previous month: got %s..%s", f, to)
+	}
+}
+
+func TestReportAgencyStatusIsOneOfFive(t *testing.T) {
+	for stored, want := range map[string]string{
+		"Pending Initial Review": "Pending Initial Review", "Awaiting Provider Response": "Awaiting Provider Response",
+		"Awaiting Plan Response": "Awaiting Plan Response", "Under Review": "Under Review", "Decided": "Decided",
+		"Closed": "Decided", "Other": "Pending Initial Review", "": "Pending Initial Review",
+		"NEGOTIATION_TRACKED": "Pending Initial Review",
+	} {
+		got := reportAgencyStatus(stored)
+		if got != want {
+			t.Errorf("stored %q reports as %q, want %q", stored, got, want)
+		}
+		if !contains(flReportedStatuses, got) {
+			t.Errorf("stored %q reports as %q, which is not one of the five allowed values", stored, got)
+		}
+	}
+	if reminderDue(d("2026-11-10"), d("2026-11-06"), 3) != "" || reminderDue(d("2026-11-10"), d("2026-11-07"), 3) != "payment_reminder" {
+		t.Error("the reminder lead time should follow the setting")
 	}
 }

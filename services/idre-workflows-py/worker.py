@@ -38,7 +38,7 @@ from copilot_actions import (
 from onboarding import StakeholderOnboardingWorkflow, TenantOnboardingWorkflow
 from ahca_activities import (
     set_dual_status, set_program_date, record_followup_action,
-    send_correspondence, set_case_outcome, notify_roles,
+    send_correspondence, set_case_outcome, notify_roles, recommendation_days_left,
 )
 from ahca_workflow import AhcaDisputeWorkflow
 
@@ -79,7 +79,7 @@ async def run_workers(client: Client) -> None:
         workflows=[AhcaDisputeWorkflow],
         activities=[
             set_dual_status, set_program_date, record_followup_action,
-            send_correspondence, set_case_outcome, notify_roles,
+            send_correspondence, set_case_outcome, notify_roles, recommendation_days_left,
             flag_cms_breach,  # reused as-is from activities.py -- generic, not CMS-specific at the DB/HTTP layer
         ],
     )

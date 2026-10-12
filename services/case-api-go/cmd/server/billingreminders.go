@@ -26,15 +26,16 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// reminderLeadDays: how long before the due date the courtesy reminder is drafted.
+// reminderLeadDays: how long before the due date the courtesy reminder is
+// drafted, unless the program sets fees.reminder_lead_days.
 const reminderLeadDays = 7
 
 // reminderDue says which reminder an open invoice is owed today, if any.
-func reminderDue(due, today time.Time) string {
+func reminderDue(due, today time.Time, leadDays int) string {
 	switch {
 	case today.After(due):
 		return "past_due_reminder"
-	case !today.Before(due.AddDate(0, 0, -reminderLeadDays)):
+	case !today.Before(due.AddDate(0, 0, -leadDays)):
 		return "payment_reminder"
 	}
 	return ""
@@ -68,7 +69,11 @@ func (s *server) sweepPaymentReminders() int {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	drafted := 0
 	for _, x := range open {
-		tplKey := reminderDue(x.due, today)
+		lead := reminderLeadDays
+		if cfg := s.loadProgram(r, x.tenant); cfg != nil && cfg.Fees.ReminderLeadDays != nil && *cfg.Fees.ReminderLeadDays >= 0 {
+			lead = *cfg.Fees.ReminderLeadDays
+		}
+		tplKey := reminderDue(x.due, today, lead)
 		if tplKey == "" {
 			continue
 		}

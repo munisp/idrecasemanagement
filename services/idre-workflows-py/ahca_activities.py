@@ -45,6 +45,21 @@ async def set_program_date(tenant: str, case_id: str, key: str, value: str) -> N
 
 
 @activity.defn
+async def recommendation_days_left(tenant: str, case_id: str) -> int:
+    """Days until the recommendation is due to the agency: Date Received + 60
+    calendar days, counted from today. 0 or less means the date has passed.
+    A case with no Date Received on record has no days left (the caller's own
+    60-day timer has already run)."""
+    with _conn() as c:
+        row = c.execute(
+            f"SELECT (program_dates->>'received_at')::date + 60 - current_date FROM tenant_{tenant}.cases "
+            f"WHERE id=%s AND coalesce(program_dates->>'received_at','') ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}'",
+            (case_id,),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+@activity.defn
 async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, body: str) -> None:
     """Tell the people who must act, not the whole tenant: one notification
     per role (user_sub 'role:<ROLE>', which case-api shows to holders of that

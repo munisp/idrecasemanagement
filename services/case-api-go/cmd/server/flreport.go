@@ -207,14 +207,36 @@ func (c *flCaseRow) received() string {
 	}
 	return c.OpenedAt.Format("2006-01-02")
 }
+
+// flReportedStatuses: the only FL AHCA Status values the reports may carry
+// (field rules). The case itself can hold two more -- "Closed" and "Other" --
+// and may hold none before its packet is confirmed; reportAgencyStatus folds
+// those into the five. The stored status is never changed by reporting.
+var flReportedStatuses = []string{"Pending Initial Review", "Awaiting Provider Response", "Awaiting Plan Response", "Under Review", "Decided"}
+
+func reportAgencyStatus(agency string) string {
+	switch agency {
+	case "Closed":
+		// Every closure follows a decision (a determination, or a finding
+		// that ends the case); the Case Outcome column says which.
+		return "Decided"
+	case "Other", "":
+		// "Other" is the AOR hold, which happens during the initial review;
+		// a paid case with no status yet is waiting for that review too.
+		return "Pending Initial Review"
+	}
+	if contains(flReportedStatuses, agency) {
+		return agency
+	}
+	return "Pending Initial Review"
+}
+
 func (c *flCaseRow) agencyStatus() string {
-	if c.Agency != "" {
-		return c.Agency
+	agency := c.Agency
+	if agency == "" {
+		agency = dget(c.Details, "fl_ahca_status", "agency_status")
 	}
-	if v := dget(c.Details, "fl_ahca_status", "agency_status"); v != "" {
-		return v
-	}
-	return "N/A" // never the engine's own status code
+	return reportAgencyStatus(agency) // never the engine's own status code
 }
 
 // externalNotes: the "Comments/Notes (External for Florida)" notes field.

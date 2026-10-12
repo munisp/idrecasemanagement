@@ -76,6 +76,9 @@ type ProgramConfig struct {
 		InitialFeeCents  int64 `json:"initial_fee_cents"`
 		RefundWindowDays int   `json:"refund_window_days"`
 		InvoiceDueDays   *int  `json:"invoice_due_days"`
+		// ReminderLeadDays: how many days before an invoice's due date the
+		// Payment Reminder is drafted (default 7).
+		ReminderLeadDays *int `json:"reminder_lead_days"`
 		// InvoicedFilerOrgs are filing organizations accepted under a bulk
 		// invoicing arrangement (AHCA 2026 workflow, "Payment before
 		// submission"): their disputes open immediately on bulk acceptance
