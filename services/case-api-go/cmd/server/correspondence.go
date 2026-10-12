@@ -191,24 +191,30 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 	// Names as people know them: what was read from the documents or given
 	// at intake. The internal ids these placeholders used to print mean
 	// nothing in a letter.
-	var provider, plan, filer string
+	var provider, plan, filer, filerType string
 	var disputed int64
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT coalesce(details->>'provider_org',''), coalesce(details->>'health_plan',''),
-		       coalesce(details->>'requester_org',''), coalesce(disputed_amount_cents,0)
-		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &disputed)
+		       coalesce(details->>'requester_org',''), coalesce(details->>'filing_party_type',''),
+		       coalesce(disputed_amount_cents,0)
+		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &filerType, &disputed)
 	if provider == "" {
 		provider = s.accountName(r, tenant, providerID)
 	}
 	if plan == "" {
 		plan = s.accountName(r, tenant, payerID)
 	}
+	provider, plan = letterPartyNames(provider, plan, filer, filerType)
+	amount := "(amount not yet recorded)"
+	if disputed > 0 {
+		amount = fmt.Sprintf("$%s.%02d", groupThousands(disputed/100), disputed%100)
+	}
 	repl := map[string]string{
 		"{case_number}":     caseNumber,
 		"{provider_name}":   orWord(provider, "the provider"),
 		"{payer_name}":      orWord(plan, "the health plan"),
 		"{filing_party}":    orWord(filer, "the filing party"),
-		"{disputed_amount}": fmt.Sprintf("$%s.%02d", groupThousands(disputed/100), disputed%100),
+		"{disputed_amount}": amount,
 		"{today}":           templateToday(),
 		"{qpa}":             fmt.Sprintf("$%d.%02d", qpa/100, qpa%100),
 		"{case_url_suffix}": "#/cases/" + caseID,
@@ -1092,4 +1098,19 @@ func (s *server) accountName(r *http.Request, tenant, accountID string) string {
 	_ = s.db.QueryRow(r.Context(),
 		`SELECT coalesce(legal_name,'') FROM public.accounts WHERE tenant=$1 AND id::text=$2`, tenant, accountID).Scan(&name)
 	return name
+}
+
+// letterPartyNames fills a missing provider or plan name from the filer: the
+// organization that filed IS the provider (or, when a health plan filed, the
+// plan), and a letter should name it rather than say "the provider". A name
+// already known is never replaced. Pure, so it is tested.
+func letterPartyNames(provider, plan, filer, filingPartyType string) (string, string) {
+	if strings.EqualFold(filingPartyType, "HEALTH_PLAN") {
+		if plan == "" {
+			plan = filer
+		}
+	} else if provider == "" {
+		provider = filer
+	}
+	return provider, plan
 }

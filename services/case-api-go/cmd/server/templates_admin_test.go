@@ -169,3 +169,21 @@ func TestGroupThousands(t *testing.T) {
 		}
 	}
 }
+
+func TestLetterPartyNamesComeFromTheFilerWhenNothingBetterIsKnown(t *testing.T) {
+	cases := []struct {
+		provider, plan, filer, kind, wantProvider, wantPlan string
+	}{
+		{"", "", "Northgate Health, P.C.", "PROVIDER", "Northgate Health, P.C.", ""},
+		{"", "", "Sunshine Plan", "HEALTH_PLAN", "", "Sunshine Plan"},
+		{"", "", "Northgate Health, P.C.", "", "Northgate Health, P.C.", ""},                                              // not recorded: filers are providers unless said otherwise
+		{"Read From EOB, M.D.", "Plan From EOB", "A Billing Company", "PROVIDER", "Read From EOB, M.D.", "Plan From EOB"}, // known names win
+		{"", "", "", "PROVIDER", "", ""},
+	}
+	for _, c := range cases {
+		gp, gl := letterPartyNames(c.provider, c.plan, c.filer, c.kind)
+		if gp != c.wantProvider || gl != c.wantPlan {
+			t.Errorf("%+v: got %q / %q", c, gp, gl)
+		}
+	}
+}
