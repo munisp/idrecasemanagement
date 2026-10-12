@@ -335,6 +335,7 @@ const Api = (() => {
       mailJournal: (opts) => req("GET", `${t()}/correspondence${qs(opts || {})}`),
       // Payment rails (moov-io): vault-sealed accounts, ACH/wire/ICL/Metro2 files, OFAC screening
       railAccounts: () => req("GET", `${t()}/payments/accounts`),
+      allInvoices: () => req("GET", `${t()}/invoices?limit=500`),
       railAccountAdd: (body) => req("POST", `${t()}/payments/accounts`, body),
       railAccountDel: (id) => req("DELETE", `${t()}/payments/accounts/${id}`),
       railRouting: (num) => req("GET", `${t()}/payments/routing/${encodeURIComponent(num)}`),

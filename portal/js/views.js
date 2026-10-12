@@ -6355,139 +6355,222 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
 
 
   // -------------------------------------------------------------------------
-  // Payment rails (moov-io stack) + OFAC screening
+  // Payments: bank accounts, bank files (moov-io: ACH, Fedwire, X9.37, Metro 2)
+  // and OFAC sanctions screening. One page, four tabs; the data is loaded once
+  // into payData and each tab renders from it.
   // -------------------------------------------------------------------------
 
-  function money(c) { return "$" + (Number(c || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }); }
+  function money(c) { return "$" + (Number(c || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+  const PAY_KIND = { ACH_DEBIT: "ACH fee debit", ACH_RETURN: "ACH return file", WIRE: "Wire transfer", ICL: "Check deposit (cash letter)", METRO2: "Credit-bureau file" };
+  const PAY_OWNER = { PARTY: "Provider or health plan", TPA: "Third-party administrator", VENDOR: "Vendor", ARBITRATOR: "Independent reviewer" };
+  let payTab = "accounts", payData = null;
 
   async function paymentsView() {
     if (!can("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"))
       return `<div class="view-head"><h1>Payments</h1></div><p class="muted">Requires PM, FINANCE, or admin.</p>`;
-    const fin = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
-    // ACH debits, wires and cash letters are sent under the program's own
-    // bank identity. Until it is on file the server refuses them, so say so
-    // up front instead of after a click.
-    const prog = await Api.program.get().catch(() => null);
-    const n = prog?.config?.bank?.nacha || {};
-    const bankReady = !!(n.originating_dfi && n.immediate_destination && n.immediate_origin);
-    const off = bankReady ? "" : " disabled";
-    const html = `
-      <h2>Payment rails</h2>
-      <div class="grid2">
-        <div class="card">
-          <h3>Bank accounts <span class="muted">(vault-sealed)</span></h3>
-          <div id="rail-accts"></div>
-          ${fin ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.railAccountAddFn(this)">
-            <div class="grid2">
-              <select name="owner_type"><option>PARTY</option><option>ARBITRATOR</option><option>TPA</option><option>VENDOR</option></select>
-              <input name="owner_ref" placeholder="owner (party / sub / org)" required />
-              <input name="label" placeholder="label" />
-              <input name="routing_number" placeholder="routing (9 digits)" required />
-              <input name="account_number" placeholder="account number" required />
-              <select name="account_type"><option>CHECKING</option><option>SAVINGS</option></select>
-            </div>
-            <label class="chk"><input type="checkbox" name="ach_debit_authorized" /> ACH debit authorization on file</label>
-            <button class="mini">Add account</button></form>` : ""}
-        </div>
-        <div class="card">
-          <h3>OFAC screening</h3>
-          <div id="screen-status" class="muted">checking…</div>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.railScreenFn(this)">
-            <input name="name" placeholder="name to screen" required />
-            <select name="subject_type"><option>MANUAL</option><option>ARBITRATOR</option><option>TPA</option><option>PARTY</option><option>VENDOR</option></select>
-            <button class="mini">Screen</button></form>
-          <div id="screen-result"></div>
-        </div>
-      </div>
-      ${fin ? `<div class="card">
-        <h3>Generate payment files</h3>
-        ${bankReady ? "" : `<p class="muted">⚠ ACH debits, wires and cash letters are sent under this program's bank details (its bank's routing number, the receiving bank, and its company ID), and none are on file yet. They are set by the platform team when the program's bank account is opened, not on this screen. Metro 2 files don't need them.</p>`}
-        <div class="grid2">
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.railAchDebitFn(this)">
-            <b>ACH fee debit batch</b>
-            <textarea name="items" rows="3" placeholder="invoice_id:account_id pairs, one per line" required></textarea>
-            <input name="effective_date" type="date" />
-            <button class="mini"${off}>Build NACHA debit file</button></form>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.railWireFn(this)">
-            <b>Fedwire transfer</b>
-            <input name="payable_id" placeholder="payable id" required />
-            <input name="payment_account_id" placeholder="payment account id" required />
-            <button class="mini"${off}>Build wire file</button></form>
-          <div>
-            <b>Image cash letter (X9.37)</b>
-            <p class="muted">Bundles every cleared check not yet deposited.</p>
-            <button class="mini" onclick="Views.railIclFn()"${off}>Build cash letter</button></div>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.railMetro2Fn(this)">
-            <b>Metro 2 furnishing</b>
-            <input name="identification_number" placeholder="furnisher code (≥5 chars)" required />
-            <input name="threshold_days" type="number" value="60" min="30" />
-            <button class="mini">Build Metro 2 file</button></form>
-        </div>
-        <div id="rail-gen-result"></div>
-        <hr />
-        <form class="inline-form" onsubmit="event.preventDefault(); Views.railReturnsFn(this)">
-          <b>Ingest ACH return file</b>
-          <input type="file" name="returns" accept=".ach,.txt" required />
-          <button class="mini">Parse returns</button></form>
-        <div id="rail-returns-result"></div>
-      </div>` : ""}
-      <div class="card">
-        <h3>Payment files</h3>
-        <div class="inline-form"><select id="rail-kind" onchange="Views.railFilesBox()">
-          <option value="">all kinds</option><option>ACH_DEBIT</option><option>ACH_RETURN</option><option>WIRE</option><option>ICL</option><option>METRO2</option>
-        </select></div>
-        <div id="rail-files"></div>
-        <div id="rail-file-detail"></div>
-      </div>`;
-    return { html, wire: () => { railAccountsBox(); railFilesBox(); railScreenStatus(); } };
+    const html = `<div class="view-head"><h1>Payments</h1>
+        <span class="muted">Bank accounts, the files your bank needs, and sanctions screening for this program</span></div>
+      <div id="pay-sum" class="pay-sum"><div class="pay-tile"><div class="k">Loading…</div></div></div>
+      <div class="rpt-tabs" role="tablist" id="pay-tabs"></div>
+      <div id="pay-panel"><p class="muted">Loading…</p></div>`;
+    return { html, wire: () => payLoad() };
   }
 
-  async function railAccountsBox() {
-    const box = document.getElementById("rail-accts");
+  async function payLoad() {
+    const fin = can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const [prog, accts, files, status] = await Promise.all([
+      Api.program.get().catch(() => null),
+      Api.program.railAccounts().catch((e) => ({ error: e.message })),
+      Api.program.railFiles("").catch((e) => ({ error: e.message })),
+      Api.program.screeningStatus().catch((e) => ({ error: e.message })),
+    ]);
+    const n = prog?.config?.bank?.nacha || {};
+    payData = {
+      fin, status, bankReady: !!(n.originating_dfi && n.immediate_destination && n.immediate_origin),
+      accounts: accts.accounts || [], accountsError: accts.error,
+      files: files.files || [], filesError: files.error,
+      invoices: null, payables: null, orgs: null,
+    };
+    payRender();
+  }
+
+  function payTabFn(tab) { payTab = tab; payRender(); }
+
+  function payRender() {
+    const d = payData, sum = document.getElementById("pay-sum"), tabs = document.getElementById("pay-tabs"), panel = document.getElementById("pay-panel");
+    if (!d || !sum || !panel) return;
+    const authorized = d.accounts.filter((a) => a.ach_debit_authorized).length;
+    const returns = d.files.filter((f) => f.kind === "ACH_RETURN").length;
+    const st = d.status || {};
+    sum.innerHTML = `
+      <div class="pay-tile ${d.bankReady ? "" : "warn"}"><div class="k">Program bank details</div>
+        <div class="v">${d.bankReady ? "On file" : "Not set"}</div>
+        <div class="s">${d.bankReady ? "ACH, wires and check deposits can be built" : "Needed for ACH, wires and check deposits"}</div></div>
+      <div class="pay-tile"><div class="k">Bank accounts</div><div class="v">${d.accounts.length}</div>
+        <div class="s">${authorized} authorized for ACH debit</div></div>
+      <div class="pay-tile"><div class="k">Files built</div><div class="v">${d.files.length - returns}</div>
+        <div class="s">${returns} return file${returns === 1 ? "" : "s"} received</div></div>
+      <div class="pay-tile ${st.error || st.last_error || !st.enabled ? "warn" : ""}"><div class="k">Sanctions list (OFAC)</div>
+        <div class="v">${st.enabled ? (st.entity_count || 0).toLocaleString() + " names" : "Off"}</div>
+        <div class="s">${st.error ? esc(st.error) : st.last_error ? "Last update failed: " + esc(st.last_error) : st.refreshed_at ? "Updated " + fmtDate(st.refreshed_at) : "Not downloaded yet"}</div></div>`;
+    const tab = (k, label) => `<button type="button" role="tab" class="rpt-tab rpt-accent-4 ${payTab === k ? "active" : ""}" onclick="Views.payTabFn('${k}')">${label}</button>`;
+    tabs.innerHTML = tab("accounts", `Bank accounts (${d.accounts.length})`) + tab("files", "Bank files") + tab("history", `History (${d.files.length})`) + tab("screening", "Sanctions screening");
+    panel.innerHTML = payTab === "accounts" ? payAccountsPanel() : payTab === "files" ? payFilesPanel() : payTab === "history" ? payHistoryPanel() : payScreeningPanel();
+    if (payTab === "files") payLoadPickers();
+    if (payTab === "accounts" && d.fin && !d.orgs) {
+      Api.crm.accounts("", { limit: 500 }).then((r) => {
+        d.orgs = (r.accounts || []).map((a) => a.name).filter(Boolean);
+        const dl = document.getElementById("pay-orgs");
+        if (dl) dl.innerHTML = d.orgs.map((o) => `<option value="${esc(o)}">`).join("");
+      }).catch(() => {});
+    }
+  }
+
+  // ---- Bank accounts ----
+  function payAccountsPanel() {
+    const d = payData;
+    const rows = d.accounts.map((a) => `<tr>
+        <td><b>${esc(a.owner_ref)}</b><div class="muted">${esc(PAY_OWNER[a.owner_type] || a.owner_type)}${a.label ? " · " + esc(a.label) : ""}</div></td>
+        <td class="mono">${esc(a.routing_number)}${a.bank_name ? `<div class="muted">${esc(a.bank_name)}</div>` : ""}</td>
+        <td class="mono">•••• ${esc(a.account_last4)}<div class="muted">${a.account_type === "SAVINGS" ? "Savings" : "Checking"}</div></td>
+        <td>${a.ach_debit_authorized ? '<span class="badge s-paid">Authorized</span>' : '<span class="muted">Not authorized</span>'}</td>
+        <td>${d.fin ? `<button class="mini ghost" onclick="Views.railAccountDelFn('${a.id}', this)">Remove</button>` : ""}</td></tr>`).join("");
+    return `<p class="muted pay-lead">Accounts that money is collected from or paid to. The full account number is encrypted the moment it is saved; only the last four digits are ever shown.</p>
+      ${d.accountsError ? `<p class="error">${esc(d.accountsError)}</p>` : ""}
+      ${d.fin ? `<details class="pay-add" ${d.accounts.length ? "" : "open"}><summary><b>Add a bank account</b></summary>
+        <form class="pay-form" onsubmit="event.preventDefault(); Views.railAccountAddFn(this)">
+          <div class="pay-row">
+            <label>Belongs to<select name="owner_type">${Object.entries(PAY_OWNER).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
+            <label>Organization or person<input name="owner_ref" list="pay-orgs" placeholder="Start typing a name" required autocomplete="off" /></label>
+            <label><span>Nickname <span class="muted">(optional)</span></span><input name="label" placeholder="e.g. Operating account" /></label>
+          </div>
+          <div class="pay-row">
+            <label>Routing number<input name="routing_number" inputmode="numeric" maxlength="9" placeholder="9 digits" required onblur="Views.railRoutingCheck(this)" />
+              <span class="pay-hint" id="pay-rt-hint"></span></label>
+            <label>Account number<input name="account_number" inputmode="numeric" maxlength="17" placeholder="4–17 digits" required autocomplete="off" /></label>
+            <label>Account type<select name="account_type"><option value="CHECKING">Checking</option><option value="SAVINGS">Savings</option></select></label>
+          </div>
+          <label class="chk"><input type="checkbox" name="ach_debit_authorized" /> The owner has signed an ACH debit authorization (needed before fees can be collected from this account)</label>
+          <div><button>Save account</button> <span id="pay-acct-msg"></span></div>
+        </form><datalist id="pay-orgs">${(d.orgs || []).map((o) => `<option value="${esc(o)}">`).join("")}</datalist></details>`
+        : `<p class="muted">Only Finance adds or removes bank accounts.</p>`}
+      ${rows ? `<div class="pay-table-wrap"><table><thead><tr><th>Belongs to</th><th>Routing / bank</th><th>Account</th><th>ACH debit</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : `<p class="muted">No bank accounts yet.</p>`}`;
+  }
+
+  async function railRoutingCheck(input) {
+    const hint = document.getElementById("pay-rt-hint"), v = input.value.trim();
+    if (!hint) return;
+    if (!v) { hint.textContent = ""; return; }
+    if (!/^\d{9}$/.test(v)) { hint.className = "pay-hint pay-bad"; hint.textContent = "A routing number is 9 digits."; return; }
     try {
-      const r = await Api.program.railAccounts();
-      const accts = r.accounts || [];
-      box.innerHTML = accts.length ? `<table><thead><tr><th>Owner</th><th>Bank</th><th>Account</th><th>Type</th><th>Debit auth</th><th></th></tr></thead><tbody>
-        ${accts.map(a => `<tr><td>${esc(a.owner_type)} ${esc(a.owner_ref)}<br /><span class="muted">${esc(a.label || "")}</span></td>
-          <td>${esc(a.routing_number)} ${a.bank_name ? `<br /><span class="muted">${esc(a.bank_name)}</span>` : ""}</td>
-          <td>••••${esc(a.account_last4)}</td><td>${esc(a.account_type)}</td>
-          <td>${a.ach_debit_authorized ? "✔" : "—"}</td>
-          <td>${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini bad" onclick="Views.railAccountDelFn('${a.id}')">remove</button>` : ""}</td></tr>`).join("")}
-        </tbody></table>` : '<p class="muted">No payment accounts yet.</p>';
-    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+      const r = await Api.program.railRouting(v);
+      hint.className = "pay-hint pay-good"; hint.textContent = "✓ Valid routing number" + (r.bank_name ? " — " + r.bank_name : "");
+    } catch { hint.className = "pay-hint pay-bad"; hint.textContent = "✗ Not a valid routing number — check the digits."; }
   }
 
   async function railAccountAddFn(form) {
-    const f = form;
+    const f = form, msg = document.getElementById("pay-acct-msg");
+    const btn = f.querySelector("button");
+    btn.disabled = true;
     try {
-      const rt = f.routing_number.value.trim();
-      if (rt) { await Api.program.railRouting(rt); } // checksum + bank name lookup first
       await Api.program.railAccountAdd({
         owner_type: f.owner_type.value, owner_ref: f.owner_ref.value.trim(), label: f.label.value.trim(),
-        routing_number: rt, account_number: f.account_number.value.trim(),
+        routing_number: f.routing_number.value.trim(), account_number: f.account_number.value.trim(),
         account_type: f.account_type.value, ach_debit_authorized: f.ach_debit_authorized.checked,
       });
-      f.reset(); railAccountsBox();
-    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      UI.toast("Bank account saved");
+      await payLoad();
+    } catch (e) { if (msg) { msg.className = "pay-bad"; msg.textContent = e.message; } btn.disabled = false; }
   }
 
-  async function railAccountDelFn(id) {
-    if (!confirm("Remove this payment account?")) return;
-    try { await Api.program.railAccountDel(id); railAccountsBox(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  async function railAccountDelFn(id, btn) {
+    const a = payData.accounts.find((x) => x.id === id);
+    if (!(await UI.confirm("Remove this bank account?", `The account ending ${a ? a.account_last4 : ""}${a ? " for " + a.owner_ref : ""} will no longer be offered for debits or wires. Files already built are not affected.`, "Remove", true))) return;
+    if (btn) btn.disabled = true;
+    try { await Api.program.railAccountDel(id); UI.toast("Bank account removed"); await payLoad(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); if (btn) btn.disabled = false; }
+  }
+
+  // ---- Bank files ----
+  function payFilesPanel() {
+    const d = payData, off = d.bankReady ? "" : " disabled";
+    if (!d.fin) return `<p class="muted pay-lead">Only Finance builds bank files. Everything built so far is under History.</p>`;
+    const authorized = d.accounts.filter((a) => a.ach_debit_authorized);
+    const acctOpt = (list) => list.map((a) => `<option value="${a.id}">${esc(a.owner_ref)} · •••• ${esc(a.account_last4)}</option>`).join("");
+    return `${d.bankReady ? "" : `<div class="pay-note">ACH debits, wires and check deposits go out under <b>this program's own bank details</b>: its bank's routing number, the receiving bank, and its company ID. None are on file yet, so those three are switched off. They are set by the platform team when the program's bank account is opened, not on this screen.</div>`}
+      <div id="rail-gen-result"></div>
+      <div class="pay-cards">
+        <div class="card pay-card"><h3>Collect fees by ACH debit</h3>
+          <p class="what">Builds a NACHA file that pulls open invoices straight from each payer's bank account. Your bank runs it.</p>
+          <p class="needs">Needs: program bank details · the payer's account, marked as authorized for debit.</p>
+          <form class="pay-form" onsubmit="event.preventDefault(); Views.railAchDebitFn(this)">
+            <div id="pay-ach-rows">${authorized.length ? '<p class="muted">Loading open invoices…</p>' : '<p class="muted">No account is authorized for debit yet — add one under Bank accounts first.</p>'}</div>
+            <label>Debit date<input name="effective_date" type="date" /></label>
+            <div><button${off || (authorized.length ? "" : " disabled")}>Build debit file</button></div></form></div>
+
+        <div class="card pay-card"><h3>Pay by wire</h3>
+          <p class="what">Builds a Fedwire transfer for one open payable — for large or same-day payments.</p>
+          <p class="needs">Needs: program bank details · an open payable · the payee's bank account.</p>
+          <form class="pay-form" onsubmit="event.preventDefault(); Views.railWireFn(this)">
+            <label>What to pay<select name="payable_id" id="pay-wire-payable" required><option value="">Loading open payables…</option></select></label>
+            <label>Send to account<select name="payment_account_id" required>${d.accounts.length ? '<option value="">Choose the account</option>' + acctOpt(d.accounts) : '<option value="">No bank accounts yet</option>'}</select></label>
+            <div><button${off || (d.accounts.length ? "" : " disabled")}>Build wire file</button></div></form></div>
+
+        <div class="card pay-card"><h3>Deposit cleared checks</h3>
+          <p class="what">Bundles every cleared paper check that hasn't been deposited yet into one X9.37 cash letter, with the check images, for your bank's remote deposit.</p>
+          <p class="needs">Needs: program bank details · checks marked cleared on the Checks page.</p>
+          <div class="pay-form"><div><button onclick="Views.railIclFn(this)"${off}>Build cash letter</button></div></div></div>
+      </div>
+      <details class="card pay-card pay-regulated"><summary><b>Credit-bureau reporting (Metro 2)</b> <span class="muted">— regulated; check with compliance first</span></summary>
+        <p class="pay-note">Metro 2 is the format for reporting unpaid debts to the credit bureaus, and doing so is regulated by the Fair Credit Reporting Act. It is built for reporting consumers; the parties on this program are providers and health plans. Use it only if your compliance team has approved it.</p>
+        <form class="pay-form" onsubmit="event.preventDefault(); Views.railMetro2Fn(this)">
+          <div class="pay-row">
+            <label>Your furnisher code<input name="identification_number" minlength="5" placeholder="assigned by the bureaus (5+ characters)" required /></label>
+            <label>Report invoices unpaid for at least<select name="threshold_days"><option value="60">60 days</option><option value="90">90 days</option><option value="120">120 days</option><option value="180">180 days</option></select></label>
+          </div>
+          <div><button>Build credit-bureau file</button></div></form></details>`;
+  }
+
+  async function payLoadPickers() {
+    const d = payData;
+    if (!d.fin) return;
+    if (!d.invoices) d.invoices = await Api.program.allInvoices().then((r) => (r.invoices || []).filter((v) => v.status === "OPEN")).catch(() => []);
+    if (!d.payables) d.payables = await Api.program.payablesList("OPEN").then((r) => r.payables || []).catch(() => []);
+    const rows = document.getElementById("pay-ach-rows");
+    const authorized = d.accounts.filter((a) => a.ach_debit_authorized);
+    if (rows && authorized.length) {
+      rows.innerHTML = d.invoices.length ? `<div class="pay-table-wrap"><table class="pay-pick"><thead><tr><th></th><th>Invoice</th><th>Bill to</th><th>Amount</th><th>Due</th><th>Debit from</th></tr></thead><tbody>
+        ${d.invoices.map((v) => `<tr><td><input type="checkbox" name="inv" value="${v.id}" aria-label="Include ${esc(v.invoice_no)}" /></td>
+          <td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party === "HEALTH_PLAN" ? "Health plan" : v.party === "PROVIDER" ? "Provider" : v.party)}</td>
+          <td>${money(v.amount_cents)}</td><td>${v.due_date ? esc(String(v.due_date).slice(0, 10)) : "—"}</td>
+          <td><select name="acct-${v.id}" aria-label="Account for ${esc(v.invoice_no)}">${authorized.map((a) => `<option value="${a.id}">${esc(a.owner_ref)} · •••• ${esc(a.account_last4)}</option>`).join("")}</select></td></tr>`).join("")}
+        </tbody></table></div>` : `<p class="muted">No open invoices to collect.</p>`;
+    }
+    const sel = document.getElementById("pay-wire-payable");
+    if (sel) sel.innerHTML = d.payables.length
+      ? `<option value="">Choose the payable</option>` + d.payables.map((p) => `<option value="${p.id}">${esc(p.payee)} — ${money(p.amount_cents)}${p.due_date ? " · due " + esc(String(p.due_date).slice(0, 10)) : ""}</option>`).join("")
+      : `<option value="">No open payables</option>`;
   }
 
   function railFail(e, elId = "rail-gen-result") {
     const msg = /bank\.nacha not configured/.test(e.message)
       ? "This program's bank details aren't on file yet, so this file can't be built."
+      : /no invoices past the delinquency threshold/.test(e.message) ? "No invoices are unpaid for that long — there is nothing to report."
+      : /no cleared checks/.test(e.message) ? "There are no cleared checks waiting to be deposited."
       : e.message;
     const box = document.getElementById(elId);
-    if (box) box.innerHTML = `<p class="error">${esc(msg)}</p>`; else UI.toast(msg, { kind: "warn" });
+    if (box) box.innerHTML = `<p class="pay-note pay-bad-note">${esc(msg)}</p>`; else UI.toast(msg, { kind: "warn" });
   }
 
-  function railShowGenerated(elId, r) {
-    document.getElementById(elId).innerHTML = `
-      <p class="ok">Generated <b>${esc(r.reference)}</b> — ${r.entry_count || r.records || r.check_count || 1} item(s), ${money(r.total_cents)}</p>
-      <button class="mini" onclick="Views.railDownload('${r.file_id}', '${esc(r.filename)}')">Download ${esc(r.filename)}</button>`;
+  function railShowGenerated(r, elId = "rail-gen-result") {
+    const box = document.getElementById(elId);
+    if (!box) return;
+    const items = r.entry_count || r.records || r.check_count || 1;
+    box.innerHTML = `<div class="pay-done"><b>File built: ${esc(r.reference)}</b> — ${items} item${items === 1 ? "" : "s"}, ${money(r.total_cents)}.
+      Download it and send it to your bank. <button class="mini" onclick="Views.railDownload('${r.file_id}', '${esc(r.filename || "")}')">Download</button></div>`;
+    Api.program.railFiles("").then((f) => { payData.files = f.files || []; }).catch(() => {});
   }
 
   async function railDownload(fileId, filename) {
@@ -6495,106 +6578,127 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       const r = await Api.program.railFileBody(fileId);
       const blob = new Blob([r.file], { type: "text/plain" });
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob); a.download = filename || r.filename; a.click();
+      a.href = URL.createObjectURL(blob); a.download = filename || r.filename || "payment-file.txt"; a.click();
       URL.revokeObjectURL(a.href);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function railAchDebitFn(form) {
-    try {
-      const items = form.items.value.split(/\n+/).map(l => l.trim()).filter(Boolean).map(l => {
-        const [invoice_id, payment_account_id] = l.split(":");
-        return { invoice_id: (invoice_id || "").trim(), payment_account_id: (payment_account_id || "").trim() };
-      });
-      const r = await Api.program.railAchDebits({ items, effective_date: form.effective_date.value || undefined });
-      railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { railFail(e); }
+    const items = [...form.querySelectorAll('input[name="inv"]:checked')].map((c) => ({
+      invoice_id: c.value, payment_account_id: form.querySelector(`select[name="acct-${c.value}"]`)?.value || "" }));
+    if (!items.length) { railFail(new Error("Tick at least one invoice to collect.")); return; }
+    await UI.run(form.querySelector("button"), async () => {
+      try { railShowGenerated(await Api.program.railAchDebits({ items, effective_date: form.effective_date.value || undefined })); }
+      catch (e) { railFail(e); }
+    });
   }
 
   async function railWireFn(form) {
-    try {
-      const r = await Api.program.railWire({ payable_id: form.payable_id.value.trim(), payment_account_id: form.payment_account_id.value.trim() });
-      railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { railFail(e); }
+    await UI.run(form.querySelector("button"), async () => {
+      try { railShowGenerated(await Api.program.railWire({ payable_id: form.payable_id.value, payment_account_id: form.payment_account_id.value })); }
+      catch (e) { railFail(e); }
+    });
   }
 
-  async function railIclFn() {
-    if (!confirm("Build an X9.37 cash letter from all cleared, un-deposited checks?")) return;
-    try {
-      const r = await Api.program.railIcl();
-      railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { railFail(e); }
+  async function railIclFn(btn) {
+    if (!(await UI.confirm("Build a cash letter?", "Every cleared check that hasn't been deposited yet goes into one file for your bank.", "Build cash letter"))) return;
+    await UI.run(btn, async () => {
+      try { railShowGenerated(await Api.program.railIcl()); } catch (e) { railFail(e); }
+    });
   }
 
   async function railMetro2Fn(form) {
-    if (!confirm("Metro 2 furnishing is a regulated FCRA act. Generate the file for seriously delinquent fee accounts?")) return;
-    try {
-      const r = await Api.program.railMetro2({ identification_number: form.identification_number.value.trim(), threshold_days: Number(form.threshold_days.value) || 60 });
-      railShowGenerated("rail-gen-result", r); railFilesBox();
-    } catch (e) { railFail(e); }
+    if (!(await UI.confirm("Report to the credit bureaus?", "Credit-bureau reporting is regulated by the Fair Credit Reporting Act. Build this file only if your compliance team has approved reporting these parties.", "Build file", true))) return;
+    await UI.run(form.querySelector("button"), async () => {
+      try { railShowGenerated(await Api.program.railMetro2({ identification_number: form.identification_number.value.trim(), threshold_days: Number(form.threshold_days.value) || 60 })); }
+      catch (e) { railFail(e); }
+    });
+  }
+
+  // ---- History ----
+  let payKind = "";
+  function payHistoryFilter(k) { payKind = k; payRender(); }
+
+  function payHistoryPanel() {
+    const d = payData;
+    const files = d.files.filter((f) => !payKind || f.kind === payKind);
+    const statusBadge = (s) => s === "RETURNED" || s === "FAILED" ? `<span class="badge pay-badge-bad">${esc(s === "RETURNED" ? "Returned" : "Failed")}</span>`
+      : `<span class="badge">${esc(s.charAt(0) + s.slice(1).toLowerCase())}</span>`;
+    return `${d.fin ? `<div class="card pay-card pay-returns"><h3>Got a return file from your bank?</h3>
+        <p class="what">When debits fail — a closed account, not enough funds — the bank sends back a return file. Upload it and each failed payment is marked with the bank's reason.</p>
+        <form class="pay-form pay-inline" onsubmit="event.preventDefault(); Views.railReturnsFn(this)">
+          <input type="file" name="returns" accept=".ach,.txt" required aria-label="ACH return file" />
+          <button>Read return file</button></form><div id="rail-returns-result"></div></div>` : ""}
+      <div class="pay-filter"><label>Show <select onchange="Views.payHistoryFilter(this.value)">
+        <option value="">All files</option>${Object.entries(PAY_KIND).map(([k, v]) => `<option value="${k}" ${payKind === k ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>
+      ${d.filesError ? `<p class="error">${esc(d.filesError)}</p>` : ""}
+      ${files.length ? `<div class="pay-table-wrap"><table><thead><tr><th>Built</th><th>File</th><th>Reference</th><th class="num">Items</th><th class="num">Total</th><th>Status</th><th></th></tr></thead><tbody>
+        ${files.map((f) => `<tr><td>${fmtDate(f.created_at)}</td><td>${esc(PAY_KIND[f.kind] || f.kind)}</td><td class="mono">${esc(f.reference)}</td>
+          <td class="num">${f.item_count}</td><td class="num">${money(f.total_cents)}</td><td>${f.kind === "ACH_RETURN" && f.status === "GENERATED" ? '<span class="badge">Received</span>' : statusBadge(f.status || "")}</td>
+          <td class="pay-actions"><button class="mini ghost" onclick="Views.railFileDetailFn('${f.id}', this)">Items</button>
+            ${d.fin ? `<button class="mini ghost" onclick="Views.railDownload('${f.id}')">Download</button>` : ""}</td></tr>
+          <tr class="pay-items" id="pay-items-${f.id}" hidden><td colspan="7"></td></tr>`).join("")}
+        </tbody></table></div>` : `<p class="muted">${payKind ? "No files of this kind yet." : "No bank files built yet."}</p>`}`;
   }
 
   async function railReturnsFn(form) {
     const f = form.returns.files[0];
     if (!f) return;
-    try {
-      const raw = await f.text();
-      const r = await Api.program.railAchReturns(raw);
-      document.getElementById("rail-returns-result").innerHTML =
-        `<p class="ok">${r.applied} return(s) applied to payment items; ${r.unmatched} unmatched.</p>`;
-      railFilesBox();
-    } catch (e) { railFail(e, "rail-returns-result"); }
+    await UI.run(form.querySelector("button"), async () => {
+      try {
+        const r = await Api.program.railAchReturns(await f.text());
+        document.getElementById("rail-returns-result").innerHTML = `<div class="pay-done">Read ${r.returns} returned payment${r.returns === 1 ? "" : "s"}:
+          ${r.applied} matched to payments we sent${r.unmatched ? `, <b>${r.unmatched} not recognised</b> (not from a file built here)` : ""}.</div>`;
+        const files = await Api.program.railFiles("").catch(() => null);
+        if (files) { payData.files = files.files || []; }
+      } catch (e) { railFail(e, "rail-returns-result"); }
+    });
   }
 
-  async function railFilesBox() {
-    const box = document.getElementById("rail-files");
-    const kind = document.getElementById("rail-kind")?.value || "";
+  async function railFileDetailFn(id, btn) {
+    const row = document.getElementById("pay-items-" + id);
+    if (!row) return;
+    if (!row.hidden) { row.hidden = true; return; }
+    row.hidden = false;
+    const cell = row.firstElementChild;
+    cell.innerHTML = '<span class="muted">Loading…</span>';
     try {
-      const r = await Api.program.railFiles(kind);
-      const files = r.files || [];
-      box.innerHTML = files.length ? `<table><thead><tr><th>When</th><th>Kind</th><th>Reference</th><th>Items</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>
-        ${files.map(f => `<tr><td>${esc(String(f.created_at).slice(0, 16))}</td><td>${esc(f.kind)}</td><td>${esc(f.reference)}</td>
-          <td>${f.item_count}</td><td>${money(f.total_cents)}</td><td>${esc(f.status)}</td>
-          <td><button class="mini ghost" onclick="Views.railFileDetailFn('${f.id}')">items</button>
-              ${can("FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini ghost" onclick="Views.railDownload('${f.id}')">file</button>` : ""}</td></tr>`).join("")}
-        </tbody></table>` : '<p class="muted">No payment files yet.</p>';
-    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+      const items = (await Api.program.railFileItems(id)).items || [];
+      cell.innerHTML = items.length ? `<table class="pay-sub"><thead><tr><th class="num">Amount</th><th>Trace number</th><th>Status</th><th>Bank's reason</th></tr></thead><tbody>
+        ${items.map((i) => `<tr><td class="num">${money(i.amount_cents)}</td><td class="mono">${esc(i.trace_number || "—")}</td>
+          <td>${i.status === "RETURNED" ? '<span class="badge pay-badge-bad">Returned</span>' : esc(i.status.charAt(0) + i.status.slice(1).toLowerCase())}</td>
+          <td>${i.return_code ? esc(i.return_code + " — " + (i.return_reason || "")) : "—"}</td></tr>`).join("")}</tbody></table>`
+        : '<span class="muted">This file has no individual items recorded.</span>';
+    } catch (e) { cell.innerHTML = `<span class="error">${esc(e.message)}</span>`; }
   }
 
-  async function railFileDetailFn(id) {
-    const box = document.getElementById("rail-file-detail");
-    try {
-      const r = await Api.program.railFileItems(id);
-      const items = r.items || [];
-      box.innerHTML = items.length ? `<table><thead><tr><th>Amount</th><th>Trace</th><th>Status</th><th>Return</th></tr></thead><tbody>
-        ${items.map(i => `<tr><td>${money(i.amount_cents)}</td><td>${esc(i.trace_number)}</td>
-          <td>${i.status === "RETURNED" ? '<span class="badge bad">RETURNED</span>' : esc(i.status)}</td>
-          <td>${i.return_code ? esc(i.return_code + " — " + (i.return_reason || "")) : "—"}</td></tr>`).join("")}
-        </tbody></table>` : '<p class="muted">No items recorded.</p>';
-    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
-  }
-
-  async function railScreenStatus() {
-    const box = document.getElementById("screen-status");
-    try {
-      const r = await Api.program.screeningStatus();
-      box.innerHTML = r.enabled
-        ? `SDN list: <b>${(r.entity_count || 0).toLocaleString()}</b> entities, refreshed ${r.refreshed_at ? esc(String(r.refreshed_at).slice(0, 16)) : "never"}${r.last_error ? ` — <span class="error">${esc(r.last_error)}</span>` : ""}`
-        : "Screening disabled (WATCHMAN_ENABLED=false).";
-    } catch (e) { box.textContent = e.message; }
+  // ---- Sanctions screening ----
+  function payScreeningPanel() {
+    const st = payData.status || {};
+    return `<p class="muted pay-lead">Checks a name against the U.S. Treasury's sanctions list (OFAC SDN) before you work with or pay someone. A match is a lead to review, not a finding — every check is kept for the compliance record.</p>
+      ${st.enabled === false ? `<div class="pay-note">Screening is switched off for this deployment.</div>` : ""}
+      <form class="pay-form pay-inline" onsubmit="event.preventDefault(); Views.railScreenFn(this)">
+        <label>Name<input name="name" placeholder="person or organization" required /></label>
+        <label>Who is this<select name="subject_type"><option value="MANUAL">Other</option><option value="PARTY">Provider or health plan</option><option value="TPA">Third-party administrator</option><option value="VENDOR">Vendor</option><option value="ARBITRATOR">Independent reviewer</option></select></label>
+        <button${st.enabled === false ? " disabled" : ""}>Check name</button></form>
+      <div id="screen-result"></div>`;
   }
 
   async function railScreenFn(form) {
     const box = document.getElementById("screen-result");
-    try {
-      const r = await Api.program.screeningCheck({ name: form.name.value.trim(), subject_type: form.subject_type.value });
-      box.innerHTML = r.matched
-        ? `<p class="error"><b>POTENTIAL MATCH</b> (score ${r.top_score.toFixed(2)}) — recorded for compliance review.</p>
-           <table><tbody>${r.matches.map(m => `<tr><td>${esc(m.name)}</td><td>${m.score.toFixed(2)}</td><td class="muted">${esc(m.source_id)}</td></tr>`).join("")}</tbody></table>`
-        : `<p class="ok">No match above threshold. Screening recorded (id ${r.screening_id}).</p>`;
-    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+    await UI.run(form.querySelector("button"), async () => {
+      try {
+        const name = form.name.value.trim();
+        const r = await Api.program.screeningCheck({ name, subject_type: form.subject_type.value });
+        box.innerHTML = r.matched
+          ? `<div class="pay-note pay-bad-note"><b>Possible match for “${esc(name)}”</b> (closest score ${Number(r.top_score).toFixed(2)} of 1.00). Don't proceed until compliance has reviewed it; this check is recorded.</div>
+             <div class="pay-table-wrap"><table><thead><tr><th>Name on the list</th><th class="num">Score</th><th>List entry</th></tr></thead><tbody>
+             ${(r.matches || []).map((m) => `<tr><td>${esc(m.name)}</td><td class="num">${Number(m.score).toFixed(2)}</td><td class="mono">${esc(m.source_id || "")}</td></tr>`).join("")}</tbody></table></div>`
+          : `<div class="pay-done">No match for “${esc(name)}” on the sanctions list. Check recorded.</div>`;
+      } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+    });
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn , correctField, correctCheck, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn , correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn };
 })();
