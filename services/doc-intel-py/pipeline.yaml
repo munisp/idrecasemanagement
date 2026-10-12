@@ -22,7 +22,12 @@ stages:
     config:
       lang: en
       use_doc_orientation_classify: true
-      use_doc_unwarping: true
+      # Off: the unwarping model (UVDoc) straightens photographed, curled
+      # pages, and is the largest of the OCR models. With OCR now actually
+      # running on images it pushed the pod past its memory limit. Flat
+      # scans and faxes -- what filers send -- do not need it; deskew and
+      # orientation correction still run.
+      use_doc_unwarping: false
       use_textline_orientation: true
       # Accuracy hardening (2026): every poor page is individually enhanced
       # (deskew + CLAHE + denoise + upscale); per-page recognizer confidence
