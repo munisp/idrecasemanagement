@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
@@ -213,6 +214,55 @@ func (s *server) clearCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "CLEARED"})
+}
+
+// submitCheckFeedback records a human correction to an extracted check field
+// (memo, payer name, amounts, MICR numbers). Corrections are the training
+// signal for the doc-intel learning loop: mined memo-noise phrases and payer
+// aliases are promoted champion/challenger and applied to future extractions.
+func (s *server) submitCheckFeedback(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	checkID := chi.URLParam(r, "checkId")
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"role may not submit check feedback"}`, http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Field          string `json:"field"`
+		ExtractedValue string `json:"extracted_value"`
+		CorrectedValue string `json:"corrected_value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	body.Field = strings.TrimSpace(body.Field)
+	if body.Field == "" || len(body.Field) > 60 || len(body.CorrectedValue) > 200 {
+		http.Error(w, `{"error":"field (<=60 chars) and corrected_value (<=200 chars) required"}`, http.StatusBadRequest)
+		return
+	}
+	// The check must exist and have been extracted — correcting a check that
+	// was never processed is a client bug.
+	var status string
+	err := s.db.QueryRow(r.Context(), `
+		SELECT status FROM public.checks WHERE id=$1 AND tenant=$2`,
+		checkID, tenant).Scan(&status)
+	if err != nil {
+		http.Error(w, `{"error":"check not found"}`, http.StatusNotFound)
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.check_feedback (tenant, check_id, field, extracted_value, corrected_value, created_by)
+		VALUES ($1,$2,$3,$4,$5,$6)`,
+		tenant, checkID, body.Field, body.ExtractedValue, body.CorrectedValue, p.Subject); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "CHECK_FEEDBACK", map[string]any{
+		"by": p.Subject, "check_id": checkID, "field": body.Field,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"check_id": checkID, "field": body.Field, "feedback": "RECORDED"})
 }
 
 // settleClearedCheck is the shared settlement core for staff clearCheck and

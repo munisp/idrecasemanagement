@@ -136,6 +136,7 @@ const Api = (() => {
     },
       analysis: (id, docId) => req("GET", `${t()}/cases/${id}/documents/${docId}/analysis`),
       retryAnalysis: (id, docId) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/retry`),
+      analysisFeedback: (id, docId, p) => req("POST", `${t()}/cases/${id}/documents/${docId}/analysis/feedback`, p),
       downloadUrl: (id, docId) => `${t()}/cases/${id}/documents/${docId}/download`,
       activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },
@@ -289,6 +290,7 @@ const Api = (() => {
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),
+      checkFeedback: (checkId, p) => req("POST", `${t()}/checks/${checkId}/feedback`, p),
       checkImage: (checkId) => blobURL(`${t()}/checks/${checkId}/image`),
       uploadCheck: (file) => {
         const fd = new FormData();

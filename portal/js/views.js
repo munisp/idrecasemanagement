@@ -750,9 +750,23 @@ const Views = (() => {
       const a = await Api.cases.analysis(caseId, docId);
       const r = a.result || {};
       const hasFindings = (r.findings || []).length > 0;
+      // Every extracted field is reviewable in place: a corrected value is
+      // posted as doc-intel feedback (the learning loop's training signal)
+      // and shown immediately in a "correction sent" state. Corrections are
+      // append-only facts — recurring ones are mined into extraction
+      // patterns, so the platform gets measurably better on the payer
+      // templates this tenant actually sees.
+      const ex = r.extracted || {};
+      const rows = Object.entries(ex).filter(([, v]) => v !== null && v !== "" && v !== undefined)
+        .map(([k, v]) => `<tr>
+          <td>${esc(k)}</td><td>${esc(typeof v === "object" ? JSON.stringify(v) : String(v))}</td>
+          <td><button class="link" onclick="Views.correctField('${caseId}','${docId}','${esc(k)}','${esc(String(typeof v === "object" ? JSON.stringify(v) : v)).replace(/'/g, "\\'")}', this)">correct</button></td>
+        </tr>`).join("");
       box.innerHTML = `<h3>Document analysis ${badge(a.status)}</h3>
         <p class="muted">type: ${esc(a.doc_type)} · seal detected: ${r.seal_detected ? "yes" : "no"} · tables: ${r.table_count ?? 0}</p>
-        <pre>${esc(JSON.stringify(r.extracted || {}, null, 2))}</pre>
+        ${rows ? `<table class="table"><thead><tr><th>Field</th><th>Extracted value</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        <p class="muted">Wrong value? Click <b>correct</b> — the correction trains future extractions on documents like this one.</p>` : `<p class="muted">No fields extracted.</p>`}
+        <details><summary>Raw extraction JSON</summary><pre>${esc(JSON.stringify(ex, null, 2))}</pre></details>
         ${hasFindings ? `<p class="error">Findings: ${esc(JSON.stringify(r.findings))}</p>` : ""}
         <p>${retryBtn}</p>`;
     } catch (e) {
@@ -760,6 +774,20 @@ const Views = (() => {
         ? `<h3>Document analysis</h3><p class="muted">No analysis result yet — the document is still queued for the OCR/extraction pipeline (or was uploaded before doc-intel processed it). Try again shortly.</p><p>${retryBtn}</p>`
         : err(e);
     }
+  }
+
+  async function correctField(caseId, docId, field, extractedValue, btn) {
+    const corrected = window.prompt(`Correct value for "${field}":`, extractedValue === "null" ? "" : extractedValue);
+    if (corrected === null) return;  // cancelled
+    try {
+      await Api.cases.analysisFeedback(caseId, docId, {
+        field, extracted_value: extractedValue === "null" ? "" : extractedValue,
+        corrected_value: corrected,
+      });
+      btn.textContent = "✓ sent";
+      btn.disabled = true;
+      UI.toast("Correction recorded — it will train future extractions");
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function retryAnalysis(caseId, docId) {
@@ -2103,6 +2131,7 @@ const Views = (() => {
             <td>${badge(c.status)}</td>
             <td class="muted">${c.confidence ? esc(c.confidence) : "—"}</td>
             <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}
+                ${["PROCESSED", "REVIEW", "MATCHED"].includes(c.status) ? `<button class="mini" onclick="Views.correctCheck('${c.id}', this)">✎ correct</button>` : ""}
                 ${c.status === "REVIEW" && c.case_id ? `<button class="mini" onclick="Views.requestRescan('${c.id}','${c.case_id}', this)">↻ request rescan</button>` : ""}</td></tr>`;
       payRow = (p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
             <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
@@ -3128,6 +3157,22 @@ const Views = (() => {
     await UI.run(el, async () => {
       try { await Api.program.clearCheck(checkId, ref); UI.toast("Check cleared — invoice settled, ledger posted"); App.rerender(); }
       catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    });
+  }
+
+  // Human correction of an extracted check field — feeds the doc-intel
+  // learning loop (memo-noise phrases / payer aliases mined + promoted).
+  async function correctCheck(checkId, el) {
+    const field = prompt("Field to correct (memo, payer_name, check_date, check_number, routing_number, account_number, amount):", "memo");
+    if (!field) return;
+    const corrected = prompt(`Corrected value for ${field}:`, "");
+    if (corrected === null || corrected === "") return;
+    await UI.run(el, async () => {
+      try {
+        await Api.program.checkFeedback(checkId, { field: field.trim(), corrected_value: corrected.trim() });
+        UI.toast("Correction recorded — the extraction model learns from it");
+        el.disabled = true; el.textContent = "✓ sent";
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
   }
 
@@ -4536,5 +4581,5 @@ const Views = (() => {
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, correctField, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, correctCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn };
 })();
