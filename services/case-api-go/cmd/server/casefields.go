@@ -121,7 +121,7 @@ func (s *server) writeCaseZip(w http.ResponseWriter, r *http.Request, tenant, ca
 		`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
 
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT id, object_key, coalesce(filename, id::text), sealed, size_bytes, parts
+		SELECT id, object_key, coalesce(filename, id::text), sealed, size_bytes, parts, coalesce(folder,'')
 		FROM tenant_%s.documents WHERE case_id=$1 AND scan_status='CLEAN'
 		ORDER BY folder, created_at DESC`, sanitizeTenant(tenant)), caseID)
 	if err != nil {
@@ -129,17 +129,17 @@ func (s *server) writeCaseZip(w http.ResponseWriter, r *http.Request, tenant, ca
 		return
 	}
 	type docRow struct {
-		id, key, name string
-		sealed        bool
-		size          int64
-		parts         []byte
+		id, key, name, folder string
+		sealed                bool
+		size                  int64
+		parts                 []byte
 	}
 	var docs []docRow
 	defer rows.Close()
 	for rows.Next() {
 		var d docRow
 		var sz *int64
-		if rows.Scan(&d.id, &d.key, &d.name, &d.sealed, &sz, &d.parts) == nil {
+		if rows.Scan(&d.id, &d.key, &d.name, &d.sealed, &sz, &d.parts, &d.folder) == nil {
 			if sz != nil {
 				d.size = *sz
 			}
@@ -160,6 +160,11 @@ func (s *server) writeCaseZip(w http.ResponseWriter, r *http.Request, tenant, ca
 	for _, d := range docs {
 		if d.sealed && !includeSealed {
 			continue // double-blind: sealed offers never ship in party bundles
+		}
+		// A bundle sent by link is the filing party's own documentation:
+		// the letters this office generated are not part of it.
+		if !includeSealed && (d.folder == "CORRESPONDENCE" || d.folder == "DETERMINATION") {
+			continue
 		}
 		name := d.name
 		if n := used[name]; n > 0 {
