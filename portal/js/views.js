@@ -119,6 +119,16 @@ const Views = (() => {
         </div>
         ${mine ? `<button class="mini">Save Dispute Summary</button>` : ""}</form></details>`;
   }
+  // Documents that disagree with what the case carries: the case value is
+  // kept, the disagreement is listed here and sends the review for a second look.
+  function sopConflictsHtml(c) {
+    const cs = (c.details && c.details.eligibility_conflicts) || [];
+    if (!cs.length) return "";
+    const show = (f, v) => (f === "disputed_amount_cents" ? usdC(v) : String(v));
+    return `<div class="err-box"><b>⚠ Documents disagree with the case.</b> The case value was kept — check which is right before deciding.
+      <ul>${cs.map((x) => `<li>${esc(String(x.field).replace(/_cents$/, "").replace(/_/g, " "))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
+        ${esc(x.document || "a document")} says <b>${esc(show(x.field, x.document_value))}</b></li>`).join("")}</ul></div>`;
+  }
   function sopAorHtml(id, c) {
     const a = c.details && c.details.aor_confirmation;
     const shown = a ? `<p>Attorney confirmation: <b>AOR ${a.valid ? "valid" : "invalid"}</b> — ${esc(a.reason)}${sopStamp(a)}</p>` : "";
@@ -1437,6 +1447,7 @@ const Views = (() => {
         automatically.</p>
       <div id="p-elig-history"></div>
       <div class="actions"><button type="button" class="mini" onclick="Views.eligChecklist('${id}')">Download Eligibility Checklist</button></div>
+      ${sopConflictsHtml(c)}
       ${sopAorHtml(id, c)}
       <div class="actions"><button id="p-elig-auto" title="Derives every rule input from the case record and analyzed documents, then decides — or tells you exactly which inputs are still missing">⚡ Auto-adjudicate from case + documents</button></div>
       <div id="p-elig-auto-out"></div>

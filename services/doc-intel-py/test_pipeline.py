@@ -521,3 +521,18 @@ def test_skew_angle_folds_both_opencv_conventions():
     assert abs(pl._skew_angle(5.0) - 5.0) < 1e-9     # post-4.5.1 range (0, 90]
     assert abs(pl._skew_angle(90.0)) < 1e-9
     assert abs(pl._skew_angle(-90.0)) < 1e-9
+
+
+def test_eligibility_conflicts_reports_disagreement_once():
+    from main import eligibility_conflicts
+    current = {"disputed_amount_cents": 185000, "provider_type": "physician_dentist", "contracted": False}
+    # same values, or nothing read: no conflict
+    assert eligibility_conflicts(current, {"disputed_amount_cents": 185000, "provider_type": None, "contracted": False}, "a.pdf") == []
+    found = {"disputed_amount_cents": 3140000, "provider_type": "hospital_inpatient", "contracted": True}
+    got = eligibility_conflicts(current, found, "VALID-05.pdf")
+    assert [c["field"] for c in got] == ["disputed_amount_cents", "provider_type", "contracted"]
+    assert got[0] == {"field": "disputed_amount_cents", "case_value": 185000, "document_value": 3140000, "document": "VALID-05.pdf"}
+    # the same disagreement from a re-analysis is not recorded twice
+    assert eligibility_conflicts(current, found, "VALID-05.pdf", known=got) == []
+    # a case with no value yet has nothing to disagree with (the backfill fills it)
+    assert eligibility_conflicts({"disputed_amount_cents": None, "provider_type": "", "contracted": None}, found, "x") == []

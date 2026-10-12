@@ -448,12 +448,30 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A provider type the program does not list is a data-entry error, not
+	// a finding. Recording it would close the dispute as INELIGIBLE on a
+	// typo, so it is refused with the list of types that exist.
+	if types := eligibilityProviderTypes(cfg); len(types) > 0 && !contains(types, in.ProviderType) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":          fmt.Sprintf("unknown provider_type %q: must be one of %s", in.ProviderType, strings.Join(types, ", ")),
+			"provider_types": types,
+		})
+		return
+	}
+
 	// Decision + persistence both live in triage.go, shared with the
 	// auto-adjudication endpoint — one implementation, so the auto path
 	// can never drift from what a human reviewer would compute.
 	result, reason, evidence := evalEligibility(cfg, in)
 	opts := eligibilityPersistOpts{ruleVersion: eligibilityRuleVersion(cfg)}
-	if bl := eligibilityBorderline(cfg, in, evidence); len(bl) > 0 {
+	bl := eligibilityBorderline(cfg, in, evidence)
+	// Documents that disagree with what the case carries make any result
+	// one a second person should look at.
+	if conflicts := s.eligibilityConflicts(r, tenant, id); len(conflicts) > 0 {
+		evidence["document_conflicts"] = conflicts
+		bl = append(bl, conflicts...)
+	}
+	if len(bl) > 0 {
 		opts.borderline, opts.borderlineReasons = true, bl
 		evidence["borderline"] = true
 		evidence["borderline_reasons"] = bl

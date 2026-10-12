@@ -118,6 +118,12 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 					sanitizeTenant(tenant)), caseID, key, today)
 		}
 	}
+	// The Ineligible Dispute letter is what closes an ineligible case.
+	if template == "ineligible" && s.caseLock(r.Context(), tenant, caseID) == lockIneligible {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+			`UPDATE tenant_%s.cases SET internal_status='Provider Closure Letter Issued', agency_status='Closed', updated_at=now() WHERE id::text=$1`,
+			sanitizeTenant(tenant)), caseID)
+	}
 	var caseNumber string
 	if err := s.db.QueryRow(r.Context(),
 		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber); err != nil {

@@ -7,6 +7,7 @@ package main
 // file is the executable copy of the SOP's eligibility page.
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,5 +197,32 @@ func TestEligibilitySOPExclusionsAndScope(t *testing.T) {
 	}
 	if !noOverrideReasons["over_filing_window"] || noOverrideReasons["below_threshold"] {
 		t.Error("only the filing-window results are non-overridable")
+	}
+}
+
+func TestEligibilityProviderTypesAndConflicts(t *testing.T) {
+	cfg := &ProgramConfig{}
+	yes, no := true, false
+	cfg.Eligibility.Thresholds = []ThresholdRule{
+		{ProviderType: "hospital_inpatient", Contracted: &yes, MinCents: 2500000},
+		{ProviderType: "hospital_inpatient", Contracted: &no, MinCents: 1000000},
+		{ProviderType: "physician_dentist", MinCents: 50000},
+	}
+	types := eligibilityProviderTypes(cfg)
+	if len(types) != 2 || types[0] != "hospital_inpatient" || types[1] != "physician_dentist" {
+		t.Fatalf("provider types should be distinct and in configured order: %v", types)
+	}
+	if contains(types, "physician") {
+		t.Error("a near-miss spelling must not count as a known provider type")
+	}
+	got := conflictSentences([]byte(`[{"field":"disputed_amount_cents","case_value":185000,"document_value":3140000,"document":"VALID-05.pdf"},{"field":"contracted","case_value":false,"document_value":true}]`))
+	if len(got) != 2 || !strings.Contains(got[0], "disputed amount cents") || !strings.Contains(got[0], "VALID-05.pdf says") {
+		t.Errorf("conflict sentences wrong: %v", got)
+	}
+	if !strings.Contains(got[1], "a document says true") {
+		t.Errorf("a conflict with no document name should still read: %q", got[1])
+	}
+	if conflictSentences([]byte(`not json`)) != nil || len(conflictSentences([]byte(`[]`))) != 0 {
+		t.Error("no conflicts should yield nothing")
 	}
 }

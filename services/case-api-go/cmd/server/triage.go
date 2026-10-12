@@ -268,7 +268,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 		tenant, caseID, result, reason, ev, decidedBy,
 		opts.ruleVersion, opts.borderline, opts.override, opts.overrideReason).Scan(&reviewID)
 	if opts.borderline {
-		s.notify(r, tenant, "*", "ELIGIBILITY_BORDERLINE",
+		s.notify(r, tenant, "role:PM", "ELIGIBILITY_BORDERLINE",
 			fmt.Sprintf("Case %s: borderline eligibility decision (%s) — PM second review required: %s",
 				caseID, result, strings.Join(opts.borderlineReasons, "; ")), "#/cases/"+caseID)
 	}
@@ -284,24 +284,27 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Hold', agency_status='Other', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
 		s.notify(r, tenant, "role:ATTORNEY", "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — please confirm (case page, Eligibility review)", caseID), "#/cases/"+caseID)
 	case "INELIGIBLE":
-		// agency_status='Closed' matches what the workflow's own equivalent
-		// transition sets (set_dual_status in ahca_workflow.py) -- this HTTP
-		// path previously left it untouched, so a case decided ineligible
-		// here (rather than via the workflow signal reaching the same
-		// branch later) stayed with a blank agency_status. Confirmed live
-		// against real data: several "Provider Closure Letter Issued" rows
-		// had no agency_status at all, which is also why a dashboard
-		// open/closed check keyed on agency_status (the only consistent
-		// "is this done" marker across FL's many internal_status labels)
-		// undercounted closed cases.
-		_, _ = s.db.Exec(r.Context(),
-			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Provider Closure Letter Issued', agency_status='Closed', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
+		// Nothing to set here any more: "Provider Closure Letter Issued" is a
+		// fact about a letter, so the status is taken when the Ineligible
+		// Dispute letter has passed QA and gone out (afterLetterSent). The
+		// case is frozen meanwhile by the review itself (caselock.go).
+		s.notify(r, tenant, "role:CASE_MANAGER", "ELIGIBILITY_INELIGIBLE",
+			fmt.Sprintf("Case %s: found ineligible (%s) — send the Ineligible Dispute letter through QA; the case closes when it has been sent", caseID, orDash(reason)), "#/cases/"+caseID)
 	}
 	var caseNumber string
 	if err := s.db.QueryRow(r.Context(),
 		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber); err == nil {
 		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 		_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "ELIGIBILITY_RESULT", map[string]any{"result": result, "reason": reason})
+	}
+	// The SOP has the Reviewer tell the PM and the Coder the result.
+	reasonSuffix := ""
+	if reason != "" {
+		reasonSuffix = " — " + strings.ReplaceAll(reason, "_", " ")
+	}
+	for _, role := range []string{"PM", "CODER"} {
+		s.notify(r, tenant, "role:"+role, "ELIGIBILITY_RESULT",
+			fmt.Sprintf("Case %s: eligibility %s%s", orDash(caseNumber), result, reasonSuffix), "#/cases/"+caseID)
 	}
 	s.logActivity(r.Context(), tenant, caseID, "ELIGIBILITY_REVIEW",
 		fmt.Sprintf("Eligibility %s%s — evidence recorded (review %s, by %s)", result, orDash(" — "+reason), reviewID, decidedBy))
@@ -345,10 +348,19 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	}
 	result, reason, evidence := evalEligibility(cfg, in)
 	evidence["auto_inputs"] = in
+	bl := eligibilityBorderline(cfg, in, evidence)
+	if conflicts := s.eligibilityConflicts(r, tenant, id); len(conflicts) > 0 {
+		evidence["document_conflicts"] = conflicts
+		bl = append(bl, conflicts...)
+	}
+	if len(bl) > 0 {
+		evidence["borderline"] = true
+		evidence["borderline_reasons"] = bl
+	}
 	reviewID := s.persistEligibilityOutcome(r, tenant, id,
 		"auto: case+document data", result, reason, evidence, eligibilityPersistOpts{
 			ruleVersion: eligibilityRuleVersion(cfg),
-			borderline:  len(eligibilityBorderline(cfg, in, evidence)) > 0,
+			borderline:  len(bl) > 0, borderlineReasons: bl,
 		})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": reviewID, "result": result, "reason": reason,
@@ -377,3 +389,51 @@ const triageLaneSQL = `
 // platform computes exact business days against its holidays table; the
 // original uses the conservative calendar approximation).
 const slaDaysSQL = `42 - GREATEST(0, (CURRENT_DATE - c.opened_at::date))`
+
+// eligibilityProviderTypes lists the provider types the program's threshold
+// matrix knows, in configured order.
+func eligibilityProviderTypes(cfg *ProgramConfig) []string {
+	var out []string
+	for _, th := range cfg.Eligibility.Thresholds {
+		if !contains(out, th.ProviderType) {
+			out = append(out, th.ProviderType)
+		}
+	}
+	return out
+}
+
+// eligibilityConflicts returns, as sentences, the places where an analyzed
+// document disagrees with a value the case already carries. doc-intel keeps
+// the first value it reads and records every later disagreement in
+// details.eligibility_conflicts; nothing is overwritten.
+func (s *server) eligibilityConflicts(r *http.Request, tenant, caseID string) []string {
+	var raw []byte
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT coalesce(details->'eligibility_conflicts','[]'::jsonb) FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&raw); err != nil {
+		return nil
+	}
+	return conflictSentences(raw)
+}
+
+func conflictSentences(raw []byte) []string {
+	var items []struct {
+		Field    string `json:"field"`
+		Case     any    `json:"case_value"`
+		Document any    `json:"document_value"`
+		Source   string `json:"document"`
+	}
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
+	}
+	var out []string
+	for _, it := range items {
+		src := it.Source
+		if src == "" {
+			src = "a document"
+		}
+		out = append(out, fmt.Sprintf("documents disagree on %s: the case has %v, %s says %v",
+			strings.ReplaceAll(it.Field, "_", " "), it.Case, src, it.Document))
+	}
+	return out
+}

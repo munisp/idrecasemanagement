@@ -249,7 +249,31 @@ def _contracted_from_network_status(text: str | None) -> bool | None:
     return None
 
 
-def backfill_case_fields(tenant: str, case_id: str, extracted: dict) -> list[str]:
+def eligibility_conflicts(current: dict, found: dict, source: str, known: list | None = None) -> list[dict]:
+    """Where a document disagrees with a value the case already carries.
+
+    `current` and `found` map field -> value for the eligibility inputs
+    (disputed_amount_cents, provider_type, contracted). The case keeps the
+    value it has -- the first one read, or what staff entered -- so a later
+    document that says otherwise would vanish without this. Each disagreement
+    is returned once: one already in `known` for the same field and document
+    value is not repeated. Pure, so it is tested without a database.
+    """
+    seen = {(k.get("field"), json.dumps(k.get("document_value"), sort_keys=True)) for k in (known or [])}
+    out = []
+    for field, doc_val in found.items():
+        cur = current.get(field)
+        if doc_val is None or cur is None or cur == "" or cur == doc_val:
+            continue
+        key = (field, json.dumps(doc_val, sort_keys=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"field": field, "case_value": cur, "document_value": doc_val, "document": source})
+    return out
+
+
+def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "") -> list[str]:
     """Fill a couple of case fields from analyzed-document facts so staff
     don't have to re-type what the document already states -- but only
     fields with an unambiguous semantic match, and only where the case
@@ -332,6 +356,29 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict) -> list[str
                 (json.dumps({"contracted": contracted}), case_id),
             )
             changed.append(f"contracted={contracted}")
+        # A document that contradicts what the case already has is recorded,
+        # never applied: the eligibility review reads this list and sends the
+        # result for a second look.
+        try:
+            billed_cents = round(float(billed_amount_usd) * 100) if billed_amount_usd else None
+        except (TypeError, ValueError):
+            billed_cents = None
+        known = details.get("eligibility_conflicts") or []
+        new_conflicts = eligibility_conflicts(
+            {"disputed_amount_cents": cur_disputed, "provider_type": details.get("provider_type"),
+             "contracted": details.get("contracted")},
+            {"disputed_amount_cents": billed_cents or None, "provider_type": provider_type, "contracted": contracted},
+            source or "a document", known,
+        )
+        if new_conflicts:
+            c.execute(
+                f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                (json.dumps({"eligibility_conflicts": known + new_conflicts}), case_id),
+            )
+            for cf in new_conflicts:
+                changed.append(
+                    f"CONFLICT on {cf['field'].replace('_', ' ')}: case has {cf['case_value']}, "
+                    f"{cf['document']} says {cf['document_value']} (case value kept)")
     return changed
 
 
@@ -402,7 +449,14 @@ def persist(evt: dict, ctx: dict) -> None:
                VALUES (%s,%s,'ANALYSIS_COMPLETE',%s)""",
             (evt["tenant"], case_id, summary[:2000]),
         )
-    changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}))
+    source = ""
+    try:
+        with psycopg.connect(DSN, autocommit=True) as c:
+            row = c.execute(f"SELECT filename FROM tenant_{evt['tenant']}.documents WHERE id=%s", (evt["doc_id"],)).fetchone()
+            source = (row[0] if row and row[0] else "") or ""
+    except Exception:
+        source = ""  # the name only labels a conflict; never worth failing the analysis for
+    changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source)
     if changed:
         with psycopg.connect(DSN, autocommit=True) as c:
             c.execute(

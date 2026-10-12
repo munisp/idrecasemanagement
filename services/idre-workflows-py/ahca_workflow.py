@@ -320,6 +320,29 @@ class AhcaDisputeWorkflow:
             self.eligibility_result = None
             await workflow.wait_condition(lambda: self.eligibility_result is not None)
 
+        # An ineligible dispute closes with its letter (Ineligible Dispute or
+        # Dismissal, through QA), not at the moment of the finding. Until the
+        # letter is out a corrected review or an override can still turn the
+        # case around, so this also listens for a new result.
+        if workflow.patched("gate-ineligible-letter-sent"):
+            closing = {"ineligible", "dismissal"}
+            while self.eligibility_result == "INELIGIBLE" and not (closing & self.letters_sent):
+                await workflow.execute_activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "send_ineligible_letter",
+                          "Dispute found ineligible — send the Ineligible Dispute letter through QA. The case closes when it has been sent."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                await workflow.wait_condition(
+                    lambda: bool(closing & self.letters_sent) or self.eligibility_result != "INELIGIBLE" or self.provider_withdrawn)
+                if self.provider_withdrawn:
+                    return await self._withdraw(tenant, case_id)
+                while self.eligibility_result == "HOLD_AOR":
+                    await workflow.wait_condition(lambda: self.aor_revised)
+                    self.aor_revised = False
+                    self.eligibility_result = None
+                    await workflow.wait_condition(lambda: self.eligibility_result is not None)
+
         if self.eligibility_result == "INELIGIBLE":
             await workflow.execute_activity(
                 set_dual_status, args=[tenant, case_id, "Provider Closure Letter Issued", "Closed"],
