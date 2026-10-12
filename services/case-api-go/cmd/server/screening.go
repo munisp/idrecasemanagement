@@ -213,6 +213,10 @@ func screenName(query string) (matched bool, top float64, matches []screeningMat
 // ---------- HTTP surface ----------
 
 func (s *server) screeningStatus(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, paymentReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, or admin"}`, http.StatusForbidden)
+		return
+	}
 	sdnList.RLock()
 	defer sdnList.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -224,7 +228,7 @@ func (s *server) screeningStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) screenSubject(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, paymentReadRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
