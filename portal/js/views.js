@@ -1000,12 +1000,22 @@ const Views = (() => {
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       document.querySelectorAll("[data-complete]").forEach((b) => b.addEventListener("click", async () => {
-        const v = await UI.modal({ title: "Complete review", submitLabel: "Complete and signal workflow",
-          body: "Your completion note is stored on the review record and the case workflow is signaled immediately.",
-          fields: [{ name: "note", label: "Completion note", type: "textarea", required: true }] });
+        // The same answers the case's Steps panel asks for this step; the
+        // server records the step there too and moves the case on.
+        const fields = [];
+        if (discipline === "CODING") fields.push({ name: "c", label: "Does the case need clinical review by a nurse or physician?", required: true, options: WF_YESNO,
+          hint: "Yes puts it in the clinical queue." });
+        fields.push({ name: "note", label: "Your findings", type: "textarea", required: true, hint: "Kept on the review record." });
+        const v = await UI.modal({ title: "Complete the review", submitLabel: "Complete review",
+          body: discipline === "LEGAL" ? "This records the attorney review step on the case. The outcome itself is recorded afterwards in the case's Steps." : "This records the review step on the case and moves it on.",
+          fields });
         if (!v) return;
-        try { await Api.reviews.complete(b.dataset.complete, v.note); UI.toast("Review complete — workflow signaled"); App.rerender(); }
-        catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        const extra = discipline === "CODING" ? { clinical_requested: v.c === "yes" } : {};
+        try {
+          await Api.reviews.complete(b.dataset.complete, v.note, extra);
+          UI.toast(discipline === "CODING" && v.c === "yes" ? "Review complete — sent on to the clinical queue" : "Review complete");
+          App.rerender();
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
       const all = document.querySelector("[data-all]");
       if (all) all.addEventListener("click", async (ev) => {

@@ -91,7 +91,8 @@ const Api = (() => {
       queue: (discipline, all, issue) => req("GET", `${t()}/queues/${discipline}${all || issue ? `?${all ? "all=1&" : ""}${issue ? `issue=${issue}` : ""}`.replace(/&$/, "") : ""}`),
       pmQueue: () => req("GET", `${t()}/queues/pm`),
       claim: (id) => req("POST", `${t()}/reviews/${id}/claim`),
-      complete: (id, note) => req("POST", `${t()}/reviews/${id}/complete`, { note }),
+      // extra: what the case's Steps panel asks for the same step (coding: clinical_requested).
+      complete: (id, note, extra) => req("POST", `${t()}/reviews/${id}/complete`, { note, ...(extra || {}) }),
     },
     party: {
       cases: () => req("GET", `${t()}/party/cases`),

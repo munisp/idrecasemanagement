@@ -670,8 +670,8 @@ func main() {
 		r.Get("/payments/files/{fileId}/file", s.paymentFileBody)
 		r.Get("/screening/status", s.screeningStatus)
 		r.Post("/screening/check", s.screenSubject)
-		r.Get("/screening/checks", s.screeningChecks) // the record of past screenings
-		r.Get("/cases/{caseId}/financials", s.caseFinancials)         // every money record tied to the dispute
+		r.Get("/screening/checks", s.screeningChecks)         // the record of past screenings
+		r.Get("/cases/{caseId}/financials", s.caseFinancials) // every money record tied to the dispute
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
 		// multiple initiating parties (providers or health plans).
@@ -682,36 +682,36 @@ func main() {
 		r.Post("/tpa/clients", s.tpaAddClient)      // add an initiating party I represent
 		r.Get("/tpa/clients", s.tpaListClients)
 		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
-		r.Post("/tpa/intake", s.tpaIntake)                              // file a dispute on behalf of a client
-		r.Get("/tpa/dashboard", s.tpaDashboard)                         // status of all my clients' disputes
-		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)             // correct my own filing while it awaits payment
-		r.Get("/admin/tpas", s.adminListTPAs)                           // state oversight
-		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)       // suspend|reactivate
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)       // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)      // past reviews (G2)
+		r.Post("/tpa/intake", s.tpaIntake)                                     // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)                                // status of all my clients' disputes
+		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                    // correct my own filing while it awaits payment
+		r.Get("/admin/tpas", s.adminListTPAs)                                  // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)              // suspend|reactivate
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)              // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)             // past reviews (G2)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
-		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)               // the SOP steps: done, next, upcoming
-		r.Post("/cases/{caseId}/outcome", s.recordOutcome)              // Reviewer: outcome, claims reviewed, award, party billed
-		r.Post("/cases/{caseId}/fwa", s.fwaAction)                      // fraud/waste/abuse: report, assign reviewer, conclude
-		r.Put("/program/contract-dates", s.setContractDates)            // admin: contract execution/effective/end dates
-		r.Get("/program/recipients", s.getCorrespondenceRecipients)     // agency contacts + PM copy addresses
-		r.Put("/program/recipients", s.setCorrespondenceRecipients)     // admin
-		r.Get("/program/templates", s.listTemplates)                    // the Templates screen
-		r.Post("/program/templates/preview", s.previewTemplate)         // placeholders filled from a real case
-		r.Put("/program/templates/usage", s.putTemplateUsage)           // which template is used when (PM/admin)
+		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                      // the SOP steps: done, next, upcoming
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                     // Reviewer: outcome, claims reviewed, award, party billed
+		r.Post("/cases/{caseId}/fwa", s.fwaAction)                             // fraud/waste/abuse: report, assign reviewer, conclude
+		r.Put("/program/contract-dates", s.setContractDates)                   // admin: contract execution/effective/end dates
+		r.Get("/program/recipients", s.getCorrespondenceRecipients)            // agency contacts + PM copy addresses
+		r.Put("/program/recipients", s.setCorrespondenceRecipients)            // admin
+		r.Get("/program/templates", s.listTemplates)                           // the Templates screen
+		r.Post("/program/templates/preview", s.previewTemplate)                // placeholders filled from a real case
+		r.Put("/program/templates/usage", s.putTemplateUsage)                  // which template is used when (PM/admin)
 		r.Delete("/program/templates/usage/{id}", s.deleteTemplateUsage)
 		r.Get("/program/templates/{key}/history", s.templateHistory)
-		r.Put("/program/templates/{key}", s.putTemplate)                // add or change a template (PM/admin)
-		r.Delete("/program/templates/{key}", s.deleteTemplate)          // remove one, or restore the standard wording
+		r.Put("/program/templates/{key}", s.putTemplate)       // add or change a template (PM/admin)
+		r.Delete("/program/templates/{key}", s.deleteTemplate) // remove one, or restore the standard wording
 		r.Get("/cases/{caseId}/correspondence/templates", s.caseTemplates)
-		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)          // per-role notes fields
-		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary)   // Coder's Dispute Summary + cost estimate
-		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)        // Attorney rules on a flagged AOR
-		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)   // auto-adjudicate from case+doc data (Lever 1)
-		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)         // grounded advisory brief (Phase 1 copilot)
-		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)    // latest persisted brief
-		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)         // Phase 2: QA-gated determination/correspondence drafts
-		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)     // Assistant thread (conversational surface, private per worker)
+		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)        // per-role notes fields
+		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary) // Coder's Dispute Summary + cost estimate
+		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)      // Attorney rules on a flagged AOR
+		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
+		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)       // grounded advisory brief (Phase 1 copilot)
+		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)  // latest persisted brief
+		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
+		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface, private per worker)
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
 		r.Post("/cases/{caseId}/copilot/chat/log", s.copilotChatLog) // fast-path intents: persist without calling the model
 		r.Get("/cases/{caseId}/copilot/chat/shares", s.copilotListThreadShares)
@@ -738,22 +738,22 @@ func main() {
 		r.Post("/cases/{caseId}/reviews", s.requestReview)            // CODING|CLINICAL|LEGAL worklist entry
 		r.Get("/queues/{discipline}", s.reviewQueue)                  // specialist worklist
 		r.Post("/reviews/{reviewId}/claim", s.claimReview)
-		r.Post("/reviews/{reviewId}/complete", s.completeReview)      // fires the workflow signal
-		r.Get("/queues/pm", s.pmQueue)                                // escalations needing PM attention
-		r.Get("/cases/{caseId}/benchmarks", s.caseBenchmarks)       // per-code QPA distribution (arbitrator/staff)
-		r.Get("/cases/{caseId}/batchable", s.batchableCases)        // 45 CFR 149.510(c) batching suggestions
-		r.Get("/cases/{caseId}/win-probability", s.winProbability)  // same-payer/code outcomes (n>=5)
-		r.Get("/analytics/payers", s.payerAnalytics)                // denial-pattern profile per payer
-		r.Get("/analytics/fraud-signals", s.fraudSignals)           // oversight: provider tripwire clusters
-		r.Get("/analytics/network-adequacy", s.networkAdequacy)     // OON concentration evidence
-		r.Post("/cases/{caseId}/party-invites", s.inviteParty)        // provision Keycloak party account
+		r.Post("/reviews/{reviewId}/complete", s.completeReview)   // fires the workflow signal
+		r.Get("/queues/pm", s.pmQueue)                             // escalations needing PM attention
+		r.Get("/cases/{caseId}/benchmarks", s.caseBenchmarks)      // per-code QPA distribution (arbitrator/staff)
+		r.Get("/cases/{caseId}/batchable", s.batchableCases)       // 45 CFR 149.510(c) batching suggestions
+		r.Get("/cases/{caseId}/win-probability", s.winProbability) // same-payer/code outcomes (n>=5)
+		r.Get("/analytics/payers", s.payerAnalytics)               // denial-pattern profile per payer
+		r.Get("/analytics/fraud-signals", s.fraudSignals)          // oversight: provider tripwire clusters
+		r.Get("/analytics/network-adequacy", s.networkAdequacy)    // OON concentration evidence
+		r.Post("/cases/{caseId}/party-invites", s.inviteParty)     // provision Keycloak party account
 		r.Get("/cases/{caseId}/party-accounts", s.listPartyAccounts)
-		r.Get("/party/cases", s.partyCases)                           // party workspace
+		r.Get("/party/cases", s.partyCases) // party workspace
 		r.Get("/party/cases/{caseId}", s.partyCaseDetail)
-		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
+		r.Get("/qa", s.qaQueue) // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
-		r.Post("/qa/{qaId}/send", s.qaSend) // the drafter sends a draft that has passed QA
+		r.Post("/qa/{qaId}/send", s.qaSend)                // the drafter sends a draft that has passed QA
 		r.Post("/cases/{caseId}/invoices", s.issueInvoice) // dual-party receivables (G8)
 		r.Get("/cases/{caseId}/invoices", s.listInvoices)
 		r.Get("/invoices", s.listInvoices)
@@ -1325,11 +1325,11 @@ var signalRoleFloors = map[string][]string{
 	"PLAN_OPT_OUT":         {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	// Sent by case-api itself when a letter really goes out; a person
 	// sending it by hand would walk a case past its QA gate.
-	"LETTER_SENT":              {"FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"ELIGIBILITY_RESULT":       {"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"LETTER_SENT":        {"FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"ELIGIBILITY_RESULT": {"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	// Each SOP step belongs to one role (workflowsteps.go); admins stand in.
 	"CODING_REVIEW_COMPLETE":   {"CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
-	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ATTORNEY_REVIEW_COMPLETE": {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"PACKET_COMPLETE":          {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"AOR_REVISED":              {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
@@ -1358,23 +1358,37 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	// case-staff floor -- excludes PARTY/unauthenticated misuse without
 	// requiring every one of these general case-tracking signals to be
 	// individually enumerated above.
-	gate := signalRoleFloors[body.Signal]
+	if s.deliverCaseSignal(w, r, tenant, id, body.Signal, body.Data, "") {
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
+	}
+}
+
+// deliverCaseSignal is the one path a workflow signal takes into a case,
+// from the case's Steps panel and from a specialty review queue alike: the
+// signal's role floor, the step-order guard, the Temporal signal, the side
+// effects, the activity record Steps reads its answers from, and the audit
+// entry. A review-complete signal also closes that discipline's open queue
+// item (reviewNote, when given, is the reviewer's completion note), and a
+// coder asking for clinical review opens a clinical one. It writes the error
+// response and returns false when it refuses.
+func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenant, id, signal string, data map[string]any, reviewNote string) bool {
+	gate := signalRoleFloors[signal]
 	if gate == nil {
 		gate = caseStaffRoles
 	}
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, append(append([]string{}, gate...), serviceRole)...) {
-		http.Error(w, fmt.Sprintf(`{"error":"forbidden: signal %q is not permitted for your role"}`, body.Signal), http.StatusForbidden)
-		return
+		http.Error(w, fmt.Sprintf(`{"error":"forbidden: signal %q is not permitted for your role"}`, signal), http.StatusForbidden)
+		return false
 	}
 	var caseNumber, status string
 	if err := s.db.QueryRow(r.Context(),
 		fmt.Sprintf(`SELECT case_number, status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&caseNumber, &status); err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
-		return
+		return false
 	}
 	// Only the case's next step may be signalled, and only by its owner.
-	if !s.stepGuard(w, r, tenant, id, "signal:"+body.Signal) {
-		return
+	if !s.stepGuard(w, r, tenant, id, "signal:"+signal) {
+		return false
 	}
 	// Workflow IDs are never persisted to the cases table (confirmed: no
 	// INSERT or UPDATE anywhere writes it) -- initiateCase/the AHCA intake
@@ -1389,19 +1403,19 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	}
 	// Statutory offer window (45 CFR 149.520(b)(2)): sealed offers are only
 	// accepted while the 10-business-day window is open — no late offers.
-	if body.Signal == "OFFER_SUBMITTED" && status != "OFFER_WINDOW_OPEN" {
+	if signal == "OFFER_SUBMITTED" && status != "OFFER_WINDOW_OPEN" {
 		s.logActivity(r.Context(), tenant, id, "LATE_OFFER_REJECTED",
 			fmt.Sprintf("Offer rejected: case status is %s, offer window is not open", status))
 		http.Error(w, `{"error":"offer window is not open — late offers are not accepted"}`, http.StatusConflict)
-		return
+		return false
 	}
-	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", body.Signal, body.Data); err != nil {
+	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", signal, data); err != nil {
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
-		return
+		return false
 	}
 	// The Reviewer tells the Coder and the Attorney the packet is in: the
 	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
-	if body.Signal == "PACKET_COMPLETE" {
+	if signal == "PACKET_COMPLETE" {
 		for _, role := range []string{"CODER", "ATTORNEY"} {
 			s.notify(r, tenant, "role:"+role, "PACKET_COMPLETE",
 				fmt.Sprintf("Case %s: the filing packet is complete and has been checked by the Reviewer", caseNumber), "#/cases/"+id)
@@ -1409,27 +1423,35 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	}
 	// The filing packet's claim count is recorded with the step that
 	// confirms the packet (report column E).
-	if body.Signal == "PACKET_COMPLETE" {
-		if n := toInt64(body.Data["claims_submitted"]); n > 0 {
+	if signal == "PACKET_COMPLETE" {
+		if n := toInt64(data["claims_submitted"]); n > 0 {
 			_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET num_claims=$2, details = details || jsonb_build_object('claims_submitted', $2::int) WHERE id=$1`,
 				sanitizeTenant(tenant)), id, n)
 		}
 	}
 	// The withdrawal letter is due one business day from the request.
-	if body.Signal == "PROVIDER_WITHDRAW" {
+	if signal == "PROVIDER_WITHDRAW" {
 		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
 			`UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object('withdrawal_requested_at', $2::text) WHERE id=$1`,
 			sanitizeTenant(tenant)), id, time.Now().UTC().Format("2006-01-02"))
 	}
-	detail, _ := json.Marshal(body.Data)
-	s.logActivity(r.Context(), tenant, id, body.Signal,
-		fmt.Sprintf("Workflow signal %s delivered to %s — %s", body.Signal, wfID, truncate(string(detail), 500)))
+	detail, _ := json.Marshal(data)
+	s.logActivity(r.Context(), tenant, id, signal,
+		fmt.Sprintf("Workflow signal %s delivered to %s — %s", signal, wfID, truncate(string(detail), 500)))
 	s.graphSync(tenant) // graph reflects status transitions (best-effort)
 	s.logAudit(r.Context(), tenant, id, "CASE_SIGNALED", map[string]any{
-		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "signal": body.Signal, "workflow_id": wfID,
+		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "signal": signal, "workflow_id": wfID,
 	})
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "signaled"})
+	if disc := reviewDisciplineOf(signal); disc != "" {
+		p := r.Context().Value(ctxPrincipal{}).(principal)
+		s.closeOpenReview(r, tenant, id, disc, displayName(p), reviewNote)
+		if disc == "CODING" && data["clinical_requested"] == true {
+			s.openReview(r, tenant, id, caseNumber, "CLINICAL",
+				"Clinical review asked for by the coder ("+displayName(p)+")"+map[bool]string{true: ": " + truncate(reviewNote, 300), false: "."}[reviewNote != ""], displayName(p))
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
