@@ -27,6 +27,11 @@ var registeredFeatures = map[string]bool{
 	"necessity_screen":      true,
 	"deadline_verification": true,
 	"duplicate_detection":   true,
+	"win_probability":       true,
+	"payer_analytics":       true,
+	"fraud_signals":         true,
+	"network_adequacy":      true,
+	"letter_citation":       true,
 }
 
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle

@@ -8,7 +8,8 @@ import "testing"
 func TestFeatureFlagVocabulary(t *testing.T) {
 	want := []string{"sealed_offers", "review_queues", "party_workspace", "benchmarks",
 		"batch_suggestions", "bundling_filter", "necessity_screen",
-		"deadline_verification", "duplicate_detection"}
+		"deadline_verification", "duplicate_detection", "win_probability",
+		"payer_analytics", "fraud_signals", "network_adequacy", "letter_citation"}
 	for _, k := range want {
 		if !registeredFeatures[k] {
 			t.Errorf("feature %q not registered", k)
