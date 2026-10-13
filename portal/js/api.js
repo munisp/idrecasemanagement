@@ -75,6 +75,25 @@ const Api = (() => {
   };
   return {
     setTenant, getTenant, download,
+    offers: {
+      submit: (caseId, p) => req("POST", `${t()}/cases/${caseId}/offers`, p),
+      list: (caseId) => req("GET", `${t()}/cases/${caseId}/offers`),
+      reveal: (caseId) => req("POST", `${t()}/cases/${caseId}/offers/reveal`),
+      determine: (caseId, p) => req("POST", `${t()}/cases/${caseId}/determination`, p),
+    },
+    reviews: {
+      request: (caseId, p) => req("POST", `${t()}/cases/${caseId}/reviews`, p),
+      queue: (discipline, all) => req("GET", `${t()}/queues/${discipline}${all ? "?all=1" : ""}`),
+      pmQueue: () => req("GET", `${t()}/queues/pm`),
+      claim: (id) => req("POST", `${t()}/reviews/${id}/claim`),
+      complete: (id, note) => req("POST", `${t()}/reviews/${id}/complete`, { note }),
+    },
+    party: {
+      cases: () => req("GET", `${t()}/party/cases`),
+      caseDetail: (id) => req("GET", `${t()}/party/cases/${id}`),
+      invite: (caseId, p) => req("POST", `${t()}/cases/${caseId}/party-invites`, p),
+      accounts: (caseId) => req("GET", `${t()}/cases/${caseId}/party-accounts`),
+    },
     admin: {
       // Not tenant-scoped -- creates the /tenant/<xx> group a new tenant
       // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
@@ -341,6 +360,8 @@ const Api = (() => {
       railRouting: (num) => req("GET", `${t()}/payments/routing/${encodeURIComponent(num)}`),
       railAchDebits: (body) => req("POST", `${t()}/payments/ach/debits`, body),
       railAchReturns: (raw) => reqRaw("POST", `${t()}/payments/ach/returns`, raw),
+      railAttachAuth: (id, raw, name) =>
+        reqRaw("POST", `${t()}/payments/accounts/${id}/authorization?name=${encodeURIComponent(name)}`, raw),
       railWire: (body) => req("POST", `${t()}/payments/wire`, body),
       railIcl: () => req("POST", `${t()}/payments/icl`, {}),
       railMetro2: (body) => req("POST", `${t()}/payments/metro2`, body),

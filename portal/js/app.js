@@ -158,6 +158,14 @@
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
   if (!has("TPA") && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
+  // Party workspace: an invited party's own disputes (party_accounts is the only source of access).
+  if (has("PARTY")) links.push(["#/party", "⚭", "My disputes"]);
+  // Specialty review queues: each specialist sees their own, the PM all three
+  // (matches queues.go's per-discipline roles).
+  if (has("CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/CODING", "⌗", "Coding queue"]);
+  if (has("NURSE_PHYSICIAN", "DOCTOR", "NURSE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/CLINICAL", "✚", "Clinical queue"]);
+  if (has("ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/LEGAL", "§", "Legal queue"]);
+  if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/pm", "▲", "PM board"]);
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
@@ -351,6 +359,11 @@
     [/^#\/pipeline$/, CrmViews.pipeline],
     [/^#\/cases(\?.*)?$/, Views.cases],
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
+    [/^#\/cases\/([\w-]+)\/offers$/, (m) => Views.caseOffers(m[1])],
+    [/^#\/queues\/pm$/, Views.pmQueueView],
+    [/^#\/queues\/(CODING|CLINICAL|LEGAL)(\?.*)?$/, (m) => Views.queueView(m[1])],
+    [/^#\/party$/, Views.partyCases],
+    [/^#\/party\/cases\/([\w-]+)$/, (m) => Views.partyCaseDetail(m[1])],
     [/^#\/new$/, Views.newDispute],
     [/^#\/crm\/accounts$/, CrmViews.accounts],
     [/^#\/crm\/accounts\/new$/, CrmViews.accountNew],
@@ -394,7 +407,7 @@
   const menu = new Set(links.map(([h]) => h.slice(2)));
   const pageOf = (h) => {
     const parts = h.replace(/^#\//, "").split("?")[0].split("/");
-    return parts[0] === "crm" ? parts.slice(0, 2).join("/") : parts[0];
+    return parts[0] === "crm" || parts[0] === "queues" ? parts.slice(0, 2).join("/") : parts[0];
   };
   function canOpen(h) {
     const page = pageOf(h);

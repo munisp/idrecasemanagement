@@ -38,6 +38,10 @@ from minio import Minio
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
+# Vault enforces X-Internal-Auth on every route when VAULT_INTERNAL_TOKEN is
+# set on its side — both sides must agree (compose wires one shared value).
+VAULT_TOKEN = os.environ.get("VAULT_INTERNAL_TOKEN", "")
+VAULT_HEADERS = {"X-Internal-Auth": VAULT_TOKEN} if VAULT_TOKEN else {}
 
 minio = Minio(
     os.environ.get("MINIO_ENDPOINT", "localhost:9000"),
@@ -127,7 +131,7 @@ def vault_seal(tenant: str, key: str, pt: bytes) -> bytes:
     # letter generation attempt failed here with KeyError('data_b64'),
     # confirmed live: never caught before because nothing ever reached this
     # far until the Kafka connectivity fix above let a request through.
-    resp = httpx.post(f"{VAULT}/docs/seal", timeout=60, json={
+    resp = httpx.post(f"{VAULT}/docs/seal", timeout=60, headers=VAULT_HEADERS, json={
         "tenant": tenant, "key": key, "data_b64": base64.b64encode(pt).decode(),
     })
     resp.raise_for_status()

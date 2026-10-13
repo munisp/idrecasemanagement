@@ -729,3 +729,4 @@ ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 .pay-filter-bar input[type=search]{min-width:240px}
 .pay-row-hit td{background:var(--danger-bg)}
 .pay-row-hit .pay-badge-bad{background:var(--danger-fg);color:var(--text-inverse)}
+.pay-file-btn{cursor:pointer;display:inline-flex;align-items:center}

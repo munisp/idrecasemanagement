@@ -172,3 +172,19 @@ CREATE TABLE IF NOT EXISTS public.screening_checks (
     created_at        timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS screening_checks_tenant ON public.screening_checks (tenant, subject_type, created_at DESC);
+
+
+-- Proof-of-authorization artifact for ACH WEB debits (NACHA 2.5.1 / WEB
+-- authorization retention): the signed authorization (PDF/scan/text) is
+-- vault-sealed like the account number itself; only metadata is queryable.
+ALTER TABLE public.payment_accounts
+    ADD COLUMN IF NOT EXISTS ach_authorization_sealed bytea,
+    ADD COLUMN IF NOT EXISTS ach_authorization_name  text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS ach_authorization_at    timestamptz;
+
+-- NACHA reinitiation bookkeeping (case-api enforces the rules):
+-- attempt_count tracks originations per invoice (cap: original + 2 for
+-- R01/R09; other return codes may not be reinitiated at all). Item status
+-- gains RETRY_ELIGIBLE (R01/R09 under cap) and SETTLED (return window passed).
+ALTER TABLE public.payment_file_items
+    ADD COLUMN IF NOT EXISTS attempt_count int NOT NULL DEFAULT 1;

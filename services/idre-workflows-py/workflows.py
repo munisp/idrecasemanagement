@@ -143,12 +143,14 @@ class IdrCaseWorkflow:
             return await self._close_early(tenant, case, "SETTLEMENT_PRE_ELIGIBILITY")
 
         reveal_reason = "BOTH_SUBMITTED" if len(self.offers_submitted) >= 2 else "WINDOW_EXPIRED"
+        # Order matters: the case status is the vault's reveal oracle, so it
+        # must be set BEFORE the oracle assertion — never after.
         await workflow.execute_activity(
-            request_lawful_reveal, args=[case],
+            set_case_status, args=[tenant, case, "OFFERS_REVEALED", reveal_reason],
             start_to_close_timeout=timedelta(seconds=30),
         )
         await workflow.execute_activity(
-            set_case_status, args=[tenant, case, "OFFERS_REVEALED", reveal_reason],
+            request_lawful_reveal, args=[tenant, case],
             start_to_close_timeout=timedelta(seconds=30),
         )
 

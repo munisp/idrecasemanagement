@@ -406,8 +406,40 @@ func resolveTBAddresses(addrs []string) ([]string, error) {
 	return out, nil
 }
 
+// enforceProductionSecrets refuses to boot with any known development-default
+// secret when ENV/APP_ENV=production. Compose ships dev defaults for laptop
+// parity; this guard makes a misconfigured prod deploy fail loudly at startup
+// instead of silently serving with credentials an attacker can guess.
+func enforceProductionSecrets(cfg Config) {
+	env := strings.ToLower(os.Getenv("ENV"))
+	if v := os.Getenv("APP_ENV"); v != "" {
+		env = strings.ToLower(v)
+	}
+	if env != "production" && env != "prod" {
+		return
+	}
+	var bad []string
+	if strings.Contains(cfg.DatabaseURL, "idre:idre@") {
+		bad = append(bad, "DATABASE_URL uses the dev idre:idre credentials")
+	}
+	if cfg.KCAdminPassword == "admin" || cfg.KCAdminPassword == "" {
+		bad = append(bad, "KC_ADMIN_PASSWORD is unset or the dev default")
+	}
+	if cfg.WorkerToken == "" || cfg.WorkerToken == "dev-worker-token" {
+		bad = append(bad, "WORKER_TOKEN is unset or the dev default")
+	}
+	if t := os.Getenv("VAULT_INTERNAL_TOKEN"); t == "" || t == "dev-internal-token" {
+		bad = append(bad, "VAULT_INTERNAL_TOKEN is unset or the dev default")
+	}
+	if len(bad) > 0 {
+		slog.Error("refusing to start in production with development-default secrets", "findings", bad)
+		os.Exit(1)
+	}
+}
+
 func main() {
 	cfg := configFromEnv()
+	enforceProductionSecrets(cfg)
 	ctx := context.Background()
 	stopTelemetry := initTelemetry(ctx)
 
@@ -626,6 +658,7 @@ func main() {
 		r.Post("/payments/accounts", s.createPaymentAccount)
 		r.Get("/payments/accounts", s.listPaymentAccounts)
 		r.Delete("/payments/accounts/{accountId}", s.deletePaymentAccount)
+		r.Post("/payments/accounts/{accountId}/authorization", s.attachPaymentAuthorization) // vault-sealed NACHA proof-of-authorization
 		r.Get("/payments/routing/{routing}", s.lookupRoutingNumber)
 		r.Post("/payments/ach/debits", s.createACHDebitBatch)
 		r.Post("/payments/ach/returns", s.ingestACHReturns)
@@ -695,6 +728,22 @@ func main() {
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Get("/correspondence", s.listMailJournal)              // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
+
+		// Double-blind offers (45 CFR 149.520(b)) + specialty review queues +
+		// authenticated party workspace.
+		r.Post("/cases/{caseId}/offers", s.submitOffer)               // vault-sealed; window-gated
+		r.Get("/cases/{caseId}/offers", s.listOffers)                 // metadata for all; amounts post-reveal
+		r.Post("/cases/{caseId}/offers/reveal", s.revealOffers)       // ARBITRATOR; vault re-verifies
+		r.Post("/cases/{caseId}/determination", s.issueDetermination) // baseball-style: select one offer
+		r.Post("/cases/{caseId}/reviews", s.requestReview)            // CODING|CLINICAL|LEGAL worklist entry
+		r.Get("/queues/{discipline}", s.reviewQueue)                  // specialist worklist
+		r.Post("/reviews/{reviewId}/claim", s.claimReview)
+		r.Post("/reviews/{reviewId}/complete", s.completeReview)      // fires the workflow signal
+		r.Get("/queues/pm", s.pmQueue)                                // escalations needing PM attention
+		r.Post("/cases/{caseId}/party-invites", s.inviteParty)        // provision Keycloak party account
+		r.Get("/cases/{caseId}/party-accounts", s.listPartyAccounts)
+		r.Get("/party/cases", s.partyCases)                           // party workspace
+		r.Get("/party/cases/{caseId}", s.partyCaseDetail)
 		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
@@ -783,6 +832,11 @@ func main() {
 	r.Patch("/api/share/{token}/uploads/{uploadId}", s.shareUploadChunk) // next chunk
 	r.Post("/api/share/{token}/uploads/{uploadId}/complete", s.shareCompleteUpload)
 	r.Get("/api/share/{token}/download", s.shareDownload) // Range/resume supported
+
+	// Vault reveal-check oracle (no OIDC; X-Internal-Auth == VAULT_INTERNAL_TOKEN
+	// is the auth). The vault calls this before decrypting any offer — reveals
+	// only a boolean + reason header, no case data.
+	r.Get("/internal/reveal-check/{tenant}/{caseId}", s.revealCheck)
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)

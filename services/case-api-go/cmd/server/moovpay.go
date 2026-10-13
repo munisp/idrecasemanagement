@@ -197,7 +197,8 @@ func (s *server) listPaymentAccounts(w http.ResponseWriter, r *http.Request) {
 	// Never SELECT account_sealed here: list views see masked data only.
 	rows, _ := s.queryRows(r, `
 		SELECT id, owner_type, owner_ref, label, routing_number, bank_name,
-		       account_last4, account_type, ach_debit_authorized, created_at
+		       account_last4, account_type, ach_debit_authorized,
+		       ach_authorization_name, ach_authorization_at, created_at
 		FROM public.payment_accounts WHERE tenant=$1 ORDER BY created_at DESC LIMIT 500`, tenant)
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})
 }
@@ -224,6 +225,7 @@ type paymentAccount struct {
 	ID, Routing, BankName, AcctType, OwnerRef string
 	Number                                    string // decrypted, in-memory only
 	DebitAuthorized                           bool
+	HasAuthorization                          bool // proof-of-authorization artifact sealed in vault
 }
 
 // loadPaymentAccount decrypts a stored account via the vault. Callers use the
@@ -233,9 +235,9 @@ func (s *server) loadPaymentAccount(r *http.Request, tenant, id string) (*paymen
 	var sealed []byte
 	err := s.db.QueryRow(r.Context(), `
 		SELECT id, routing_number, bank_name, account_type, owner_ref,
-		       account_sealed, ach_debit_authorized
+		       account_sealed, ach_debit_authorized, ach_authorization_sealed IS NOT NULL
 		FROM public.payment_accounts WHERE tenant=$1 AND id=$2`, tenant, id).
-		Scan(&a.ID, &a.Routing, &a.BankName, &a.AcctType, &a.OwnerRef, &sealed, &a.DebitAuthorized)
+		Scan(&a.ID, &a.Routing, &a.BankName, &a.AcctType, &a.OwnerRef, &sealed, &a.DebitAuthorized, &a.HasAuthorization)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +311,10 @@ func (s *server) createACHDebitBatch(w http.ResponseWriter, r *http.Request) {
 	bh.ODFIIdentification = cfg.OriginatingDFI
 	batch := ach.NewBatchWEB(bh)
 
-	type itemRef struct{ invoiceID, acctID, trace string }
+	type itemRef struct {
+		invoiceID, acctID, trace string
+		attempt                  int
+	}
 	var refs []itemRef
 	var total int64
 	for i, it := range in.Items {
@@ -327,6 +332,23 @@ func (s *server) createACHDebitBatch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"invoice %s is %s, not OPEN"}`, invoiceNo, status), http.StatusConflict)
 			return
 		}
+		// NACHA reinitiation rules: only R01/R09 returns may be reinitiated,
+		// and at most twice beyond the original entry (3 originations total).
+		var attempts int
+		var hardReturn string
+		_ = s.db.QueryRow(r.Context(), `
+			SELECT count(*),
+			       coalesce(max(CASE WHEN status='RETURNED' AND return_code NOT IN ('R01','R09') THEN return_code END), '')
+			FROM public.payment_file_items
+			WHERE tenant=$1 AND invoice_id=$2`, tenant, it.InvoiceID).Scan(&attempts, &hardReturn)
+		if hardReturn != "" {
+			http.Error(w, fmt.Sprintf(`{"error":"invoice %s was returned %s — not reinitiable under NACHA (only R01/R09 may be reinitiated)"}`, invoiceNo, hardReturn), http.StatusUnprocessableEntity)
+			return
+		}
+		if attempts >= 3 {
+			http.Error(w, fmt.Sprintf(`{"error":"invoice %s reached the NACHA reinitiation cap (original entry + 2 reinitiations)"}`, invoiceNo), http.StatusUnprocessableEntity)
+			return
+		}
 		acct, err := s.loadPaymentAccount(r, tenant, it.PaymentAccountID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"payment account %s unavailable"}`, it.PaymentAccountID), http.StatusNotFound)
@@ -334,6 +356,17 @@ func (s *server) createACHDebitBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if !acct.DebitAuthorized {
 			http.Error(w, fmt.Sprintf(`{"error":"payment account %s has no ACH debit authorization on file"}`, it.PaymentAccountID), http.StatusConflict)
+			return
+		}
+		// NACHA WEB authorization-retention rule: the flag alone is not
+		// enough — the signed authorization artifact must be sealed on file.
+		if !acct.HasAuthorization {
+			http.Error(w, fmt.Sprintf(`{"error":"payment account %s has no proof-of-authorization artifact — POST /payments/accounts/{id}/authorization first (NACHA WEB retention rule)"}`, it.PaymentAccountID), http.StatusConflict)
+			return
+		}
+		// OFAC gate: strict-liability — a match blocks origination outright.
+		if blocked, _, code, msg := s.screenPaymentParty(r, tenant, "PARTY", it.InvoiceID, party); blocked {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), code)
 			return
 		}
 		tcode := ach.CheckingDebit
@@ -352,7 +385,7 @@ func (s *server) createACHDebitBatch(w http.ResponseWriter, r *http.Request) {
 		trace := cfg.OriginatingDFI + numeric(strconv.Itoa(i+1), 7)
 		entry.TraceNumber = trace
 		batch.AddEntry(entry)
-		refs = append(refs, itemRef{it.InvoiceID, it.PaymentAccountID, trace})
+		refs = append(refs, itemRef{it.InvoiceID, it.PaymentAccountID, trace, attempts + 1})
 		total += amount
 	}
 	if err := batch.Create(); err != nil {
@@ -385,9 +418,9 @@ func (s *server) createACHDebitBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, rf := range refs {
 		_, _ = s.db.Exec(r.Context(), `
-			INSERT INTO public.payment_file_items (tenant, file_id, invoice_id, amount_cents, trace_number, status)
-			SELECT $1,$2,$3, amount_cents, $4, 'SENT' FROM public.invoices WHERE id=$3 AND tenant=$1`,
-			tenant, fileID, rf.invoiceID, rf.trace)
+			INSERT INTO public.payment_file_items (tenant, file_id, invoice_id, amount_cents, trace_number, status, attempt_count)
+			SELECT $1,$2,$3, amount_cents, $4, 'SENT', $5 FROM public.invoices WHERE id=$3 AND tenant=$1`,
+			tenant, fileID, rf.invoiceID, rf.trace, rf.attempt)
 	}
 	s.logAudit(r.Context(), tenant, "", "ACH_DEBIT_BATCH_GENERATED", map[string]any{
 		"by": p.Subject, "file_id": fileID, "entries": len(refs), "total_cents": total})
@@ -430,17 +463,34 @@ func (s *server) ingestACHReturns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"file parsed but contains no return entries (Addenda99)"}`, http.StatusUnprocessableEntity)
 		return
 	}
-	applied, unmatched := 0, 0
+	applied, unmatched, reinitiable := 0, 0, 0
 	for _, rt := range returns {
-		res, err := s.db.Exec(r.Context(), `
+		var invoiceID string
+		err := s.db.QueryRow(r.Context(), `
 			UPDATE public.payment_file_items
 			SET status='RETURNED', return_code=$3, return_reason=$4, updated_at=now()
-			WHERE tenant=$1 AND trace_number=$2 AND status <> 'RETURNED'`,
-			tenant, rt.Trace, rt.Code, rt.Reason)
-		if err == nil && res.RowsAffected() > 0 {
-			applied++
-		} else {
+			WHERE tenant=$1 AND trace_number=$2 AND status <> 'RETURNED'
+			RETURNING invoice_id`,
+			tenant, rt.Trace, rt.Code, rt.Reason).Scan(&invoiceID)
+		if err != nil {
 			unmatched++
+			continue
+		}
+		applied++
+		// NACHA reinitiation: R01/R09 may be reinitiated up to twice. Mark the
+		// item RETRY_ELIGIBLE (invoice stays OPEN) while under the cap; the
+		// debit-batch endpoint enforces the cap and the R-code whitelist.
+		if rt.Code == "R01" || rt.Code == "R09" {
+			var attempts int
+			_ = s.db.QueryRow(r.Context(), `
+				SELECT count(*) FROM public.payment_file_items
+				WHERE tenant=$1 AND invoice_id=$2`, tenant, invoiceID).Scan(&attempts)
+			if attempts < 3 {
+				_, _ = s.db.Exec(r.Context(), `
+					UPDATE public.payment_file_items SET status='RETRY_ELIGIBLE', updated_at=now()
+					WHERE tenant=$1 AND trace_number=$2`, tenant, rt.Trace)
+				reinitiable++
+			}
 		}
 	}
 	ref := "RETURN-" + time.Now().Format("060102-150405")
@@ -449,15 +499,26 @@ func (s *server) ingestACHReturns(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO public.payment_files (tenant, kind, reference, item_count, status, file_body, detail, created_by)
 		VALUES ($1,'ACH_RETURN',$2,$3,'GENERATED',$4,$5,$6) RETURNING id`,
 		tenant, ref, len(returns), string(body),
-		json.RawMessage(fmt.Sprintf(`{"applied":%d,"unmatched":%d}`, applied, unmatched)), p.Subject).Scan(&fileID)
+		json.RawMessage(fmt.Sprintf(`{"applied":%d,"unmatched":%d,"reinitiable":%d}`, applied, unmatched, reinitiable)), p.Subject).Scan(&fileID)
 	s.logAudit(r.Context(), tenant, "", "ACH_RETURNS_INGESTED", map[string]any{
-		"by": p.Subject, "file_id": fileID, "returns": len(returns), "applied": applied, "unmatched": unmatched})
+		"by": p.Subject, "file_id": fileID, "returns": len(returns), "applied": applied, "unmatched": unmatched, "reinitiable": reinitiable})
 	if applied > 0 {
 		s.notify(r, tenant, "*", "ACH_RETURN",
-			fmt.Sprintf("%d ACH return(s) matched to payment items; %d unmatched.", applied, unmatched), "")
+			fmt.Sprintf("%d ACH return(s) matched to payment items; %d unmatched; %d eligible for reinitiation (R01/R09, under NACHA cap).", applied, unmatched, reinitiable), "")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"file_id": fileID, "returns": len(returns), "applied": applied, "unmatched": unmatched})
+		"file_id": fileID, "returns": len(returns), "applied": applied, "unmatched": unmatched, "reinitiable": reinitiable})
+}
+
+// settleACHWindow lazily flips SENT debit items to SETTLED once the NACHA
+// return window (two banking days, approximated as 48 hours) has passed with
+// no return ingested. A late return can still flip a SETTLED item back —
+// ingestACHReturns accepts any non-RETURNED prior status.
+func (s *server) settleACHWindow(r *http.Request, tenant string) {
+	_, _ = s.db.Exec(r.Context(), `
+		UPDATE public.payment_file_items
+		SET status='SETTLED', updated_at=now()
+		WHERE tenant=$1 AND status='SENT' AND updated_at < now() - interval '2 days'`, tenant)
 }
 
 // listPaymentFiles / paymentFileBody: staff visibility over generated and
@@ -469,6 +530,7 @@ func (s *server) listPaymentFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	s.settleACHWindow(r, tenant)
 	kind := strings.ToUpper(r.URL.Query().Get("kind"))
 	q := `
 		SELECT f.id, f.kind, f.reference, f.item_count, f.total_cents, f.status, f.created_at, f.detail
@@ -490,6 +552,7 @@ func (s *server) paymentFileItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	s.settleACHWindow(r, tenant)
 	rows, _ := s.queryRows(r, `
 		SELECT i.id, i.invoice_id, i.payable_id, i.check_id, i.amount_cents,
 		       i.trace_number, i.status, i.return_code, i.return_reason
@@ -573,6 +636,12 @@ func (s *server) createWireFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if status != "OPEN" {
 		http.Error(w, fmt.Sprintf(`{"error":"payable is %s, not OPEN"}`, status), http.StatusConflict)
+		return
+	}
+	// OFAC strict-liability gate: a wire is an irreversible same-day settlement,
+	// so a matched payee must stop the file before any instruction is built.
+	if blocked, _, code, msg := s.screenPaymentParty(r, tenant, "PAYABLE", in.PayableID, payee); blocked {
+		http.Error(w, msg, code)
 		return
 	}
 	acct, err := s.loadPaymentAccount(r, tenant, in.PaymentAccountID)
@@ -942,4 +1011,49 @@ func (s *server) createMetro2File(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file_id": fileID, "reference": ref, "records": count,
 		"total_cents": total, "filename": ref + ".dat", "file": f.String(false)})
+}
+
+
+// attachPaymentAuthorization: FINANCE seals the signed ACH authorization
+// (NACHA WEB retention) into the vault against an account. Raw body is the
+// artifact itself (PDF/scan/text), filename via ?name=. Uploading proof IS
+// the authorization: the debit-authorized flag sets here, not by checkbox.
+func (s *server) attachPaymentAuthorization(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, paymentAccountRoles...) {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	id := r.PathValue("accountId")
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil || len(body) < 16 {
+		http.Error(w, `{"error":"artifact body required (raw file, max 8 MiB)"}`, http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if len(name) > 120 {
+		name = name[:120]
+	}
+	if name == "" {
+		name = "authorization.bin"
+	}
+	sealed, err := s.vaultSealDoc(r, tenant, "payment-account-auth:"+tenant+":"+id, body)
+	if err != nil {
+		http.Error(w, `{"error":"vault seal failed"}`, http.StatusBadGateway)
+		return
+	}
+	res, err := s.db.Exec(r.Context(), `
+		UPDATE public.payment_accounts
+		SET ach_authorization_sealed=$3, ach_authorization_name=$4,
+		    ach_authorization_at=now(), ach_debit_authorized=true
+		WHERE tenant=$1 AND id=$2`, tenant, id, sealed, name)
+	if err != nil || res.RowsAffected() == 0 {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "PAYMENT_ACCOUNT_AUTH_ATTACHED", map[string]any{
+		"by": p.Subject, "account_id": id, "name": name, "bytes": len(body)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account_id": id, "authorization_name": name, "ach_debit_authorized": true})
 }

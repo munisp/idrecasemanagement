@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -494,6 +495,9 @@ func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Res
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tok := os.Getenv("VAULT_INTERNAL_TOKEN"); tok != "" {
+		req.Header.Set("X-Internal-Auth", tok)
+	}
 	return http.DefaultClient.Do(req)
 }
 
