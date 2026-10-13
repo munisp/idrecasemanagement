@@ -98,7 +98,7 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 	q := fmt.Sprintf(`
 		SELECT v.id, v.case_id, c.case_number, c.status, c.service_line,
 		       c.disputed_amount_cents, v.discipline, v.status AS review_status,
-		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at
+		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at, v.completed_at
 		FROM public.specialty_reviews v
 		JOIN tenant_%s.cases c ON c.id::text = v.case_id
 		WHERE v.tenant=$1 AND v.discipline=$2`, sanitizeTenant(tenant))
@@ -163,7 +163,7 @@ func (s *server) transitionReview(w http.ResponseWriter, r *http.Request, target
 		    claimed_at = CASE WHEN $3='IN_REVIEW' THEN now() ELSE claimed_at END,
 		    completed_at = CASE WHEN $3='COMPLETE' THEN now() ELSE NULL END
 		WHERE tenant=$1 AND id=$2 AND status <> 'COMPLETE'`,
-		tenant, reviewID, target, p.Subject, in.Note)
+		tenant, reviewID, target, displayName(p), in.Note)
 	if err != nil || res.RowsAffected() == 0 {
 		http.Error(w, `{"error":"transition not allowed"}`, http.StatusConflict)
 		return
@@ -204,5 +204,17 @@ func (s *server) pmQueue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "discipline": "PM"})
+	// The board's second table: the program's open cases, newest first.
+	open, err := s.queryRows(r, fmt.Sprintf(`
+		SELECT id, case_number, status, opened_at
+		FROM tenant_%s.cases
+		WHERE status NOT LIKE 'CLOSED%%'
+		ORDER BY opened_at DESC LIMIT 100`, sanitizeTenant(tenant)))
+	if err != nil {
+		slog.Error("query failed", "handler", "queues.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	// "queue" is kept for existing callers; the board reads the named lists.
+	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "escalations": rows, "open_cases": open, "discipline": "PM"})
 }

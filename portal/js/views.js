@@ -930,7 +930,9 @@ const Views = (() => {
     let rows;
     try { rows = await Api.reviews.queue(discipline); }
     catch (e) { return `<div class="view-head"><h1>${esc(meta.title)}</h1></div><p class="muted">${esc(e.message)}</p>`; }
-    rows = rows.reviews || rows || [];
+    // The server answers {queue: [...]}: status is the CASE's status,
+    // review_status the review's (REQUESTED / IN_REVIEW / COMPLETE).
+    rows = rows.queue || rows.reviews || (Array.isArray(rows) ? rows : []);
     const usd = (c) => (c == null ? "—" : "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }));
     const html = `<div class="view-head"><h1>${esc(meta.title)}</h1>
         <a class="btn ghost" href="#/queues/${discipline}?all=1" data-all>Show completed</a></div>
@@ -938,11 +940,11 @@ const Views = (() => {
       <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Service line</th><th>Disputed</th><th>Review</th><th>Requested</th><th></th></tr></thead><tbody>` +
       (rows.length ? rows.map((r) => `<tr>
         <td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td>
-        <td>${badge(r.case_status || "")}</td><td>${esc(r.service_line || "—")}</td><td>${usd(r.disputed_amount_cents)}</td>
-        <td>${badge(r.status)}${r.reviewer ? ` <span class="muted">${esc(r.reviewer)}</span>` : ""}</td>
+        <td>${badge(r.status || "")}</td><td>${esc(r.service_line || "—")}</td><td>${usd(r.disputed_amount_cents)}</td>
+        <td>${badge(r.review_status)}${r.reviewer ? ` <span class="muted">${esc(r.reviewer)}</span>` : ""}${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
         <td>${fmtDate(r.requested_at)}</td>
-        <td>${r.status === "REQUESTED" ? `<button class="btn sm" data-claim="${r.id}">Claim</button>`
-          : r.status === "IN_REVIEW" ? `<button class="btn sm" data-complete="${r.id}">Complete</button>` : ""}</td></tr>`).join("")
+        <td>${r.review_status === "REQUESTED" ? `<button class="btn sm" data-claim="${r.id}">Claim</button>`
+          : r.review_status === "IN_REVIEW" ? `<button class="btn sm" data-complete="${r.id}">Complete</button>` : ""}</td></tr>`).join("")
         : `<tr><td colspan="7" class="muted">Queue is clear — nothing awaiting ${esc(discipline.toLowerCase())} review.</td></tr>`) +
       `</tbody></table>`;
     return { html, wire: () => {
@@ -963,11 +965,11 @@ const Views = (() => {
         ev.preventDefault();
         try {
           const full = await Api.reviews.queue(discipline, true);
-          const list = full.reviews || full || [];
-          const done = list.filter((r) => r.status === "COMPLETE");
+          const list = full.queue || full.reviews || (Array.isArray(full) ? full : []);
+          const done = list.filter((r) => r.review_status === "COMPLETE");
           await UI.modal({ title: "Completed reviews", wide: true, submitLabel: "Close",
             body: done.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Reviewer</th><th>Completed</th><th>Note</th></tr></thead><tbody>` +
-              done.map((r) => `<tr><td class="mono">${esc(r.case_number || r.case_id)}</td><td>${esc(r.reviewer || "")}</td><td>${fmtDate(r.completed_at)}</td><td>${esc(r.completion_note || "")}</td></tr>`).join("") + `</tbody></table>`
+              done.map((r) => `<tr><td class="mono">${esc(r.case_number || r.case_id)}</td><td>${esc(r.reviewer || "")}</td><td>${fmtDate(r.completed_at)}</td><td>${esc(r.note || "")}</td></tr>`).join("") + `</tbody></table>`
               : "<p class='muted'>No completed reviews yet.</p>",
             fields: [] });
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
@@ -980,12 +982,12 @@ const Views = (() => {
     let data;
     try { data = await Api.reviews.pmQueue(); }
     catch (e) { return `<div class="view-head"><h1>PM board</h1></div><p class="muted">${esc(e.message)}</p>`; }
-    const escRows = data.escalations || [];
+    const escRows = data.escalations || data.queue || [];
     const open = data.open_cases || [];
     const html = `<div class="view-head"><h1>Program manager board</h1></div>
       <h2>Escalations</h2>
       <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Reason</th><th>Raised</th></tr></thead><tbody>` +
-      (escRows.length ? escRows.map((r) => `<tr><td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td><td>${badge(r.case_status || "")}</td><td>${esc(r.reason || "")}</td><td>${fmtDate(r.created_at)}</td></tr>`).join("")
+      (escRows.length ? escRows.map((r) => `<tr><td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td><td>${badge(r.status || "")}</td><td>${esc(r.clock || "")}${r.level > 1 ? ` · level ${r.level}` : ""}${r.detail ? `<div class="muted">${esc(r.detail)}</div>` : ""}</td><td>${fmtDate(r.created_at)}</td></tr>`).join("")
         : `<tr><td colspan="4" class="muted">No open escalations.</td></tr>`) + `</tbody></table>
       <h2>Open cases</h2>
       <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Opened</th></tr></thead><tbody>` +
