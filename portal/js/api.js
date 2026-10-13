@@ -83,7 +83,7 @@ const Api = (() => {
     },
     reviews: {
       request: (caseId, p) => req("POST", `${t()}/cases/${caseId}/reviews`, p),
-      queue: (discipline, all) => req("GET", `${t()}/queues/${discipline}${all ? "?all=1" : ""}`),
+      queue: (discipline, all, issue) => req("GET", `${t()}/queues/${discipline}${all || issue ? `?${all ? "all=1&" : ""}${issue ? `issue=${issue}` : ""}`.replace(/&$/, "") : ""}`),
       pmQueue: () => req("GET", `${t()}/queues/pm`),
       claim: (id) => req("POST", `${t()}/reviews/${id}/claim`),
       complete: (id, note) => req("POST", `${t()}/reviews/${id}/complete`, { note }),
