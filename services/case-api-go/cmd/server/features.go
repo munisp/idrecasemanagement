@@ -32,6 +32,7 @@ var registeredFeatures = map[string]bool{
 	"fraud_signals":         true,
 	"network_adequacy":      true,
 	"letter_citation":       true,
+	"tpa_onboarding":        true,
 }
 
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle

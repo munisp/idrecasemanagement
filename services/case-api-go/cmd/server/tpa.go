@@ -236,6 +236,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		ClientID            string `json:"client_id"`
+		PackageID           string `json:"package_id"` // optional until onboarding completes for the client
 		ContactName         string `json:"contact_name"` // client's contact for the dispute
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		Notes               string `json:"notes"`
@@ -256,6 +257,43 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	if clientStatus != "ACTIVE" {
 		http.Error(w, `{"error":"client relationship is SUSPENDED"}`, http.StatusConflict)
 		return
+	}
+	// Onboarding gate (tpa_onboarding): when the client has completed
+	// onboarding the filing must reference its READY package — six ACCEPTED
+	// slots + a verified payment rail. Clients that never started onboarding
+	// (no profile, no packages) keep the legacy ungated path so existing
+	// flows don't break mid-flight.
+	if s.featureEnabled(r, tenant, "tpa_onboarding") {
+		var onboarded int
+		_ = s.db.QueryRow(r.Context(), `
+			SELECT count(*) FROM public.tpa_clients
+			WHERE tenant=$1 AND id=$2 AND (npi IS NOT NULL OR
+			  EXISTS (SELECT 1 FROM public.tpa_packages p WHERE p.tenant=$1 AND p.client_id=$2))`,
+			tenant, in.ClientID).Scan(&onboarded)
+		if onboarded > 0 {
+			if in.PackageID == "" {
+				http.Error(w, `{"error":"this client is onboarded — filings must reference a READY package (package_id)"}`, http.StatusConflict)
+				return
+			}
+			var pkgStatus string
+			err = s.db.QueryRow(r.Context(), `
+				SELECT status FROM public.tpa_packages
+				WHERE tenant=$1 AND tpa_id=$2 AND client_id=$3 AND id=$4`,
+				tenant, org.ID, in.ClientID, in.PackageID).Scan(&pkgStatus)
+			if err != nil || pkgStatus != "READY" {
+				http.Error(w, `{"error":"package not found or not READY (all six documents must be ACCEPTED)"}`, http.StatusConflict)
+				return
+			}
+			var verified int
+			_ = s.db.QueryRow(r.Context(), `
+				SELECT count(*) FROM public.tpa_payment_methods
+				WHERE tenant=$1 AND client_id=$2 AND verified AND status='ACTIVE'`,
+				tenant, in.ClientID).Scan(&verified)
+			if verified == 0 {
+				http.Error(w, `{"error":"no verified payment method for this client"}`, http.StatusConflict)
+				return
+			}
+		}
 	}
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
@@ -280,6 +318,12 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		  (tenant, case_id, tpa_id, client_id, initiating_party_name, initiating_party_type, filed_by_email)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
 		tenant, caseID, org.ID, in.ClientID, partyName, partyType, org.ContactEmail)
+	// Mark the validated package as consumed by this filing.
+	if in.PackageID != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			UPDATE public.tpa_packages SET status='FILED', case_id=$3, updated_at=now()
+			WHERE tenant=$1 AND id=$2`, tenant, in.PackageID, caseID)
+	}
 	// Attribute the intake-fee payment row: paid by the TPA on behalf of the party.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,

@@ -636,6 +636,17 @@ func main() {
 		r.Get("/tpa/dashboard", s.tpaDashboard)             // status of all my clients' disputes
 		r.Get("/admin/tpas", s.adminListTPAs)               // state oversight
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus) // suspend|reactivate
+		// TPA onboarding (tpa_onboarding.go): profile -> payment -> 6-doc package.
+		r.Put("/tpa/clients/{clientId}/profile", s.tpaUpdateClientProfile)
+		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)            // bulk roster (CSV)
+		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment)     // CARD/ACH rail
+		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
+		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)
+		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)        // one slot
+		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)   // one giant PDF
+		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)          // slot verdict grid
+		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                // ZIP of client folders
+		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)

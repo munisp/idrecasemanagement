@@ -797,6 +797,7 @@ const Views = (() => {
     fraud_signals: "Fraud-signal surface (oversight)",
     network_adequacy: "Network-adequacy evidence",
     letter_citation: "Determination-letter auto-citation",
+    tpa_onboarding: "TPA onboarding (profile + payment + 6-doc packages)",
   };
 
   async function featuresAdmin() {
@@ -4371,6 +4372,23 @@ const Views = (() => {
       <span class="muted">File, pay, and track disputes on behalf of your initiating parties</span></div>
       <div id="tpa-org"></div>
       <div id="tpa-body" style="display:none">
+        ${App.feature("tpa_onboarding") ? `
+        <div class="card"><h2>Onboarding — readiness board</h2>
+          <p class="muted">Each initiating party needs a verified profile (NPI/TIN/address), a payment rail (card or ACH), and a validated six-document package before you can file for them.</p>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaImportFn(this)">
+            <input name="file" type="file" accept=".csv,text/csv" required />
+            <button class="mini">Import roster (CSV)</button></form>
+          <p class="muted">CSV header: <code>party_name,party_type,contact_email,npi,tin,address</code>. Every row is validated on its own — the report shows per-row results.</p>
+          <div id="tpa-import-result"></div>
+          <div id="tpa-onboarding"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>Onboarding — bulk packages (ZIP)</h2>
+          <p class="muted">One ZIP, many clients: top-level folder = client's organization name. Inside each folder, either six files whose names map to the required slots (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code> containing all six — it's split and validated page by page.</p>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaZipFn(this)">
+            <input name="file" type="file" accept=".zip,application/zip" required />
+            <button class="mini">Upload packages ZIP</button></form>
+          <div id="tpa-zip-result"></div></div>
+        <div class="card" id="tpa-pkg-card" style="display:none"><h2>Package — slot verdicts</h2>
+          <div id="tpa-pkg"></div></div>` : ""}
         <div class="card"><h2>Initiating parties (clients)</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaAddClientFn(this)">
             <input name="party_name" placeholder="organization name" required />
@@ -4381,6 +4399,7 @@ const Views = (() => {
         <div class="card"><h2>File a dispute on behalf of a client</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
             <select name="client_id" id="tpa-file-client" required></select>
+            <select name="package_id" id="tpa-file-package"><option value="">— no package —</option></select>
             <input name="contact_name" placeholder="client contact for this dispute" />
             <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
             <input name="notes" placeholder="notes" />
@@ -4411,6 +4430,7 @@ const Views = (() => {
         <div class="muted">${esc(r.tpa.contact_email)} · ${badge(r.tpa.status)}</div></div></div>`;
       document.getElementById("tpa-body").style.display = "";
       tpaClientsBox(); tpaDashBox(); tpaBatchesBox();
+      if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
       const bref = document.getElementById("tpa-bulk-ref");
       if (bref && !bref.value) bref.value = "TPA-" + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
@@ -4423,6 +4443,153 @@ const Views = (() => {
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) tpaAdminBox();
+  }
+
+  async function tpaOnboardingBox() {
+    const box = document.getElementById("tpa-onboarding");
+    if (!box) return;
+    try {
+      const r = await Api.program.tpaOnboarding();
+      const cs = r.clients || [];
+      const readyPkgs = [];
+      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr>
+          <th>Party</th><th>Profile</th><th>Payment</th><th>Package</th><th>Onboarding</th><th>Actions</th></tr></thead><tbody>
+        ${cs.map((c) => {
+          (c.open_packages || []).forEach((p) => { if (p.status === "READY") readyPkgs.push({ client: c.client_id, id: p.id, name: c.party_name }); });
+          return `<tr><td>${esc(c.party_name)}<br><span class="muted">${badge(c.party_type)}</span></td>
+          <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}</td>
+          <td>${c.verified_payments > 0 ? badge(c.verified_payments + " VERIFIED") : badge("NONE")}</td>
+          <td>${c.ready_packages > 0 ? badge(c.ready_packages + " READY") : badge("NONE")}</td>
+          <td>${badge(c.onboarding_status)}</td>
+          <td>
+            <button class="mini" onclick="Views.tpaProfileForm('${c.client_id}')">Profile</button>
+            <button class="mini" onclick="Views.tpaPaymentForm('${c.client_id}')">Payment</button>
+            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','DISCRETE')">6-file package</button>
+            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','MERGED')">Merged PDF</button>
+            ${(c.open_packages || []).map((p) => `<button class="mini" onclick="Views.tpaPackageBox('${p.id}')">${esc(p.mode)} ${esc(p.status)}</button>`).join("")}
+          </td></tr>`;
+        }).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one below or import a roster CSV.</p>';
+      // READY packages feed the filing form.
+      const sel = document.getElementById("tpa-file-package");
+      if (sel) sel.innerHTML = `<option value="">— no package (only for non-onboarded clients) —</option>` +
+        readyPkgs.map((p) => `<option value="${p.id}" data-client="${p.client}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaImportFn(form) {
+    const out = document.getElementById("tpa-import-result");
+    try {
+      const r = await Api.program.tpaImportClients(form.file.files[0]);
+      out.innerHTML = `<p class="ok">Imported ${r.imported} of ${r.total} rows.</p>
+        <table class="tbl"><thead><tr><th>Row</th><th>Party</th><th>Result</th></tr></thead><tbody>
+        ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.party_name || "—")}</td>
+          <td>${x.ok ? badge("IMPORTED") : `<span class="error">${esc(x.error || "failed")}</span>`}</td></tr>`).join("")}</tbody></table>`;
+      form.reset(); tpaOnboardingBox(); tpaClientsBox();
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaProfileForm(clientId) {
+    const v = await UI.modal({ title: "Client profile", submitLabel: "Save profile", fields: [
+      { name: "npi", label: "NPI (10 digits, Luhn-checked)", required: true, placeholder: "1234567893" },
+      { name: "tin", label: "TIN (9 digits)", required: true, placeholder: "123456789" },
+      { name: "address", label: "Address", type: "textarea", required: true },
+    ]});
+    if (!v) return;
+    try {
+      const r = await Api.program.tpaClientProfile(clientId, {
+        npi: v.npi.trim(), tin: v.tin.trim(), address: v.address.trim() });
+      tpaOnboardingBox();
+      alert("Profile saved — onboarding: " + r.onboarding_status);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function tpaPaymentForm(clientId) {
+    let methods = [];
+    try { methods = (await Api.program.tpaPayments(clientId)).payment_methods || []; } catch { /* none yet */ }
+    if (methods.length) {
+      alert("Existing rails:\n" + methods.map((m) =>
+        `${m.method} ${m.label || ""} ${m.method === "ACH" ? "routing " + m.routing : m.brand} ····${m.last4} — ${m.verified ? "VERIFIED" : "PENDING"}`).join("\n"));
+    }
+    const v = await UI.modal({ title: "Add payment rail", submitLabel: "Add rail", fields: [
+      { name: "method", label: "Method", options: [["CARD", "Credit card"], ["ACH", "ACH debit"]] },
+      { name: "label", label: "Label", placeholder: "Operating account" },
+      { name: "processor_ref", label: "Card: processor token ref", placeholder: "tok_... (never a raw card number)" },
+      { name: "brand", label: "Card brand", placeholder: "VISA" },
+      { name: "routing", label: "ACH: routing number (9 digits)", placeholder: "021000021" },
+      { name: "last4", label: "Last 4", required: true, placeholder: "1234" },
+      { name: "auth_received", label: "ACH: type 'YES' to confirm debit authorization captured", placeholder: "YES" },
+    ]});
+    if (!v) return;
+    try {
+      const r = await Api.program.tpaAddPayment(clientId, {
+        method: v.method, label: v.label, brand: v.brand,
+        last4: (v.last4 || "").trim(), routing: (v.routing || "").trim(),
+        processor_ref: (v.processor_ref || "").trim(),
+        auth_received: (v.auth_received || "").trim().toUpperCase() === "YES" });
+      tpaOnboardingBox();
+      alert("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function tpaPackageStart(clientId, mode) {
+    try {
+      const r = await Api.program.tpaCreatePackage(clientId, mode);
+      tpaPackageBox(r.package_id);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function tpaPackageBox(packageId) {
+    const card = document.getElementById("tpa-pkg-card");
+    const box = document.getElementById("tpa-pkg");
+    if (!card || !box) return;
+    card.style.display = "";
+    try {
+      const p = await Api.program.tpaPackage(packageId);
+      box.innerHTML = `<p>${badge(p.status)} · mode ${esc(p.mode)} · package <code>${esc(packageId)}</code>
+          <button class="mini" onclick="Views.tpaPackageBox('${packageId}')">Refresh</button></p>
+        <table class="tbl"><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>Upload</th></tr></thead><tbody>
+        ${p.slots.map((s) => `<tr><td><code>${esc(s.slot)}</code></td>
+          <td>${esc(s.filename || "—")}${s.page_start ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
+          <td>${badge(s.status)}</td>
+          <td class="muted">${(s.reasons || []).map((r2) => esc(r2.code + ": " + r2.detail)).join("; ") || "—"}</td>
+          <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
+            ? `<input type="file" id="pkg-${s.slot}" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this)" />` : ""}</td>
+        </tr>`).join("")}</tbody></table>
+        ${p.mode === "MERGED" && ["ASSEMBLING", "REJECTED"].includes(p.status) ? `
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaMergedFn(this,'${packageId}')">
+            <input name="file" type="file" accept=".pdf,application/pdf" required />
+            <button class="mini">Upload merged PDF</button></form>` : ""}
+        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when filing.</p>' : ""}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaSlotUpload(packageId, slot, input) {
+    if (!input.files[0]) return;
+    try {
+      await Api.program.tpaAttachDoc(packageId, slot, input.files[0]);
+      setTimeout(() => tpaPackageBox(packageId), 300);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function tpaMergedFn(form, packageId) {
+    try {
+      await Api.program.tpaUploadMerged(packageId, form.file.files[0]);
+      form.reset();
+      setTimeout(() => tpaPackageBox(packageId), 1500); // splitter is async
+    } catch (e) { alert(e.message); }
+  }
+
+  async function tpaZipFn(form) {
+    const out = document.getElementById("tpa-zip-result");
+    try {
+      const r = await Api.program.tpaBulkPackages(form.file.files[0]);
+      out.innerHTML = `<table class="tbl"><thead><tr><th>Client</th><th>Package</th><th>Attached</th><th>Errors</th></tr></thead><tbody>
+        ${(r.reports || []).map((x) => `<tr><td>${esc(x.client)}</td>
+          <td>${x.package_id ? `<code>${esc(x.package_id.slice(0, 8))}</code> ${esc(x.mode)}` : "—"}</td>
+          <td>${(x.attached || []).map(esc).join(", ") || "—"}</td>
+          <td class="error">${(x.errors || []).map(esc).join("; ") || ""}</td></tr>`).join("")}</tbody></table>`;
+      form.reset(); tpaOnboardingBox();
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
   async function tpaClaimFn(form) {
@@ -4460,7 +4627,8 @@ const Views = (() => {
     const out = document.getElementById("tpa-file-result");
     try {
       const r = await Api.program.tpaIntake({
-        client_id: form.client_id.value, contact_name: form.contact_name.value,
+        client_id: form.client_id.value, package_id: form.package_id ? form.package_id.value : "",
+        contact_name: form.contact_name.value,
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? "Payment link sent to your TPA email." : ""}</p>`;
@@ -4923,5 +5091,5 @@ async function railAttachAuthFn(id) {
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, correctField, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, correctCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railAttachAuthFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn, offerForm, determinationForm, caseOffers, batchableModal, insightsView, featuresAdmin, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, correctField, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, correctCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, mailLog, mailLogFilter, mailLogBody, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railAttachAuthFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn, offerForm, determinationForm, caseOffers, batchableModal, insightsView, featuresAdmin, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm };
 })();
