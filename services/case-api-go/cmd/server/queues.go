@@ -11,6 +11,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -99,14 +100,19 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 		       c.disputed_amount_cents, v.discipline, v.status AS review_status,
 		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at
 		FROM public.specialty_reviews v
-		JOIN tenant_%s.cases c ON c.id = v.case_id
+		JOIN tenant_%s.cases c ON c.id::text = v.case_id
 		WHERE v.tenant=$1 AND v.discipline=$2`, sanitizeTenant(tenant))
 	args := []any{tenant, discipline}
 	if !showAll {
 		q += ` AND v.status <> 'COMPLETE'`
 	}
 	q += ` ORDER BY v.requested_at LIMIT 500`
-	rows, _ := s.queryRows(r, q, args...)
+	rows, err := s.queryRows(r, q, args...)
+	if err != nil {
+		slog.Error("query failed", "handler", "queues.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "discipline": discipline})
 }
 
@@ -186,12 +192,17 @@ func (s *server) pmQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, _ := s.queryRows(r, fmt.Sprintf(`
+	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT e.id, e.case_id, c.case_number, c.status, c.service_line,
 		       c.disputed_amount_cents, e.clock, e.level, e.escalated_to, e.detail, e.created_at
 		FROM public.escalations e
-		JOIN tenant_%s.cases c ON c.id = e.case_id
+		JOIN tenant_%s.cases c ON c.id::text = e.case_id
 		WHERE e.tenant=$1 AND c.status NOT LIKE 'CLOSED%%'
 		ORDER BY e.created_at DESC LIMIT 200`, sanitizeTenant(tenant)), tenant)
+	if err != nil {
+		slog.Error("query failed", "handler", "queues.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "discipline": "PM"})
 }
