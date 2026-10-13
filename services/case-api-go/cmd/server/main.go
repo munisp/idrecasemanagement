@@ -652,6 +652,22 @@ func main() {
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Get("/correspondence", s.listMailJournal)                          // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
+
+		// Double-blind offers (45 CFR 149.520(b)) + specialty review queues +
+		// authenticated party workspace.
+		r.Post("/cases/{caseId}/offers", s.submitOffer)               // vault-sealed; window-gated
+		r.Get("/cases/{caseId}/offers", s.listOffers)                 // metadata for all; amounts post-reveal
+		r.Post("/cases/{caseId}/offers/reveal", s.revealOffers)       // ARBITRATOR; vault re-verifies
+		r.Post("/cases/{caseId}/determination", s.issueDetermination) // baseball-style: select one offer
+		r.Post("/cases/{caseId}/reviews", s.requestReview)            // CODING|CLINICAL|LEGAL worklist entry
+		r.Get("/queues/{discipline}", s.reviewQueue)                  // specialist worklist
+		r.Post("/reviews/{reviewId}/claim", s.claimReview)
+		r.Post("/reviews/{reviewId}/complete", s.completeReview)      // fires the workflow signal
+		r.Get("/queues/pm", s.pmQueue)                                // escalations needing PM attention
+		r.Post("/cases/{caseId}/party-invites", s.inviteParty)        // provision Keycloak party account
+		r.Get("/cases/{caseId}/party-accounts", s.listPartyAccounts)
+		r.Get("/party/cases", s.partyCases)                           // party workspace
+		r.Get("/party/cases/{caseId}", s.partyCaseDetail)
 		r.Get("/qa", s.qaQueue)                                  // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
@@ -736,6 +752,11 @@ func main() {
 	r.Patch("/api/share/{token}/uploads/{uploadId}", s.shareUploadChunk) // next chunk
 	r.Post("/api/share/{token}/uploads/{uploadId}/complete", s.shareCompleteUpload)
 	r.Get("/api/share/{token}/download", s.shareDownload) // Range/resume supported
+
+	// Vault reveal-check oracle (no OIDC; X-Internal-Auth == VAULT_INTERNAL_TOKEN
+	// is the auth). The vault calls this before decrypting any offer — reveals
+	// only a boolean + reason header, no case data.
+	r.Get("/internal/reveal-check/{tenant}/{caseId}", s.revealCheck)
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
