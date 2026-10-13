@@ -647,6 +647,23 @@ func main() {
 		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)          // slot verdict grid
 		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                // ZIP of client folders
 		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
+		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
+		r.Post("/hp/claim", s.claimHealthPlan)
+		r.Get("/hp/me", s.hpMe)
+		r.Post("/hp/parties", s.hpAddParty)
+		r.Put("/hp/parties/{partyId}/profile", s.hpUpdatePartyProfile)
+		r.Post("/hp/parties/import", s.hpImportPartiesCSV)
+		r.Post("/hp/parties/{partyId}/payments", s.hpAddPayment)
+		r.Get("/hp/parties/{partyId}/payments", s.hpListPayments)
+		r.Post("/hp/parties/{partyId}/packages", s.hpCreatePackage)
+		r.Post("/hp/packages/{packageId}/docs", s.hpAttachDoc)
+		r.Post("/hp/packages/{packageId}/merged", s.hpUploadMerged)
+		r.Get("/hp/packages/{packageId}", s.hpPackageStatus)
+		r.Post("/hp/packages/bulk", s.hpUploadBulkZip)
+		r.Get("/hp/onboarding", s.hpOnboardingBoard)
+		r.Post("/hp/intake", s.hpIntake)
+		r.Get("/admin/healthplans", s.adminListHealthPlans)
+		r.Post("/admin/healthplans/{planId}/status", s.adminSetHealthPlanStatus)
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)     // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)    // past reviews (G2)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
@@ -787,6 +804,7 @@ func main() {
 	// Public pre-case intake for programmed tenants (no OIDC; per-IP throttled).
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
+	r.Post("/api/public/healthplan/register", s.registerHealthPlan)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
 	// intakes to INELIGIBLE and raises staff notifications for the letters.

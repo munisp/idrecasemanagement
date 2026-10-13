@@ -162,6 +162,7 @@
     links.push(["#/checks", "◧", "Checks"]);
   }
   if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
+  if (App.feature("healthplan_onboarding") && has("HEALTH_PLAN", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/healthplan", "⛃", "Health plan"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
@@ -311,6 +312,7 @@
     [/^#\/recon$/, Views.reconView],
     [/^#\/checks$/, Views.checksView],
     [/^#\/tpa$/, Views.tpaView],
+    [/^#\/healthplan$/, Views.hpView],
     [/^#\/rules$/, Views.rulesAdmin],
     [/^#\/team$/, Views.teamAdmin],
     [/^#\/mail$/, Views.mailLog],
