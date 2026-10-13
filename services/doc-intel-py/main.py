@@ -111,6 +111,10 @@ def fire_doc_rules(evt: dict, kind: str, subj_id: str, ctx: dict) -> None:
                   file=sys.stderr, flush=True)
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
+# Per deployment: idre and idre-prod share one MinIO and one OpenSearch on
+# the dev cluster, so each reads its own bucket and indexes into its own names.
+DOC_BUCKET = os.environ.get("DOC_BUCKET", "idre-docs")
+DOC_INDEX_PREFIX = os.environ.get("DOC_INDEX_PREFIX", "idre-docs")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
 # Vault enforces X-Internal-Auth on every route when VAULT_INTERNAL_TOKEN is
 # set on its side — both sides must agree (compose wires one shared value).
@@ -146,7 +150,7 @@ search = OpenSearch(
 
 def fetch_and_decrypt(tenant: str, object_key: str) -> bytes:
     import base64
-    ct = minio.get_object("idre-docs", object_key).read()
+    ct = minio.get_object(DOC_BUCKET, object_key).read()
     resp = httpx.post(f"{VAULT}/docs/open", timeout=60, headers=VAULT_HEADERS, json={
         "tenant": tenant, "key": object_key, "data_b64": base64.b64encode(ct).decode(),
     })
@@ -844,7 +848,7 @@ def persist(evt: dict, ctx: dict) -> None:
     # (confirmed live: it did, before this was guarded).
     try:
         search.index(
-            index=f"idre-docs-{evt['tenant']}",
+            index=f"{DOC_INDEX_PREFIX}-{evt['tenant']}",
             id=evt["doc_id"],
             # stage_index builds the searchable body; fall back to raw fields if
             # the pipeline stopped before indexing (e.g. early ERROR paths).
@@ -1116,7 +1120,7 @@ def main() -> None:
             n = learning.load_active(c)
             if n:
                 print(f"doc-intel learning: {n} active label synonyms loaded", flush=True)
-        learning.start_learning_loop(lambda: psycopg.connect(DSN), search)
+        learning.start_learning_loop(lambda: psycopg.connect(DSN), search, f"{DOC_INDEX_PREFIX}-*")
     except Exception as exc:  # noqa: BLE001
         print(f"doc-intel learning: startup skipped: {exc}", flush=True)
 

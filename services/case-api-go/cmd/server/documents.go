@@ -26,8 +26,15 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// The documents bucket and the search-index prefix are per deployment, so two
+// deployments sharing one MinIO and one OpenSearch (idre and idre-prod on the
+// dev cluster) keep their files and search results apart.
+var (
+	docBucket      = envOr("DOC_BUCKET", "idre-docs")
+	docIndexPrefix = envOr("DOC_INDEX_PREFIX", "idre-docs")
+)
+
 const (
-	docBucket      = "idre-docs"
 	maxDocBytes    = 100 << 20 // 100 MB hard cap
 	retentionYears = 6         // federal retention mandate
 	// tenantStorageQuota bounds cumulative document bytes per tenant (25 GiB).

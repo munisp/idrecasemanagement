@@ -64,7 +64,7 @@ func osSearchBody(query string) []byte {
 	return b
 }
 
-// searchDocsOpenSearch queries idre-docs-{tenant} for full-text matches.
+// searchDocsOpenSearch queries <docIndexPrefix>-{tenant} for full-text matches.
 // ok=false means "cluster unavailable" — callers silently skip doc hits.
 func (s *server) searchDocsOpenSearch(ctx context.Context, tenant, query string) (hits []docSearchHit, ok bool) {
 	if s.cfg.OpenSearchURL == "" || strings.TrimSpace(query) == "" {
@@ -72,7 +72,7 @@ func (s *server) searchDocsOpenSearch(ctx context.Context, tenant, query string)
 	}
 	// Index name carries the tenant code doc-intel wrote with; sanitizeTenant
 	// guarantees [a-z0-9], which is also a legal index suffix.
-	url := fmt.Sprintf("%s/idre-docs-%s/_search", strings.TrimRight(s.cfg.OpenSearchURL, "/"), sanitizeTenant(tenant))
+	url := fmt.Sprintf("%s/%s-%s/_search", strings.TrimRight(s.cfg.OpenSearchURL, "/"), docIndexPrefix, sanitizeTenant(tenant))
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(osSearchBody(query)))

@@ -50,8 +50,9 @@ minio = Minio(
     secure=False,
 )
 
-TEMPLATE_BUCKET = "idre-templates"
-DOC_BUCKET = "idre-docs"
+# Per deployment: idre and idre-prod share one MinIO on the dev cluster.
+TEMPLATE_BUCKET = os.environ.get("TEMPLATE_BUCKET", "idre-templates")
+DOC_BUCKET = os.environ.get("DOC_BUCKET", "idre-docs")
 
 
 def features_for(tenant: str) -> dict:
