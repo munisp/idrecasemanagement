@@ -862,3 +862,22 @@ def test_a_badly_scanned_page_with_nothing_found_is_unreadable_not_unrelated():
 def test_turned_pages_are_reported():
     ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 10.0}, "pages_turned": [(1, 180)], "text": "Billed 10.00"}, {}, None)
     assert any("upside down and was turned" in f["issue"] for f in ctx["findings"])
+
+
+def test_a_crooked_page_is_straightened_and_a_straight_one_left_alone():
+    from PIL import Image, ImageDraw, ImageFont
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 30)
+    except OSError:
+        pytest.skip("no TrueType font to draw a test page")
+    page = Image.new("L", (1700, 2200), 255)
+    d = ImageDraw.Draw(page)
+    for i in range(28):
+        d.text((120, 120 + i * 70), f"Line {i}: Office visit 99215 billed $1,450.00 allowed $330.00", fill=0, font=font)
+    assert pl.skew_degrees(page) == 0.0
+    crooked = page.rotate(-5, resample=Image.BICUBIC, fillcolor=255)
+    assert abs(abs(pl.skew_degrees(crooked)) - 5) <= 0.5
+    fixed, done = pl.straighten_pages([crooked, page])
+    assert [p for p, _ in done] == [1] and abs(pl.skew_degrees(fixed[0])) <= 0.5
+    ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 1.0}, "pages_straightened": [(1, -5.0)], "text": "1.00"}, {}, None)
+    assert any("crooked (5.0°)" in f["issue"] for f in ctx["findings"])

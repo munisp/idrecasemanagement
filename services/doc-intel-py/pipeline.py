@@ -285,6 +285,50 @@ def image_bytes(pages: list[Image.Image], raw: bytes) -> bytes:
     return buf.getvalue()
 
 
+def skew_degrees(img: Image.Image, span: float = 12.0) -> float:
+    """How far a page's text lines are tilted, in degrees (0 when straight or
+    when it cannot tell). Tries small rotations and keeps the one where the
+    rows of text line up sharpest (the variance of the row ink totals peaks).
+    A page is only called crooked when that beats leaving it as it is by a
+    clear margin, so a dark or speckled page is not turned on noise."""
+    import cv2
+    import numpy as np
+
+    g = np.asarray(img.convert("L"))
+    scale = 1000 / max(g.shape)
+    if scale < 1:
+        g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    ink = cv2.adaptiveThreshold(g, 1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 15).astype(np.float32)
+    if ink.sum() < 500 or ink.mean() > 0.4:
+        return 0.0
+    h, w = ink.shape
+
+    def score(a: float) -> float:
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), float(a), 1.0)
+        return float(np.var(cv2.warpAffine(ink, m, (w, h), flags=cv2.INTER_NEAREST, borderValue=0).sum(axis=1)))
+
+    coarse = max(np.arange(-span, span + 0.01, 0.5), key=score)
+    fine = max(np.arange(coarse - 0.5, coarse + 0.51, 0.1), key=score)
+    if score(fine) < 1.15 * score(0.0):
+        return 0.0
+    return round(float(fine), 1)
+
+
+def straighten_pages(pages: list[Image.Image]) -> tuple[list[Image.Image], list[tuple[int, float]]]:
+    """Straighten pages fed in crooked (1 degree or more): (pages, [(page number, degrees)]).
+    Read crooked, a form's labels and values drift onto other lines and a
+    model may not recognise it as a bill at all."""
+    out, done = [], []
+    for i, p in enumerate(pages):
+        a = skew_degrees(p)
+        if abs(a) >= 1.0:
+            fill = 255 if p.mode in ("L", "1") else (255, 255, 255)
+            p = (p if p.mode in ("L", "RGB") else p.convert("RGB")).rotate(a, resample=Image.BICUBIC, fillcolor=fill)
+            done.append((i + 1, a))
+        out.append(p)
+    return out, done
+
+
 def upright_pages(pages: list[Image.Image]) -> tuple[list[Image.Image], list[tuple[int, int]]]:
     """upright() over every page: (pages, [(page number, degrees turned)])."""
     out, turned = [], []
@@ -1380,6 +1424,8 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     for page, deg in ctx.get("pages_turned", []):
         how = "upside down" if deg == 180 else "sideways"
         findings.append({"field": None, "issue": f"Page {page} was {how} and was turned the right way up before reading"})
+    for page, deg in ctx.get("pages_straightened", []):
+        findings.append({"field": None, "issue": f"Page {page} was fed in crooked ({abs(deg):.1f}°) and was straightened before reading"})
     if ctx.get("watermark_removed"):
         findings.append({"field": None, "issue": "Periodic watermark/stamp background detected and removed before OCR — extraction used the recovered text layer"})
     # Ambiguous classification: the winning type barely beat the runner-up.

@@ -24,7 +24,8 @@ from minio import Minio
 from opensearchpy import OpenSearch
 
 from eobshape import as_lines, as_money, as_text, line_text, lines_text
-from pipeline import ModelUnavailable, bytes_to_pages, image_bytes, ooxml_safe, run_pipeline, sniff_doc_kind, upright_pages
+from pipeline import (ModelUnavailable, bytes_to_pages, image_bytes, ooxml_safe, run_pipeline, sniff_doc_kind,
+                      straighten_pages, upright_pages)
 from rules_engine import expand_template, fire_rules, load_rules
 from check_processor import extract_check
 import learning
@@ -751,17 +752,20 @@ def process(evt: dict) -> None:
     # A page faxed upside down or sideways is turned the right way up before
     # anything reads it: read as it came, its values landed in the wrong
     # fields (a claim number as the provider).
-    turned = []
+    # Crooked pages are straightened the same way.
+    turned, straightened = [], []
     if pages:
         try:
             pages, turned = upright_pages(pages)
-            if turned:
+            pages, straightened = straighten_pages(pages)
+            if turned or straightened:
                 raw = image_bytes(pages, raw)
         except Exception as exc:  # noqa: BLE001 -- turning is an aid; reading goes on without it
             print(f"doc-intel: could not check page orientation: {exc}", file=sys.stderr, flush=True)
-            turned = []
+            turned, straightened = [], []
     ctx = {
         "pages_turned": turned,
+        "pages_straightened": straightened,
         "filename": evt.get("object_key", ""),
         "raw_bytes": raw,                                   # Docling parses bytes directly
         "content_type": evt.get("content_type", ""),
