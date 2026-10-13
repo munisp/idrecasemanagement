@@ -132,6 +132,13 @@
     document.getElementById("body").insertBefore(bar, view);
   }
 
+  // Per-tenant feature flags (server-enforced; this only hides the UI).
+  // Absent flag = on. Loaded fresh on each full boot; a toggle applies on
+  // next reload — the server gate applies immediately.
+  let FEATURES = {};
+  try { FEATURES = (await Api.program.get()).features || {}; } catch { FEATURES = {}; }
+  const feature = (n) => FEATURES[n] !== false;
+
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
   const has = (...rs) => Auth.can(...rs);
   // "New dispute" (#/new) only fits the federal NSA process -- CMS case
@@ -159,13 +166,15 @@
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
   if (!has("TPA") && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
   // Party workspace: an invited party's own disputes (party_accounts is the only source of access).
-  if (has("PARTY")) links.push(["#/party", "⚭", "My disputes"]);
+  if (has("PARTY") && feature("party_workspace")) links.push(["#/party", "⚭", "My disputes"]);
   // Specialty review queues: each specialist sees their own, the PM all three
-  // (matches queues.go's per-discipline roles).
-  if (has("CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/CODING", "⌗", "Coding queue"]);
-  if (has("NURSE_PHYSICIAN", "DOCTOR", "NURSE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/CLINICAL", "✚", "Clinical queue"]);
-  if (has("ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/LEGAL", "§", "Legal queue"]);
-  if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/pm", "▲", "PM board"]);
+  // (matches queues.go's per-discipline roles). Off when the tenant's
+  // review_queues flag is off.
+  const queues = feature("review_queues");
+  if (queues && has("CODER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/CODING", "⌗", "Coding queue"]);
+  if (queues && has("NURSE_PHYSICIAN", "DOCTOR", "NURSE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/CLINICAL", "✚", "Clinical queue"]);
+  if (queues && has("ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/LEGAL", "§", "Legal queue"]);
+  if (queues && has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/pm", "▲", "PM board"]);
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
@@ -204,6 +213,7 @@
   }
   if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/rules", "§", "Rules"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
@@ -211,6 +221,8 @@
   if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   // Payment rails and OFAC screening: money screens, so the money roles (the page itself checks too).
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/payments", "🏦", "Payments"]);
+  // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
+  if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
@@ -360,8 +372,10 @@
     [/^#\/cases(\?.*)?$/, Views.cases],
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/cases\/([\w-]+)\/offers$/, (m) => Views.caseOffers(m[1])],
+    [/^#\/features$/, Views.featuresAdmin],
     [/^#\/queues\/pm$/, Views.pmQueueView],
     [/^#\/queues\/(CODING|CLINICAL|LEGAL)(\?.*)?$/, (m) => Views.queueView(m[1])],
+    [/^#\/insights$/, Views.insightsView],
     [/^#\/party$/, Views.partyCases],
     [/^#\/party\/cases\/([\w-]+)$/, (m) => Views.partyCaseDetail(m[1])],
     [/^#\/new$/, Views.newDispute],
@@ -456,7 +470,7 @@
   }
   // Soft refresh: re-render the current route without a full page reload
   // (no Keycloak round-trip, no shell flash, preserves rail/scroll context).
-  window.App = { rerender: render, canOpen };
+  window.App = { rerender: render, canOpen, feature };
   // Last-resort feedback net: any async handler that still throws without its
   // own try/catch surfaces as an error toast instead of failing silently.
   addEventListener("unhandledrejection", (e) => {

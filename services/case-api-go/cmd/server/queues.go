@@ -31,6 +31,9 @@ var disciplineMeta = map[string]struct {
 // requestReview: POST /cases/{caseId}/reviews — case staff request a
 // specialty review on a case (e.g. bundling dispute -> CODING).
 func (s *server) requestReview(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "review_queues") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires case staff"}`, http.StatusForbidden)
@@ -82,6 +85,9 @@ func (s *server) requestReview(w http.ResponseWriter, r *http.Request) {
 // every discipline; specialists see their own. Joins the tenant case for the
 // context a reviewer needs (number, service line, disputed amount, status).
 func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "review_queues") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	discipline := chi.URLParam(r, "discipline")
@@ -98,13 +104,24 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 	q := fmt.Sprintf(`
 		SELECT v.id, v.case_id, c.case_number, c.status, c.service_line,
 		       c.disputed_amount_cents, v.discipline, v.status AS review_status,
-		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at, v.completed_at
+		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at, v.completed_at,
+		       coalesce(c.details->>'diagnosis_codes','[]') AS diagnosis_codes,
+		       coalesce(c.details->>'bundling_suspected','') AS bundling_suspected
 		FROM public.specialty_reviews v
 		JOIN tenant_%s.cases c ON c.id::text = v.case_id
 		WHERE v.tenant=$1 AND v.discipline=$2`, sanitizeTenant(tenant))
 	args := []any{tenant, discipline}
 	if !showAll {
 		q += ` AND v.status <> 'COMPLETE'`
+	}
+	// ?issue=bundling narrows to bundling/unbundling disputes: cases an
+	// extracted document flagged (details.bundling_suspected, set by
+	// doc-intel from NCCI/modifier-59/bundling vocabulary) or whose recorded
+	// disputed issue mentions bundling.
+	if r.URL.Query().Get("issue") == "bundling" && s.featureEnabled(r, tenant, "bundling_filter") {
+		q += ` AND (coalesce(c.details->>'bundling_suspected','') = 'true'
+		            OR c.details->>'disputed_issue' ILIKE '%bundl%'
+		            OR c.details->>'issue' ILIKE '%bundl%')`
 	}
 	q += ` ORDER BY v.requested_at LIMIT 500`
 	rows, err := s.queryRows(r, q, args...)
@@ -118,12 +135,18 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 
 // claimReview: POST /reviews/{reviewId}/claim — specialist takes ownership.
 func (s *server) claimReview(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "review_queues") {
+		return
+	}
 	s.transitionReview(w, r, "IN_REVIEW")
 }
 
 // completeReview: POST /reviews/{reviewId}/complete — closes the review and
 // forwards the discipline's workflow signal (single writer, no divergence).
 func (s *server) completeReview(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "review_queues") {
+		return
+	}
 	s.transitionReview(w, r, "COMPLETE")
 }
 
@@ -186,6 +209,9 @@ func (s *server) transitionReview(w http.ResponseWriter, r *http.Request, target
 // Backed by the existing escalations table (auto-triggered above the program
 // amount threshold, plus manual escalations).
 func (s *server) pmQueue(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "review_queues") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires PM"}`, http.StatusForbidden)

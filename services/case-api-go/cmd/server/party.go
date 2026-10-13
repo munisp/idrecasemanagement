@@ -22,6 +22,9 @@ import (
 // Keycloak account for an external party representative and bind it to this
 // case + side. Re-inviting the same email for the same case is idempotent.
 func (s *server) inviteParty(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "party_workspace") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires case staff"}`, http.StatusForbidden)
@@ -104,6 +107,9 @@ func (s *server) inviteParty(w http.ResponseWriter, r *http.Request) {
 
 // partyCases: GET /party/cases — every case the authenticated party is mapped to.
 func (s *server) partyCases(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "party_workspace") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "PARTY") {
 		http.Error(w, `{"error":"forbidden: party accounts only"}`, http.StatusForbidden)
@@ -129,6 +135,9 @@ func (s *server) partyCases(w http.ResponseWriter, r *http.Request) {
 // determination outcome (post-issue), and this party's invoice obligations.
 // Offer amounts are never exposed here — listOffers handles that lawfully.
 func (s *server) partyCaseDetail(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "party_workspace") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "PARTY") {
 		http.Error(w, `{"error":"forbidden: party accounts only"}`, http.StatusForbidden)
@@ -171,6 +180,9 @@ func (s *server) partyCaseDetail(w http.ResponseWriter, r *http.Request) {
 // listPartyAccounts: GET /cases/{caseId}/party-accounts — staff visibility
 // over who holds party access to a case.
 func (s *server) listPartyAccounts(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "party_workspace") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)

@@ -10,9 +10,9 @@ package main
 // G6 (escalation auto-trigger), G11 (numbering).
 
 import (
-	"io"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -27,10 +27,10 @@ type FollowUp struct {
 }
 
 type ClockRule struct {
-	Name     string     `json:"name"`
-	Label    string     `json:"label"`
-	Basis    string     `json:"basis"` // key into program_dates (received_at, plan_notified_at, …)
-	Days     int        `json:"days"`
+	Name  string `json:"name"`
+	Label string `json:"label"`
+	Basis string `json:"basis"` // key into program_dates (received_at, plan_notified_at, …)
+	Days  int    `json:"days"`
 	// MaxDays: the contract's hard limit when it is longer than the target
 	// ("60 days, never more than 90"; "10 days, +3 for notification").
 	// Past Days the clock is late; past MaxDays it is in breach.
@@ -94,8 +94,8 @@ type ProgramConfig struct {
 	} `json:"escalation"`
 	NotesStreams     []string            `json:"notes_streams"`
 	NotesStreamRoles map[string][]string `json:"notes_stream_roles"`
-	FieldSchema  map[string][]string `json:"field_schema"`
-	Checklist    map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
+	FieldSchema      map[string][]string `json:"field_schema"`
+	Checklist        map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
 	// ChecklistOwners: checklist item -> the role that ticks it. An item
 	// with no owner here can be ticked by any case staff, as before.
 	ChecklistOwners map[string]string `json:"checklist_owners"`
@@ -140,7 +140,7 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	var label string
 	_ = s.db.QueryRow(r.Context(), `SELECT label FROM public.tenant_labels WHERE tenant=$1`, tenant).Scan(&label)
 	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label})
+		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label, "features": s.tenantFeatures(r, tenant)})
 		return
 	}
 	// The templates the portal offers: the standard ones as edited on the
@@ -155,7 +155,7 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isExternalOnly(p) {
 		cfg = publicProgram(cfg)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label})
+	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label, "features": s.tenantFeatures(r, tenant)})
 }
 
 // publicProgram is what an outside filer may know about the program: how

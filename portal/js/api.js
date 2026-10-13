@@ -75,6 +75,11 @@ const Api = (() => {
   };
   return {
     setTenant, getTenant, download,
+    analytics: {
+      payers: () => req("GET", `${t()}/analytics/payers`),
+      fraudSignals: () => req("GET", `${t()}/analytics/fraud-signals`),
+      networkAdequacy: () => req("GET", `${t()}/analytics/network-adequacy`),
+    },
     offers: {
       submit: (caseId, p) => req("POST", `${t()}/cases/${caseId}/offers`, p),
       list: (caseId) => req("GET", `${t()}/cases/${caseId}/offers`),
@@ -83,7 +88,7 @@ const Api = (() => {
     },
     reviews: {
       request: (caseId, p) => req("POST", `${t()}/cases/${caseId}/reviews`, p),
-      queue: (discipline, all) => req("GET", `${t()}/queues/${discipline}${all ? "?all=1" : ""}`),
+      queue: (discipline, all, issue) => req("GET", `${t()}/queues/${discipline}${all || issue ? `?${all ? "all=1&" : ""}${issue ? `issue=${issue}` : ""}`.replace(/&$/, "") : ""}`),
       pmQueue: () => req("GET", `${t()}/queues/pm`),
       claim: (id) => req("POST", `${t()}/reviews/${id}/claim`),
       complete: (id, note) => req("POST", `${t()}/reviews/${id}/complete`, { note }),
@@ -98,6 +103,7 @@ const Api = (() => {
       // Not tenant-scoped -- creates the /tenant/<xx> group a new tenant
       // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createTenant: (payload) => req("POST", "/v1/admin/tenants", payload),
+      setFeatures: (tenant, features) => req("PUT", `/v1/admin/tenants/${tenant}/features`, { features }),
       // Cross-tenant: creates a FEDERAL_ADMIN/PLATFORM_ADMIN account.
       // FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createFederalAdmin: (payload) => req("POST", "/v1/admin/federal-admins", payload),
@@ -134,6 +140,9 @@ const Api = (() => {
       get: (id) => req("GET", `${t()}/cases/${id}`),
       initiate: (payload) => req("POST", `${t()}/cases/initiate`, payload),
       signal: (id, signal, data) => req("POST", `${t()}/cases/${id}/signal`, { signal, data }),
+      benchmarks: (id) => req("GET", `${t()}/cases/${id}/benchmarks`),
+      winProbability: (id) => req("GET", `${t()}/cases/${id}/win-probability`),
+      batchable: (id) => req("GET", `${t()}/cases/${id}/batchable`),
       upload: (id, file, sealed, folder) => {
         const fd = new FormData();
         fd.append("file", file);

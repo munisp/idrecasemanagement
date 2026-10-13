@@ -54,6 +54,57 @@ TEMPLATE_BUCKET = "idre-templates"
 DOC_BUCKET = "idre-docs"
 
 
+def features_for(tenant: str) -> dict:
+    """Per-tenant feature toggles: any kept in the program settings
+    (config->'features', or the NG manifest) overlaid by public.tenant_features,
+    where case-api writes them. Absent = ON, matching case-api's gate."""
+    flags: dict = {}
+    try:
+        with psycopg.connect(DSN) as c:
+            row = c.execute("SELECT config FROM public.program_rules WHERE tenant=%s", (tenant,)).fetchone()
+            cfg = (row[0] if row else None) or {}
+            flags.update((cfg.get("manifest") or {}).get("features") or {})
+            flags.update(cfg.get("features") or {})
+            own = c.execute("SELECT features FROM public.tenant_features WHERE tenant=%s", (tenant,)).fetchone()
+            if own and own[0]:
+                flags.update(own[0])
+    except Exception:
+        pass
+    return flags
+
+
+def load_citations(tenant: str, case_id: str) -> dict:
+    """Determination-letter auto-citation: the extracted codes, denial date,
+    determination amount and rationale the letter relies on, flattened to
+    {citation_*} placeholders. Templates that lack them render unchanged —
+    templates that include them make the certified letter self-documenting."""
+    out: dict = {}
+    with psycopg.connect(DSN) as c:
+        det = c.execute(
+            """SELECT d.amount_cents, d.rationale, d.issued_at, o.party_id
+               FROM public.determinations d JOIN public.offers o ON o.id = d.selected_offer_id
+               WHERE d.tenant=%s AND d.case_id=%s""",
+            (tenant, case_id),
+        ).fetchone()
+        row = c.execute(
+            f"SELECT details FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),
+        ).fetchone()
+    details = (row[0] if row else {}) or {}
+    codes = sorted(set((details.get("cpt_codes") or []) + (details.get("hcpcs_codes") or [])))
+    if codes:
+        out["citation_codes"] = ", ".join(codes[:20])
+    if details.get("diagnosis_codes"):
+        out["citation_diagnoses"] = ", ".join(details["diagnosis_codes"][:20])
+    if details.get("eob_denial_date"):
+        out["citation_denial_date"] = str(details["eob_denial_date"])
+    if det:
+        out["citation_determination_amount"] = f"${(det[0] or 0) / 100:,.2f}"
+        out["citation_rationale"] = det[1] or ""
+        out["citation_prevailing_party"] = det[3] or ""
+        out["citation_issued_at"] = det[2].date().isoformat() if det[2] else ""
+    return out
+
+
 def load_case(tenant: str, case_id: str) -> dict:
     with psycopg.connect(DSN) as c:
         row = c.execute(
@@ -155,6 +206,8 @@ def handle(evt: dict) -> None:
     requested_by = evt.get("requested_by", "system")
     tpl = template_config(tenant, key)
     fields = load_case(tenant, case_id)
+    if key == "determination_letter" and features_for(tenant).get("letter_citation", True):
+        fields.update(load_citations(tenant, case_id))
 
     obj = minio.get_object(TEMPLATE_BUCKET, f"{tenant}/{key}.docx")
     merged = merge_docx(obj.read(), fields)

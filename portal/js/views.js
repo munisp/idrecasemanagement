@@ -885,11 +885,29 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
+  // 45 CFR 149.510(c): same payer + same/similar codes can batch into one IDR.
+  async function batchableModal(caseId) {
+    let d;
+    try { d = await Api.cases.batchable(caseId); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    const rows = d.batchable || [];
+    const usd = (c) => (c == null ? "—" : "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }));
+    await UI.modal({ title: "Batchable disputes", wide: true, submitLabel: "Close",
+      body: `<p>Same payer (<span class="mono">${esc(d.payer_id || "?")}</span>) with at least one extracted procedure code in common, still early enough to batch lawfully (45 CFR 149.510(c)).</p>` +
+        (rows.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Service line</th><th>QPA</th><th>Opened</th></tr></thead><tbody>` +
+          rows.map((r) => `<tr><td><a href="#/cases/${esc(r.id)}" class="mono">${esc(r.case_number)}</a></td><td>${badge(r.status)}</td><td>${esc(r.service_line || "—")}</td><td>${usd(r.qpa_cents)}</td><td>${fmtDate(r.opened_at)}</td></tr>`).join("") + `</tbody></table>`
+          : `<p class="muted">${esc(d.note || "No batchable disputes found.")}</p>`),
+      fields: [] });
+  }
+
   // ---- Sealed-offer arbitration panel (case staff / arbitrator) --------------
   async function caseOffers(caseId) {
-    let c, offers;
+    let c, offers, bench;
     try {
-      [c, offers] = await Promise.all([Api.cases.get(caseId), Api.offers.list(caseId)]);
+      [c, offers, bench, winp] = await Promise.all([
+        Api.cases.get(caseId), Api.offers.list(caseId),
+        Api.cases.benchmarks(caseId).catch(() => null),
+        Api.cases.winProbability(caseId).catch(() => null)]);
     } catch (e) { return `<div class="view-head"><h1>Offers</h1></div><p class="muted">${esc(e.message)}</p>`; }
     const usd = (c2) => "$" + ((Number(c2) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
     const rows = (offers.offers || offers || []);
@@ -912,6 +930,16 @@ const Views = (() => {
       }]);
     if (can("ARBITRATOR") && ["OFFERS_REVEALED", "SELECTION_FINALIZED"].includes(c.status))
       acts.push(["Issue determination", () => determinationForm(caseId)]);
+    const bl = (bench && bench.benchmarks) || [];
+    if (winp && winp.sufficient)
+      html += `<div class="card"><strong>Historical read:</strong> in ${winp.n} comparable determinations (${esc(winp.basis)}), the initiating party's offer prevailed ${winp.initiating_win_pct.toFixed(0)}% of the time.</div>`;
+    else if (winp && winp.note)
+      html += `<p class="muted">${esc(winp.note)}</p>`;
+    if (bl.length)
+      html += `<h2>QPA benchmarks — this tenant</h2>
+        <p class="muted">Distribution of qualifying payment amounts on this tenant's cases carrying the same extracted procedure codes. The QPA is the primary statutory reasonableness factor (45 CFR 149.520(b)(2)(ii)).</p>
+        <table class="tbl"><thead><tr><th>Code</th><th>Cases</th><th>P25</th><th>Median</th><th>P75</th></tr></thead><tbody>` +
+        bl.map((b) => `<tr><td class="mono">${esc(b.code)}</td><td>${b.n}</td><td>${usd(b.p25_cents)}</td><td><strong>${usd(b.median_cents)}</strong></td><td>${usd(b.p75_cents)}</td></tr>`).join("") + `</tbody></table>`;
     if (acts.length) html += `<div class="actions">` + acts.map((a, i) => `<button class="btn" data-act="${i}">${esc(a[0])}</button>`).join("") + `</div>`;
     return { html, wire: () => {
       document.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => acts[Number(b.dataset.act)][1]()));
@@ -927,20 +955,24 @@ const Views = (() => {
 
   async function queueView(discipline) {
     const meta = DISCIPLINES[discipline] || { title: "Review queue", blurb: "" };
+    const issue = new URLSearchParams((location.hash.split("?")[1] || "")).get("issue") || "";
     let rows;
-    try { rows = await Api.reviews.queue(discipline); }
+    try { rows = await Api.reviews.queue(discipline, false, issue); }
     catch (e) { return `<div class="view-head"><h1>${esc(meta.title)}</h1></div><p class="muted">${esc(e.message)}</p>`; }
     // The server answers {queue: [...]}: status is the CASE's status,
     // review_status the review's (REQUESTED / IN_REVIEW / COMPLETE).
     rows = rows.queue || rows.reviews || (Array.isArray(rows) ? rows : []);
     const usd = (c) => (c == null ? "—" : "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }));
+    const dxOf = (r) => { try { return typeof r.diagnosis_codes === "string" ? JSON.parse(r.diagnosis_codes) : (r.diagnosis_codes || []); } catch { return []; } };
+    const chip = (val, label) => `<a class="btn ${issue === val ? "" : "ghost"} sm" href="#/queues/${discipline}${val ? `?issue=${val}` : ""}">${label}</a>`;
     const html = `<div class="view-head"><h1>${esc(meta.title)}</h1>
-        <a class="btn ghost" href="#/queues/${discipline}?all=1" data-all>Show completed</a></div>
-      <p class="muted">${esc(meta.blurb)}</p>
+        <span class="chipbar">${chip("", "All issues")}${chip("bundling", "Bundling only")}
+        <a class="btn ghost sm" href="#" data-all>Show completed</a></span></div>
+      <p class="muted">${esc(meta.blurb)}${issue === "bundling" ? " Filtered to bundling/unbundling disputes — cases flagged by document analysis (NCCI edits, modifier 59, bundled-denial vocabulary) or with a bundling disputed issue on record." : ""}</p>
       <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Service line</th><th>Disputed</th><th>Review</th><th>Requested</th><th></th></tr></thead><tbody>` +
       (rows.length ? rows.map((r) => `<tr>
         <td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td>
-        <td>${badge(r.status || "")}</td><td>${esc(r.service_line || "—")}</td><td>${usd(r.disputed_amount_cents)}</td>
+        <td>${badge(r.status || "")}</td><td>${esc(r.service_line || "—")}${r.bundling_suspected === "true" ? ' <span class="badge s-flag" title="Bundling vocabulary detected in case documents">bundling</span>' : ""}<br><span class="muted mono" style="font-size:11px">${dxOf(r).slice(0, 6).map(esc).join(" ")}${dxOf(r).length > 6 ? " …" : ""}</span></td><td>${usd(r.disputed_amount_cents)}</td>
         <td>${badge(r.review_status)}${r.reviewer ? ` <span class="muted">${esc(r.reviewer)}</span>` : ""}${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
         <td>${fmtDate(r.requested_at)}</td>
         <td>${r.review_status === "REQUESTED" ? `<button class="btn sm" data-claim="${r.id}">Claim</button>`
@@ -1022,7 +1054,7 @@ const Views = (() => {
     let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>${badge(c.status)} ${badge(d.your_party)}</div>
       <p class="muted">${esc(c.service_line || "")} · disputed ${usd(c.disputed_amount_cents)} · opened ${fmtDate(c.opened_at)}</p>`;
     const acts = [];
-    if (["OFFER_WINDOW_OPEN"].includes(c.status)) acts.push(["Submit sealed offer", () => offerForm(c.id, d.your_party)]);
+    if (App.feature("sealed_offers") && ["OFFER_WINDOW_OPEN"].includes(c.status)) acts.push(["Submit sealed offer", () => offerForm(c.id, d.your_party)]);
     if (acts.length) html += `<div class="actions">` + acts.map((a, i) => `<button class="btn" data-act="${i}">${esc(a[0])}</button>`).join("") + `</div>`;
     if (d.determination)
       html += `<h2>Determination</h2><div class="card"><p><strong>${usd(d.determination.amount_cents)}</strong> — issued ${fmtDate(d.determination.issued_at)}</p>
@@ -1066,6 +1098,79 @@ const Views = (() => {
         fields: [] });
       App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // ---- Insights: downstream analytics (oversight + staff) ---------------------
+  async function insightsView() {
+    const usd = (c) => (c == null ? "—" : "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 0 }));
+    let html = `<div class="view-head"><h1>Insights</h1></div>
+      <p class="muted">Patterns computed from extracted document data and the determination record. Tenant-isolated; parties never see any of this.</p>`;
+    if (App.feature("payer_analytics")) {
+      const payers = (await Api.analytics.payers().catch(() => ({ payers: [] }))).payers || [];
+      html += `<h2>Payer denial patterns</h2><table class="tbl"><thead><tr><th>Payer</th><th>Disputes</th><th>Resolved</th><th>Bundling</th><th>Necessity</th><th>Duplicates</th><th>Avg disputed</th><th>Avg denial→filing</th></tr></thead><tbody>` +
+        (payers.length ? payers.map((r) => `<tr><td class="mono">${esc(r.payer_id)}</td><td>${r.disputes}</td><td>${r.resolved}</td><td>${r.bundling_flags}</td><td>${r.necessity_flags}</td><td>${r.duplicate_flags}</td><td>${usd(r.avg_disputed_cents)}</td><td>${r.avg_denial_to_filing_days ?? "—"}d</td></tr>`).join("")
+          : `<tr><td colspan="8" class="muted">No payer data yet.</td></tr>`) + `</tbody></table>`;
+    }
+    if (App.feature("fraud_signals") && can("STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+      const prov = (await Api.analytics.fraudSignals().catch(() => ({ providers: [] }))).providers || [];
+      html += `<h2>Provider tripwire clusters <span class="muted">(oversight surface — patterns for human review, not accusations)</span></h2>
+        <table class="tbl"><thead><tr><th>Provider</th><th>Disputes</th><th>Necessity flags</th><th>Duplicate claims</th><th>Bundling</th><th>Avg QPA</th></tr></thead><tbody>` +
+        (prov.length ? prov.map((r) => `<tr><td class="mono">${esc(r.provider_id)}</td><td>${r.disputes}</td><td>${r.necessity_flags}</td><td>${r.duplicate_claims}</td><td>${r.bundling_flags}</td><td>${usd(r.avg_qpa_cents)}</td></tr>`).join("")
+          : `<tr><td colspan="6" class="muted">No tripwires triggered.</td></tr>`) + `</tbody></table>`;
+    }
+    if (App.feature("network_adequacy")) {
+      const segs = (await Api.analytics.networkAdequacy().catch(() => ({ segments: [] }))).segments || [];
+      html += `<h2>Network-adequacy evidence <span class="muted">(OON dispute concentration)</span></h2>
+        <table class="tbl"><thead><tr><th>Service line</th><th>Payer</th><th>OON disputes</th><th>Avg disputed</th><th>Span</th></tr></thead><tbody>` +
+        (segs.length ? segs.map((r) => `<tr><td>${esc(r.service_line)}</td><td class="mono">${esc(r.payer_id)}</td><td>${r.oon_disputes}</td><td>${usd(r.avg_disputed_cents)}</td><td class="muted">${fmtDate(r.first_seen)} → ${fmtDate(r.latest)}</td></tr>`).join("")
+          : `<tr><td colspan="5" class="muted">No dispute segments yet.</td></tr>`) + `</tbody></table>`;
+    }
+    return html;
+  }
+
+  // ---- Platform-admin feature toggles -----------------------------------------
+  const FEATURE_LABELS = {
+    sealed_offers: "Sealed offers (double-blind bidding)",
+    review_queues: "Specialty review queues (coding/clinical/legal)",
+    party_workspace: "Party workspace (Keycloak party accounts)",
+    benchmarks: "QPA benchmarks",
+    batch_suggestions: "Batch-consolidation suggestions",
+    bundling_filter: "Bundling queue filter + auto-flag",
+    necessity_screen: "dx↔CPT necessity screen",
+    deadline_verification: "Deadline verification from document dates",
+    duplicate_detection: "Duplicate-claim detection",
+    win_probability: "Win-probability triage",
+    payer_analytics: "Payer denial-pattern analytics",
+    fraud_signals: "Fraud-signal surface (oversight)",
+    network_adequacy: "Network-adequacy evidence",
+    letter_citation: "Determination-letter auto-citation",
+  };
+
+  async function featuresAdmin() {
+    const p = await Api.program.get().catch(() => ({ features: {} }));
+    const flags = p.features || {};
+    const tenant = Api.getTenant();
+    const html = `<div class="view-head"><h1>Feature toggles</h1><span class="badge">${esc(tenant).toUpperCase()}</span></div>
+      <p class="muted">Per-tenant capability switches. The server enforces every flag — turning one off makes its endpoints 404, not just hides the UI. Changes apply to the next request; users see the UI change on reload.</p>
+      <table class="tbl"><thead><tr><th>Capability</th><th>State</th><th></th></tr></thead><tbody>` +
+      Object.entries(FEATURE_LABELS).map(([k, label]) => {
+        const on = flags[k] !== false;
+        return `<tr><td>${esc(label)}<br><span class="muted mono" style="font-size:11px">${esc(k)}</span></td>
+          <td>${on ? '<span class="badge s-active">ON</span>' : '<span class="badge">OFF</span>'}</td>
+          <td><button class="btn sm ${on ? "ghost" : ""}" data-feat="${k}" data-to="${on ? "0" : "1"}">${on ? "Turn off" : "Turn on"}</button></td></tr>`;
+      }).join("") + `</tbody></table>`;
+    return { html, wire: () => {
+      document.querySelectorAll("[data-feat]").forEach((b) => b.addEventListener("click", async () => {
+        const cur = {};
+        Object.keys(FEATURE_LABELS).forEach((k) => { cur[k] = flags[k] !== false; });
+        cur[b.dataset.feat] = b.dataset.to === "1";
+        try {
+          await Api.admin.setFeatures(tenant, cur);
+          UI.toast(`${FEATURE_LABELS[b.dataset.feat]} ${cur[b.dataset.feat] ? "enabled" : "disabled"} — effective immediately`);
+          App.rerender();
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      }));
+    } };
   }
 
   // ---- Case detail workspace -------------------------------------------------
@@ -1126,23 +1231,25 @@ const Views = (() => {
       if (can("PARTY") && c.status === "INITIATED")
         acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
       if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN")
-        acts.push(["Submit sealed offer", () => offerForm(id)]);
+        if (App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
       if (can("PARTY"))
         acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
       if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
+        if (App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
       if (can("ARBITRATOR"))
         acts.push(["Issue determination", () => determinationForm(id)]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Invite party", () => partyInviteForm(id)]);
+        if (App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
       if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Request specialty review", () => reviewRequestForm(id)]);
+        if (App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         acts.push(["Escalate", () => Views.escalate(id)]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         acts.push(["Link related case", () => Views.relate(id)]);
+      if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
+        if (App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
       if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status))
         acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
       if (can("FINANCE"))
@@ -6985,5 +7092,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn , correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn , correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin };
 })();
