@@ -948,9 +948,9 @@ const Views = (() => {
 
   // ---- Specialty review queues -------------------------------------------------
   const DISCIPLINES = {
-    CODING: { title: "Coding review queue", blurb: "Bundling, unbundling and code-accuracy disputes awaiting CODER review. Completing a review signals the case workflow (CODING_REVIEW_COMPLETE)." },
-    CLINICAL: { title: "Clinical review queue", blurb: "Medical-necessity and level-of-care questions awaiting DOCTOR / NURSE review. Completion signals CLINICAL_REVIEW_COMPLETE." },
-    LEGAL: { title: "Legal review queue", blurb: "Opt-out recording, eligibility and process questions awaiting ATTORNEY review. Completion signals ATTORNEY_REVIEW_COMPLETE." },
+    CODING: { title: "Coding review queue", who: "coder", blurb: "Bundling, unbundling and code-accuracy questions waiting for a coder. Claim one to take it; completing it moves the case on." },
+    CLINICAL: { title: "Clinical review queue", who: "clinical reviewer", blurb: "Medical-necessity and level-of-care questions waiting for a doctor or nurse. Claim one to take it; completing it moves the case on." },
+    LEGAL: { title: "Legal review queue", who: "attorney", blurb: "Opt-out, eligibility and process questions waiting for an attorney. Claim one to take it; completing it moves the case on." },
   };
 
   async function queueView(discipline) {
@@ -964,21 +964,36 @@ const Views = (() => {
     rows = rows.queue || rows.reviews || (Array.isArray(rows) ? rows : []);
     const usd = (c) => (c == null ? "—" : "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }));
     const dxOf = (r) => { try { return typeof r.diagnosis_codes === "string" ? JSON.parse(r.diagnosis_codes) : (r.diagnosis_codes || []); } catch { return []; } };
-    const chip = (val, label) => `<a class="btn ${issue === val ? "" : "ghost"} sm" href="#/queues/${discipline}${val ? `?issue=${val}` : ""}">${label}</a>`;
-    const html = `<div class="view-head"><h1>${esc(meta.title)}</h1>
-        <span class="chipbar">${chip("", "All issues")}${chip("bundling", "Bundling only")}
-        <a class="btn ghost sm" href="#" data-all>Show completed</a></span></div>
-      <p class="muted">${esc(meta.blurb)}${issue === "bundling" ? " Filtered to bundling/unbundling disputes — cases flagged by document analysis (NCCI edits, modifier 59, bundled-denial vocabulary) or with a bundling disputed issue on record." : ""}</p>
-      <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Service line</th><th>Disputed</th><th>Review</th><th>Requested</th><th></th></tr></thead><tbody>` +
+    // Bundling is a coding question: the switch is offered on the coding
+    // queue only, with both counts (the server filters by ?issue=bundling).
+    const bundlingOn = discipline === "CODING" && (window.App?.feature ? App.feature("bundling_filter") : true);
+    let counts = null;
+    if (bundlingOn) {
+      const other = await Api.reviews.queue(discipline, false, issue ? "" : "bundling").catch(() => null);
+      const n = (x) => (x ? (x.queue || x.reviews || []).length : null);
+      counts = issue ? { all: n(other), bundling: rows.length } : { all: rows.length, bundling: n(other) };
+    }
+    const seg = (val, label, n) => `<a href="#/queues/${discipline}${val ? `?issue=${val}` : ""}" aria-current="${issue === val}">${label}${n == null ? "" : `<span class="n">${n}</span>`}</a>`;
+    const waiting = rows.filter((r) => r.review_status === "REQUESTED").length;
+    const inReview = rows.filter((r) => r.review_status === "IN_REVIEW").length;
+    const html = `<div class="view-head"><h1>${esc(meta.title)}</h1></div>
+      <p class="muted q-blurb">${esc(meta.blurb)}</p>
+      <div class="q-toolbar">
+        <div>${bundlingOn ? `<nav class="q-seg" aria-label="Filter">${seg("", "All open", counts.all)}${seg("bundling", "Bundling", counts.bundling)}</nav>` : ""}</div>
+        <div class="q-right"><span class="q-summary">${waiting} waiting · ${inReview} in review</span>
+          <button type="button" class="mini" data-all>Show completed</button></div>
+      </div>
+      ${issue === "bundling" ? `<p class="muted q-note">Showing cases flagged by document analysis (NCCI edits, modifier 59, bundled-denial wording) or whose disputed issue mentions bundling.</p>` : ""}
+      <div class="q-table"><table><thead><tr><th>Case</th><th>Case status</th><th>Service line · codes</th><th class="num">Disputed</th><th>Review</th><th>Requested</th><th></th></tr></thead><tbody>` +
       (rows.length ? rows.map((r) => `<tr>
         <td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td>
-        <td>${badge(r.status || "")}</td><td>${esc(r.service_line || "—")}${r.bundling_suspected === "true" ? ' <span class="badge s-flag" title="Bundling vocabulary detected in case documents">bundling</span>' : ""}<br><span class="muted mono" style="font-size:11px">${dxOf(r).slice(0, 6).map(esc).join(" ")}${dxOf(r).length > 6 ? " …" : ""}</span></td><td>${usd(r.disputed_amount_cents)}</td>
+        <td>${badge(r.status || "")}</td><td>${esc(r.service_line || "—")}${r.bundling_suspected === "true" ? ' <span class="badge s-flag" title="Bundling wording found in the case documents">bundling</span>' : ""}${dxOf(r).length ? `<div class="q-codes" title="Diagnosis codes from the documents">${dxOf(r).slice(0, 6).map(esc).join(" · ")}${dxOf(r).length > 6 ? ` +${dxOf(r).length - 6}` : ""}</div>` : ""}</td><td class="num">${usd(r.disputed_amount_cents)}</td>
         <td>${badge(r.review_status)}${r.reviewer ? ` <span class="muted">${esc(r.reviewer)}</span>` : ""}${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
         <td>${fmtDate(r.requested_at)}</td>
-        <td>${r.review_status === "REQUESTED" ? `<button class="btn sm" data-claim="${r.id}">Claim</button>`
-          : r.review_status === "IN_REVIEW" ? `<button class="btn sm" data-complete="${r.id}">Complete</button>` : ""}</td></tr>`).join("")
-        : `<tr><td colspan="7" class="muted">Queue is clear — nothing awaiting ${esc(discipline.toLowerCase())} review.</td></tr>`) +
-      `</tbody></table>`;
+        <td class="q-act">${r.review_status === "REQUESTED" ? `<button type="button" class="q-btn" data-claim="${r.id}">Claim</button>`
+          : r.review_status === "IN_REVIEW" ? `<button type="button" class="q-btn" data-complete="${r.id}">Complete</button>` : ""}</td></tr>`).join("")
+        : `<tr><td colspan="7" class="q-empty">${issue === "bundling" ? "No bundling questions waiting." : `Nothing waiting for a ${esc(meta.who || "reviewer")} — the queue is clear.`}</td></tr>`) +
+      `</tbody></table></div>`;
     return { html, wire: () => {
       document.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", async () => {
         try { await Api.reviews.claim(b.dataset.claim); UI.toast("Review claimed"); App.rerender(); }
@@ -995,16 +1010,18 @@ const Views = (() => {
       const all = document.querySelector("[data-all]");
       if (all) all.addEventListener("click", async (ev) => {
         ev.preventDefault();
+        await UI.run(all, async () => {
         try {
           const full = await Api.reviews.queue(discipline, true);
           const list = full.queue || full.reviews || (Array.isArray(full) ? full : []);
           const done = list.filter((r) => r.review_status === "COMPLETE");
           await UI.modal({ title: "Completed reviews", wide: true, submitLabel: "Close",
-            body: done.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Reviewer</th><th>Completed</th><th>Note</th></tr></thead><tbody>` +
+            body: done.length ? `<table><thead><tr><th>Case</th><th>Reviewer</th><th>Completed</th><th>Note</th></tr></thead><tbody>` +
               done.map((r) => `<tr><td class="mono">${esc(r.case_number || r.case_id)}</td><td>${esc(r.reviewer || "")}</td><td>${fmtDate(r.completed_at)}</td><td>${esc(r.note || "")}</td></tr>`).join("") + `</tbody></table>`
               : "<p class='muted'>No completed reviews yet.</p>",
             fields: [] });
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        });
       });
     } };
   }

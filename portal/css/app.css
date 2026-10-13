@@ -730,3 +730,25 @@ ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 .pay-row-hit td{background:var(--danger-bg)}
 .pay-row-hit .pay-badge-bad{background:var(--danger-fg);color:var(--text-inverse)}
 .pay-file-btn{cursor:pointer;display:inline-flex;align-items:center}
+
+/* Specialty review queues */
+.q-blurb{max-width:72ch;margin:2px 0 0;font-size:13px}
+.q-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin:14px 0 10px}
+.q-seg{display:inline-flex;border:1px solid var(--border-default);border-radius:var(--radius-input);overflow:hidden;background:var(--surface-raised)}
+.q-seg a{display:inline-flex;align-items:center;gap:7px;padding:6px 14px;font-size:13px;font-weight:600;color:var(--text-secondary);text-decoration:none;border-right:1px solid var(--border-default)}
+.q-seg a:last-child{border-right:0}
+.q-seg a:hover{background:var(--surface-sunken);color:var(--text-primary)}
+.q-seg a[aria-current="true"]{background:var(--action-primary-bg);color:var(--action-primary-fg)}
+.q-seg a:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px}
+.q-seg .n{min-width:20px;padding:0 6px;border-radius:var(--radius-chip);background:var(--surface-sunken);color:var(--text-secondary);font-size:11.5px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums}
+.q-seg a[aria-current="true"] .n{background:#ffffff2e;color:inherit}
+.q-right{display:flex;align-items:center;gap:12px}
+.q-summary{font-size:12.5px;color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+.q-note{margin:0 0 8px;font-size:12.5px}
+.q-table{overflow-x:auto}
+.q-table td.num,.q-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+.q-codes{margin-top:3px;font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary)}
+.q-act{text-align:right;white-space:nowrap}
+button.q-btn{min-height:28px;padding:3px 14px;font-size:12.5px}
+.q-empty{padding:28px 12px!important;text-align:center;color:var(--text-tertiary)}
+.badge.s-flag{background:var(--warning-bg);color:var(--warning-fg)}

@@ -440,7 +440,7 @@
     const h = location.hash || "#/dashboard";
     nav.querySelectorAll("a").forEach((a) => {
       const r = a.dataset.route;
-      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || (r === "cases" && h.startsWith("#/new")));
+      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || h.startsWith("#/" + r + "?") || (r === "cases" && h.startsWith("#/new")));
     });
     for (const [re, fn] of routes) {
       const m = h.match(re);
