@@ -16,7 +16,6 @@ package main
 // invoice amount, default bill-to, and memo template.
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -163,17 +162,10 @@ func (s *server) postSvcLedger(tenant, key string, debitCode, creditCode uint32,
 	if s.tb == nil || amount <= 0 {
 		return
 	}
-	ih := sha256.Sum256([]byte("svc:" + key))
-	var idb [16]byte
-	copy(idb[:], ih[:16])
-	res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-		ID:              tb_types.BytesToUint128(idb),
-		DebitAccountID:  acctID(tenant, debitCode, ""),
-		CreditAccountID: acctID(tenant, creditCode, ""),
-		Amount:          tb_types.ToUint128(uint64(amount)),
-		Ledger:          tenantLedgerID(tenant),
-		Code:            ledgerCodeIDRE,
-	}})
+	res, err := s.postLedger(tenant, ledgerAcct{debitCode, ""}, ledgerAcct{creditCode, ""}, tb_types.Transfer{
+		ID:     ledgerTransferID("svc:" + key),
+		Amount: tb_types.ToUint128(uint64(amount)),
+	})
 	if err != nil {
 		slog.Error("ledger leg failed for service invoice", "key", key, "err", err)
 		return

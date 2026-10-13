@@ -41,27 +41,27 @@ const acctStripeClearing uint32 = 6000
 // (sha256 of payment_intent + direction), so Stripe webhook retries are safe.
 // Fail-open with an error log: the payment itself is already real; a missing
 // ledger leg is caught by dashboard reconciliation (payments vs TB balances).
+// paymentLeg is the accounts and transfer id of a payment's ledger leg
+// (clearing -> escrow; a refund reverses it). The ledger backfill uses the
+// same, so a replayed payment and a live one are the same transfer.
+func paymentLeg(paymentIntent, party string, refund bool) (debit, credit ledgerAcct, id tb_types.Uint128) {
+	debit, credit = ledgerAcct{acctStripeClearing, ""}, ledgerAcct{acctEscrowTrustHeld, party}
+	if refund {
+		debit, credit = credit, debit
+	}
+	return debit, credit, ledgerTransferID(paymentLegKey(paymentIntent, refund))
+}
+
+func paymentLegKey(paymentIntent string, refund bool) string {
+	return fmt.Sprintf("stripe:%s:%v", paymentIntent, refund)
+}
+
 func (s *server) postPaymentLedger(tenant, caseID, paymentIntent, party string, amount uint64, refund bool) {
 	if s.tb == nil || paymentIntent == "" {
 		return
 	}
-	var debit, credit tb_types.Uint128
-	if refund {
-		debit, credit = acctID(tenant, acctEscrowTrustHeld, party), acctID(tenant, acctStripeClearing, "")
-	} else {
-		debit, credit = acctID(tenant, acctStripeClearing, ""), acctID(tenant, acctEscrowTrustHeld, party)
-	}
-	ih := sha256.Sum256([]byte(fmt.Sprintf("stripe:%s:%v", paymentIntent, refund)))
-	var idb [16]byte
-	copy(idb[:], ih[:16])
-	res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-		ID:              tb_types.BytesToUint128(idb),
-		DebitAccountID:  debit,
-		CreditAccountID: credit,
-		Amount:          tb_types.ToUint128(amount),
-		Ledger:          tenantLedgerID(tenant),
-		Code:            ledgerCodeIDRE,
-	}})
+	debit, credit, id := paymentLeg(paymentIntent, party, refund)
+	res, err := s.postLedger(tenant, debit, credit, tb_types.Transfer{ID: id, Amount: tb_types.ToUint128(amount)})
 	if err != nil {
 		slog.Error("ledger leg failed for stripe payment", "pi", paymentIntent, "err", err)
 		return

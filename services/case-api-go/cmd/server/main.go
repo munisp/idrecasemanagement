@@ -570,6 +570,7 @@ func main() {
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
+		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)
 		r.Post("/checks", s.uploadCheck)                                // physical check photo/scan intake
 		r.Get("/checks", s.listChecks)                                  // review queue
 		r.Get("/checks/{checkId}/image", s.checkImage)                  // vault-unsealed scan for portal preview
@@ -1480,7 +1481,7 @@ func tenantLedgerID(tenant string) uint32 {
 }
 
 func acctID(tenant string, code uint32, party string) tb_types.Uint128 {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s", tenant, code, party)))
+	h := sha256.Sum256([]byte(ledgerKey(fmt.Sprintf("%s:%d:%s", tenant, code, party))))
 	var b [16]byte
 	copy(b[:], h[:16])
 	return tb_types.BytesToUint128(b)
@@ -1500,7 +1501,7 @@ func u128lo(v tb_types.Uint128) uint64 {
 }
 
 func hash16(parts ...string) tb_types.Uint128 {
-	h := sha256.Sum256([]byte(strings.Join(parts, ":")))
+	h := sha256.Sum256([]byte(ledgerKey(strings.Join(parts, ":"))))
 	var b [16]byte
 	copy(b[:], h[:16])
 	return tb_types.BytesToUint128(b)
@@ -1556,16 +1557,16 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	var debit, credit tb_types.Uint128
+	var debit, credit ledgerAcct
 	switch req.Kind {
 	case "ADMIN_FEE": // party pays admin fee into remittance account via escrow
-		debit, credit = acctID(tenant, acctEscrowTrustHeld, req.PartyID), acctID(tenant, acctAdminRemittance, "")
+		debit, credit = ledgerAcct{acctEscrowTrustHeld, req.PartyID}, ledgerAcct{acctAdminRemittance, ""}
 	case "IDRE_FEE_RESERVE":
-		debit, credit = acctID(tenant, acctEscrowTrustHeld, req.PartyID), acctID(tenant, acctIdreCompensation, "")
+		debit, credit = ledgerAcct{acctEscrowTrustHeld, req.PartyID}, ledgerAcct{acctIdreCompensation, ""}
 	case "REFUND":
-		debit, credit = acctID(tenant, acctRefundPayable, ""), acctID(tenant, acctEscrowTrustHeld, req.PartyID)
+		debit, credit = ledgerAcct{acctRefundPayable, ""}, ledgerAcct{acctEscrowTrustHeld, req.PartyID}
 	default: // SETTLEMENT
-		debit, credit = acctID(tenant, acctEscrowTrustHeld, req.PartyID), acctID(tenant, acctRefundPayable, "")
+		debit, credit = ledgerAcct{acctEscrowTrustHeld, req.PartyID}, ledgerAcct{acctRefundPayable, ""}
 	}
 	id, transferPendingID := transferIDs(req.CaseID, req.Kind, req.PartyID, req.Amount, req.PostKind)
 	var flags uint16
@@ -1577,16 +1578,12 @@ func (s *server) postFeeTransfer(w http.ResponseWriter, r *http.Request) {
 	case "VOID":
 		flags = tb_types.TransferFlags{VoidPendingTransfer: true}.ToUint16()
 	}
-	res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-		ID:              id,
-		DebitAccountID:  debit,
-		CreditAccountID: credit,
-		Amount:          tb_types.ToUint128(req.Amount),
-		PendingID:       transferPendingID,
-		Ledger:          tenantLedgerID(tenant),
-		Code:            ledgerCodeIDRE,
-		Flags:           flags,
-	}})
+	res, err := s.postLedger(tenant, debit, credit, tb_types.Transfer{
+		ID:        id,
+		Amount:    tb_types.ToUint128(req.Amount),
+		PendingID: transferPendingID,
+		Flags:     flags,
+	})
 	if err != nil {
 		http.Error(w, `{"error":"ledger unavailable"}`, http.StatusBadGateway)
 		return
