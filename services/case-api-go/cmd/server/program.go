@@ -336,7 +336,7 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	}
 	// Decode twice: the decision input, then the override envelope (separate
 	// type so eligibilityInput stays exactly the rule inputs).
-	raw, _ := io.ReadAll(r.Body)
+	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err := json.Unmarshal(raw, &in); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
