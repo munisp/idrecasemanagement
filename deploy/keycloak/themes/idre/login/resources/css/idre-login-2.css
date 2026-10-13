@@ -1,0 +1,191 @@
+/* idre login theme -- the portal's look (Meridian tokens, portal/css/app.css)
+   over Keycloak's keycloak.v2 / PatternFly 5. Almost everything is done by
+   pointing PatternFly's variables at the portal's colours; a few rules cover
+   what the variables do not reach. Light first, then the dark set, which
+   Keycloak switches to (html.pf-v5-theme-dark) when the visitor's system is dark. */
+
+:root {
+  /* Portal tokens (tier 1 + the semantic ones used here) */
+  --idre-brand-300: #2E6B52;
+  --idre-brand-500: #123B2F;
+  --idre-brand-700: #0C2A21;
+  --idre-brand-900: #071A14;
+  --idre-brass-500: #B08D3E;
+  --idre-n0: #FFFFFF;
+  --idre-n50: #F7F5EF;
+  --idre-n200: #D9D4C6;
+  --idre-n300: #BDB7A7;
+  --idre-n500: #6E6A5E;
+  --idre-n700: #3B3931;
+  --idre-n900: #191813;
+  --idre-font: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --idre-surface: var(--idre-n0);
+  --idre-text: var(--idre-n900);
+  --idre-text-2: var(--idre-n700);
+  --idre-border: var(--idre-n300);
+  --idre-action: var(--idre-brand-500);
+  --idre-action-hover: var(--idre-brand-700);
+  --idre-on-action: var(--idre-n0);
+  --idre-focus: var(--idre-brand-300);
+  --idre-field: var(--idre-n0);
+
+  /* Keycloak's own knobs */
+  --keycloak-bg-logo-url: none;
+  --keycloak-card-top-color: var(--idre-brass-500);
+
+  /* PatternFly globals */
+  --pf-v5-global--FontFamily--text: var(--idre-font);
+  --pf-v5-global--FontFamily--heading: var(--idre-font);
+  --pf-v5-global--primary-color--100: var(--idre-action);
+  --pf-v5-global--primary-color--200: var(--idre-action-hover);
+  --pf-v5-global--link--Color: var(--idre-action);
+  --pf-v5-global--link--Color--hover: var(--idre-action-hover);
+  --pf-v5-global--BackgroundColor--100: var(--idre-surface);
+  --pf-v5-global--Color--100: var(--idre-text);
+  --pf-v5-global--Color--200: var(--idre-text-2);
+  --pf-v5-global--BorderColor--100: var(--idre-border);
+}
+
+/* Dark set: the portal's dark tokens (a raised dark surface, light text,
+   the lighter pine for actions with dark text on them, brass focus). */
+:root.pf-v5-theme-dark {
+  --idre-surface: #211F19;
+  --idre-text: var(--idre-n50);
+  --idre-text-2: var(--idre-n200);
+  --idre-border: #4A4840;
+  --idre-action: var(--idre-brand-300);
+  --idre-action-hover: #3D8266;
+  --idre-on-action: var(--idre-n900);
+  --idre-focus: var(--idre-brass-500);
+  --idre-field: #12110D;
+
+  --pf-v5-global--primary-color--100: var(--idre-action);
+  --pf-v5-global--primary-color--200: var(--idre-action-hover);
+  --pf-v5-global--link--Color: #9FD3B4;
+  --pf-v5-global--link--Color--hover: #C3E6D1;
+  --pf-v5-global--BackgroundColor--100: var(--idre-surface);
+  --pf-v5-global--Color--100: var(--idre-text);
+  --pf-v5-global--Color--200: var(--idre-text-2);
+  --pf-v5-global--BorderColor--100: var(--idre-border);
+}
+
+/* The page behind the card: the portal rail's deep pine, in both modes. */
+.login-pf body,
+body#keycloak-bg {
+  background: radial-gradient(120% 90% at 50% 0%, var(--idre-brand-500) 0%, var(--idre-brand-900) 70%) fixed;
+  font-family: var(--idre-font);
+}
+
+/* Heading: the realm display name, with the portal's brass "ID" mark. */
+#kc-header-wrapper.pf-v5-c-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: #EDEAE0;
+  font-family: var(--idre-font);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+#kc-header-wrapper.pf-v5-c-brand::before {
+  content: "ID";
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--idre-brass-500);
+  color: var(--idre-n900);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+/* The card */
+.pf-v5-c-login__main {
+  --pf-v5-c-login__main--BackgroundColor: var(--idre-surface);
+  background-color: var(--idre-surface);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 28px #00000040;
+}
+.pf-v5-c-login__main-header {
+  border-top-width: 3px;
+}
+.pf-v5-c-login__main-header .pf-v5-c-title {
+  color: var(--idre-text);
+  font-weight: 700;
+}
+
+/* Inputs: the portal's 8px corners, its border, a pine (brass in dark) focus. */
+.pf-v5-c-form-control {
+  --pf-v5-c-form-control--BorderRadius: 8px;
+  --pf-v5-c-form-control--BackgroundColor: var(--idre-field);
+  background-color: var(--idre-field);
+  border-radius: 8px;
+  --pf-v5-c-form-control--before--BorderColor: var(--idre-border);
+  --pf-v5-c-form-control--focus--after--BorderBottomColor: var(--idre-focus);
+  --pf-v5-c-form-control--hover--after--BorderBottomColor: var(--idre-focus);
+}
+.pf-v5-c-form-control::after {
+  border-radius: 8px;
+}
+
+/* Buttons: pine primary like the portal's main action. */
+.pf-v5-c-button {
+  --pf-v5-c-button--BorderRadius: 8px;
+}
+.pf-v5-c-button.pf-m-primary {
+  --pf-v5-c-button--m-primary--BackgroundColor: var(--idre-action);
+  --pf-v5-c-button--m-primary--hover--BackgroundColor: var(--idre-action-hover);
+  --pf-v5-c-button--m-primary--focus--BackgroundColor: var(--idre-action-hover);
+  --pf-v5-c-button--m-primary--active--BackgroundColor: var(--idre-action-hover);
+  --pf-v5-c-button--m-primary--Color: var(--idre-on-action);
+  --pf-v5-c-button--m-primary--hover--Color: var(--idre-on-action);
+  --pf-v5-c-button--m-primary--focus--Color: var(--idre-on-action);
+  --pf-v5-c-button--m-primary--active--Color: var(--idre-on-action);
+  font-weight: 600;
+}
+.pf-v5-c-button:focus-visible {
+  outline: 2px solid var(--idre-focus);
+  outline-offset: 2px;
+}
+
+/* Links below the card (e.g. "Forgot password?") stay readable on pine. */
+.pf-v5-c-login__main-footer-band a,
+.pf-v5-c-login__footer a {
+  color: var(--pf-v5-global--link--Color);
+}
+
+/* Password box and its show/hide button read as one field. */
+.pf-v5-c-input-group > .pf-v5-c-input-group__item.pf-m-fill .pf-v5-c-form-control,
+.pf-v5-c-input-group > .pf-v5-c-input-group__item.pf-m-fill .pf-v5-c-form-control::after {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+.pf-v5-c-input-group .pf-v5-c-button.pf-m-control {
+  --pf-v5-c-button--m-control--BackgroundColor: var(--idre-field);
+  --pf-v5-c-button--m-control--BorderRadius: 0 8px 8px 0;
+  background-color: var(--idre-field);
+  border-start-end-radius: 8px;
+  border-end-end-radius: 8px;
+}
+.pf-v5-c-input-group .pf-v5-c-button.pf-m-control::after {
+  border-color: var(--idre-border);
+  border-bottom-color: var(--idre-border);
+  border-start-end-radius: 8px;
+  border-end-end-radius: 8px;
+}
+
+/* The heading stays full strength on pine in dark mode too. */
+:root.pf-v5-theme-dark #kc-header-wrapper.pf-v5-c-brand {
+  color: #F7F5EF;
+}
+
+/* Phones: a 16px gutter so the card does not touch the screen edge. */
+@media (max-width: 600px) {
+  .pf-v5-c-login__main {
+    margin-inline: 16px;
+  }
+}
