@@ -135,6 +135,15 @@ func (s *server) sweepUnreadDocuments() (requeued, stalled int) {
 			}
 		}
 		drows.Close()
+		overdue := 0
+		for _, d := range docs {
+			if d.unreadFor >= docUnreadGrace {
+				overdue++
+			}
+		}
+		var stalledNow int64
+		_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.doc_analysis WHERE tenant=$1 AND status='STALLED'`, tenant).Scan(&stalledNow)
+		recordDocumentGauges(ctx, tenant, int64(len(docs)), int64(overdue), stalledNow)
 		for _, d := range docs {
 			switch requeueDecision(d.attempts, d.unreadFor, d.sinceLast, readerActive) {
 			case "requeue":

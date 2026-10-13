@@ -511,13 +511,13 @@ func main() {
 		permify: envOr("PERMIFY_URL", "")}
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, chimw.Logger, chimw.Recoverer)
+	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, tenancy, s.accessGuard, s.caseLockGuard)
+		r.Use(a.middleware, noteActor, tenancy, s.accessGuard, s.caseLockGuard)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
@@ -797,7 +797,7 @@ func main() {
 	// /tenant/<st> group membership, which is exactly what this creates) --
 	// auth only, then an inline FEDERAL_ADMIN/PLATFORM_ADMIN role check.
 	r.Route("/v1/admin", func(r chi.Router) {
-		r.Use(a.middleware)
+		r.Use(a.middleware, noteActor)
 		r.Post("/tenants", s.createTenant)
 		r.Post("/federal-admins", s.createFederalAdmin)
 		r.Get("/federal-admins", s.listFederalAdmins)

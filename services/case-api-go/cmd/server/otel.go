@@ -20,8 +20,10 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -37,6 +39,7 @@ func initTelemetry(ctx context.Context) func(context.Context) {
 		propagation.TraceContext{}, propagation.Baggage{}))
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" && os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "" {
 		slog.Info("tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT not set")
+		initActionMetrics()
 		return func(context.Context) {}
 	}
 	exp, err := otlptracehttp.New(ctx)
@@ -62,9 +65,23 @@ func initTelemetry(ctx context.Context) func(context.Context) {
 	// traceparent downstream.
 	http.DefaultTransport = otelhttp.NewTransport(http.DefaultTransport)
 	slog.Info("tracing enabled", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	// Metrics (idre.actions, idre.action.duration, document counts) go to
+	// the same collector, which exports them to Prometheus.
+	var mp *sdkmetric.MeterProvider
+	if mexp, err := otlpmetrichttp.New(ctx); err != nil {
+		slog.Error("metrics disabled: exporter init failed", "err", err)
+	} else {
+		mp = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res),
+			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(30*time.Second))))
+		otel.SetMeterProvider(mp)
+	}
+	initActionMetrics()
 	return func(ctx context.Context) {
 		if err := tp.Shutdown(ctx); err != nil {
 			slog.Warn("tracing shutdown", "err", err)
+		}
+		if mp != nil {
+			_ = mp.Shutdown(ctx)
 		}
 	}
 }

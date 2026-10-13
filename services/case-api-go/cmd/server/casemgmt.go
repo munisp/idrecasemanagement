@@ -77,6 +77,7 @@ func (s *server) notify(r *http.Request, tenant, userSub, typ, body, link string
 // account 360 and voice. Every subsystem (intake, documents, signals, notes,
 // email, voice) writes through here so there is ONE activity stream per case.
 func (s *server) logActivity(ctx context.Context, tenant, caseID, typ, body string) {
+	logEvent(ctx, "activity", tenant, caseID, typ, nil)
 	_, _ = s.db.Exec(ctx, `
 		INSERT INTO public.case_activities (tenant, case_id, type, body)
 		VALUES ($1,$2,$3,$4)`, tenant, caseID, typ, truncate(body, 2000))
@@ -102,6 +103,7 @@ func (s *server) logActivity(ctx context.Context, tenant, caseID, typ, body stri
 // producers have the same gap. A SELECT ... FOR UPDATE would close it if
 // write volume ever makes that race likely in practice.
 func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, payload map[string]any) {
+	logEvent(ctx, "audit", tenant, caseID, action, eventDetail(payload))
 	body, err := json.Marshal(payload) // Go sorts map keys on marshal -- matches Python's sort_keys=True
 	if err != nil {
 		return

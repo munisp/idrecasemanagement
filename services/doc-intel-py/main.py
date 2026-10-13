@@ -721,7 +721,21 @@ def persist(evt: dict, ctx: dict) -> None:
             )
 
 
+def read_event(evt: dict, outcome: str, started: float, ctx: dict | None = None) -> None:
+    """One JSON line per document read, for the idre activity dashboard
+    (Loki). Ids, outcome and timings only -- never document content."""
+    ctx = ctx or {}
+    print(json.dumps({
+        "kind": "document_read", "tenant": evt.get("tenant"), "case_id": evt.get("case_id"),
+        "doc_id": evt.get("doc_id"), "outcome": outcome, "status": ctx.get("status"),
+        "doc_type": ctx.get("doc_type"), "ms": int((time.time() - started) * 1000),
+        "findings": len(ctx.get("findings") or []),
+        "pages_turned": len(ctx.get("pages_turned") or []), "pages_straightened": len(ctx.get("pages_straightened") or []),
+    }), flush=True)
+
+
 def process(evt: dict) -> None:
+    started = time.time()
     kind, subj_id = subject(evt)
     if evt.get("sealed"):
         # Sealed offer documents: skip analysis until lawful reveal.
@@ -782,6 +796,7 @@ def process(evt: dict) -> None:
         # document sweep in case-api sends it again (and tells people if it
         # still cannot be read after several tries).
         print(f"doc-intel: model unavailable for {evt.get('doc_id')}, left for re-reading: {exc}", flush=True)
+        read_event(evt, "model_unavailable", started)
         return
     truncated = truncated or ctx.get("pages_truncated", False)
     if truncated:
@@ -792,6 +807,7 @@ def process(evt: dict) -> None:
         ctx["status"] = "ANALYZED_WITH_FINDINGS"
         ctx["result_truncated"] = True
     persist(evt, ctx)
+    read_event(evt, "read", started, ctx)
     # doc.analyzed program rules (notify/flag/detail side effects, audited).
     try:
         fire_doc_rules(evt, kind, subj_id, ctx)
