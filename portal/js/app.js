@@ -117,14 +117,21 @@
     document.getElementById("body").insertBefore(bar, view);
   }
 
+  // Per-tenant feature flags (server-enforced; this only hides the UI).
+  // Absent flag = on. Loaded fresh on each full boot; a toggle applies on
+  // next reload — the server gate applies immediately.
+  let FEATURES = {};
+  try { FEATURES = (await Api.program.get()).features || {}; } catch { FEATURES = {}; }
+  const feature = (n) => FEATURES[n] !== false;
+
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
   const has = (...rs) => rs.some((r) => me.roles.includes(r));
   const links = [
     ["#/dashboard", "▤", "Home"], ["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
     ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"],
   ];
-  if (has("PARTY")) links.push(["#/party", "⚭", "My disputes"]);
-  if (has("CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+  if (has("PARTY") && feature("party_workspace")) links.push(["#/party", "⚭", "My disputes"]);
+  if (feature("review_queues") && has("CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/queues/CODING", "⌗", "Coding queue"]);
     links.push(["#/queues/CLINICAL", "✚", "Clinical queue"]);
     links.push(["#/queues/LEGAL", "§", "Legal queue"]);
@@ -156,6 +163,7 @@
   }
   if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/rules", "§", "Rules"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
@@ -269,6 +277,7 @@
     [/^#\/cases(\?.*)?$/, Views.cases],
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/cases\/([\w-]+)\/offers$/, (m) => Views.caseOffers(m[1])],
+    [/^#\/features$/, Views.featuresAdmin],
     [/^#\/queues\/pm$/, Views.pmQueueView],
     [/^#\/queues\/(CODING|CLINICAL|LEGAL)(\?.*)?$/, (m) => Views.queueView(m[1])],
     [/^#\/party$/, Views.partyCases],
@@ -340,7 +349,7 @@
   }
   // Soft refresh: re-render the current route without a full page reload
   // (no Keycloak round-trip, no shell flash, preserves rail/scroll context).
-  window.App = { rerender: render };
+  window.App = { rerender: render, feature };
   // Last-resort feedback net: any async handler that still throws without its
   // own try/catch surfaces as an error toast instead of failing silently.
   addEventListener("unhandledrejection", (e) => {

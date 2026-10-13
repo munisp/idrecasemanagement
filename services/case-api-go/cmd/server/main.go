@@ -721,6 +721,7 @@ func main() {
 	r.Route("/v1/admin", func(r chi.Router) {
 		r.Use(a.middleware)
 		r.Post("/tenants", s.createTenant)
+		r.Put("/tenants/{tenant}/features", s.setTenantFeatures)
 		r.Post("/federal-admins", s.createFederalAdmin)
 		r.Get("/federal-admins", s.listFederalAdmins)
 		r.Patch("/federal-admins/{username}", s.updateFederalAdminStatus)

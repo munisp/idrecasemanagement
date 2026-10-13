@@ -702,7 +702,7 @@ const Views = (() => {
     let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>${badge(c.status)} ${badge(d.your_party)}</div>
       <p class="muted">${esc(c.service_line || "")} · disputed ${usd(c.disputed_amount_cents)} · opened ${fmtDate(c.opened_at)}</p>`;
     const acts = [];
-    if (["OFFER_WINDOW_OPEN"].includes(c.status)) acts.push(["Submit sealed offer", () => offerForm(c.id, d.your_party)]);
+    if (App.feature("sealed_offers") && ["OFFER_WINDOW_OPEN"].includes(c.status)) acts.push(["Submit sealed offer", () => offerForm(c.id, d.your_party)]);
     if (acts.length) html += `<div class="actions">` + acts.map((a, i) => `<button class="btn" data-act="${i}">${esc(a[0])}</button>`).join("") + `</div>`;
     if (d.determination)
       html += `<h2>Determination</h2><div class="card"><p><strong>${usd(d.determination.amount_cents)}</strong> — issued ${fmtDate(d.determination.issued_at)}</p>
@@ -748,6 +748,46 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
+  // ---- Platform-admin feature toggles -----------------------------------------
+  const FEATURE_LABELS = {
+    sealed_offers: "Sealed offers (double-blind bidding)",
+    review_queues: "Specialty review queues (coding/clinical/legal)",
+    party_workspace: "Party workspace (Keycloak party accounts)",
+    benchmarks: "QPA benchmarks",
+    batch_suggestions: "Batch-consolidation suggestions",
+    bundling_filter: "Bundling queue filter + auto-flag",
+    necessity_screen: "dx↔CPT necessity screen",
+    deadline_verification: "Deadline verification from document dates",
+    duplicate_detection: "Duplicate-claim detection",
+  };
+
+  async function featuresAdmin() {
+    const p = await Api.program.get().catch(() => ({ features: {} }));
+    const flags = p.features || {};
+    const tenant = Api.getTenant();
+    const html = `<div class="view-head"><h1>Feature toggles</h1><span class="badge">${esc(tenant).toUpperCase()}</span></div>
+      <p class="muted">Per-tenant capability switches. The server enforces every flag — turning one off makes its endpoints 404, not just hides the UI. Changes apply to the next request; users see the UI change on reload.</p>
+      <table class="tbl"><thead><tr><th>Capability</th><th>State</th><th></th></tr></thead><tbody>` +
+      Object.entries(FEATURE_LABELS).map(([k, label]) => {
+        const on = flags[k] !== false;
+        return `<tr><td>${esc(label)}<br><span class="muted mono" style="font-size:11px">${esc(k)}</span></td>
+          <td>${on ? '<span class="badge s-active">ON</span>' : '<span class="badge">OFF</span>'}</td>
+          <td><button class="btn sm ${on ? "ghost" : ""}" data-feat="${k}" data-to="${on ? "0" : "1"}">${on ? "Turn off" : "Turn on"}</button></td></tr>`;
+      }).join("") + `</tbody></table>`;
+    return { html, wire: () => {
+      document.querySelectorAll("[data-feat]").forEach((b) => b.addEventListener("click", async () => {
+        const cur = {};
+        Object.keys(FEATURE_LABELS).forEach((k) => { cur[k] = flags[k] !== false; });
+        cur[b.dataset.feat] = b.dataset.to === "1";
+        try {
+          await Api.admin.setFeatures(tenant, cur);
+          UI.toast(`${FEATURE_LABELS[b.dataset.feat]} ${cur[b.dataset.feat] ? "enabled" : "disabled"} — effective immediately`);
+          App.rerender();
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      }));
+    } };
+  }
+
   // ---- Case detail workspace -------------------------------------------------
   async function caseDetail(id) {
     try {
@@ -774,17 +814,17 @@ const Views = (() => {
       if (can("PARTY") && c.status === "INITIATED")
         acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
       if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN")
-        acts.push(["Submit sealed offer", () => offerForm(id)]);
+        if (App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
       if (can("PARTY"))
         acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
       if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
+        if (App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
       if (can("ARBITRATOR"))
         acts.push(["Issue determination", () => determinationForm(id)]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Invite party", () => partyInviteForm(id)]);
+        if (App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
       if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Request specialty review", () => reviewRequestForm(id)]);
+        if (App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
@@ -792,7 +832,7 @@ const Views = (() => {
       if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
         acts.push(["Link related case", () => Views.relate(id)]);
       if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        acts.push(["Batchable cases", () => batchableModal(id)]);
+        if (App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
       if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status))
         acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
       if (can("FINANCE"))
@@ -4845,5 +4885,5 @@ async function railAttachAuthFn(id) {
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, correctField, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, correctCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railAttachAuthFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn, offerForm, determinationForm, caseOffers, batchableModal, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, correctField, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, settleInvoice, qaQueue, qaReview, qaDecide, intake, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, correctCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, asstQaDecide, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, timeReportRun, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, intakeMore, financeMore, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList(f.status.value), arapView, arapRecord, arapSettle, arapVoid, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, tpaView, tpaClaimFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, paymentsView, railAccountsBox, railAccountAddFn, railAccountDelFn, railAttachAuthFn, railShowGenerated, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFilesBox, railFileDetailFn, railScreenStatus, railScreenFn, offerForm, determinationForm, caseOffers, batchableModal, featuresAdmin, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm };
 })();

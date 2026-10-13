@@ -118,10 +118,10 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil})
+		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "features": s.tenantFeatures(r, tenant)})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg})
+	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "features": s.tenantFeatures(r, tenant)})
 }
 
 // programDates reads the case's program-specific date bag.

@@ -49,6 +49,9 @@ func percentileStats(sorted []int64) (int64, int64, int64) {
 }
 
 func (s *server) caseBenchmarks(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "benchmarks") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
@@ -117,6 +120,9 @@ func (s *server) caseBenchmarks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) batchableCases(w http.ResponseWriter, r *http.Request) {
+	if !s.featureGate(w, r, r.Context().Value(ctxTenant{}).(string), "batch_suggestions") {
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")

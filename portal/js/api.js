@@ -98,6 +98,7 @@ const Api = (() => {
       // Not tenant-scoped -- creates the /tenant/<xx> group a new tenant
       // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createTenant: (payload) => req("POST", "/v1/admin/tenants", payload),
+      setFeatures: (tenant, features) => req("PUT", `/v1/admin/tenants/${tenant}/features`, { features }),
       // Cross-tenant: creates a FEDERAL_ADMIN/PLATFORM_ADMIN account.
       // FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createFederalAdmin: (payload) => req("POST", "/v1/admin/federal-admins", payload),
