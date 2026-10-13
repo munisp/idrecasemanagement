@@ -664,6 +664,8 @@ func main() {
 		r.Post("/reviews/{reviewId}/claim", s.claimReview)
 		r.Post("/reviews/{reviewId}/complete", s.completeReview)      // fires the workflow signal
 		r.Get("/queues/pm", s.pmQueue)                                // escalations needing PM attention
+		r.Get("/cases/{caseId}/benchmarks", s.caseBenchmarks)       // per-code QPA distribution (arbitrator/staff)
+		r.Get("/cases/{caseId}/batchable", s.batchableCases)        // 45 CFR 149.510(c) batching suggestions
 		r.Post("/cases/{caseId}/party-invites", s.inviteParty)        // provision Keycloak party account
 		r.Get("/cases/{caseId}/party-accounts", s.listPartyAccounts)
 		r.Get("/party/cases", s.partyCases)                           // party workspace
