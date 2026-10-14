@@ -61,6 +61,7 @@ var outsideShellPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/program$`),           // the portal reads the program's settings to draw itself
 	regexp.MustCompile(`^/prefs$`),             // the caller's own preferences
 	regexp.MustCompile(`^/notifications(/|$)`), // the caller's own notifications
+	regexp.MustCompile(`^/audit/mine$`),        // the caller's own audit trail
 	regexp.MustCompile(`^/presence/ping$`),
 }
 

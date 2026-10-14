@@ -101,7 +101,10 @@ func (s *server) orgAudit(next http.Handler) http.Handler {
 		outside := isExternalOnly(p)
 		orgArea := strings.HasPrefix(rel, "/tpa/") || strings.HasPrefix(rel, "/hp/") || strings.HasPrefix(rel, "/admin/tpas/") ||
 			strings.HasPrefix(rel, "/admin/healthplans/") || strings.HasPrefix(rel, "/intake/bulk")
-		if tenant == "" || (!outside && !orgArea) {
+		// Everyone's own trail (My activity): an office user's every change, and
+		// every document it opens, is recorded too -- by actor, with no organization.
+		staffChange := !outside && !orgArea && (r.Method != http.MethodGet || isDocumentRead(rel))
+		if tenant == "" || p.Subject == "" || contains(p.Roles, serviceRole) || (!outside && !orgArea && !staffChange) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -140,17 +143,17 @@ func (s *server) orgAudit(next http.Handler) http.Handler {
 		default:
 			org = orgs["plan"]
 		}
-		if org == "" || strings.HasSuffix(org, ":") {
-			return // not about an organization (e.g. a staff list of all TPAs)
+		if strings.HasSuffix(org, ":") {
+			org = ""
+		}
+		if org == "" && !staffChange && !outside {
+			return // a staff read in an organization's area that is not about one (e.g. the list of all TPAs)
 		}
 		caseID := ""
 		if rctx != nil {
 			caseID = rctx.URLParam("caseId")
 		}
-		label := orgActionLabels[action]
-		if label == "" {
-			label = action
-		}
+		label := actionLabel(action)
 		payload := map[string]any{
 			"org": org, "by": p.Subject, "by_name": displayName(p), "roles": roleList(p.Roles), "office_staff": !outside,
 			"action": action, "label": label, "method": r.Method, "status": sw.code, "outcome": outcomeOf(sw.code), "ip": clientIP(r),
@@ -203,17 +206,35 @@ func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 			}
 			orgID = org.ID
 		}
-		q := r.URL.Query()
-		limit, offset := pageParams(r, 100, 500)
 		prefix := "tpa"
 		if kind == "hp" {
 			prefix = "plan" // entries name the organization as "plan:<id>" (auditOrg, payer.org)
 		}
-		where, args := "a.tenant=$1 AND a.org=$2", []any{tenant, prefix + ":" + orgID}
+		s.auditEntries(w, r, tenant, "a.org=$2", prefix+":"+orgID)
+	}
+}
+
+// myAuditLog: GET /audit/mine -- what the caller did, whoever it is (staff,
+// party, a TPA's or a plan's member): its own entries only.
+func (s *server) myAuditLog(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	s.auditEntries(w, r, tenant, "a.actor=$2", p.Subject)
+}
+
+// auditEntries lists audit entries matching one condition ($2), newest first,
+// in words. ?views=1 includes page views (left out by default: opening a page
+// is recorded, but a reader looks for what was done); ?q= searches.
+func (s *server) auditEntries(w http.ResponseWriter, r *http.Request, tenant, cond string, arg string) {
+	{
+		q := r.URL.Query()
+		limit, offset := pageParams(r, 100, 500)
+		where, args := "a.tenant=$1 AND "+cond, []any{tenant, arg}
 		if q.Get("views") != "1" {
 			// Reads that only drew a page are left out; opening a document stays in.
 			where += ` AND NOT (a.action='PORTAL_ACTION' AND a.payload::jsonb->>'method'='GET'
-			            AND a.payload::jsonb->>'action' NOT LIKE '%/file' AND a.payload::jsonb->>'action' NOT LIKE '%/download')`
+			            AND a.payload::jsonb->>'action' NOT LIKE '%/file' AND a.payload::jsonb->>'action' NOT LIKE '%/download'
+			            AND a.payload::jsonb->>'action' NOT LIKE '%/documents.zip')`
 		}
 		if term := strings.TrimSpace(q.Get("q")); term != "" {
 			args = append(args, "%"+term+"%")
@@ -298,4 +319,52 @@ func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"entries": out})
 	}
+}
+
+// isDocumentRead: a GET that hands over a document (recorded like a change).
+func isDocumentRead(rel string) bool {
+	return strings.HasSuffix(rel, "/download") || strings.HasSuffix(rel, "/file") || strings.HasSuffix(rel, "/documents.zip")
+}
+
+// staffActionLabels: the office's most frequent actions, in words.
+var staffActionLabels = map[string]string{
+	"POST /cases/{caseId}/signal":                          "Moved a case to its next step",
+	"POST /cases/{caseId}/eligibility":                     "Recorded an eligibility review",
+	"POST /cases/{caseId}/eligibility/auto":                "Ran the automatic eligibility check",
+	"POST /cases/{caseId}/correspondence":                  "Drafted a letter",
+	"POST /cases/{caseId}/documents":                       "Uploaded a document to a case",
+	"GET /cases/{caseId}/documents/{docId}/download":       "Downloaded a case document",
+	"GET /cases/{caseId}/documents.zip":                    "Downloaded a case's documents",
+	"POST /cases/{caseId}/document-requests":               "Requested documents",
+	"POST /cases/{caseId}/document-requests/{reqId}/close": "Closed a document request",
+	"POST /qa/{qaId}/decision":                             "Decided a letter in the QA gate",
+	"POST /qa/{qaId}/send":                                 "Sent a letter",
+	"POST /invoices/{invId}/settle":                        "Recorded an invoice payment",
+	"PUT /cases/{caseId}/review-notes":                     "Edited review notes",
+	"POST /cases/{caseId}/offers":                          "Submitted a sealed offer",
+	"PUT /program/brand":                                   "Changed the portal's brand name",
+	"PUT /program/label":                                   "Changed the tenant's display name",
+}
+
+// actionLabel: what an action was, in words, for the audit trails.
+func actionLabel(action string) string {
+	if l := orgActionLabels[action]; l != "" {
+		return l
+	}
+	if l := staffActionLabels[action]; l != "" {
+		return l
+	}
+	method, route, _ := strings.Cut(action, " ")
+	words := []string{}
+	for _, seg := range strings.Split(strings.Trim(route, "/"), "/") {
+		if seg == "" || strings.HasPrefix(seg, "{") || idSegment.MatchString(seg) {
+			continue
+		}
+		words = append(words, strings.ReplaceAll(seg, "-", " "))
+	}
+	verb := map[string]string{"POST": "Did", "PUT": "Updated", "PATCH": "Updated", "DELETE": "Deleted", "GET": "Opened"}[method]
+	if verb == "" {
+		verb = method
+	}
+	return verb + ": " + strings.Join(words, " › ")
 }

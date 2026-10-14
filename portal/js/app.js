@@ -237,9 +237,11 @@
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/payments", "🏦", "Payments"]);
   // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
-  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Program audit log"]);
-  // A TPA's or plan's own trail (the office's tenant-wide log above is not theirs).
-  else if (outside) links.push(["#/org-audit", "⌘", "Audit log"]);
+  // Audit trails, isolated: the whole program's for admins and the state
+  // auditor; an organization's own for a TPA or plan; and everyone's own actions.
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/audit", "⌘", "Program audit log"]);
+  else if (outside && has("TPA", "HEALTH_PLAN")) links.push(["#/org-audit", "⌘", "Audit log"]);
+  links.push(["#/my-activity", "◷", "My activity"]);
   if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
@@ -430,6 +432,7 @@
     [/^#\/payments$/, Views.paymentsView],
     [/^#\/audit$/, Views.auditLog],
     [/^#\/org-audit$/, Views.orgAuditPage],
+    [/^#\/my-activity$/, Views.myActivityPage],
     [/^#\/document-requests$/, Views.docReqPage],
   ];
 

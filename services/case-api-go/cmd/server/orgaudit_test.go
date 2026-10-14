@@ -30,3 +30,33 @@ func TestEveryOrgRouteHasWords(t *testing.T) {
 		}
 	}
 }
+
+// An entry belongs to the person who did it; machine actors belong to no one.
+func TestAuditActor(t *testing.T) {
+	for pl, want := range map[string]string{"u-1": "u-1", "system": "", "system:bulk-filer": "", "stripe": "", "": ""} {
+		if got := auditActor(map[string]any{"by": pl}); got != want {
+			t.Errorf("auditActor(by=%q) = %q, want %q", pl, got, want)
+		}
+	}
+}
+
+// Every action reads as words in the trails, known or not.
+func TestActionLabel(t *testing.T) {
+	if l := actionLabel("POST /cases/{caseId}/eligibility"); l != "Recorded an eligibility review" {
+		t.Errorf("known staff action: %q", l)
+	}
+	if l := actionLabel("POST /tpa/disputes/bulk"); l != "Uploaded a bulk filing" {
+		t.Errorf("known org action: %q", l)
+	}
+	if l := actionLabel("DELETE /cases/{caseId}/notes/{noteId}"); l != "Deleted: cases › notes" {
+		t.Errorf("fallback: %q", l)
+	}
+	for _, p := range []string{"/cases/x/documents/y/download", "/hp/responding/x/documents/y/file", "/cases/x/documents.zip"} {
+		if !isDocumentRead(p) {
+			t.Errorf("%s hands over a document", p)
+		}
+	}
+	if isDocumentRead("/cases/x") {
+		t.Error("opening a case is not a document read")
+	}
+}

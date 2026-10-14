@@ -585,6 +585,7 @@ func main() {
 		r.Post("/checklists/{itemId}/check", s.checkItem)
 		r.Get("/calendar", s.calendar)
 		r.Get("/audit-log", s.listAuditLog)
+		r.Get("/audit/mine", s.myAuditLog) // everyone's own trail (orgaudit.go)
 		r.Get("/notifications", s.listNotifications)
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Post("/notifications/read-all", s.readAllNotifications)

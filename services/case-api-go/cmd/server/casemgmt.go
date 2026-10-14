@@ -128,12 +128,22 @@ func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, pa
 	sum := sha256.Sum256([]byte(prevHash + string(body)))
 	hash := hex.EncodeToString(sum[:])
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org)
-		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''))`, tenant, caseID, action, string(body), prevHash, hash, auditOrg(payload)); err != nil {
+		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org, actor)
+		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''))`, tenant, caseID, action, string(body), prevHash, hash, auditOrg(payload), auditActor(payload)); err != nil {
 		slog.Error("audit", "action", action, "err", err)
 		return
 	}
 	_ = tx.Commit(ctx)
+}
+
+// auditActor: the person an entry records ("by"), for their own trail
+// (My activity); "" for the system, Stripe and other machine actors.
+func auditActor(payload map[string]any) string {
+	by, _ := payload["by"].(string)
+	if by == "" || strings.HasPrefix(by, "system") || strings.HasPrefix(by, "stripe") {
+		return ""
+	}
+	return by
 }
 
 // auditOrg: the outside organization an entry is about, so its own audit
@@ -162,8 +172,11 @@ func auditOrg(payload map[string]any) string {
 // their own tenant's rows.
 func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM") {
-		http.Error(w, `{"error":"forbidden: requires admin, auditor, or case-staff role"}`, http.StatusForbidden)
+	// The whole program's trail: admins and the state auditor. Everyone else
+	// reads their own (GET /audit/mine) and, for a TPA or plan, its
+	// organization's; a case's own history stays on the case page.
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN") {
+		http.Error(w, `{"error":"forbidden: the program audit log is for admins and the state auditor — see My activity for your own"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

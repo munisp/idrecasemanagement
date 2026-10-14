@@ -394,7 +394,7 @@ const Api = (() => {
       checkoutCancel: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/cancel`),
       hpFees: () => req("GET", `${t()}/hp/fees`),
       hpFeesCheckout: () => req("POST", `${t()}/hp/fees/checkout`),
-      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/audit?` + new URLSearchParams(params || {})),
+      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "mine" ? "audit/mine" : kind === "hp" ? "hp/audit" : "tpa/audit"}?` + new URLSearchParams(params || {})),
       // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
       respondList: (k) => req("GET", `${t()}/${k}/responding`),
       // Document requests: asked on the case by the review team, answered in the portal.
