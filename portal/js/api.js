@@ -343,6 +343,67 @@ const Api = (() => {
       tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${qs(tpaId ? { tpa_id: tpaId } : {})}`),
       adminTpas: () => req("GET", `${t()}/admin/tpas`),
       adminTpaStatus: (id, status) => req("POST", `${t()}/admin/tpas/${id}/status`, { status }),
+      tpaOnboarding: () => req("GET", `${t()}/tpa/onboarding`),
+      tpaClientProfile: (clientId, body) => req("PUT", `${t()}/tpa/clients/${clientId}/profile`, body),
+      tpaImportClients: (file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return req("POST", `${t()}/tpa/clients/import`, fd, true);
+      },
+      tpaPayments: (clientId) => req("GET", `${t()}/tpa/clients/${clientId}/payments`),
+      tpaAddPayment: (clientId, body) => req("POST", `${t()}/tpa/clients/${clientId}/payments`, body),
+      tpaCreatePackage: (clientId, mode) => req("POST", `${t()}/tpa/clients/${clientId}/packages`, { mode }),
+      tpaPackage: (packageId) => req("GET", `${t()}/tpa/packages/${packageId}`),
+      tpaAttachDoc: (packageId, slot, file) => {
+        const fd = new FormData();
+        fd.append("slot", slot);
+        fd.append("file", file);
+        return req("POST", `${t()}/tpa/packages/${packageId}/docs`, fd, true);
+      },
+      tpaUploadMerged: (packageId, file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return req("POST", `${t()}/tpa/packages/${packageId}/merged`, fd, true);
+      },
+      tpaBulkPackages: (file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return req("POST", `${t()}/tpa/packages/bulk`, fd, true);
+      },
+      healthPlanRegister: (body) => req("POST", "/api/public/healthplan/register", body),
+      hpClaim: (code) => req("POST", `${t()}/hp/claim`, { code }),
+      hpMe: () => req("GET", `${t()}/hp/me`),
+      hpOnboarding: () => req("GET", `${t()}/hp/onboarding`),
+      hpAddParty: (body) => req("POST", `${t()}/hp/parties`, body),
+      hpPartyProfile: (partyId, body) => req("PUT", `${t()}/hp/parties/${partyId}/profile`, body),
+      hpImportParties: (file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return req("POST", `${t()}/hp/parties/import`, fd, true);
+      },
+      hpPayments: (partyId) => req("GET", `${t()}/hp/parties/${partyId}/payments`),
+      hpAddPayment: (partyId, body) => req("POST", `${t()}/hp/parties/${partyId}/payments`, body),
+      hpCreatePackage: (partyId, mode) => req("POST", `${t()}/hp/parties/${partyId}/packages`, { mode }),
+      hpPackage: (packageId) => req("GET", `${t()}/hp/packages/${packageId}`),
+      hpAttachDoc: (packageId, slot, file) => {
+        const fd = new FormData();
+        fd.append("slot", slot);
+        fd.append("file", file);
+        return req("POST", `${t()}/hp/packages/${packageId}/docs`, fd, true);
+      },
+      hpUploadMerged: (packageId, file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return req("POST", `${t()}/hp/packages/${packageId}/merged`, fd, true);
+      },
+      hpBulkPackages: (file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return req("POST", `${t()}/hp/packages/bulk`, fd, true);
+      },
+      hpIntake: (body) => req("POST", `${t()}/hp/intake`, body),
+      adminHealthPlans: () => req("GET", `${t()}/admin/healthplans`),
+      adminHealthPlanStatus: (id, status) => req("POST", `${t()}/admin/healthplans/${id}/status`, { status }),
       pingPresence: (name) => req("POST", `${t()}/presence/ping`, { name }),
       checks: (status, opts) => req("GET", `${t()}/checks${qs({ status: status || "", ...(opts || {}) })}`),
       clearCheck: (checkId, remittanceRef) => req("POST", `${t()}/checks/${checkId}/clear`, { remittance_ref: remittanceRef }),

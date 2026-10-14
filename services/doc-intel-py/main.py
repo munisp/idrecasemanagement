@@ -24,8 +24,10 @@ from minio import Minio
 from opensearchpy import OpenSearch
 
 from eobshape import as_lines, as_money, as_text, line_text, lines_text
-from pipeline import (ModelUnavailable, bytes_to_pages, image_bytes, ooxml_safe, run_pipeline, sniff_doc_kind,
-                      straighten_pages, upright_pages)
+from fields import extract_fields
+from pipeline import (ModelUnavailable, bytes_to_pages, classify_text, image_bytes, ooxml_safe, run_pipeline,
+                      sniff_doc_kind, straighten_pages, upright_pages)
+import tpa_docs
 from rules_engine import expand_template, fire_rules, load_rules
 from check_processor import extract_check
 import learning
@@ -1126,15 +1128,23 @@ def main() -> None:
 
     def run(evt: dict) -> None:
         kind = evt.get("type")
-        if kind not in ("doc.uploaded", "check.uploaded"):
+        if kind not in ("doc.uploaded", "check.uploaded", "tpa_doc.uploaded"):
             return
         with otel_setup.span(f"{kind} process", traceparent=evt.get("traceparent"), consumer=True,
                              **{"idre.tenant": evt.get("tenant"), "idre.doc_id": evt.get("doc_id"),
                                 "idre.case_id": evt.get("case_id"), "messaging.system": "kafka"}):
             if kind == "doc.uploaded":
                 process(evt)
-            else:
+            elif kind == "check.uploaded":
                 process_check(evt)
+            else:
+                tpa_docs.handle_tpa_doc(evt, {
+                    "dsn": DSN, "vault": VAULT, "vault_headers": VAULT_HEADERS,
+                    "minio": minio, "doc_bucket": DOC_BUCKET, "classify_text": classify_text,
+                    "extract_fields": extract_fields,
+                    "fetch_and_decrypt": fetch_and_decrypt,
+                    "features_for": features_for,
+                })
 
     def drain(block: bool = False) -> None:
         while pending and (block or pending[0][1].done()):
