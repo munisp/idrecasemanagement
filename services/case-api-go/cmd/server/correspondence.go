@@ -297,6 +297,17 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	// the case manager never leaves the compose screen to copy-paste a URL.
 	// Fire when explicitly requested OR when the body still carries the
 	// placeholder after variable substitution.
+	if tpl.Key == "rfi" && s.portalRFI(r.Context(), tenant, caseID, in.RfiTo) {
+		// That side answers in its portal (document_requests.go): the letter
+		// tells it where, instead of carrying an upload link.
+		portal := strings.TrimRight(s.cfg.PortalBaseURL, "/") + "/app.html#/document-requests"
+		if strings.Contains(body, "{share_link}") {
+			body = strings.ReplaceAll(body, "{share_link}", portal)
+		} else {
+			body += "\n\nPlease sign in to the portal and upload the documents under Document requests: " + portal
+		}
+		in.AutoShare = false
+	}
 	if in.AutoShare || strings.Contains(body, "{share_link}") {
 		link := s.autoShareLink(r, tenant, caseID, "upload", "")
 		if strings.Contains(body, "{share_link}") {

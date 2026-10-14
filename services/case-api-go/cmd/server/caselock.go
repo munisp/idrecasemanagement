@@ -71,7 +71,7 @@ func caseActionAllowed(lock, action string) bool {
 	// log of calls and inquiries exchanged with them.
 	case "correspondence", "lettergen", "letters", "calls", "inquiries":
 		return true
-	case "eligibility":
+	case "eligibility", "document-requests": // a re-check needs the documents it asks for
 		return lock == lockIneligible
 	}
 	return false

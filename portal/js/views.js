@@ -1229,7 +1229,7 @@ const Views = (() => {
   }
   async function filerCase(id) {
     const kind = can("TPA") ? "tpa" : "hp";
-    filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind));
+    filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind)); filerDocReqBanner(id, kind);
     let c;
     try { c = await Api.cases.get(id); }
     catch { return `<div class="view-head"><h1>Dispute not found</h1></div>
@@ -1239,6 +1239,7 @@ const Views = (() => {
     const list = Array.isArray(docs) ? docs : (docs.documents || []);
     return `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>${badge(c.status)}</div>
       <p class="muted">Filed for ${esc(d.initiating_party || "your client")} · opened ${fmtDate(c.opened_at)}</p>
+      <div id="filer-docreq-${id}"></div>
       ${c.lock === "AWAITING_PAYMENT" ? `<div class="case-lock" role="status"><b>Awaiting payment.</b> The review starts once the initial fee is paid.
         <span id="filer-fee-${id}"></span></div>` : ""}
       ${clocks.length ? `<div class="sla-cluster">` + clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
@@ -1331,6 +1332,10 @@ const Views = (() => {
         });
         copilotLoadBatches(id);
       }
+
+      // Document requests — what the review team asked a side for, and what came back.
+      html += `<h2>Document requests</h2><div id="docreq-box"><p class="muted">Loading…</p></div>`;
+      caseDocReqBox(id);
 
       // Documents — docket grouped by folder with full metadata + RBAC controls
       const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
@@ -6291,7 +6296,7 @@ const Views = (() => {
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("against", "Against your clients", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("audit", "Audit log", true)}
+        ${tab("disputes", "Disputes", true)}${tab("against", "Against your clients", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -6399,6 +6404,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         </section>
 
         <section data-tpa-panel="team" style="display:none"><div id="tpa-team"></div></section>
+        <section data-tpa-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
+          <p class="muted">Documents the review team asked you for, on your disputes and on disputes against your clients. Upload and send them here.</p>
+          <div id="tpa-docreq"><p class="muted">Loading…</p></div></div></section>
         <section data-tpa-panel="audit" style="display:none"><div class="card"><h2>Audit log</h2>
           <p class="muted">Everything done in your organization's account — by your team, by the office on your behalf, and by the system — newest first. Each entry is chained to the one before it, so a removed or altered entry shows.</p>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('tpa-audit', 'tpa')">
@@ -6438,8 +6446,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       reviews: () => onboardingReviewsBox("tpa-reviews", "tpa"),
       oversight: () => tpaAdminBox(),
       audit: () => orgAuditBox("tpa-audit", "tpa"),
+      docreq: () => orgDocReqBox("tpa-docreq", "tpa"),
     }[k] || (() => {}))();
     if (k === "audit" && !tpaTab._booted) orgAuditBox("tpa-audit", "tpa");
+    if (k === "docreq" && !tpaTab._booted) orgDocReqBox("tpa-docreq", "tpa");
     tpaTab._booted = true;
   }
   function tpaTabCount(k, text) {
@@ -6676,7 +6686,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       <span class="muted">Answer the disputes filed against your plan, and file disputes for your employer groups, networks and facilities</span></div>
       <div id="hp-org"></div>
       <div class="rpt-tabs" role="tablist" id="hp-tabs">
-        ${tab("against", "Disputes against us", true)}${tab("parties", "Your parties", true)}${tab("file", "File a dispute", true)}${tab("audit", "Audit log", true)}
+        ${tab("against", "Disputes against us", true)}${tab("parties", "Your parties", true)}${tab("file", "File a dispute", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All plans", false) + tab("reviews", "Documents to review", false) : ""}
       </div>
       <div id="hp-body" style="display:none">
@@ -6727,6 +6737,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <p class="muted">The payment link and case instructions come to your plan contact — you pay and manage documents on behalf of the party.</p>
           <div id="hp-file-result"></div></div>
         </section>
+        <section data-hp-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
+          <p class="muted">Documents the review team asked you for. Upload and send them here.</p>
+          <div id="hp-docreq"><p class="muted">Loading…</p></div></div></section>
         <section data-hp-panel="audit" style="display:none"><div class="card"><h2>Audit log</h2>
           <p class="muted">Everything done in your organization's account — by your team, by the office on your behalf, and by the system — newest first. Each entry is chained to the one before it, so a removed or altered entry shows.</p>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('hp-audit', 'hp')">
@@ -6755,8 +6768,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       reviews: () => onboardingReviewsBox("hp-reviews", "hp"),
       oversight: () => hpAdminBox(),
       audit: () => orgAuditBox("hp-audit", "hp"),
+      docreq: () => orgDocReqBox("hp-docreq", "hp"),
     }[k] || (() => {}))();
     if (k === "audit" && !hpTab._booted) orgAuditBox("hp-audit", "hp");
+    if (k === "docreq" && !hpTab._booted) orgDocReqBox("hp-docreq", "hp");
     hpTab._booted = true;
   }
   function hpTabCount(k, text) {
@@ -7464,6 +7479,117 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       return pages ? `${label} ${pages[0]}` : (rest.toLowerCase() === slug + ".pdf" ? label : `${label} · ${rest}`);
     }
     return `${label} · ${rest}`;
+  }
+  // ---- Document requests (document_requests.go) ----
+  const DOCREQ_REASONS = [["VERIFICATION", "Verification"], ["ELIGIBILITY_RECHECK", "Eligibility re-check"], ["MISSING_DOCUMENT", "Missing document"],
+    ["CLEARER_COPY", "Clearer copy needed"], ["RFI", "Request for information"], ["OTHER", "Other"]];
+  const DOCREQ_STATUS = { OPEN: ["needs-review", "Waiting for documents"], SUBMITTED: ["validating", "Documents received"],
+    COMPLETE: ["filed", "Complete"], CANCELLED: ["", "Withdrawn"] };
+  const docReqBadge = (x) => { const [c, t] = DOCREQ_STATUS[x.status] || ["", x.status]; return `<span class="badge s-${c}">${t}</span>` + (x.overdue ? ' <span class="badge s-rejected">Overdue</span>' : ""); };
+  const docReqItems = (x) => (x.items || []).length ? `<ul class="docreq-items">${x.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : "";
+  const docReqFiles = (x) => (x.files || []).length ? `<div class="muted">Received: ${x.files.map((f) => esc(f.filename)).join(", ")}</div>` : "";
+  const docReqCanAsk = () => can("CASE_MANAGER", "PM", "ARBITRATOR", "ATTORNEY", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+  async function caseDocReqBox(caseId) {
+    let box = null;
+    for (let i = 0; i < 50 && !(box = document.getElementById("docreq-box")); i++) await new Promise((r) => setTimeout(r, 200));
+    if (!box) return;
+    try {
+      const rs = (await Api.program.caseDocRequests(caseId)).requests || [];
+      box.innerHTML = (docReqCanAsk() ? `<p><button class="mini" onclick="Views.docReqNew('${caseId}')">Request documents</button>
+          <span class="muted">A TPA or health plan on the platform gets it in its portal; anyone else gets a secure upload link by email.</span></p>` : "")
+        + (rs.length ? `<table class="tbl"><thead><tr><th>Asked</th><th>Of</th><th>Why</th><th>Documents</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>
+          ${rs.map((x) => `<tr><td>${fmtDate(x.created_at)}<div class="muted">${esc(x.requested_by || "")}</div></td>
+            <td>${x.side === "PROVIDER" ? "Provider" : "Health plan"}<div class="muted">${x.in_portal ? "in the portal" : "by email"}</div></td>
+            <td>${esc(x.reason_label)}${x.source === "rfi_letter" ? '<div class="muted">with the RFI letter</div>' : ""}</td>
+            <td>${docReqItems(x)}${x.message ? `<div class="muted">${esc(x.message)}</div>` : ""}${docReqFiles(x)}${x.response_note ? `<div>“${esc(x.response_note)}”</div>` : ""}</td>
+            <td>${esc(x.due_date)}</td><td>${docReqBadge(x)}</td>
+            <td class="row-actions">${docReqCanAsk() && (x.status === "OPEN" || x.status === "SUBMITTED") ? `<button class="mini" onclick="Views.docReqClose('${caseId}','${x.id}','complete')">Mark complete</button>
+              <button class="mini secondary" onclick="Views.docReqClose('${caseId}','${x.id}','cancel')">Cancel</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+          : '<p class="muted">No documents requested on this case.</p>');
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function docReqNew(caseId) {
+    const v = await UI.modal({
+      title: "Request documents",
+      body: "The side you ask is notified at once. A TPA or health plan on the platform uploads in its portal; anyone else gets a secure upload link by email.",
+      fields: [
+        { name: "side", label: "Ask", required: true, options: [["PROVIDER", "The provider's side"], ["HEALTH_PLAN", "The health plan's side"]] },
+        { name: "reason", label: "Why", required: true, options: DOCREQ_REASONS },
+        { name: "items", label: "Documents needed (one per line)", type: "textarea", required: true, placeholder: "e.g. Proof of coverage for the date of service" },
+        { name: "message", label: "Message (optional)", type: "textarea" },
+        { name: "due_days", label: "Due in (days)", type: "number", value: "15" },
+      ],
+      submitLabel: "Send request",
+    });
+    if (!v) return;
+    try {
+      const r = await Api.program.createDocRequest(caseId, { side: v.side, reason: v.reason, items: String(v.items || "").split("\n"),
+        message: v.message || "", due_days: Number(v.due_days) || 15 });
+      UI.toast(r.in_portal ? "Request sent — it is in their portal, and they were emailed" : "Request sent by email with a secure upload link");
+      caseDocReqBox(caseId);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function docReqClose(caseId, reqId, action) {
+    if (!(await UI.confirm(action === "complete" ? "Mark this request complete?" : "Withdraw this request?",
+      action === "complete" ? "You have what you asked for." : "The other side is told nothing more is needed.", action === "complete" ? "Mark complete" : "Withdraw"))) return;
+    try { await Api.program.closeDocRequest(caseId, reqId, action); caseDocReqBox(caseId); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  // The outside organization's side: what it is asked for, and where it answers.
+  function docReqPage() {
+    const kind = can("TPA") ? "tpa" : "hp";
+    orgDocReqBox("docreq-org", kind);
+    return `<div class="view-head"><h1>Document requests</h1></div>
+      <div class="card"><p class="muted">Documents the review team asked you for. Upload them here and send them — that is your answer; there is no need to reply by email.</p>
+        <div id="docreq-org"><p class="muted">Loading…</p></div></div>`;
+  }
+  async function orgDocReqBox(boxId, kind) {
+    let box = null;
+    for (let i = 0; i < 50 && !(box = document.getElementById(boxId)); i++) await new Promise((r) => setTimeout(r, 200));
+    if (!box) return;
+    try {
+      const r = await Api.program.orgDocRequests(kind);
+      const rs = r.requests || [];
+      const tc = document.getElementById((kind === "hp" ? "hp" : "tpa") + "-tc-docreq");
+      if (tc) tc.textContent = r.open ? String(r.open) : "";
+      box.innerHTML = rs.length ? rs.map((x) => `<div class="docreq ${x.status === "OPEN" ? "open" : ""}" id="docreq-${x.id}">
+          <div class="docreq-head"><b class="mono">${esc(x.case_number)}</b> ${docReqBadge(x)} <span class="muted">${esc(x.reason_label)} · asked ${fmtDate(x.created_at)} · due ${esc(x.due_date)}</span></div>
+          <div class="muted">${esc(x.filer || "")}${x.other_party ? " · against " + esc(x.other_party) : ""}</div>
+          ${docReqItems(x)}${x.message ? `<p>${esc(x.message)}</p>` : ""}
+          ${(x.files || []).length ? `<div><b>Uploaded:</b> ${x.files.map((f) => esc(f.filename)).join(", ")}</div>` : ""}
+          ${x.status === "OPEN" ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.docReqUploadFn(this, '${kind}', '${x.id}', '${boxId}')">
+              <input type="file" name="file" multiple required aria-label="Choose files"><button>Upload</button></form>
+            <form class="inline-form" onsubmit="event.preventDefault(); Views.docReqSubmitFn(this, '${kind}', '${x.id}', '${boxId}')">
+              <textarea name="note" rows="2" placeholder="A note for the reviewer (optional)"></textarea>
+              <button ${(x.files || []).length ? "" : "disabled title=\"Upload the documents first\""}>Send the documents</button></form>`
+            : x.response_note ? `<div class="muted">Your note: “${esc(x.response_note)}”</div>` : ""}
+        </div>`).join("") : '<p class="muted">No documents have been requested from you.</p>';
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function docReqUploadFn(form, kind, reqId, boxId) {
+    const btn = form.querySelector("button"); btn.disabled = true;
+    try {
+      for (const f of form.file.files) await Api.program.orgDocRequestUpload(kind, reqId, f);
+      UI.toast(`${form.file.files.length} file${form.file.files.length === 1 ? "" : "s"} uploaded — send them when you have everything`);
+      orgDocReqBox(boxId, kind);
+    } catch (e) { btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function docReqSubmitFn(form, kind, reqId, boxId) {
+    if (!(await UI.confirm("Send these documents?", "The reviewer is told at once. You can't add to this request afterwards.", "Send"))) return;
+    try {
+      await Api.program.orgDocRequestSubmit(kind, reqId, form.note.value.trim());
+      UI.toast("Documents sent to the reviewer"); orgDocReqBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  // An outside filer's dispute page: its open requests, with a link to answer them.
+  async function filerDocReqBanner(caseId, kind) {
+    let box = null;
+    for (let i = 0; i < 50 && !(box = document.getElementById("filer-docreq-" + caseId)); i++) await new Promise((r) => setTimeout(r, 200));
+    if (!box) return;
+    try {
+      const open = ((await Api.program.orgDocRequests(kind)).requests || []).filter((x) => x.case_id === caseId && x.status === "OPEN");
+      box.innerHTML = open.length ? `<div class="case-lock" role="status"><b>Documents requested.</b> The review team needs ${open.length === 1 ? "a document" : open.length + " sets of documents"} for this dispute (due ${esc(open[0].due_date)}).
+        <a class="button mini" href="#/document-requests">Upload them</a></div>` : "";
+    } catch { box.innerHTML = ""; }
   }
   // The sidebar's Audit log for a TPA or plan account: its organization's trail.
   function orgAuditPage() {
@@ -8222,5 +8348,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn };
 })();

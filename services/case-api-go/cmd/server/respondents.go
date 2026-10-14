@@ -31,7 +31,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
@@ -360,63 +359,14 @@ func (s *server) respondingUpload(actor string) http.HandlerFunc {
 			http.Error(w, `{"error":"no such dispute against you"}`, http.StatusNotFound)
 			return
 		}
-		var status string
-		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
-		if status == "CLOSED" || status == "AWAITING_PAYMENT" {
-			http.Error(w, `{"error":"this dispute is not open for documents"}`, http.StatusConflict)
+		docID, filename, code, msg := s.storeCaseUpload(w, r, tenant, caseID, "respondent:"+sc.label, "Response — ")
+		if code != 0 {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), code)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
-		if err := r.ParseMultipartForm(maxDocBytes); err != nil {
-			http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
-			return
-		}
-		f, hdr, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, `{"error":"file field required"}`, http.StatusBadRequest)
-			return
-		}
-		defer f.Close()
-		raw, err := io.ReadAll(f)
-		if err != nil {
-			http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
-			return
-		}
-		if err := contentPolicy(hdr.Filename, raw); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
-			return
-		}
-		if sig, ok := s.scanOrRefuse(discardWriter{}, bytes.NewReader(raw), "file"); !ok {
-			http.Error(w, fmt.Sprintf(`{"error":"malware scan rejected: %s"}`, sig), http.StatusUnsupportedMediaType)
-			return
-		}
-		docID := newUUID()
-		objectKey := fmt.Sprintf("%s/cases/%s/%s.enc", tenant, caseID, docID)
-		ct, err := s.vaultSealDoc(r, tenant, objectKey, raw)
-		if err != nil {
-			http.Error(w, `{"error":"seal failed"}`, http.StatusBadGateway)
-			return
-		}
-		if _, err := s.docs.mc.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
-			minio.PutObjectOptions{UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
-			http.Error(w, `{"error":"store failed"}`, http.StatusBadGateway)
-			return
-		}
-		ctype := hdr.Header.Get("Content-Type")
-		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
-			INSERT INTO tenant_%s.documents
-			  (id, case_id, object_key, size_bytes, content_type, sealed, uploaded_by, version, scan_status, filename, folder)
-			VALUES ($1,$2::uuid,$3,$4,$5,false,$6,1,'CLEAN',$7,'PARTY_UPLOADS')`, sanitizeTenant(tenant)),
-			docID, caseID, objectKey, len(raw), ctype, "respondent:"+sc.label, "Response — "+hdr.Filename); err != nil {
-			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-			return
-		}
-		s.publish(r.Context(), tenant, "documents", map[string]any{
-			"type": "doc.uploaded", "tenant": tenant, "case_id": caseID, "doc_id": docID,
-			"object_key": objectKey, "content_type": ctype, "sealed": false, "at": time.Now().UTC(),
-		})
-		s.logActivity(r.Context(), tenant, caseID, "RESPONDENT_DOCUMENT", fmt.Sprintf("%s added a response document: %s", sc.label, hdr.Filename))
-		writeJSON(w, http.StatusCreated, map[string]any{"doc_id": docID, "filename": "Response — " + hdr.Filename})
+		hdrName := strings.TrimPrefix(filename, "Response — ")
+		s.logActivity(r.Context(), tenant, caseID, "RESPONDENT_DOCUMENT", fmt.Sprintf("%s added a response document: %s", sc.label, hdrName))
+		writeJSON(w, http.StatusCreated, map[string]any{"doc_id": docID, "filename": filename})
 	}
 }
 

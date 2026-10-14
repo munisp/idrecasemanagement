@@ -726,6 +726,16 @@ func main() {
 		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout) // one payment for all unpaid fees
 		r.Get("/tpa/audit", s.orgAuditLog("tpa"))       // the TPA's own audit trail (orgaudit.go)
 		r.Get("/hp/audit", s.orgAuditLog("hp"))         // the plan's own audit trail
+		// Document requests (document_requests.go): asked on the case, answered in the portal.
+		r.Get("/tpa/document-requests", s.orgDocRequests("tpa"))
+		r.Post("/tpa/document-requests/{reqId}/files", s.orgDocRequestUpload("tpa"))
+		r.Post("/tpa/document-requests/{reqId}/submit", s.orgDocRequestSubmit("tpa"))
+		r.Get("/hp/document-requests", s.orgDocRequests("hp"))
+		r.Post("/hp/document-requests/{reqId}/files", s.orgDocRequestUpload("hp"))
+		r.Post("/hp/document-requests/{reqId}/submit", s.orgDocRequestSubmit("hp"))
+		r.Get("/cases/{caseId}/document-requests", s.listCaseDocRequests)
+		r.Post("/cases/{caseId}/document-requests", s.createDocRequest)
+		r.Post("/cases/{caseId}/document-requests/{reqId}/close", s.closeDocRequest)
 		// Fee payments (fee_payments.go): one dispute, one provider, a bulk upload, or everything.
 		r.Post("/tpa/clients/{clientId}/fees/checkout", s.tpaClientCheckout)
 		r.Post("/tpa/disputes/{caseId}/pay", s.disputePay("tpa"))

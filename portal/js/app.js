@@ -233,6 +233,7 @@
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
   // A TPA's or plan's own trail (the office's tenant-wide log above is not theirs).
   else if (outside) links.push(["#/org-audit", "⌘", "Audit log"]);
+  if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
 
@@ -422,6 +423,7 @@
     [/^#\/payments$/, Views.paymentsView],
     [/^#\/audit$/, Views.auditLog],
     [/^#\/org-audit$/, Views.orgAuditPage],
+    [/^#\/document-requests$/, Views.docReqPage],
   ];
 
   // One rule for every way of reaching a page -- the rail, a typed or

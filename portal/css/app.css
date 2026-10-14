@@ -818,3 +818,10 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 .fee-note { font-size: 12px; margin-top: 2px; max-width: 28ch; }
 .row-actions { white-space: nowrap; }
 .row-actions .mini + .mini { margin-left: 6px; }
+
+/* Document requests (TPA / plan portal, staff case page) */
+.docreq { border: 1px solid var(--border-subtle); border-radius: var(--radius-card); padding: 12px 14px; margin: 0 0 10px; background: var(--surface-raised); display: grid; gap: 6px; }
+.docreq.open { border-color: var(--border-strong); }
+.docreq-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.docreq-items { margin: 2px 0 0 18px; padding: 0; }
+.docreq textarea { min-width: min(420px, 100%); }

@@ -396,6 +396,16 @@ const Api = (() => {
       orgAudit: (kind, params) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/audit?` + new URLSearchParams(params || {})),
       // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
       respondList: (k) => req("GET", `${t()}/${k}/responding`),
+      // Document requests: asked on the case by the review team, answered in the portal.
+      caseDocRequests: (caseId) => req("GET", `${t()}/cases/${caseId}/document-requests`),
+      createDocRequest: (caseId, body) => req("POST", `${t()}/cases/${caseId}/document-requests`, body),
+      closeDocRequest: (caseId, reqId, action) => req("POST", `${t()}/cases/${caseId}/document-requests/${reqId}/close`, { action }),
+      orgDocRequests: (k) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests`),
+      orgDocRequestUpload: (k, reqId, file) => {
+        const fd = new FormData(); fd.append("file", file);
+        return req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/files`, fd, true);
+      },
+      orgDocRequestSubmit: (k, reqId, note) => req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/submit`, { note }),
       respondGet: (k, id) => req("GET", k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`),
       respondFile: (k, id, doc) => blobURL((k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + `/documents/${doc}/file`),
       respondUpload: (k, id, file) => {

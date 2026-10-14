@@ -157,6 +157,7 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 			rfiTo = "provider"
 		}
 		_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "RFI_SENT", map[string]any{"to": rfiTo})
+		s.rfiDocRequest(r, tenant, caseID, rfiTo) // answered in the portal when that side has one
 	}
 	_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "LETTER_SENT", map[string]any{"template": template})
 }

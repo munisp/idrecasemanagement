@@ -66,6 +66,9 @@ var orgActionLabels = map[string]string{
 	"GET /tpa/disputes/{caseId}/fee": "Viewed a dispute's fee", "GET /hp/disputes/{caseId}/fee": "Viewed a dispute's fee", "GET /hp/fees": "Viewed fees owed",
 	"POST /tpa/fees/checkout/{groupId}/confirm": "Came back from a payment", "POST /hp/fees/checkout/{groupId}/confirm": "Came back from a payment",
 	"POST /tpa/fees/checkout/{groupId}/cancel": "Cancelled a payment", "POST /hp/fees/checkout/{groupId}/cancel": "Cancelled a payment",
+	"GET /tpa/document-requests": "Viewed document requests", "GET /hp/document-requests": "Viewed document requests",
+	"POST /tpa/document-requests/{reqId}/files": "Uploaded a requested document", "POST /hp/document-requests/{reqId}/files": "Uploaded a requested document",
+	"POST /tpa/document-requests/{reqId}/submit": "Sent the requested documents", "POST /hp/document-requests/{reqId}/submit": "Sent the requested documents",
 	"GET /tpa/audit": "Viewed the audit log", "GET /hp/audit": "Viewed the audit log",
 	"POST /admin/tpas/{tpaId}/status": "Office changed the TPA's status", "POST /admin/healthplans/{planId}/status": "Office changed the plan's status",
 }
@@ -82,6 +85,8 @@ var orgEventLabels = map[string]string{
 	"DISPUTE_AGAINST_YOU": "Notice: a dispute against you", "DISPUTE_AGAINST_CLIENT": "Notice: a dispute against a client",
 	"RESPONDENT_RESPONDED": "Notice: the other side responded", "PLAN_OPT_OUT_REQUESTED": "Notice: opt-out requested",
 	"PAYMENT_RECEIVED": "Notice: payment received", "PAYMENT_REFUNDED": "Notice: a fee paid twice was refunded",
+	"DOCUMENTS_REQUESTED": "Office requested documents", "DOCUMENT_REQUEST_CANCELLED": "Office withdrew a document request",
+	"DOCUMENT_REQUEST_COMPLETE": "Office marked a document request complete", "DOCUMENTS_SUBMITTED": "Requested documents sent",
 	"FEE_CHECKOUT": "Payment page opened", "FEE_CHECKOUT_CANCELLED": "Payment cancelled", "DUPLICATE_PAYMENT_REFUNDED": "Fee paid twice — refunded",
 	"TPA_FEE_CHECKOUT": "Payment page opened", "BATCH_FILED": "Notice: bulk filing filed", "PACKAGE_STATUS": "Package checked",
 }
