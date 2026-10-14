@@ -489,7 +489,8 @@ button.mini.danger{color:#991b1b;border-color:#fecaca}
    tiles to scroll horizontally. */
 .rpt-tabs{display:flex;gap:4px;margin:12px 0 0;border-bottom:1px solid var(--border-subtle);overflow-x:auto}
 .rpt-tab{flex-shrink:0;padding:9px 16px;border:none;border-bottom:2px solid transparent;background:none;color:var(--text-muted);font-size:14px;cursor:pointer;white-space:nowrap}
-.rpt-tab:hover{color:var(--text-default)}
+/* background:none again on hover: the generic button:hover fill (dark) outranks .rpt-tab and made a hovered tab unreadable */
+.rpt-tab:hover,.rpt-tab:focus{color:var(--text-default);background:none}
 .rpt-tab.active{color:var(--text-default);font-weight:600}
 .rpt-tab.rpt-accent-1.active{border-bottom-color:#2E6B52}
 .rpt-tab.rpt-accent-2.active{border-bottom-color:#9C2B1F}
@@ -758,3 +759,22 @@ button.q-btn{min-height:28px;padding:3px 14px;font-size:12.5px}
 #tpa-onboarding,#tpa-pkg,#tpa-clients,#tpa-reviews,#tpa-admin,#tpa-batches,#tpa-dash,
 #hp-onboarding,#hp-pkg,#hp-reviews,#hp-admin{overflow-x:auto;max-width:100%}
 .onb-doc{width:100%;height:70vh;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-base)}
+
+/* TPA page */
+.tpa-org-line{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:2px 0 6px}
+.tpa-org-name{font-size:18px;font-weight:600}
+#tpa-tabs{margin-bottom:14px}
+#tpa-tabs .tab-count{margin-left:4px;font-size:12px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+#tpa-tabs .tab-count:empty{display:none}
+.tpa-steps{display:flex;flex-wrap:wrap;gap:6px;list-style:none;counter-reset:step;padding:0 14px;margin:0 0 12px}
+.tpa-steps li{counter-increment:step;display:flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border-subtle);border-radius:999px;font-size:13px;color:var(--text-muted)}
+.tpa-steps li::before{content:counter(step);display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--surface-sunken,#eee);font-size:11px;font-weight:600;color:var(--text-default)}
+.tpa-steps li b{color:var(--text-default);font-weight:600}
+.tpa-more{margin:4px 14px 12px}
+.tpa-more>summary{cursor:pointer;font-weight:600;padding:6px 0}
+.tpa-more .inline-form{padding-left:0}
+.tpa-zip-howto{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:900px){.tpa-zip-howto{grid-template-columns:minmax(0,1fr)}}
+.tpa-tree{margin:0;padding:10px 12px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-sunken,#f6f5f1);color:var(--text-primary);font-size:12.5px;line-height:1.5;overflow-x:auto;white-space:pre}
+.tpa-pkg-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+#tpa-team,#tpa-bd-report{overflow-x:auto}

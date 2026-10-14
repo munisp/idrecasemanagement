@@ -718,6 +718,9 @@ func main() {
 		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)   // one giant PDF
 		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)          // slot verdict grid
 		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                // ZIP of client folders
+		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                 // many disputes, each with its own six documents (ZIP)
+		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
+		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
 		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
@@ -925,6 +928,10 @@ func main() {
 	// No upload left unread (docrequeue.go): every few minutes, documents the
 	// reader should have read and has not are announced to it again; one it
 	// still cannot read is flagged to the people on the case.
+	// Bulk TPA disputes (tpa_bulk_disputes.go): a row is filed once its own
+	// six documents are accepted.
+	go s.runBulkDisputeFiler(sweepStop)
+
 	go func() {
 		t := time.NewTicker(docSweepEvery)
 		defer t.Stop()

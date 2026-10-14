@@ -163,6 +163,13 @@ func (s *server) processOneBulkIntake(r *http.Request, tenant, subject string, i
 // still real, just unlabeled.
 func (s *server) processOneTPABulkIntake(r *http.Request, tenant string, org *tpaOrg, it bulkIntakeItem, fpt string) bulkIntakeResult {
 	res := bulkIntakeResult{ExternalRef: it.ExternalRef}
+	// This path opens cases with no documents. While filings need a READY
+	// package, a TPA files in bulk with POST /tpa/disputes/bulk instead: a ZIP
+	// with each dispute's own six documents.
+	if s.featureEnabled(r, tenant, "tpa_onboarding") && s.featureEnabled(r, tenant, "onboarding_required") {
+		res.Status, res.Error = "ERROR", "each dispute needs its six documents: upload the disputes as a ZIP (Bulk filing with documents on the TPA page)"
+		return res
+	}
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
 		res.Status, res.Error = "ERROR", "TPA filing is available on programmed tenants"
@@ -255,6 +262,10 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
 			return
 		}
+		callerOrg = org
+	} else if org, err := s.tpaForPrincipal(r, tenant); err == nil {
+		// Staff acting for a TPA (claimed with its code) file as that TPA,
+		// under the same rules -- including the documents each dispute needs.
 		callerOrg = org
 	}
 	var in struct {

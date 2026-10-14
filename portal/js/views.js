@@ -6261,45 +6261,98 @@ const Views = (() => {
     if (!can("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
       return `<div class="view-head"><h1>Third-party administrators</h1></div><p class="muted">Requires a TPA, CASE_MANAGER, or FINANCE account.</p>`;
     afterRender(tpaBoot);
+    const onb = App.feature("tpa_onboarding");
+    const staff = can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const tab = (k, label, ws) => `<button type="button" role="tab" class="rpt-tab rpt-accent-4${ws ? " tpa-ws" : ""}" data-tab="${k}" onclick="Views.tpaTab('${k}')"${ws ? ' style="display:none"' : ""}>${label} <span class="tab-count" id="tpa-tc-${k}"></span></button>`;
     return `<div class="view-head"><h1>Third-party administrators</h1>
-      <span class="muted">File, pay, and track disputes on behalf of your initiating parties</span></div>
+      <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
+      <div class="rpt-tabs" role="tablist" id="tpa-tabs">
+        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}
+        ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
+      </div>
+      ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
+        <button class="mini" onclick="Views.tpaPkgClose()">Close</button></div><div id="tpa-pkg"></div></div>` : ""}
       <div id="tpa-body" style="display:none">
-        ${App.feature("tpa_onboarding") ? `
-        <div class="card"><h2>Onboarding — readiness board</h2>
-          <p class="muted">Each initiating party needs a verified profile (NPI/TIN/address), a payment rail (card or ACH), and a validated six-document package before you can file for them.</p>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaImportFn(this)">
-            <input name="file" type="file" accept=".csv,text/csv" required />
-            <button class="mini">Import roster (CSV)</button></form>
-          <p class="muted">CSV header: <code>party_name,party_type,contact_email,npi,tin,address</code>. Every row is validated on its own — the report shows per-row results.</p>
-          <div id="tpa-import-result"></div>
-          <div id="tpa-onboarding"><p class="muted">Loading…</p></div></div>
-        <div class="card"><h2>Onboarding — bulk packages (ZIP)</h2>
-          <p class="muted">One ZIP, many clients: top-level folder = client's organization name. Inside each folder, either six files whose names map to the required slots (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code> containing all six — it's split and validated page by page.</p>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaZipFn(this)">
-            <input name="file" type="file" accept=".zip,application/zip" required />
-            <button class="mini">Upload packages ZIP</button></form>
-          <div id="tpa-zip-result"></div></div>
-        <div class="card" id="tpa-pkg-card" style="display:none"><h2>Package — slot verdicts</h2>
-          <div id="tpa-pkg"></div></div>` : ""}
-        <div class="card"><h2>Initiating parties (clients)</h2>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaAddClientFn(this)">
-            <input name="party_name" placeholder="organization name" required />
-            <select name="party_type"><option value="PROVIDER">Provider</option><option value="HEALTH_PLAN">Health plan</option></select>
-            <input name="contact_email" type="email" placeholder="contact email" />
-            <button class="mini">Add</button></form>
-          <div id="tpa-clients"><p class="muted">Loading…</p></div></div>
-        <div class="card"><h2>File a dispute on behalf of a client</h2>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
-            <select name="client_id" id="tpa-file-client" required onchange="Views.filingPackagesFilter('tpa-file-client','tpa-file-package','client')"></select>
-            <select name="package_id" id="tpa-file-package"><option value="">— no package —</option></select>
-            <input name="contact_name" placeholder="client contact for this dispute" />
-            <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
-            <input name="notes" placeholder="notes" />
-            <button class="mini">File dispute</button></form>
-          <p class="muted">The payment link and upload link come to your TPA contact email — you pay and manage documents on behalf of the initiating party.</p>
-          <div id="tpa-file-result"></div></div>
-        <div class="card"><h2>Bulk upload — file many disputes at once</h2>
+
+        <section data-tpa-panel="disputes">
+          <div class="card"><h2>Your parties' disputes</h2>
+            <p class="muted">Every dispute you filed, for every client. Open a case number for its details, payment and documents.</p>
+            <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
+            <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+        </section>
+
+        <section data-tpa-panel="clients" style="display:none">
+          <div class="card"><h2>Add a client</h2>
+            ${onb ? `<ol class="tpa-steps"><li><b>Add the client</b></li><li><b>Profile</b> — NPI, TIN, address</li><li><b>Payment</b> — card or ACH</li><li><b>File</b> — each dispute with its six documents</li></ol>` : ""}
+            <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaAddClientFn(this)">
+              <input name="party_name" placeholder="organization name" required />
+              <select name="party_type"><option value="PROVIDER">Provider</option><option value="HEALTH_PLAN">Health plan</option></select>
+              <input name="contact_email" type="email" placeholder="contact email" />
+              <button class="mini">Add client</button></form>
+            ${onb ? `<details class="tpa-more"><summary>Add many clients from a spreadsheet (CSV)</summary>
+              <p class="muted">Columns: <code>party_name,party_type,contact_email,npi,tin,address</code>. Each row is checked on its own; the report lists every row.</p>
+              <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaImportFn(this)">
+                <input name="file" type="file" accept=".csv,text/csv" required />
+                <button class="mini">Import clients</button></form>
+              <div id="tpa-import-result"></div></details>` : ""}</div>
+          ${onb ? `<div class="card"><h2>Where each client stands</h2>
+            <p class="muted">A client is <b>Ready</b> once its profile and payment are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute.</p>
+            <div id="tpa-onboarding"><p class="muted">Loading…</p></div>
+            <details class="tpa-more"><summary>Give documents to many clients at once (ZIP)</summary>
+              <p class="muted">One folder per client, named exactly like the client, holding its six documents (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code>. To file many disputes, each with its own documents, use <b>Bulk filing</b> instead.</p>
+              <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaZipFn(this)">
+                <input name="file" type="file" accept=".zip,application/zip" required />
+                <button class="mini">Upload ZIP</button></form>
+              <div id="tpa-zip-result"></div></details></div>` : ""}
+          <div class="card"><h2>All clients</h2>
+            <div id="tpa-clients"><p class="muted">Loading…</p></div></div>
+        </section>
+
+        <section data-tpa-panel="file" style="display:none">
+          <div class="card"><h2>File one dispute</h2>
+            <p class="muted">${onb ? "Pick the client, then one of its ready document sets (made in the Clients tab). To file many disputes, each with its own documents, use Bulk filing." : "Pick the client and enter the disputed amount."}</p>
+            <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
+              <select name="client_id" id="tpa-file-client" required onchange="Views.filingPackagesFilter('tpa-file-client','tpa-file-package','client')"></select>
+              <select name="package_id" id="tpa-file-package"><option value="">— no package —</option></select>
+              <input name="contact_name" placeholder="client contact for this dispute" />
+              <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
+              <input name="notes" placeholder="notes" />
+              <button class="mini">File dispute</button></form>
+            <p class="muted">The payment link and the case instructions come to your TPA email: you pay and manage documents for the client.</p>
+            <div id="tpa-file-result"></div></div>
+        </section>
+
+        <section data-tpa-panel="bulk" style="display:none">
+          ${onb ? `<div class="card"><h2>File many disputes at once</h2>
+            <p class="muted">Upload one ZIP with a list of the disputes and a folder of documents for each. Every dispute is filed by itself as soon as its six documents are accepted; one that needs a fix waits in the report below.</p>
+            <details class="tpa-more" open><summary>How to prepare the ZIP</summary>
+              <div class="tpa-zip-howto">
+                <pre class="tpa-tree">disputes.zip
+├── disputes.csv
+├── CLAIM-001/            ← one folder per dispute, named after its dispute_ref
+│   ├── eob.pdf
+│   ├── itemized_bill.pdf
+│   ├── proof_of_coverage.pdf
+│   ├── open_negotiation_notice.pdf
+│   ├── offer_substantiation.pdf
+│   └── idre_attestation.pdf
+└── CLAIM-002/
+    └── merged.pdf        ← or one PDF holding all six</pre>
+                <div><p><b>disputes.csv</b> — one row per dispute:</p>
+                  <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,contact_name,notes
+CLAIM-001,Gulf Coast Clinic,1980,Dr Lee,ER visit 08/14
+CLAIM-002,Bay Imaging,2450.00,,</pre>
+                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). Up to 500 disputes per ZIP.</p></div></div></details>
+            <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
+              <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
+              <input name="file" type="file" accept=".zip,application/zip" required />
+              <button class="mini">Upload disputes ZIP</button></form>
+            <div id="tpa-bd-result"></div></div>
+          <div class="card"><h2>Your bulk filings</h2>
+            <div id="tpa-bd-batches"><p class="muted">Loading…</p></div>
+            <div id="tpa-bd-report"></div></div>` : `
+          <div class="card"><h2>Bulk upload — file many disputes at once</h2>
           <p class="muted">CSV with header row: <code>email</code> (required), <code>contact_name</code>, <code>org</code>, <code>amount</code>, <code>filing_party_type</code> (PROVIDER/HEALTH_PLAN), <code>external_ref</code>, <code>notes</code>. Up to 500 rows per batch.</p>
           <form class="inline-form" onsubmit="event.preventDefault()">
             <input id="tpa-bulk-ref" placeholder="batch reference (your idempotency key)" required style="min-width:16em" />
@@ -6307,15 +6360,43 @@ const Views = (() => {
             <button class="mini" id="tpa-bulk-btn" disabled>File batch</button></form>
           <div id="tpa-bulk-preview"></div><div id="tpa-bulk-result"></div></div>
         <div class="card"><h2>My batch filings — status</h2>
-          <div id="tpa-batches"><p class="muted">Loading…</p></div></div>
-        <div class="card"><h2>Tracking — all your parties' disputes</h2>
-          <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
-          <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+          <div id="tpa-batches"><p class="muted">Loading…</p></div></div>`}
+        </section>
+
+        <section data-tpa-panel="team" style="display:none"><div id="tpa-team"></div></section>
       </div>
-      ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
-      <div class="card"><h2>State oversight — all TPAs</h2><div id="tpa-admin"><p class="muted">Loading…</p></div></div>
-      <div class="card"><h2>Documents waiting for review</h2><div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>` : ""}`;
+      ${staff ? `
+      <section data-tpa-panel="oversight" style="display:none">
+        <div class="card"><h2>All TPAs in this program</h2><div id="tpa-admin"><p class="muted">Loading…</p></div></div></section>
+      ${onb ? `<section data-tpa-panel="reviews" style="display:none">
+        <div class="card"><h2>Documents waiting for review</h2>
+          <p class="muted">Documents the reader could not decide on. Open each one, then accept it or say why it is rejected — the filer sees the note.</p>
+          <div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}` : ""}`;
   }
+
+  // TPA page tabs. The workspace tabs show once the account is linked to a
+  // TPA; staff also get the program-wide tabs. The choice is remembered.
+  let tpaTabCur = "";
+  function tpaTab(k) {
+    const btn = document.querySelector(`#tpa-tabs [data-tab="${k}"]`);
+    if (!btn || btn.style.display === "none") return;
+    tpaTabCur = k;
+    try { localStorage.setItem("idre.tpaTab", k); } catch { /* private window */ }
+    document.querySelectorAll("#tpa-tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === k));
+    document.querySelectorAll("[data-tpa-panel]").forEach((p) => { p.style.display = p.dataset.tpaPanel === k ? "" : "none"; });
+  }
+  function tpaTabCount(k, text) {
+    const el = document.getElementById("tpa-tc-" + k);
+    if (el) el.textContent = text ? String(text) : "";
+  }
+  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
+  const PKG_STATUS = { ASSEMBLING: "started", VALIDATING: "checking", REJECTED: "needs a fix", READY: "ready to file", FILED: "filed" };
+  const onbStatus = (st) => `<span class="badge s-${esc(String(st || "")).toLowerCase().replace(/_/g, "-")}">${esc(ONB_STATUS[st] || st || "—")}</span>`;
+  function tpaPkgClose() {
+    const card = document.getElementById("tpa-pkg-card");
+    if (card) card.style.display = "none";
+  }
+
 
   async function tpaBoot() {
     const orgBox = document.getElementById("tpa-org");
@@ -6325,15 +6406,19 @@ const Views = (() => {
       const r = await Api.program.tpaMe();
       const code = r.tpa.invite_code;
       const isStaff = can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
-      orgBox.innerHTML = `<div class="stat-grid"><div class="stat"><div class="stat-num">${esc(r.tpa.name)}</div>
-        <div class="muted">${esc(r.tpa.contact_email)} · ${badge(r.tpa.status)}</div>
-        ${isStaff ? `<button class="mini" style="margin-top:8px" onclick="Views.tpaUnlinkFn()">Stop acting as this TPA</button>` : ""}</div></div>
-        <div class="card" style="margin-top:10px"><h2>Add a teammate</h2>
+      orgBox.innerHTML = `<div class="tpa-org-line"><span class="tpa-org-name">${esc(r.tpa.name)}</span>
+        <span class="muted">${esc(r.tpa.contact_email)}</span> ${badge(r.tpa.status)}
+        ${isStaff ? `<button class="mini" onclick="Views.tpaUnlinkFn()">Stop acting as this TPA</button>` : ""}</div>`;
+      document.getElementById("tpa-team").innerHTML = `
+        <div class="card"><h2>Add a teammate</h2>
           <p class="muted">Give this code to a colleague to let them log into their own portal account and join your organization — Profile → Claim TPA, or the form here when they're not linked to any org yet. Generating a new code replaces the old one.</p>
           <p id="tpa-invite-code">${code ? `<span class="mono" style="font-weight:600;font-size:1.1em">${esc(code)}</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate new code</button>`
             : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></div>`;
       document.getElementById("tpa-body").style.display = "";
-      tpaClientsBox(); tpaDashBox(); tpaBatchesBox();
+      document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
+      let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
+      tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes");
+      tpaClientsBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
       const bref = document.getElementById("tpa-bulk-ref");
@@ -6350,7 +6435,10 @@ const Views = (() => {
         <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaClaimFn(this)">
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
-    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) { tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); }
+    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa");
+      if (document.getElementById("tpa-body").style.display === "none") tpaTab("oversight");  // not acting for a TPA
+    }
   }
 
   async function tpaOnboardingBox() {
@@ -6360,26 +6448,27 @@ const Views = (() => {
       const r = await Api.program.tpaOnboarding();
       const cs = r.clients || [];
       const readyPkgs = [];
+      tpaTabCount("clients", cs.length ? `${cs.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length}/${cs.length} ready` : "");
       box.innerHTML = cs.length ? `<table class="tbl"><thead><tr>
-          <th>Party</th><th>Profile</th><th>Payment</th><th>Package</th><th>Onboarding</th><th>Actions</th></tr></thead><tbody>
+          <th>Client</th><th>Profile</th><th>Payment</th><th>Document sets ready</th><th>Status</th><th>Actions</th></tr></thead><tbody>
         ${cs.map((c) => {
           (c.open_packages || []).forEach((p) => { if (p.status === "READY") readyPkgs.push({ client: c.client_id, id: p.id, name: c.party_name }); });
           return `<tr><td>${esc(c.party_name)}<br><span class="muted">${badge(c.party_type)}</span></td>
           <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}</td>
           <td>${c.verified_payments > 0 ? badge(c.verified_payments + " VERIFIED") : badge("NONE")}</td>
-          <td>${c.ready_packages > 0 ? badge(c.ready_packages + " READY") : badge("NONE")}</td>
-          <td>${badge(c.onboarding_status)}</td>
+          <td>${c.ready_packages > 0 ? c.ready_packages : '<span class="muted">—</span>'}</td>
+          <td>${onbStatus(c.onboarding_status)}</td>
           <td>
             <button class="mini" onclick="Views.tpaProfileForm('${c.client_id}')">Profile</button>
             <button class="mini" onclick="Views.tpaPaymentForm('${c.client_id}')">Payment</button>
-            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','DISCRETE')">6-file package</button>
-            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','MERGED')">Merged PDF</button>
-            ${(c.open_packages || []).map((p) => `<button class="mini" onclick="Views.tpaPackageBox('${p.id}')">${esc(p.mode)} ${esc(p.status)}</button>`).join("")}
+            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','DISCRETE')">New set: 6 files</button>
+            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','MERGED')">New set: merged PDF</button>
+            ${(c.open_packages || []).map((p) => `<button class="mini ghost" onclick="Views.tpaPackageBox('${p.id}')">${p.mode === "MERGED" ? "Merged PDF" : "6 files"}: ${esc(PKG_STATUS[p.status] || p.status)}</button>`).join("")}
           </td></tr>`;
         }).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one below or import a roster CSV.</p>';
       // READY packages feed the filing form.
       const sel = document.getElementById("tpa-file-package");
-      if (sel) sel.innerHTML = `<option value="">— choose the client\'s READY package —</option>` +
+      if (sel) sel.innerHTML = `<option value="">— choose a ready document set —</option>` +
         readyPkgs.map((p) => `<option value="${p.id}" data-client="${p.client}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
       filingPackagesFilter('tpa-file-client','tpa-file-package','client');
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -6452,6 +6541,7 @@ const Views = (() => {
     const box = document.getElementById("tpa-pkg");
     if (!card || !box) return;
     card.style.display = "";
+    if (!tpaPackageBox._open || tpaPackageBox._open !== packageId) { tpaPackageBox._open = packageId; card.scrollIntoView({ behavior: "smooth", block: "start" }); }
     try {
       const p = await Api.program.tpaPackage(packageId);
       box.innerHTML = `<p>${badge(p.status)} · mode ${esc(p.mode)} · package <code>${esc(packageId)}</code>
@@ -6882,7 +6972,7 @@ const Views = (() => {
       window._tpaCases = r.cases || [];
       // Editable only on the caller's own org view, not staff oversight of another TPA.
       window._tpaCanEdit = !tpaId;
-      roll.innerHTML = (r.by_client || []).map((x) => `<span class="chip">${esc(x.initiating_party)}: <b>${x.cases}</b> cases (${x.open} open) · invoiced ${usdC(x.invoiced_cents)} · paid ${usdC(x.paid_cents)}</span> `).join("");
+      roll.innerHTML = (r.by_client || []).map((x) => `<span class="chip">${esc(x.initiating_party)} · ${x.cases} case${x.cases == 1 ? "" : "s"} (${x.open} open) · invoiced ${usdC(x.invoiced_cents)} · paid ${usdC(x.paid_cents)}</span> `).join("");
       const statuses = [...new Set(window._tpaCases.map((x) => x.status))].sort();
       if (filtersBox) filtersBox.innerHTML = window._tpaCases.length ? `<p>
         <select id="tpa-cases-status" onchange="Views.tpaCasesFilter()"><option value="">All statuses</option>
@@ -6981,6 +7071,64 @@ const Views = (() => {
     } catch (e) { row.firstElementChild.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
+  // ---- Bulk filing with documents per dispute (tpa_bulk_disputes.go) ----
+  async function tpaBulkDisputesFn(form) {
+    const out = document.getElementById("tpa-bd-result");
+    const btn = form.querySelector("button"); btn.disabled = true;
+    out.innerHTML = '<p class="muted">Uploading and reading the ZIP…</p>';
+    try {
+      const r = await Api.program.tpaBulkDisputes(form.batch_ref.value.trim(), form.file.files[0]);
+      if (r.idempotent_replay) { out.innerHTML = `<p class="muted">${esc(r.note)}</p>`; tpaBdReport(r.batch_id); return; }
+      out.innerHTML = `<p>${r.waiting_for_documents} dispute(s) accepted and waiting for their documents to be checked${r.refused ? `, <b>${r.refused} refused</b>` : ""}.</p>
+        <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Documents</th><th>Result</th></tr></thead><tbody>
+        ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.dispute_ref)}</td><td>${esc(x.party)}</td>
+          <td>${x.mode ? esc(x.mode === "MERGED" ? "merged PDF" : (x.attached || []).length + " of 6 files") : "—"}</td>
+          <td>${x.status === "WAITING_DOCS" ? '<span class="badge s-validating">Checking documents</span>' : '<span class="badge s-rejected">Refused</span>'}${(x.errors || []).length ? `<br><span class="muted">${(x.errors || []).map(esc).join("<br>")}</span>` : ""}</td></tr>`).join("")}
+        </tbody></table>`;
+      form.reset(); tpaBdBatchesBox(); tpaBdReport(r.batch_id);
+    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+    finally { btn.disabled = false; }
+  }
+  async function tpaBdBatchesBox() {
+    const box = document.getElementById("tpa-bd-batches");
+    if (!box) return;
+    try {
+      const bs = (await Api.program.tpaBulkDisputeBatches()).batches || [];
+      tpaTabCount("bulk", bs.reduce((n, b) => n + Number(b.waiting || 0), 0) || "");
+      box.innerHTML = bs.length ? `<table class="tbl"><thead><tr><th>Batch</th><th>Uploaded</th><th>Disputes</th><th>Filed</th><th>Waiting</th><th>Refused</th><th></th></tr></thead><tbody>
+        ${bs.map((b) => `<tr><td class="mono">${esc(b.batch_ref)}</td><td>${esc(String(b.created_at || "").slice(0, 16))}</td>
+          <td>${b.rows}</td><td>${b.filed}</td><td>${b.waiting}</td><td>${b.refused ? `<span class="badge warn">${b.refused}</span>` : "0"}</td>
+          <td><button class="mini" onclick="Views.tpaBdReport('${b.id}')">Report</button></td></tr>`).join("")}</tbody></table>`
+        : '<p class="muted">No bulk filings yet — upload a disputes ZIP above.</p>';
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  // A bulk row's state, in words: filed, refused, or waiting on its documents.
+  function bdStatus(x) {
+    const b = (cls, t) => `<span class="badge s-${cls}">${t}</span>`;
+    if (x.status === "FILED") return b("filed", "Filed");
+    if (x.status === "ERROR") return b("rejected", "Refused");
+    if (x.status === "FILING") return b("validating", "Filing…");
+    if (x.rejected) return b("rejected", "Needs a fix — document rejected");
+    if (x.needs_review) return b("needs-review", "Waiting for review");
+    return b("validating", "Checking documents");
+  }
+  async function tpaBdReport(batchId) {
+    const box = document.getElementById("tpa-bd-report");
+    if (!box) return;
+    try {
+      const items = (await Api.program.tpaBulkDisputeBatch(batchId)).items || [];
+      const docs = (x) => !x.package_id ? "—" : `${x.accepted} of 6 accepted${x.needs_review ? ` · ${x.needs_review} need review` : ""}${x.rejected ? ` · <b>${x.rejected} rejected</b>` : ""}`;
+      box.innerHTML = `<p style="margin-top:12px"><b>Report</b> <button class="mini" onclick="Views.tpaBdReport('${batchId}')">Refresh</button></p>
+        <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Amount</th><th>Documents</th><th>Status</th><th>Case</th></tr></thead><tbody>
+        ${items.map((x) => `<tr><td>${x.row_no}</td><td>${esc(String(x.dispute_ref).replace(/ \(row \d+\)$/, ""))}</td><td>${esc(x.party || "—")}</td>
+          <td>${x.disputed_amount_cents ? "$" + (x.disputed_amount_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }) : "—"}</td>
+          <td>${docs(x)}${x.package_id && x.status !== "FILED" ? ` <button class="mini" onclick="Views.tpaPackageBox('${x.package_id}')">Open package</button>` : ""}</td>
+          <td>${bdStatus(x)}${x.error ? `<br><span class="muted">${esc(x.error)}</span>` : ""}</td>
+          <td>${x.case_number ? `<a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a>` : "—"}</td></tr>`).join("")}
+        </tbody></table>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
   async function tpaAdminBox() {
     const box = document.getElementById("tpa-admin");
     if (!box) return;
@@ -7034,6 +7182,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     const decides = can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
     try {
       const rows = ((await Api.program.onboardingReviews()).reviews || []).filter((x) => x.kind === kind);
+      if (kind === "tpa") tpaTabCount("reviews", rows.length || "");
       if (!rows.length) { box.innerHTML = '<p class="muted">Nothing waiting — every document has a decision.</p>'; return; }
       box.innerHTML = `<table class="tbl"><thead><tr><th>Organization · party</th><th>Document</th><th>Why it needs a person</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td>${esc(x.organization)}<br><span class="muted">${esc(x.party)}</span></td>
@@ -7628,5 +7777,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose };
 })();

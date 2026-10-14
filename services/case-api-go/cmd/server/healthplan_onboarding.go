@@ -1256,6 +1256,8 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.db.Exec(r.Context(), `
 			UPDATE public.hp_packages SET status='FILED', case_id=$3, updated_at=now()
 			WHERE tenant=$1 AND id=$2`, tenant, in.PackageID, caseID)
+		// The checked documents belong to the dispute: put them on the case.
+		s.attachPackageDocsToCase(r, tenant, onboardingKinds["hp"], in.PackageID, caseID, "health-plan:"+org.Name)
 	}
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,

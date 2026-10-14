@@ -376,6 +376,13 @@ const Api = (() => {
         fd.append("file", file);
         return req("POST", `${t()}/tpa/packages/bulk`, fd, true);
       },
+      // Many disputes, each with its own documents: disputes.csv + a folder per dispute.
+      tpaBulkDisputes: (batchRef, file) => {
+        const fd = new FormData(); fd.append("batch_ref", batchRef); fd.append("file", file);
+        return req("POST", `${t()}/tpa/disputes/bulk`, fd, true);
+      },
+      tpaBulkDisputeBatches: () => req("GET", `${t()}/tpa/disputes/bulk`),
+      tpaBulkDisputeBatch: (id) => req("GET", `${t()}/tpa/disputes/bulk/${id}`),
       healthPlanRegister: (body) => req("POST", "/api/public/healthplan/register", body),
       hpClaim: (code) => req("POST", `${t()}/hp/claim`, { code }),
       hpUnlink: () => req("POST", `${t()}/hp/unlink`, {}),

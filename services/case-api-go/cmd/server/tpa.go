@@ -22,13 +22,14 @@ package main
 // correctly per dispute AND per TPA.
 
 import (
-	"net/mail"
-	"log/slog"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 )
 
@@ -525,54 +526,18 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	cfg := s.loadProgram(r, tenant)
-	if cfg == nil {
-		http.Error(w, `{"error":"TPA filing is available on programmed tenants"}`, http.StatusBadRequest)
-		return
-	}
-	// The TPA is the operational contact: payment link, case number, and
-	// upload link all flow to them — they pay and manage documents on behalf.
-	caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg,
-		org.ContactEmail, org.ContactName, org.Name+" on behalf of "+partyName, partyType, in.DisputedAmountCents, "")
+	caseID, caseNumber, st, err := s.fileTPADispute(r, tenant, org, in.ClientID, partyName, partyType, in.PackageID, in.ContactName, in.Notes, in.DisputedAmountCents)
 	if err != nil {
-		if isUniqueViolation(err) {
+		switch {
+		case errors.Is(err, errNotProgrammed):
+			http.Error(w, `{"error":"TPA filing is available on programmed tenants"}`, http.StatusBadRequest)
+		case isUniqueViolation(err):
 			http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
-			return
+		default:
+			http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 		}
-		http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 		return
 	}
-	// Origin record: the dispute belongs to the initiating party; the TPA filed it.
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.case_origin
-		  (tenant, case_id, tpa_id, client_id, initiating_party_name, initiating_party_type, filed_by_email)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		tenant, caseID, org.ID, in.ClientID, partyName, partyType, org.ContactEmail)
-	// Mark the validated package as consumed by this filing.
-	if in.PackageID != "" {
-		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.tpa_packages SET status='FILED', case_id=$3, updated_at=now()
-			WHERE tenant=$1 AND id=$2`, tenant, in.PackageID, caseID)
-	}
-	// Attribute the intake-fee payment row: paid by the TPA on behalf of the party.
-	_, _ = s.db.Exec(r.Context(), `
-		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,
-		tenant, caseID, org.Name+" (on behalf of "+partyName+")")
-	// Initiating party visible on the case itself.
-	// The client's own contact and the filing notes are kept too, so the TPA
-	// can see and correct them while the fee is unpaid (tpa_edit.go).
-	originDetails, _ := json.Marshal(map[string]string{
-		"initiating_party": partyName, "filed_by_tpa": org.Name,
-		"initiating_party_contact": strings.TrimSpace(in.ContactName), "filing_notes": strings.TrimSpace(in.Notes),
-	})
-	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
-		UPDATE tenant_%s.cases SET details = details || $2::jsonb WHERE id=$1`, sanitizeTenant(tenant)),
-		caseID, originDetails)
-	var st string
-	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-		`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
-	s.logAudit(r.Context(), tenant, caseID, "TPA_INTAKE", map[string]any{
-		"tpa_id": org.ID, "client_id": in.ClientID, "initiating_party": partyName, "case_number": caseNumber})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "case_number": caseNumber, "status": st,
 		"payment_required": st == "AWAITING_PAYMENT",
@@ -712,4 +677,58 @@ func (s *server) adminSetTPAStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logAudit(r.Context(), tenant, "", "TPA_STATUS", map[string]any{"tpa_id": r.PathValue("tpaId"), "status": in.Status, "by": p.Subject})
 	writeJSON(w, http.StatusOK, map[string]any{"status": in.Status})
+}
+
+// errNotProgrammed: TPA filing needs a programmed tenant (program rules).
+var errNotProgrammed = errors.New("not a programmed tenant")
+
+// fileTPADispute opens the case for one dispute a TPA files for a client --
+// the part single filing (tpaIntake) and bulk filing (tpa_bulk_disputes.go)
+// share once their own checks have passed. With a package, the package is
+// marked FILED and its documents are attached to the case.
+func (s *server) fileTPADispute(r *http.Request, tenant string, org *tpaOrg, clientID, partyName, partyType, packageID, contactName, notes string, amountCents int64) (caseID, caseNumber, status string, err error) {
+	cfg := s.loadProgram(r, tenant)
+	if cfg == nil {
+		return "", "", "", errNotProgrammed
+	}
+	// The TPA is the operational contact: payment link, case number, and
+	// upload link all flow to them — they pay and manage documents on behalf.
+	caseID, caseNumber, err = s.startAhcaCase(r, tenant, cfg,
+		org.ContactEmail, org.ContactName, org.Name+" on behalf of "+partyName, partyType, amountCents, "")
+	if err != nil {
+		return "", "", "", err
+	}
+	// Origin record: the dispute belongs to the initiating party; the TPA filed it.
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.case_origin
+		  (tenant, case_id, tpa_id, client_id, initiating_party_name, initiating_party_type, filed_by_email)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		tenant, caseID, org.ID, clientID, partyName, partyType, org.ContactEmail)
+	// Mark the validated package as consumed by this filing.
+	if packageID != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			UPDATE public.tpa_packages SET status='FILED', case_id=$3, updated_at=now()
+			WHERE tenant=$1 AND id=$2`, tenant, packageID, caseID)
+		// The checked documents belong to the dispute: put them on the case.
+		s.attachPackageDocsToCase(r, tenant, onboardingKinds["tpa"], packageID, caseID, "tpa:"+org.Name)
+	}
+	// Attribute the intake-fee payment row: paid by the TPA on behalf of the party.
+	_, _ = s.db.Exec(r.Context(), `
+		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,
+		tenant, caseID, org.Name+" (on behalf of "+partyName+")")
+	// Initiating party visible on the case itself.
+	// The client's own contact and the filing notes are kept too, so the TPA
+	// can see and correct them while the fee is unpaid (tpa_edit.go).
+	originDetails, _ := json.Marshal(map[string]string{
+		"initiating_party": partyName, "filed_by_tpa": org.Name,
+		"initiating_party_contact": strings.TrimSpace(contactName), "filing_notes": strings.TrimSpace(notes),
+	})
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET details = details || $2::jsonb WHERE id=$1`, sanitizeTenant(tenant)),
+		caseID, originDetails)
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
+		`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
+	s.logAudit(r.Context(), tenant, caseID, "TPA_INTAKE", map[string]any{
+		"tpa_id": org.ID, "client_id": clientID, "initiating_party": partyName, "case_number": caseNumber})
+	return caseID, caseNumber, status, nil
 }
