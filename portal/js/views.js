@@ -6291,7 +6291,7 @@ const Views = (() => {
           <div id="tpa-clients"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>File a dispute on behalf of a client</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
-            <select name="client_id" id="tpa-file-client" required></select>
+            <select name="client_id" id="tpa-file-client" required onchange="Views.filingPackagesFilter('tpa-file-client','tpa-file-package','client')"></select>
             <select name="package_id" id="tpa-file-package"><option value="">— no package —</option></select>
             <input name="contact_name" placeholder="client contact for this dispute" />
             <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
@@ -6381,6 +6381,7 @@ const Views = (() => {
       const sel = document.getElementById("tpa-file-package");
       if (sel) sel.innerHTML = `<option value="">— choose the client\'s READY package —</option>` +
         readyPkgs.map((p) => `<option value="${p.id}" data-client="${p.client}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
+      filingPackagesFilter('tpa-file-client','tpa-file-package','client');
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6407,15 +6408,15 @@ const Views = (() => {
       const r = await Api.program.tpaClientProfile(clientId, {
         npi: v.npi.trim(), tin: v.tin.trim(), address: v.address.trim() });
       tpaOnboardingBox();
-      alert("Profile saved — onboarding: " + r.onboarding_status);
-    } catch (e) { alert(e.message); }
+      UI.toast("Profile saved — onboarding: " + r.onboarding_status);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaPaymentForm(clientId) {
     let methods = [];
     try { methods = (await Api.program.tpaPayments(clientId)).payment_methods || []; } catch { /* none yet */ }
     if (methods.length) {
-      alert("Existing rails:\n" + methods.map((m) =>
+      UI.toast("Existing rails:\n" + methods.map((m) =>
         `${m.method} ${m.label || ""} ${m.method === "ACH" ? "routing " + m.routing : m.brand} ····${m.last4} — ${m.verified ? "VERIFIED" : "PENDING"}`).join("\n"));
     }
     const v = await UI.modal({ title: "Add payment rail", submitLabel: "Add rail", fields: [
@@ -6435,15 +6436,15 @@ const Views = (() => {
         processor_ref: (v.processor_ref || "").trim(),
         auth_received: (v.auth_received || "").trim().toUpperCase() === "YES" });
       tpaOnboardingBox();
-      alert("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
-    } catch (e) { alert(e.message); }
+      UI.toast("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaPackageStart(clientId, mode) {
     try {
       const r = await Api.program.tpaCreatePackage(clientId, mode);
       tpaPackageBox(r.package_id);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaPackageBox(packageId) {
@@ -6457,7 +6458,7 @@ const Views = (() => {
           <button class="mini" onclick="Views.tpaPackageBox('${packageId}')">Refresh</button></p>
         <table class="tbl"><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>Upload</th></tr></thead><tbody>
         ${p.slots.map((s) => `<tr><td><code>${esc(s.slot)}</code></td>
-          <td>${esc(s.filename || "—")}${s.page_start ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
+          <td>${esc(s.filename || "—")}${s.page_start && !/\(pages /.test(s.filename || "") ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
           <td>${badge(s.status)}</td>
           <td class="muted">${(s.reasons || []).map((r2) => esc(r2.code + ": " + r2.detail)).join("; ") || "—"}</td>
           <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
@@ -6468,6 +6469,9 @@ const Views = (() => {
             <input name="file" type="file" accept=".pdf,application/pdf" required />
             <button class="mini">Upload merged PDF</button></form>` : ""}
         ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when filing.</p>' : ""}`;
+      // The filing list is filled by the board: redraw it once the package is
+      // ready, or a READY package only showed up there after a page reload.
+      if (p.status === "READY" || p.status === "FILED") tpaOnboardingBox();
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6476,7 +6480,7 @@ const Views = (() => {
     try {
       await Api.program.tpaAttachDoc(packageId, slot, input.files[0]);
       setTimeout(() => tpaPackageBox(packageId), 300);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaMergedFn(form, packageId) {
@@ -6484,7 +6488,7 @@ const Views = (() => {
       await Api.program.tpaUploadMerged(packageId, form.file.files[0]);
       form.reset();
       setTimeout(() => tpaPackageBox(packageId), 1500); // splitter is async
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaZipFn(form) {
@@ -6538,7 +6542,7 @@ const Views = (() => {
           <div id="hp-pkg"></div></div>
         <div class="card"><h2>Submit a dispute on behalf of a party</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpFileFn(this)">
-            <select name="party_id" id="hp-file-party" required></select>
+            <select name="party_id" id="hp-file-party" required onchange="Views.filingPackagesFilter('hp-file-party','hp-file-package','party')"></select>
             <select name="package_id" id="hp-file-package"><option value="">— no package —</option></select>
             <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
             <input name="notes" placeholder="notes" />
@@ -6571,14 +6575,14 @@ const Views = (() => {
 
   async function hpClaimFn(form) {
     try { await Api.program.hpClaim(form.code.value.trim()); hpBoot(); }
-    catch (e) { alert(e.message); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpAddPartyFn(form) {
     try {
       await Api.program.hpAddParty({ party_name: form.party_name.value, party_type: form.party_type.value, contact_email: form.contact_email.value });
       form.reset(); hpOnboardingBox();
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpOnboardingBox() {
@@ -6608,6 +6612,7 @@ const Views = (() => {
       const sel = document.getElementById("hp-file-package");
       if (sel) sel.innerHTML = `<option value="">— choose the party\'s READY package —</option>` +
         readyPkgs.map((p) => `<option value="${p.id}" data-party="${p.party}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
+      filingPackagesFilter('hp-file-party','hp-file-package','party');
       const psel = document.getElementById("hp-file-party");
       if (psel) psel.innerHTML = ps.filter((c) => c.status === "ACTIVE")
         .map((c) => `<option value="${c.party_id}">${esc(c.party_name)} (${esc(c.party_type)})</option>`).join("");
@@ -6639,15 +6644,15 @@ const Views = (() => {
       const r = await Api.program.hpPartyProfile(partyId, {
         npi: (v.npi || "").trim(), tin: v.tin.trim(), address: v.address.trim() });
       hpOnboardingBox();
-      alert("Profile saved — onboarding: " + r.onboarding_status);
-    } catch (e) { alert(e.message); }
+      UI.toast("Profile saved — onboarding: " + r.onboarding_status);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpPaymentForm(partyId) {
     let methods = [];
     try { methods = (await Api.program.hpPayments(partyId)).payment_methods || []; } catch { /* none yet */ }
     if (methods.length) {
-      alert("Existing rails:\n" + methods.map((m) =>
+      UI.toast("Existing rails:\n" + methods.map((m) =>
         `${m.method} ${m.label || ""} ${m.method === "ACH" ? "routing " + m.routing : m.brand} ····${m.last4} — ${m.verified ? "VERIFIED" : "PENDING"}`).join("\n"));
     }
     const v = await UI.modal({ title: "Add payment rail", submitLabel: "Add rail", fields: [
@@ -6667,15 +6672,15 @@ const Views = (() => {
         processor_ref: (v.processor_ref || "").trim(),
         auth_received: (v.auth_received || "").trim().toUpperCase() === "YES" });
       hpOnboardingBox();
-      alert("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
-    } catch (e) { alert(e.message); }
+      UI.toast("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpPackageStart(partyId, mode) {
     try {
       const r = await Api.program.hpCreatePackage(partyId, mode);
       hpPackageBox(r.package_id);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpPackageBox(packageId) {
@@ -6689,7 +6694,7 @@ const Views = (() => {
           <button class="mini" onclick="Views.hpPackageBox('${packageId}')">Refresh</button></p>
         <table class="tbl"><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>Upload</th></tr></thead><tbody>
         ${p.slots.map((s) => `<tr><td><code>${esc(s.slot)}</code></td>
-          <td>${esc(s.filename || "—")}${s.page_start ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
+          <td>${esc(s.filename || "—")}${s.page_start && !/\(pages /.test(s.filename || "") ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
           <td>${badge(s.status)}</td>
           <td class="muted">${(s.reasons || []).map((r2) => esc(r2.code + ": " + r2.detail)).join("; ") || "—"}</td>
           <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
@@ -6700,6 +6705,9 @@ const Views = (() => {
             <input name="file" type="file" accept=".pdf,application/pdf" required />
             <button class="mini">Upload merged PDF</button></form>` : ""}
         ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when submitting.</p>' : ""}`;
+      // The filing list is filled by the board: redraw it once the package is
+      // ready, or a READY package only showed up there after a page reload.
+      if (p.status === "READY" || p.status === "FILED") hpOnboardingBox();
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6708,7 +6716,7 @@ const Views = (() => {
     try {
       await Api.program.hpAttachDoc(packageId, slot, input.files[0]);
       setTimeout(() => hpPackageBox(packageId), 300);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpMergedFn(form, packageId) {
@@ -6716,7 +6724,7 @@ const Views = (() => {
       await Api.program.hpUploadMerged(packageId, form.file.files[0]);
       form.reset();
       setTimeout(() => hpPackageBox(packageId), 1500);
-    } catch (e) { alert(e.message); }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function hpZipFn(form) {
@@ -6761,12 +6769,12 @@ const Views = (() => {
 
   async function hpAdminStatusFn(id, status) {
     try { await Api.program.adminHealthPlanStatus(id, status); hpAdminBox(); }
-    catch (e) { alert(e.message); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaClaimFn(form) {
     try { await Api.program.tpaClaim(form.code.value.trim()); tpaBoot(); }
-    catch (e) { alert(e.message); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaInviteCodeFn() {
@@ -6993,7 +7001,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
 
   async function tpaAdminStatusFn(id, status) {
     try { await Api.program.adminTpaStatus(id, status); tpaAdminBox(); }
-    catch (e) { alert(e.message); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // Undo a claim made with a TPA-supplied code -- back to the oversight-only
@@ -7036,9 +7044,24 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
             <button class="mini danger" onclick="Views.onbReviewDecide('${boxId}','${kind}','${x.doc_id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
+  // Only the chosen client's (or party's) READY packages can be filed with it.
+  function filingPackagesFilter(ownerSelId, pkgSelId, attr) {
+    const owner = document.getElementById(ownerSelId), sel = document.getElementById(pkgSelId);
+    if (!owner || !sel) return;
+    for (const o of sel.options) if (o.value) o.hidden = o.dataset[attr] !== owner.value;
+    if (sel.selectedOptions[0]?.hidden) sel.value = "";
+  }
   async function onbReviewOpen(kind, docId) {
-    try { window.open(await Api.program.onboardingReviewFile(kind, docId), "_blank", "noopener"); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    // Shown inside the portal: a new tab can't load a file this page fetched
+    // (pop-up blockers stop a tab opened after the download, and the browser
+    // keeps the downloaded file to this page).
+    try {
+      const url = await Api.program.onboardingReviewFile(kind, docId);
+      await UI.modal({ title: "Document under review", wide: true, submitLabel: "Close",
+        body: `<iframe class="onb-doc" src="${url}" title="Document under review"></iframe>
+          <p class="muted"><a href="${url}" download="review-${esc(docId.slice(0, 8))}.pdf">Download</a> — then accept or reject it in the list.</p>` });
+      URL.revokeObjectURL(url);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
   async function onbReviewDecide(boxId, kind, docId, decision) {
     let note = "";
@@ -7605,5 +7628,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter };
 })();

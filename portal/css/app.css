@@ -752,3 +752,9 @@ ol.wf .wf-hint{flex-basis:100%;margin-left:1.9em;font-weight:400}
 button.q-btn{min-height:28px;padding:3px 14px;font-size:12.5px}
 .q-empty{padding:28px 12px!important;text-align:center;color:var(--text-tertiary)}
 .badge.s-flag{background:var(--warning-bg);color:var(--warning-fg)}
+
+/* Onboarding (TPA / health plan): wide tables scroll inside their card instead
+   of pushing the whole page sideways on a narrow screen. */
+#tpa-onboarding,#tpa-pkg,#tpa-clients,#tpa-reviews,#tpa-admin,#tpa-batches,#tpa-dash,
+#hp-onboarding,#hp-pkg,#hp-reviews,#hp-admin{overflow-x:auto;max-width:100%}
+.onb-doc{width:100%;height:70vh;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-base)}
