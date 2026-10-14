@@ -6379,7 +6379,7 @@ const Views = (() => {
         }).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one below or import a roster CSV.</p>';
       // READY packages feed the filing form.
       const sel = document.getElementById("tpa-file-package");
-      if (sel) sel.innerHTML = `<option value="">— no package (only for non-onboarded clients) —</option>` +
+      if (sel) sel.innerHTML = `<option value="">— choose the client\'s READY package —</option>` +
         readyPkgs.map((p) => `<option value="${p.id}" data-client="${p.client}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -6463,7 +6463,7 @@ const Views = (() => {
           <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
             ? `<input type="file" id="pkg-${s.slot}" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this)" />` : ""}</td>
         </tr>`).join("")}</tbody></table>
-        ${p.mode === "MERGED" && ["ASSEMBLING", "REJECTED"].includes(p.status) ? `
+        ${p.mode === "MERGED" && !["READY", "FILED"].includes(p.status) ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaMergedFn(this,'${packageId}')">
             <input name="file" type="file" accept=".pdf,application/pdf" required />
             <button class="mini">Upload merged PDF</button></form>` : ""}
@@ -6606,7 +6606,7 @@ const Views = (() => {
           </td></tr>`;
         }).join("")}</tbody></table>` : '<p class="muted">No parties yet — add one above or import a roster CSV.</p>';
       const sel = document.getElementById("hp-file-package");
-      if (sel) sel.innerHTML = `<option value="">— no package (only for non-onboarded parties) —</option>` +
+      if (sel) sel.innerHTML = `<option value="">— choose the party\'s READY package —</option>` +
         readyPkgs.map((p) => `<option value="${p.id}" data-party="${p.party}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
       const psel = document.getElementById("hp-file-party");
       if (psel) psel.innerHTML = ps.filter((c) => c.status === "ACTIVE")
@@ -6695,7 +6695,7 @@ const Views = (() => {
           <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
             ? `<input type="file" id="hppkg-${s.slot}" onchange="Views.hpSlotUpload('${packageId}','${s.slot}',this)" />` : ""}</td>
         </tr>`).join("")}</tbody></table>
-        ${p.mode === "MERGED" && ["ASSEMBLING", "REJECTED"].includes(p.status) ? `
+        ${p.mode === "MERGED" && !["READY", "FILED"].includes(p.status) ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpMergedFn(this,'${packageId}')">
             <input name="file" type="file" accept=".pdf,application/pdf" required />
             <button class="mini">Upload merged PDF</button></form>` : ""}
@@ -6791,7 +6791,9 @@ const Views = (() => {
   async function tpaAddClientFn(form) {
     try {
       await Api.program.tpaAddClient({ party_name: form.party_name.value, party_type: form.party_type.value, contact_email: form.contact_email.value });
-      form.reset(); tpaClientsBox();
+      // The readiness board lists clients too: without this the new client
+      // only showed up there after a reload, so it couldn't be onboarded.
+      form.reset(); tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -6809,7 +6811,8 @@ const Views = (() => {
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? "Payment link sent to your TPA email." : ""}</p>`;
-      form.reset(); tpaDashBox(); tpaClientsBox();
+      // A filed package leaves the board and the "file with" list.
+      form.reset(); tpaDashBox(); tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 

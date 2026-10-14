@@ -15,7 +15,13 @@ const Api = (() => {
       body: isForm ? body : body ? JSON.stringify(body) : undefined,
     });
     if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
-    const data = resp.headers.get("content-type")?.includes("json") ? await resp.json() : await resp.text();
+    let data = resp.headers.get("content-type")?.includes("json") ? await resp.json() : await resp.text();
+    // case-api answers refusals with Go's http.Error, which labels a JSON body
+    // text/plain: read it as JSON anyway, or every refusal on every page shows
+    // as a bare "HTTP 409" instead of the reason the server gave.
+    if (typeof data === "string" && /^\s*\{/.test(data)) {
+      try { data = JSON.parse(data); } catch { /* keep the text */ }
+    }
     if (!resp.ok) {
       const msg = typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`;
       const err = new Error(msg); err.status = resp.status; err.data = data;

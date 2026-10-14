@@ -351,7 +351,8 @@ func (s *server) bulkIntake(w http.ResponseWriter, r *http.Request) {
 // see only their own batches; staff see any batch in the tenant.
 func (s *server) getIntakeBatch(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// Same roles as bulkIntake: whoever may file a batch may read it back.
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -366,7 +367,7 @@ func (s *server) getIntakeBatch(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT submitter, batch_ref, item_count, created_count, error_count, results, created_at::text
 	      FROM public.intake_batches WHERE tenant=$1 AND id=$2`
 	args := []any{tenant, id}
-	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		q += ` AND submitter=$3`
 		args = append(args, p.Subject)
 	}
@@ -389,12 +390,13 @@ func (s *server) getIntakeBatch(w http.ResponseWriter, r *http.Request) {
 // ?submitter= to inspect a specific filer, or see all batches in the tenant.
 func (s *server) listIntakeBatches(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+	// Same roles as bulkIntake: whoever may file a batch may read it back.
+	if !hasAnyRole(p, "BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	staff := hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole)
+	staff := hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole)
 	q := `SELECT id, submitter, batch_ref, item_count, created_count, error_count, created_at::text
 	      FROM public.intake_batches WHERE tenant=$1`
 	args := []any{tenant}
