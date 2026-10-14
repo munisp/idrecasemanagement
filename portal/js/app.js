@@ -12,13 +12,15 @@
   // schedule, and a new worker installing while one is already active
   // means a newer build landed -- reload once to pick it up.
   if ("serviceWorker" in navigator) {
+    // Reload once the new worker has taken over (controllerchange), not when
+    // it has merely installed: a reload at "installed" was still answered by
+    // the old worker from the old cache, so the new build stayed hidden.
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hadController && !reloaded) { reloaded = true; location.reload(); }
+    });
     navigator.serviceWorker.register("/sw.js").then((reg) => {
-      reg.addEventListener("updatefound", () => {
-        const nw = reg.installing;
-        nw?.addEventListener("statechange", () => {
-          if (nw.state === "installed" && navigator.serviceWorker.controller) location.reload();
-        });
-      });
       reg.update();
       // The check above only ran once, on this page load. A tab left open
       // across several deploys (exactly how this app gets tested -- SPA

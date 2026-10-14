@@ -62,6 +62,24 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
+  // The page itself: network first. Served cache-first it kept the previous
+  // build's page -- and with it the previous build's ?v= asset links -- so a
+  // deploy only showed after a second reload. The cache is the offline copy.
+  if (e.request.mode === "navigate") {
+    e.respondWith(
+      fetch(e.request)
+        .then((resp) => {
+          if (resp.ok && url.origin === location.origin) {
+            const clone = resp.clone();
+            caches.open(SHELL).then((c) => c.put(e.request, clone));
+          }
+          return resp;
+        })
+        .catch(() => caches.match(e.request).then((hit) => hit || caches.match("/index.html")))
+    );
+    return;
+  }
+
   // App shell + static: cache-first, navigation falls back to shell.
   e.respondWith(
     caches.match(e.request).then(
