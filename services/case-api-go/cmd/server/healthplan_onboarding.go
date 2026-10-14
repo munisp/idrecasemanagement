@@ -1295,7 +1295,8 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) adminListHealthPlans(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	// Same readers as the TPA oversight list (adminListTPAs).
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}

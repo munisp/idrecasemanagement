@@ -107,26 +107,32 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 		UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object($2::text, $3::text)
 		WHERE id::text=$1 AND NOT (coalesce(details,'{}'::jsonb) ? $2)`, sanitizeTenant(tenant)), caseID, detailKey, rsp.Name)
 
-	// The best match wins: identifier and name together, then the name, then
-	// the identifier alone (one provider can be the client of several TPAs,
-	// and test or shared identifiers repeat).
+	// Only an organization on the same email domain as the notice address the
+	// filer gave is linked: registration is public, so a NAIC or a name alone
+	// would let anyone who registers as "that plan" read the dispute (and its
+	// documents). The plan's login is emailed to its own address, so the
+	// domain is one it controls. Within the domain the best match wins:
+	// exact address, identifier and name, identifier, name. Otherwise the
+	// other side is reached through the notice email and a staff invitation.
 	var planID, tpaID, clientID *string
 	if rsp.Side == "HEALTH_PLAN" {
 		var id string
 		if s.db.QueryRow(ctx, `
-			SELECT id::text FROM public.health_plans WHERE tenant=$1 AND status='ACTIVE' AND (
-			      ($2 <> '' AND naic=$2) OR lower(contact_email)=lower($3) OR lower(name)=lower($4))
-			ORDER BY ($2 <> '' AND naic=$2 AND lower(name)=lower($4)) DESC, ($2 <> '' AND naic=$2) DESC,
-			         (lower(contact_email)=lower($3)) DESC, created_at DESC LIMIT 1`, tenant, rsp.NAIC, rsp.Email, rsp.Name).Scan(&id) == nil {
+			SELECT id::text FROM public.health_plans WHERE tenant=$1 AND status='ACTIVE'
+			  AND split_part(lower(contact_email),'@',2) = split_part(lower($3),'@',2)
+			  AND (($2 <> '' AND naic=$2) OR lower(contact_email)=lower($3) OR lower(name)=lower($4))
+			ORDER BY (lower(contact_email)=lower($3)) DESC, ($2 <> '' AND naic=$2 AND lower(name)=lower($4)) DESC,
+			         ($2 <> '' AND naic=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NAIC, rsp.Email, rsp.Name).Scan(&id) == nil {
 			planID = &id
 		}
 	} else {
 		var t, c string
 		if s.db.QueryRow(ctx, `
-			SELECT tpa_id::text, id::text FROM public.tpa_clients WHERE tenant=$1 AND status='ACTIVE' AND (
-			      ($2 <> '' AND npi=$2) OR lower(party_name)=lower($3))
+			SELECT tpa_id::text, id::text FROM public.tpa_clients WHERE tenant=$1 AND status='ACTIVE'
+			  AND split_part(lower(coalesce(contact_email,'')),'@',2) = split_part(lower($4),'@',2)
+			  AND (($2 <> '' AND npi=$2) OR lower(party_name)=lower($3))
 			ORDER BY ($2 <> '' AND npi=$2 AND lower(party_name)=lower($3)) DESC, (lower(party_name)=lower($3)) DESC,
-			         ($2 <> '' AND npi=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NPI, rsp.Name).Scan(&t, &c) == nil {
+			         ($2 <> '' AND npi=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NPI, rsp.Name, rsp.Email).Scan(&t, &c) == nil {
 			tpaID, clientID = &t, &c
 		}
 	}
@@ -154,8 +160,9 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 func (s *server) linkRespondentsToPlan(ctx context.Context, tenant, planID, naic, email, name string) int64 {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE public.case_respondents SET plan_id=$2::uuid
-		WHERE tenant=$1 AND side='HEALTH_PLAN' AND plan_id IS NULL AND (
-		      ($3 <> '' AND naic=$3) OR lower(email)=lower($4) OR lower(name)=lower($5))`,
+		WHERE tenant=$1 AND side='HEALTH_PLAN' AND plan_id IS NULL
+		  AND split_part(lower(email),'@',2) = split_part(lower($4),'@',2)
+		  AND (($3 <> '' AND naic=$3) OR lower(email)=lower($4) OR lower(name)=lower($5))`,
 		tenant, planID, naic, email, name)
 	if err != nil {
 		return 0

@@ -446,8 +446,11 @@
       const r = a.dataset.route;
       a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || h.startsWith("#/" + r + "?") || (r === "cases" && h.startsWith("#/new")));
     });
+    // A route may carry ?... (Stripe's return to "#/tpa?paid=1"): routes that
+    // don't take a query match without it, instead of showing "Not found".
+    const hBare = h.split("?")[0];
     for (const [re, fn] of routes) {
-      const m = h.match(re);
+      const m = h.match(re) || hBare.match(re);
       if (m) {
         if (!canOpen(h)) { view.innerHTML = noAccess(); return; }
         const result = await fn(m);

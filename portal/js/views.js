@@ -6392,13 +6392,26 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
   // TPA page tabs. The workspace tabs show once the account is linked to a
   // TPA; staff also get the program-wide tabs. The choice is remembered.
   let tpaTabCur = "";
-  function tpaTab(k) {
+  // auto: chosen by the page (start-up, "not acting for a TPA"), not by a
+  // click -- not remembered, or it would win over the workspace next time.
+  function tpaTab(k, auto) {
     const btn = document.querySelector(`#tpa-tabs [data-tab="${k}"]`);
     if (!btn || btn.style.display === "none") return;
     tpaTabCur = k;
-    try { localStorage.setItem("idre.tpaTab", k); } catch { /* private window */ }
+    if (!auto) try { localStorage.setItem("idre.tpaTab", k); } catch { /* private window */ }
     document.querySelectorAll("#tpa-tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === k));
     document.querySelectorAll("[data-tpa-panel]").forEach((p) => { p.style.display = p.dataset.tpaPanel === k ? "" : "none"; });
+    // Opening a tab shows it as it is now: disputes file and payments settle in
+    // the background, so what was loaded with the page goes stale.
+    if (tpaTab._booted) ({
+      disputes: () => { tpaFeesBox(); tpaDashBox(); },
+      against: () => respondListBox("tpa"),
+      clients: () => { tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox(); },
+      bulk: () => tpaBdBatchesBox(),
+      reviews: () => onboardingReviewsBox("tpa-reviews", "tpa"),
+      oversight: () => tpaAdminBox(),
+    }[k] || (() => {}))();
+    tpaTab._booted = true;
   }
   function tpaTabCount(k, text) {
     const el = document.getElementById("tpa-tc-" + k);
@@ -6432,7 +6445,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       document.getElementById("tpa-body").style.display = "";
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
-      tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes");
+      tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
       tpaClientsBox(); tpaDashBox(); tpaFeesBox(); respondListBox("tpa"); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
       if (/[?&]paid=/.test(location.hash)) UI.toast("Payment sent — your disputes open as soon as the payment is confirmed (usually within a minute).");
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
@@ -6453,7 +6466,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
       tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa");
-      if (document.getElementById("tpa-body").style.display === "none") tpaTab("oversight");  // not acting for a TPA
+      if (document.getElementById("tpa-body").style.display === "none") tpaTab("oversight", true);  // not acting for a TPA
     }
   }
 
@@ -6682,12 +6695,20 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}`;
   }
 
-  function hpTab(k) {
+  function hpTab(k, auto) {
     const btn = document.querySelector(`#hp-tabs [data-tab="${k}"]`);
     if (!btn || btn.style.display === "none") return;
-    try { localStorage.setItem("idre.hpTab", k); } catch { /* private window */ }
+    if (!auto) try { localStorage.setItem("idre.hpTab", k); } catch { /* private window */ }
     document.querySelectorAll("#hp-tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === k));
     document.querySelectorAll("[data-hp-panel]").forEach((p) => { p.style.display = p.dataset.hpPanel === k ? "" : "none"; });
+    if (hpTab._booted) ({
+      against: () => respondListBox("hp"),
+      parties: () => hpOnboardingBox(),
+      file: () => hpOnboardingBox(),
+      reviews: () => onboardingReviewsBox("hp-reviews", "hp"),
+      oversight: () => hpAdminBox(),
+    }[k] || (() => {}))();
+    hpTab._booted = true;
   }
   function hpTabCount(k, text) {
     const el = document.getElementById("hp-tc-" + k);
@@ -6705,7 +6726,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       document.getElementById("hp-body").style.display = "";
       document.querySelectorAll("#hp-tabs .hp-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.hpTab") || ""; } catch { /* private window */ }
-      hpTab(saved && document.querySelector(`#hp-tabs [data-tab="${saved}"]`) ? saved : "against");
+      hpTab(saved && document.querySelector(`#hp-tabs [data-tab="${saved}"]`) ? saved : "against", true);
       hpOnboardingBox(); respondListBox("hp");
     } catch (e) {
       orgBox.innerHTML = `<div class="card"><h2>Link your health plan organization</h2>
@@ -6715,7 +6736,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
       hpAdminBox(); onboardingReviewsBox("hp-reviews", "hp");
-      if (document.getElementById("hp-body").style.display === "none") hpTab("oversight");  // not acting for a plan
+      if (document.getElementById("hp-body").style.display === "none") hpTab("oversight", true);  // not acting for a plan
     }
   }
 
