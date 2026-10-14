@@ -500,9 +500,9 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 			WHERE tenant=$1 AND id=$2 AND (npi IS NOT NULL OR
 			  EXISTS (SELECT 1 FROM public.tpa_packages p WHERE p.tenant=$1 AND p.client_id=$2))`,
 			tenant, in.ClientID).Scan(&onboarded)
-		if onboarded > 0 {
+		if onboarded > 0 || s.featureEnabled(r, tenant, "onboarding_required") {
 			if in.PackageID == "" {
-				http.Error(w, `{"error":"this client is onboarded — filings must reference a READY package (package_id)"}`, http.StatusConflict)
+				http.Error(w, `{"error":"filings must reference this client's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)
 				return
 			}
 			var pkgStatus string

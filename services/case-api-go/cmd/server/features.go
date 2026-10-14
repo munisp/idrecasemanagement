@@ -34,6 +34,10 @@ var registeredFeatures = map[string]bool{
 	"letter_citation":       true,
 	"tpa_onboarding":        true,
 	"healthplan_onboarding": true,
+	// With onboarding on, every filing by a TPA or health plan must reference a
+	// READY package. Off: a client or party that never started onboarding
+	// files the old way (the behaviour before this flag existed).
+	"onboarding_required": true,
 }
 
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle

@@ -721,6 +721,10 @@ func main() {
 		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
+		r.Post("/hp/unlink", s.hpUnlink)                                // staff: stop acting for a plan
+		r.Get("/onboarding/reviews", s.onboardingReviews)               // documents doc-intel left for a person (both rails)
+		r.Get("/onboarding/reviews/{kind}/{docId}/file", s.onboardingReviewFile)
+		r.Post("/onboarding/reviews/{kind}/{docId}", s.onboardingReviewDecide)
 		r.Get("/hp/me", s.hpMe)
 		r.Post("/hp/parties", s.hpAddParty)
 		r.Put("/hp/parties/{partyId}/profile", s.hpUpdatePartyProfile)

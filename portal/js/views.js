@@ -1173,6 +1173,7 @@ const Views = (() => {
     letter_citation: "Determination-letter auto-citation",
     tpa_onboarding: "TPA onboarding (profile + payment + 6-doc packages)",
     healthplan_onboarding: "Health plan onboarding (parties + payment + 6-doc packages)",
+    onboarding_required: "TPA / health plan filings need a READY package (off: clients that never started onboarding file the old way)",
   };
 
   async function featuresAdmin() {
@@ -6312,7 +6313,8 @@ const Views = (() => {
           <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
       </div>
       ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
-      <div class="card"><h2>State oversight — all TPAs</h2><div id="tpa-admin"><p class="muted">Loading…</p></div></div>` : ""}`;
+      <div class="card"><h2>State oversight — all TPAs</h2><div id="tpa-admin"><p class="muted">Loading…</p></div></div>
+      <div class="card"><h2>Documents waiting for review</h2><div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>` : ""}`;
   }
 
   async function tpaBoot() {
@@ -6348,7 +6350,7 @@ const Views = (() => {
         <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaClaimFn(this)">
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
-    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) tpaAdminBox();
+    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) { tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); }
   }
 
   async function tpaOnboardingBox() {
@@ -6545,7 +6547,8 @@ const Views = (() => {
           <div id="hp-file-result"></div></div>
       </div>
       ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
-      <div class="card"><h2>State oversight — all health plans</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div>` : ""}`;
+      <div class="card"><h2>State oversight — all health plans</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div>
+      <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>` : ""}`;
   }
 
   async function hpBoot() {
@@ -6553,7 +6556,8 @@ const Views = (() => {
     try {
       const r = await Api.program.hpMe();
       orgBox.innerHTML = `<div class="stat-grid"><div class="stat"><div class="stat-num">${esc(r.health_plan.name)}</div>
-        <div class="muted">${esc(r.health_plan.contact_email)} · ${r.health_plan.naic ? "NAIC " + esc(r.health_plan.naic) + " · " : ""}${esc(r.health_plan.line_of_business || "")} ${badge(r.health_plan.status)}</div></div></div>`;
+        <div class="muted">${esc(r.health_plan.contact_email)} · ${r.health_plan.naic ? "NAIC " + esc(r.health_plan.naic) + " · " : ""}${esc(r.health_plan.line_of_business || "")} ${badge(r.health_plan.status)}</div>
+        ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") && !can("HEALTH_PLAN") ? `<button class="mini" style="margin-top:8px" onclick="Views.hpUnlinkFn()">Stop acting as this plan</button>` : ""}</div></div>`;
       document.getElementById("hp-body").style.display = "";
       hpOnboardingBox();
     } catch (e) {
@@ -6562,7 +6566,7 @@ const Views = (() => {
         <form class="inline-form" onsubmit="event.preventDefault(); Views.hpClaimFn(this)">
           <input name="code" placeholder="HP-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
-    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) hpAdminBox();
+    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) { hpAdminBox(); onboardingReviewsBox("hp-reviews", "hp"); }
   }
 
   async function hpClaimFn(form) {
@@ -6996,6 +7000,54 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     if (!(await UI.confirm("Stop acting as this TPA?", "Unlinks your own account from this organization. You'll go back to the oversight list; claim a code again any time to act on a TPA's behalf.", "Unlink"))) return;
     try { await Api.program.tpaUnlink(); UI.toast("Unlinked"); App.rerender(); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function hpUnlinkFn() {
+    if (!(await UI.confirm("Stop acting as this plan?", "Unlinks your own account from this health plan. You'll go back to the oversight list; claim a code again any time to act for a plan.", "Unlink"))) return;
+    try { await Api.program.hpUnlink(); UI.toast("Unlinked"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // Documents doc-intel could not decide (illegible, ambiguous type, a slot
+  // the merged-PDF split did not find, a plan offer without the QPA): a person
+  // opens each one and accepts or rejects it. The reviewer and the PM decide.
+  const ONB_REASONS = {
+    LEGIBILITY_LOW: "Too little readable text", TYPE_UNCLEAR: "Document type not recognised",
+    TYPE_AMBIGUOUS: "Document type unclear", FIELDS_MISSING: "Claim number / codes not found",
+    KEYWORDS_MISSING: "Doesn't say what it is", QPA_DOC_MISSING: "Offer doesn't document the QPA",
+    SLOT_NOT_FOUND_IN_MERGED: "Not found in the merged PDF", ANALYZER_ERROR: "Could not be read",
+  };
+  async function onboardingReviewsBox(boxId, kind) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const decides = can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    try {
+      const rows = ((await Api.program.onboardingReviews()).reviews || []).filter((x) => x.kind === kind);
+      if (!rows.length) { box.innerHTML = '<p class="muted">Nothing waiting — every document has a decision.</p>'; return; }
+      box.innerHTML = `<table class="tbl"><thead><tr><th>Organization · party</th><th>Document</th><th>Why it needs a person</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td>${esc(x.organization)}<br><span class="muted">${esc(x.party)}</span></td>
+          <td>${esc(x.slot.replace(/_/g, " ").toLowerCase())}<br><span class="muted">${esc(x.filename)}</span></td>
+          <td>${(x.reasons || []).filter((r) => r.code !== "SPLIT_FROM_MERGED").map((r) => `${esc(ONB_REASONS[r.code] || r.code)}<br><span class="muted">${esc(r.detail || "")}</span>`).join("<br>")}</td>
+          <td style="white-space:nowrap"><button class="mini" onclick="Views.onbReviewOpen('${kind}','${x.doc_id}')">Open</button>
+            ${decides ? `<button class="mini" onclick="Views.onbReviewDecide('${boxId}','${kind}','${x.doc_id}','ACCEPT')">Accept</button>
+            <button class="mini danger" onclick="Views.onbReviewDecide('${boxId}','${kind}','${x.doc_id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function onbReviewOpen(kind, docId) {
+    try { window.open(await Api.program.onboardingReviewFile(kind, docId), "_blank", "noopener"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function onbReviewDecide(boxId, kind, docId, decision) {
+    let note = "";
+    if (decision === "REJECT") {
+      note = (prompt("Why is this document rejected? The filer sees this note.") || "").trim();
+      if (!note) return;
+    } else if (!(await UI.confirm("Accept this document?", "It counts as checked for its slot. The package is ready once all six slots are accepted.", "Accept"))) return;
+    try {
+      const r = await Api.program.onboardingReviewDecide(kind, docId, decision, note);
+      UI.toast(`${decision === "ACCEPT" ? "Accepted" : "Rejected"} — package ${String(r.package_status || "").toLowerCase()}`);
+      onboardingReviewsBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // ── Physical check intake + scan preview ───────────────────────────
@@ -7550,5 +7602,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated};
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide };
 })();

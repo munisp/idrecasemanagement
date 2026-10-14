@@ -536,6 +536,7 @@ func (s *server) storePackageDoc(r *http.Request, tenant, tpaID, pkgID, slot, fi
 	if err != nil {
 		return "", fmt.Errorf("db")
 	}
+	s.packageDocReplaced(r, tenant, onboardingKinds["tpa"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
 		"type": "tpa_doc.uploaded", "tenant": tenant, "package_id": pkgID,
 		"package_doc_id": rowID, "slot": slot, "object_key": objectKey,
@@ -561,8 +562,10 @@ func (s *server) tpaAttachDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
-	if mode != "DISCRETE" || (status != "ASSEMBLING" && status != "REJECTED") {
-		http.Error(w, `{"error":"package does not accept discrete slot uploads in its current state"}`, http.StatusConflict)
+	// Until it is filed, a slot can be added or replaced: slots are checked
+	// one at a time, so the package is VALIDATING after the first upload.
+	if mode != "DISCRETE" || status == "FILED" {
+		http.Error(w, `{"error":"this package takes one merged PDF, or it has already been filed"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -613,8 +616,8 @@ func (s *server) tpaUploadMerged(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
-	if mode != "MERGED" || (status != "ASSEMBLING" && status != "REJECTED") {
-		http.Error(w, `{"error":"package does not accept a merged upload in its current state"}`, http.StatusConflict)
+	if mode != "MERGED" || status == "FILED" {
+		http.Error(w, `{"error":"this package takes documents slot by slot, or it has already been filed"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -662,6 +665,7 @@ func (s *server) tpaUploadMerged(w http.ResponseWriter, r *http.Request) {
 		UPDATE public.tpa_packages SET source_object_key=$3, status='VALIDATING', updated_at=now()
 		WHERE tenant=$1 AND id=$2`, tenant, pkgID, objectKey)
 	_, _ = s.db.Exec(r.Context(), `DELETE FROM public.tpa_package_docs WHERE tenant=$1 AND package_id=$2`, tenant, pkgID)
+	s.packageDocReplaced(r, tenant, onboardingKinds["tpa"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
 		"type": "tpa_doc.uploaded", "tenant": tenant, "package_id": pkgID,
 		"object_key": objectKey, "filename": hdr.Filename, "merged": true,

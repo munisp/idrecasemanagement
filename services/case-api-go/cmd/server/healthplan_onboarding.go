@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -73,7 +74,14 @@ func (s *server) healthPlanForPrincipal(r *http.Request, tenant string) (*health
 	return &o, nil
 }
 
-// registerHealthPlan: PUBLIC self-serve onboarding; returns a one-time claim code.
+// registerHealthPlan: PUBLIC self-serve onboarding, the same shape as a TPA's
+// (registerTPA): it creates the plan AND its first HEALTH_PLAN portal login,
+// links them, and emails the sign-in details to the contact. It used to hand
+// the claim code back in the response, with no throttle, to anyone who
+// posted a name and an address -- and the code could be claimed from any
+// account. The code now never leaves the database; the login goes to the
+// registered mailbox only. FEIN is required, and NAIC for every line of
+// business but ASO (a self-funded group has none).
 func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Tenant         string `json:"tenant"`
@@ -91,38 +99,133 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"tenant, name, and a valid contact_email are required"}`, http.StatusBadRequest)
 		return
 	}
-	in.NAIC = strings.TrimSpace(in.NAIC)
-	if in.NAIC != "" && !isDigits(in.NAIC, 5) {
-		http.Error(w, `{"error":"NAIC must be 5 digits"}`, http.StatusBadRequest)
-		return
-	}
-	if in.FEIN != "" && !tinValid(strings.TrimSpace(in.FEIN)) {
-		http.Error(w, `{"error":"FEIN must be 9 digits"}`, http.StatusBadRequest)
+	tenant := strings.ToLower(strings.TrimSpace(in.Tenant))
+	in.ContactEmail = strings.TrimSpace(in.ContactEmail)
+	if !validMailbox(in.ContactEmail) {
+		http.Error(w, `{"error":"enter a valid contact email address — your sign-in details will be sent there"}`, http.StatusBadRequest)
 		return
 	}
 	lob := strings.ToUpper(strings.TrimSpace(in.LineOfBusiness))
-	if lob != "" && !hpLOBs[lob] {
-		http.Error(w, `{"error":"line_of_business must be FULLY_INSURED|ASO|MEDICARE_ADVANTAGE|MEDICAID_MANAGED"}`, http.StatusBadRequest)
+	if !hpLOBs[lob] {
+		http.Error(w, `{"error":"line_of_business is required: FULLY_INSURED|ASO|MEDICARE_ADVANTAGE|MEDICAID_MANAGED"}`, http.StatusBadRequest)
 		return
 	}
-	code := "HP-" + strings.ToUpper(hex6())
+	in.FEIN = strings.TrimSpace(in.FEIN)
+	if !tinValid(in.FEIN) {
+		http.Error(w, `{"error":"FEIN is required (9 digits)"}`, http.StatusBadRequest)
+		return
+	}
+	in.NAIC = strings.TrimSpace(in.NAIC)
+	if lob == "ASO" && in.NAIC != "" && !isDigits(in.NAIC, 5) || lob != "ASO" && !isDigits(in.NAIC, 5) {
+		http.Error(w, `{"error":"NAIC company code is required (5 digits) for an insured line of business"}`, http.StatusBadRequest)
+		return
+	}
+	ip := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	if !s.rateLimit("hp-register:"+ip, 10, 3600) {
+		http.Error(w, `{"error":"too many registrations from this address — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+
+	tok, err := s.kcAdminToken(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak admin auth failed: " + err.Error()})
+		return
+	}
+	groupPath := "/tenant/" + tenant
+	if _, err := s.kcEnsureGroup(r.Context(), tok, tenant); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak group ensure failed: " + err.Error()})
+		return
+	}
+	base := tpaUsernameFromEmail(in.ContactEmail)
+	username := base
+	var result map[string]any
+	for attempt := 0; attempt < 5; attempt++ {
+		result = s.kcCreateUser(r.Context(), tok, username, in.ContactEmail, "HEALTH_PLAN", []string{groupPath})
+		if _, failed := result["error"]; !failed {
+			break
+		}
+		if msg, _ := result["error"].(string); !strings.Contains(msg, "already exists") {
+			writeJSON(w, http.StatusBadGateway, result)
+			return
+		}
+		username = base + hex6()[:4]
+	}
+	if _, failed := result["error"]; failed {
+		writeJSON(w, http.StatusConflict, result)
+		return
+	}
+	userID, _ := result["user_id"].(string)
+	if userID == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "account created but its Keycloak id was unavailable -- cannot link it to the plan"})
+		return
+	}
+	undo := func() {
+		if derr := s.kcDeleteUser(r.Context(), tok, userID); derr != nil {
+			slog.Error("health plan registration rollback: could not delete the Keycloak user", "user_id", userID, "err", derr)
+		}
+	}
 	var id string
-	err := s.db.QueryRow(r.Context(), `
+	if err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.health_plans
 		  (tenant, name, naic, fein, state_license, line_of_business, qpa_contact_email, contact_name, contact_email, claim_code, status)
-		VALUES (lower($1), $2, NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, $9, $10, 'ACTIVE')
+		VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), $6, NULLIF($7,''), $8, $9, $10, 'ACTIVE')
 		RETURNING id`,
-		in.Tenant, in.Name, in.NAIC, strings.TrimSpace(in.FEIN), in.StateLicense, lob,
-		in.QPAContact, in.ContactName, in.ContactEmail, code).Scan(&id)
-	if err != nil {
+		tenant, in.Name, in.NAIC, in.FEIN, in.StateLicense, lob,
+		in.QPAContact, in.ContactName, in.ContactEmail, "HP-"+strings.ToUpper(hex6())).Scan(&id); err != nil {
+		undo()
 		http.Error(w, `{"error":"registration failed — an organization with this email may already exist for this program"}`, http.StatusConflict)
 		return
 	}
-	s.logAudit(r.Context(), strings.ToLower(in.Tenant), "", "HEALTH_PLAN_REGISTERED", map[string]any{"plan_id": id, "name": in.Name})
+	dropPlan := func() {
+		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.health_plan_users WHERE tenant=$1 AND plan_id=$2`, tenant, id)
+		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.health_plans WHERE tenant=$1 AND id=$2`, tenant, id)
+		undo()
+	}
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.health_plan_users (tenant, user_sub, plan_id) VALUES ($1,$2,$3)`,
+		tenant, userID, id); err != nil {
+		dropPlan()
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "registration failed while linking the account — nothing was registered, try again"})
+		return
+	}
+	tempPassword, _ := result["temporary_password"].(string)
+	subject, body := hpWelcomeMail(in.Name, in.ContactName, username, tempPassword, s.cfg.PortalBaseURL)
+	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
+		s.logCorrespondence(r, tenant, "", "OUT", "hp_welcome", subject, tpaWelcomeLogNote, []string{in.ContactEmail}, nil, "system:hp-register", merr.Error())
+		dropPlan()
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "we could not send the sign-in email to that address, so nothing was registered. Check the email address and try again.",
+		})
+		return
+	}
+	s.logCorrespondence(r, tenant, "", "OUT", "hp_welcome", subject, tpaWelcomeLogNote, []string{in.ContactEmail}, nil, "system:hp-register")
+	s.logAudit(r.Context(), tenant, "", "HEALTH_PLAN_REGISTERED", map[string]any{
+		"plan_id": id, "name": in.Name, "username": username, "user_id": userID, "credentials_emailed_to": in.ContactEmail})
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"plan_id": id, "status": "ACTIVE", "claim_code": code,
-		"next": "Sign in to the portal with a health plan account and enter this claim code to link your organization. Then roster your parties, set up payment per party, and assemble validated document packages.",
+		"plan_id": id, "status": "ACTIVE",
+		"next": "Check your email for how to sign in. Your plan is already linked to your portal account.",
 	})
+}
+
+// hpWelcomeMail builds the sign-in email for a newly registered health plan.
+func hpWelcomeMail(planName, contactName, username, tempPassword, portalBase string) (subject, body string) {
+	greeting := "Hello,"
+	if strings.TrimSpace(contactName) != "" {
+		greeting = "Hello " + strings.TrimSpace(contactName) + ","
+	}
+	subject = "Your health plan portal account — " + planName
+	body = greeting + "\n\n" +
+		planName + " is now registered. Your portal account is ready and already linked to your plan.\n\n" +
+		"Sign in:   " + strings.TrimRight(portalBase, "/") + "/app.html\n" +
+		"Username:  " + username + "\n" +
+		"Password:  " + tempPassword + "\n\n" +
+		"This password is temporary: you will be asked to choose a new one the first time you sign in.\n\n" +
+		"Once signed in, open Health plan in the menu to roster the groups, networks and facilities you act for, set up payment, and assemble their document packages.\n\n" +
+		"If you did not register, you can ignore this email — the account cannot be used without this message."
+	return subject, body
 }
 
 func isDigits(s string, n int) bool {
@@ -147,6 +250,12 @@ func hex6() string {
 // claimHealthPlan links the authenticated user to their plan org via the code.
 func (s *server) claimHealthPlan(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// A plan's own login, or staff acting for it -- not any signed-in account
+	// (a TPA or a provider must not become a health plan by knowing a code).
+	if !hasAnyRole(p, "HEALTH_PLAN", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: only a health plan account or program staff can link a health plan"}`, http.StatusForbidden)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
 		Code string `json:"code"`
@@ -172,6 +281,30 @@ func (s *server) claimHealthPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 // hpMe: the caller's plan org.
+// hpUnlink: POST /hp/unlink -- staff stop acting for a health plan (the way
+// back out of claimHealthPlan; mirrors unlinkTPA). A plan's own login does
+// not unlink itself.
+func (s *server) hpUnlink(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: only staff acting for a plan can unlink"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	res, err := s.db.Exec(r.Context(), `
+		DELETE FROM public.health_plan_users WHERE tenant=$1 AND user_sub=$2`, tenant, p.Subject)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	if res.RowsAffected() == 0 {
+		http.Error(w, `{"error":"not linked to any health plan"}`, http.StatusNotFound)
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "HEALTH_PLAN_UNLINKED", map[string]any{"by": p.Subject})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "unlinked"})
+}
+
 func (s *server) hpMe(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	if !s.featureGate(w, r, tenant, "healthplan_onboarding") {
@@ -629,6 +762,7 @@ func (s *server) hpStorePackageDoc(r *http.Request, tenant, planID, pkgID, slot,
 	if err != nil {
 		return "", fmt.Errorf("db")
 	}
+	s.packageDocReplaced(r, tenant, onboardingKinds["hp"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
 		"type": "tpa_doc.uploaded", "tenant": tenant, "actor": "healthplan",
 		"package_id": pkgID, "package_doc_id": rowID, "slot": slot,
@@ -655,8 +789,10 @@ func (s *server) hpAttachDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
-	if mode != "DISCRETE" || (status != "ASSEMBLING" && status != "REJECTED") {
-		http.Error(w, `{"error":"package does not accept discrete slot uploads in its current state"}`, http.StatusConflict)
+	// Until it is filed, a slot can be added or replaced: slots are checked
+	// one at a time, so the package is VALIDATING after the first upload.
+	if mode != "DISCRETE" || status == "FILED" {
+		http.Error(w, `{"error":"this package takes one merged PDF, or it has already been filed"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -707,8 +843,8 @@ func (s *server) hpUploadMerged(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
-	if mode != "MERGED" || (status != "ASSEMBLING" && status != "REJECTED") {
-		http.Error(w, `{"error":"package does not accept a merged upload in its current state"}`, http.StatusConflict)
+	if mode != "MERGED" || status == "FILED" {
+		http.Error(w, `{"error":"this package takes documents slot by slot, or it has already been filed"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -756,6 +892,7 @@ func (s *server) hpUploadMerged(w http.ResponseWriter, r *http.Request) {
 		UPDATE public.hp_packages SET source_object_key=$3, status='VALIDATING', updated_at=now()
 		WHERE tenant=$1 AND id=$2`, tenant, pkgID, objectKey)
 	_, _ = s.db.Exec(r.Context(), `DELETE FROM public.hp_package_docs WHERE tenant=$1 AND package_id=$2`, tenant, pkgID)
+	s.packageDocReplaced(r, tenant, onboardingKinds["hp"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
 		"type": "tpa_doc.uploaded", "tenant": tenant, "actor": "healthplan",
 		"package_id": pkgID, "object_key": objectKey, "filename": hdr.Filename,
@@ -1069,9 +1206,9 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		WHERE tenant=$1 AND id=$2 AND (tin IS NOT NULL OR
 		  EXISTS (SELECT 1 FROM public.hp_packages p WHERE p.tenant=$1 AND p.party_id=$2))`,
 		tenant, in.PartyID).Scan(&onboarded)
-	if onboarded > 0 {
+	if onboarded > 0 || s.featureEnabled(r, tenant, "onboarding_required") {
 		if in.PackageID == "" {
-			http.Error(w, `{"error":"this party is onboarded — filings must reference a READY package (package_id)"}`, http.StatusConflict)
+			http.Error(w, `{"error":"filings must reference this party's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)
 			return
 		}
 		var pkgStatus string

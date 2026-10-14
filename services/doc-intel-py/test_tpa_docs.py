@@ -113,3 +113,39 @@ def test_tpa_substantiation_has_no_qpa_floor():
                                   PLAIN_SUBSTANTIATION, classify_text, extract_fields,
                                   actor="tpa")
     assert status == "ACCEPTED"
+
+
+# ---- merged-PDF splitting -------------------------------------------------
+
+PAGES = {
+    "EOB": "EXPLANATION OF BENEFITS\nRemittance advice\nClaim Number: T-1  CPT 99285\nAllowed Amount $612.40  Patient Responsibility $150.00",
+    "ITEMIZED_BILL": "ITEMIZED BILL - UB-04 Summary\nRev Code 0450 CPT 99285 Units 1 Billed Amount $2,450.00\nHCPCS J1885 Place of Service 23",
+    "PROOF_OF_COVERAGE": "PROOF OF COVERAGE\nThe subscriber was eligible on the service date. Member ID TST-1, provider Gulf Coast, payer Sunshine.",
+    "OPEN_NEGOTIATION_NOTICE": "OPEN NEGOTIATION NOTICE\nNotice of initiation of the open negotiation period. 30 business days.",
+    "OFFER_SUBSTANTIATION": "OFFER SUBSTANTIATION\nProvider offer $1,980.00 for CPT 99285. Qualifying payment amount $612.40. CMS-1500 attached.\nThe open negotiation period ended without agreement.",
+    "IDRE_ATTESTATION": "ATTESTATION OF NO CONFLICT OF INTEREST\nI attest and certify under penalty of perjury that this is true.",
+}
+ORDER = ["EOB", "ITEMIZED_BILL", "PROOF_OF_COVERAGE", "OPEN_NEGOTIATION_NOTICE", "OFFER_SUBSTANTIATION", "IDRE_ATTESTATION"]
+
+
+def test_split_finds_all_six_in_order():
+    got = tpa_docs.split_pages([PAGES[s] for s in ORDER], classify_text)
+    assert got == {s: (i, i) for i, s in enumerate(ORDER)}
+
+
+def test_split_continuation_page_stays_with_its_document():
+    texts = [PAGES["EOB"], "page 2 of 2\nline 3: 99285 continued", PAGES["ITEMIZED_BILL"]]
+    got = tpa_docs.split_pages(texts, classify_text)
+    assert got["EOB"] == (0, 1) and got["ITEMIZED_BILL"] == (2, 2)
+
+
+def test_split_any_order():
+    order = list(reversed(ORDER))
+    got = tpa_docs.split_pages([PAGES[s] for s in order], classify_text)
+    assert set(got) == set(ORDER)
+    assert got["OFFER_SUBSTANTIATION"] == (order.index("OFFER_SUBSTANTIATION"),) * 2
+
+
+def test_split_offer_mentioning_negotiation_is_still_the_offer():
+    got = tpa_docs.split_pages([PAGES["OFFER_SUBSTANTIATION"]], classify_text)
+    assert list(got) == ["OFFER_SUBSTANTIATION"]
