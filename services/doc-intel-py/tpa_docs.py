@@ -29,6 +29,8 @@ import uuid
 import httpx
 import psycopg
 
+from pipeline import PDFIUM_LOCK
+
 SLOTS = [
     "EOB", "ITEMIZED_BILL", "PROOF_OF_COVERAGE",
     "OPEN_NEGOTIATION_NOTICE", "OFFER_SUBSTANTIATION", "IDRE_ATTESTATION",
@@ -269,9 +271,10 @@ def _handle_discrete(evt: dict, ctx: dict, actor: str = "tpa") -> None:
     try:
         raw = ctx["fetch_and_decrypt"](tenant, evt["object_key"])
         if raw[:4] == b"%PDF":
-            texts, pdf = _pdf_pages(raw)
+            with PDFIUM_LOCK:
+                texts, pdf = _pdf_pages(raw)
+                pdf.close()
             text = "\n".join(texts)
-            pdf.close()
         else:
             text = raw.decode("utf-8", "ignore")
         status, reasons = _verdict(evt["slot"], evt.get("filename") or "", text,
@@ -296,13 +299,20 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
     prefix = "hp" if actor == "healthplan" else "tpa"
     try:
         raw = ctx["fetch_and_decrypt"](tenant, evt["object_key"])
-        texts, pdf = _pdf_pages(raw)
-        assigned = split_pages(texts, ctx["classify_text"])
+        # All PDFium work (read, split, cut out each slot's pages) under the
+        # lock; sealing and storing happen after it is released.
+        with PDFIUM_LOCK:
+            texts, pdf = _pdf_pages(raw)
+            try:
+                assigned = split_pages(texts, ctx["classify_text"])
+                segments = {slot: _export_segment(pdf, a, b) for slot, (a, b) in assigned.items()}
+            finally:
+                pdf.close()
         with psycopg.connect(ctx["dsn"]) as conn:
             for slot in SLOTS:
                 if slot in assigned:
                     start, end = assigned[slot]
-                    seg = _export_segment(pdf, start, end)
+                    seg = segments[slot]
                     key = f"{tenant}/{prefix}-packages/{package_id}/{slot.lower()}-{uuid.uuid4()}.enc"
                     ct = _seal(ctx["vault"], ctx["vault_headers"], tenant, key, seg)
                     ctx["minio"].put_object(ctx.get("doc_bucket", "idre-docs"), key, io.BytesIO(ct), len(ct))
@@ -338,7 +348,6 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
                                       "detail": "page classification found no segment for this slot"}])))
             pkg_status = _refresh_package(conn, tenant, package_id, prefix)
             conn.commit()
-        pdf.close()
         print(f"tpa-doc merged {package_id}: slots {sorted(assigned)} -> package {pkg_status}", flush=True)
     except Exception as exc:  # noqa: BLE001
         with psycopg.connect(ctx["dsn"]) as conn:

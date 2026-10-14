@@ -218,6 +218,11 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		tenant, invID, caseID := sess.Metadata["tenant"], sess.Metadata["invoice_id"], sess.Metadata["case_id"]
+		// A bulk batch's one checkout covers many invoices (tpa_bulk_payments.go).
+		if gid := sess.Metadata["payment_group_id"]; gid != "" {
+			s.settlePaymentGroup(r, tenant, gid, sess.ID, sess.PaymentIntent, sess.Email)
+			break
+		}
 		// mark payment PAID (+ Field Criteria auto-fill: who paid, org, email)
 		_, _ = s.db.Exec(r.Context(), `
 			UPDATE public.payments SET status='PAID', payment_intent=$3, payer_email=$4,

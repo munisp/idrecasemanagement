@@ -56,6 +56,12 @@ from PIL import Image
 
 _MODEL_CACHE: dict[tuple, Any] = {}
 _MODEL_LOCK = threading.Lock()
+# PDFium (pypdfium2, and docling's PDF backend on top of it) is not safe to
+# use from several threads at once. With three consumer workers, a bulk
+# upload's documents were opened concurrently and the process died with
+# "double free or corruption" (exit 139), over and over, stalling every
+# tenant's queue. Every PDFium use in this process holds this lock.
+PDFIUM_LOCK = threading.RLock()
 
 
 def _model(key: tuple, factory) -> Any:
@@ -166,7 +172,8 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
                         cfg.get("do_table_structure", True)), build)
     stream = DocumentStream(name=ctx.get("filename", "doc.pdf"),
                             stream=io.BytesIO(ctx["raw_bytes"]))
-    doc = converter.convert(stream).document
+    with PDFIUM_LOCK:
+        doc = converter.convert(stream).document
 
     ctx["text"] = doc.export_to_markdown()            # structure-aware reading order
     ctx["markdown"] = ctx["text"]
@@ -1629,14 +1636,15 @@ def pdf_to_pages(data: bytes, dpi: int = 200,
     import pypdfium2 as pdfium
 
     cap = max_pages or int(os.environ.get("DOC_INTEL_MAX_PAGES", "150"))
-    pdf = pdfium.PdfDocument(data)
     pages = []
     truncated = False
-    for i, page in enumerate(pdf):
-        if i >= cap:
-            truncated = True
-            break
-        pages.append(page.render(scale=dpi / 72).to_pil())
+    with PDFIUM_LOCK:
+        pdf = pdfium.PdfDocument(data)
+        for i, page in enumerate(pdf):
+            if i >= cap:
+                truncated = True
+                break
+            pages.append(page.render(scale=dpi / 72).to_pil())
     return pages, truncated
 
 

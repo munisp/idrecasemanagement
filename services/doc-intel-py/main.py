@@ -934,9 +934,30 @@ def read_event(evt: dict, outcome: str, started: float, ctx: dict | None = None)
     }), flush=True)
 
 
+def package_checked(evt: dict) -> bool:
+    """True when the document came from a TPA / health plan package and was
+    already read and accepted there (case-api records that as its analysis).
+    Re-reading it is wasted work -- and docling crashed on these one-page
+    segments, taking the whole consumer down and stalling every queue."""
+    doc_id = evt.get("doc_id")
+    if not doc_id:
+        return False
+    try:
+        with psycopg.connect(DSN) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM public.doc_analysis WHERE doc_id=%s AND result->>'source'='onboarding_package'",
+                (doc_id,)).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001 -- on doubt, read the document as usual
+        return False
+
+
 def process(evt: dict) -> None:
     started = time.time()
     kind, subj_id = subject(evt)
+    if package_checked(evt):
+        print(f"doc-intel: {evt.get('doc_id')} already checked in its onboarding package, skipped", flush=True)
+        return
     if evt.get("sealed"):
         # Sealed offer documents: skip analysis until lawful reveal.
         mark(evt, "SEALED_PENDING_REVEAL")

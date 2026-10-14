@@ -721,6 +721,7 @@ func main() {
 		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                 // many disputes, each with its own six documents (ZIP)
 		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
 		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
+		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
 		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
@@ -931,6 +932,7 @@ func main() {
 	// Bulk TPA disputes (tpa_bulk_disputes.go): a row is filed once its own
 	// six documents are accepted.
 	go s.runBulkDisputeFiler(sweepStop)
+	go s.backfillPackageAnalyses()
 
 	go func() {
 		t := time.NewTicker(docSweepEvery)

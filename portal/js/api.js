@@ -383,6 +383,7 @@ const Api = (() => {
       },
       tpaBulkDisputeBatches: () => req("GET", `${t()}/tpa/disputes/bulk`),
       tpaBulkDisputeBatch: (id) => req("GET", `${t()}/tpa/disputes/bulk/${id}`),
+      tpaBulkCheckout: (id) => req("POST", `${t()}/tpa/disputes/bulk/${id}/checkout`, {}),
       healthPlanRegister: (body) => req("POST", "/api/public/healthplan/register", body),
       hpClaim: (code) => req("POST", `${t()}/hp/claim`, { code }),
       hpUnlink: () => req("POST", `${t()}/hp/unlink`, {}),

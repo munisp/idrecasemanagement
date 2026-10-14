@@ -194,14 +194,20 @@ func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboa
 		}
 		label := strings.ReplaceAll(strings.ToLower(d.slot), "_", " ")
 		filename := label + " — " + d.filename
+		docID := newUUID()
 		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 			INSERT INTO tenant_%s.documents
 			  (id, case_id, object_key, size_bytes, content_type, sealed, uploaded_by, version, scan_status, filename, folder)
 			VALUES ($1,$2,$3,$4,'application/pdf',false,$5,1,'CLEAN',$6,'INTAKE')`, sanitizeTenant(tenant)),
-			newUUID(), caseID, d.key, size, uploadedBy, filename); err != nil {
+			docID, caseID, d.key, size, uploadedBy, filename); err != nil {
 			slog.Error("attach package documents: insert", "package", pkgID, "slot", d.slot, "err", err)
 			continue
 		}
+		// The document was already read and accepted for its slot: record that
+		// as its analysis. Without one, the unread-documents sweep sent it to
+		// doc-intel again, whose PDF library crashed on these one-page
+		// segments and took the whole document queue down with it.
+		s.recordPackageAnalysis(r.Context(), tenant, docID, caseID, d.slot, pkgID)
 		n++
 	}
 	if n > 0 {
@@ -209,6 +215,63 @@ func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboa
 			fmt.Sprintf("%d checked filing documents attached from the onboarding package", n))
 	}
 	return n
+}
+
+// packageDocType names an accepted slot in doc-intel's document types.
+func packageDocType(slot string) string {
+	switch slot {
+	case "EOB":
+		return "eob"
+	case "ITEMIZED_BILL", "OFFER_SUBSTANTIATION":
+		return "idr_claim"
+	}
+	return strings.ToLower(slot)
+}
+
+func (s *server) recordPackageAnalysis(ctx context.Context, tenant, docID, caseID, slot, pkgID string) {
+	_, _ = s.db.Exec(ctx, `
+		INSERT INTO public.doc_analysis (doc_id, tenant, case_id, status, doc_type, result, analyzed_at)
+		VALUES ($1::uuid,$2,$3::uuid,'ANALYZED',$4,
+		        jsonb_build_object('source','onboarding_package','slot',$5::text,'package_id',$6::text,'verdict','ACCEPTED'), now())
+		ON CONFLICT DO NOTHING`, docID, tenant, caseID, packageDocType(slot), slot, pkgID)
+}
+
+// backfillPackageAnalyses gives every already-attached package document its
+// analysis record (documents attached before recordPackageAnalysis existed).
+// Runs once at start; idempotent.
+func (s *server) backfillPackageAnalyses() {
+	ctx := context.Background()
+	rows, err := s.db.Query(ctx, `SELECT substr(schema_name, 8) FROM information_schema.schemata WHERE schema_name LIKE 'tenant\_%'`)
+	if err != nil {
+		return
+	}
+	var tenants []string
+	for rows.Next() {
+		var t string
+		if rows.Scan(&t) == nil {
+			tenants = append(tenants, t)
+		}
+	}
+	rows.Close()
+	total := int64(0)
+	for _, t := range tenants {
+		tag, err := s.db.Exec(ctx, fmt.Sprintf(`
+			INSERT INTO public.doc_analysis (doc_id, tenant, case_id, status, doc_type, result, analyzed_at)
+			SELECT d.id, $1, d.case_id::uuid, 'ANALYZED', 'onboarding_package',
+			       jsonb_build_object('source','onboarding_package','verdict','ACCEPTED'), now()
+			FROM tenant_%s.documents d
+			WHERE d.folder='INTAKE' AND (d.uploaded_by LIKE 'tpa:%%' OR d.uploaded_by LIKE 'health-plan:%%')
+			  AND NOT EXISTS (SELECT 1 FROM public.doc_analysis a WHERE a.doc_id=d.id AND a.status NOT IN ('QUEUED','STALLED'))
+			ON CONFLICT (doc_id) DO UPDATE SET status='ANALYZED', result=EXCLUDED.result, analyzed_at=now()`, sanitizeTenant(t)), t)
+		if err == nil {
+			total += tag.RowsAffected()
+		} else {
+			slog.Error("backfill package analyses", "tenant", t, "err", err)
+		}
+	}
+	if total > 0 {
+		slog.Info("package documents given their analysis record", "count", total)
+	}
 }
 
 // bulkDisputeRow is one line of disputes.csv and what became of it.
@@ -442,7 +505,11 @@ func (s *server) tpaBulkDisputeBatches(w http.ResponseWriter, r *http.Request) {
 		       count(i.*) AS rows,
 		       count(*) FILTER (WHERE i.status='FILED') AS filed,
 		       count(*) FILTER (WHERE i.status IN ('WAITING_DOCS','FILING')) AS waiting,
-		       count(*) FILTER (WHERE i.status='ERROR') AS refused
+		       count(*) FILTER (WHERE i.status='ERROR') AS refused,
+		       (SELECT count(*) FROM public.tpa_dispute_batch_items x JOIN public.invoices f ON f.tenant=x.tenant AND f.case_id=x.case_id AND f.kind='INITIAL_FEE' AND f.status='OPEN'
+		         WHERE x.batch_id=b.id AND x.status='FILED') AS unpaid,
+		       (SELECT coalesce(sum(f.amount_cents),0) FROM public.tpa_dispute_batch_items x JOIN public.invoices f ON f.tenant=x.tenant AND f.case_id=x.case_id AND f.kind='INITIAL_FEE' AND f.status='OPEN'
+		         WHERE x.batch_id=b.id AND x.status='FILED') AS unpaid_cents
 		FROM public.tpa_dispute_batches b
 		LEFT JOIN public.tpa_dispute_batch_items i ON i.batch_id=b.id
 		WHERE b.tenant=$1 AND b.tpa_id=$2
@@ -470,7 +537,10 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		       (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=i.package_id AND d.status='ACCEPTED') AS accepted,
 		       (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=i.package_id AND d.status='NEEDS_REVIEW') AS needs_review,
 		       (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=i.package_id AND d.status='REJECTED') AS rejected,
-		       coalesce(i.case_number,'') AS case_number, coalesce(i.case_id,'') AS case_id
+		       coalesce(i.case_number,'') AS case_number, coalesce(i.case_id,'') AS case_id,
+		       coalesce((SELECT f.status FROM public.invoices f WHERE f.tenant=i.tenant AND f.case_id=i.case_id AND f.kind='INITIAL_FEE' LIMIT 1),'') AS fee_status,
+		       coalesce((SELECT f.due_date::text FROM public.invoices f WHERE f.tenant=i.tenant AND f.case_id=i.case_id AND f.kind='INITIAL_FEE' LIMIT 1),'') AS fee_due,
+		       coalesce((SELECT f.amount_cents FROM public.invoices f WHERE f.tenant=i.tenant AND f.case_id=i.case_id AND f.kind='INITIAL_FEE' LIMIT 1),0) AS fee_cents
 		FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_dispute_batches b ON b.id=i.batch_id
 		LEFT JOIN public.tpa_clients c ON c.id=i.client_id
@@ -521,16 +591,18 @@ func (s *server) fileReadyBulkDisputes() int {
 	}
 	rows.Close()
 	filed := 0
+	type batchKey struct{ tenant, batch string }
+	filedIn := map[batchKey][]string{}
 	for _, id := range ids {
-		var tenant, tpaID, clientID, pkgID, contact, notes string
+		var tenant, tpaID, clientID, pkgID, contact, notes, batchID string
 		var amount int64
 		if err := s.db.QueryRow(ctx, `
 			UPDATE public.tpa_dispute_batch_items i SET status='FILING'
 			FROM public.tpa_dispute_batches b
 			WHERE i.id::text=$1 AND i.status='WAITING_DOCS' AND b.id=i.batch_id
 			RETURNING i.tenant, b.tpa_id::text, i.client_id::text, i.package_id::text, i.disputed_amount_cents,
-			          coalesce(i.contact_name,''), coalesce(i.notes,'')`, id).
-			Scan(&tenant, &tpaID, &clientID, &pkgID, &amount, &contact, &notes); err != nil {
+			          coalesce(i.contact_name,''), coalesce(i.notes,''), i.batch_id::text`, id).
+			Scan(&tenant, &tpaID, &clientID, &pkgID, &amount, &contact, &notes, &batchID); err != nil {
 			continue // another replica claimed it
 		}
 		caseNumber, ferr := s.fileOneBulkDispute(ctx, tenant, tpaID, clientID, pkgID, contact, notes, amount)
@@ -544,6 +616,11 @@ func (s *server) fileReadyBulkDisputes() int {
 			       case_id=(SELECT case_id FROM public.tpa_packages WHERE id::text=$3)
 			WHERE id::text=$1`, id, caseNumber, pkgID)
 		filed++
+		filedIn[batchKey{tenant, batchID}] = append(filedIn[batchKey{tenant, batchID}], caseNumber)
+	}
+	// One email per batch for this round, not one payment email per dispute.
+	for k, nums := range filedIn {
+		s.emailBatchFiled(ctx, k.tenant, k.batch, nums)
 	}
 	return filed
 }
@@ -581,7 +658,7 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	if pkgStatus != "READY" {
 		return "", fmt.Errorf("the package is %s, not READY", pkgStatus)
 	}
-	_, caseNumber, _, err := s.fileTPADispute(r, tenant, &org, clientID, partyName, partyType, pkgID, contact, notes, amount)
+	_, caseNumber, _, err := s.fileTPADisputeOpt(r, tenant, &org, clientID, partyName, partyType, pkgID, contact, notes, amount, true)
 	if err != nil {
 		return "", fmt.Errorf("case creation failed: %v", err)
 	}

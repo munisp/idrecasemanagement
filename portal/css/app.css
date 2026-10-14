@@ -778,3 +778,4 @@ button.q-btn{min-height:28px;padding:3px 14px;font-size:12.5px}
 .tpa-tree{margin:0;padding:10px 12px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-sunken,#f6f5f1);color:var(--text-primary);font-size:12.5px;line-height:1.5;overflow-x:auto;white-space:pre}
 .tpa-pkg-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 #tpa-team,#tpa-bd-report{overflow-x:auto}
+.tpa-paybar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 12px;padding:12px 14px;border:1px solid var(--border-default);border-radius:10px;background:var(--surface-sunken)}

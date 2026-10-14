@@ -122,6 +122,13 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 // opening path in the AHCA 2026 "Payment before submission" rules. Every
 // other filer still pays before the dispute exists.
 func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, serviceLine string, deferFee bool) (caseID, caseNumber string, err error) {
+	return s.startAhcaCaseFull(r, tenant, cfg, email, contactName, org, filingPartyType, disputedAmountCents, serviceLine, deferFee, false)
+}
+
+// startAhcaCaseFull adds batchPay: the fee invoice is raised and the case
+// waits for payment, but no checkout or payment email of its own -- the
+// filer pays for a whole bulk batch with one checkout (tpa_bulk_payments.go).
+func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, serviceLine string, deferFee, batchPay bool) (caseID, caseNumber string, err error) {
 	caseNumber = s.nextCaseNumber(r, tenant, cfg)
 	// requester_* lands in details so the pre-case intake list can show who
 	// asked and search by email/org -- previously nothing persisted this on
@@ -204,7 +211,19 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 	// settles (Stripe webhook or offline settlement) — and the share-upload
 	// endpoint independently refuses AWAITING_PAYMENT cases, so documents
 	// cannot reach the docket before payment by any path.
-	if cfg.Fees.InitialFeeCents > 0 {
+	if cfg.Fees.InitialFeeCents > 0 && batchPay {
+		if _, ierr := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents); ierr == nil {
+			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
+				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
+				sanitizeTenant(tenant)), caseID); uerr == nil {
+				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
+					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents, "paid_with": "bulk batch checkout",
+				})
+				return caseID, caseNumber, nil
+			}
+		}
+	}
+	if cfg.Fees.InitialFeeCents > 0 && !batchPay {
 		checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
 		if cerr == nil {
 			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
@@ -337,7 +356,8 @@ func (s *server) mintShareLink(r *http.Request, tenant, caseID, kind, objectKey 
 // exists at public intake time). Mirrors both functions' SQL/Stripe calls
 // exactly so the invoice this produces is indistinguishable from one a
 // staffer issued through the ordinary endpoint.
-func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
+// issueInitialFeeInvoice raises (or re-opens) the case's INITIAL_FEE invoice.
+func (s *server) issueInitialFeeInvoice(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
 	var invID string
 	if err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
@@ -347,7 +367,14 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 		return "", err
 	}
 	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", amountCents, "PROVIDER", caseNumber, "system:ahca-intake")
+	return invID, nil
+}
 
+func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
+	invID, err := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, amountCents)
+	if err != nil {
+		return "", err
+	}
 	form := url.Values{}
 	form.Set("mode", "payment")
 	form.Set("success_url", s.cfg.PortalBaseURL+"/#/cases/"+caseID+"?paid=1")

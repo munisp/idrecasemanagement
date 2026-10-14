@@ -687,14 +687,29 @@ var errNotProgrammed = errors.New("not a programmed tenant")
 // share once their own checks have passed. With a package, the package is
 // marked FILED and its documents are attached to the case.
 func (s *server) fileTPADispute(r *http.Request, tenant string, org *tpaOrg, clientID, partyName, partyType, packageID, contactName, notes string, amountCents int64) (caseID, caseNumber, status string, err error) {
+	return s.fileTPADisputeOpt(r, tenant, org, clientID, partyName, partyType, packageID, contactName, notes, amountCents, false)
+}
+
+// fileTPADisputeOpt: bulk=true for a bulk-filed row. Its fee is paid with the
+// batch's one checkout instead of a link per dispute, and a TPA on the
+// program's invoiced_filer_orgs list is invoiced instead of paying up front.
+func (s *server) fileTPADisputeOpt(r *http.Request, tenant string, org *tpaOrg, clientID, partyName, partyType, packageID, contactName, notes string, amountCents int64, bulk bool) (caseID, caseNumber, status string, err error) {
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
 		return "", "", "", errNotProgrammed
 	}
 	// The TPA is the operational contact: payment link, case number, and
 	// upload link all flow to them — they pay and manage documents on behalf.
-	caseID, caseNumber, err = s.startAhcaCase(r, tenant, cfg,
-		org.ContactEmail, org.ContactName, org.Name+" on behalf of "+partyName, partyType, amountCents, "")
+	deferFee := false
+	if bulk {
+		for _, approved := range cfg.Fees.InvoicedFilerOrgs {
+			if strings.EqualFold(strings.TrimSpace(approved), strings.TrimSpace(org.Name)) {
+				deferFee = true
+			}
+		}
+	}
+	caseID, caseNumber, err = s.startAhcaCaseFull(r, tenant, cfg,
+		org.ContactEmail, org.ContactName, org.Name+" on behalf of "+partyName, partyType, amountCents, "", deferFee, bulk && !deferFee)
 	if err != nil {
 		return "", "", "", err
 	}

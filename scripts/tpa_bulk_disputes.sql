@@ -40,3 +40,22 @@ CREATE TABLE IF NOT EXISTS public.tpa_dispute_batch_items (
 );
 CREATE INDEX IF NOT EXISTS tpa_dispute_batch_items_waiting ON public.tpa_dispute_batch_items (status) WHERE status='WAITING_DOCS';
 CREATE INDEX IF NOT EXISTS tpa_dispute_batch_items_batch ON public.tpa_dispute_batch_items (tenant, batch_id);
+
+-- One Stripe checkout paying the initial fees of a bulk batch's filed
+-- disputes together (tpa_bulk_payments.go). A new checkout for the batch
+-- expires the previous unpaid one, so no invoice can be paid twice.
+CREATE TABLE IF NOT EXISTS public.payment_groups (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant         text NOT NULL,
+    batch_id       uuid REFERENCES public.tpa_dispute_batches(id),
+    invoice_ids    uuid[] NOT NULL,
+    amount_cents   bigint NOT NULL,
+    session_id     text UNIQUE,
+    checkout_url   text,
+    status         text NOT NULL DEFAULT 'OPEN',   -- OPEN|PAID|EXPIRED
+    payment_intent text,
+    created_by     text,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    paid_at        timestamptz
+);
+CREATE INDEX IF NOT EXISTS payment_groups_batch ON public.payment_groups (tenant, batch_id, status);
