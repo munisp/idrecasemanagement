@@ -231,6 +231,8 @@
   // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
+  // A TPA's or plan's own trail (the office's tenant-wide log above is not theirs).
+  else if (outside) links.push(["#/org-audit", "⌘", "Audit log"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
 
@@ -419,6 +421,7 @@
     [/^#\/mail$/, Views.mailLog],
     [/^#\/payments$/, Views.paymentsView],
     [/^#\/audit$/, Views.auditLog],
+    [/^#\/org-audit$/, Views.orgAuditPage],
   ];
 
   // One rule for every way of reaching a page -- the rail, a typed or
