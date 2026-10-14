@@ -6490,7 +6490,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <p class="muted">Give this code to a colleague to let them log into their own portal account and join your organization — Profile → Claim TPA, or the form here when they're not linked to any org yet. Generating a new code replaces the old one.</p>
           <p id="tpa-invite-code">${code ? `<span class="mono" style="font-weight:600;font-size:1.1em">${esc(code)}</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate new code</button>`
             : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></div>`;
-      document.getElementById("tpa-body").style.display = "";
+      const tpaBody = document.getElementById("tpa-body");
+      if (!tpaBody) return; // the page was left while it loaded
+      tpaBody.style.display = "";
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
@@ -6514,7 +6516,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
       tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa");
-      if (document.getElementById("tpa-body").style.display === "none") tpaTab("oversight", true);  // not acting for a TPA
+      if (document.getElementById("tpa-body")?.style.display === "none") tpaTab("oversight", true);  // not acting for a TPA
     }
   }
 
@@ -6796,7 +6798,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       orgBox.innerHTML = `<div class="stat-grid"><div class="stat"><div class="stat-num">${esc(r.health_plan.name)}</div>
         <div class="muted">${esc(r.health_plan.contact_email)} · ${r.health_plan.naic ? "NAIC " + esc(r.health_plan.naic) + " · " : ""}${esc(r.health_plan.line_of_business || "")} ${badge(r.health_plan.status)}</div>
         ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") && !can("HEALTH_PLAN") ? `<button class="mini" style="margin-top:8px" onclick="Views.hpUnlinkFn()">Stop acting as this plan</button>` : ""}</div></div>`;
-      document.getElementById("hp-body").style.display = "";
+      const hpBody = document.getElementById("hp-body");
+      if (!hpBody) return; // the page was left while it loaded
+      hpBody.style.display = "";
       document.querySelectorAll("#hp-tabs .hp-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.hpTab") || ""; } catch { /* private window */ }
       hpTab(saved && document.querySelector(`#hp-tabs [data-tab="${saved}"]`) ? saved : "against", true);
@@ -6810,7 +6814,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
       hpAdminBox(); onboardingReviewsBox("hp-reviews", "hp");
-      if (document.getElementById("hp-body").style.display === "none") hpTab("oversight", true);  // not acting for a plan
+      if (document.getElementById("hp-body")?.style.display === "none") hpTab("oversight", true);  // not acting for a plan
     }
   }
 
@@ -7652,7 +7656,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <td>${usdC(x.disputed_amount_cents)}</td><td>${x.response_status !== "AWAITING" ? '<span class="muted">—</span>' : x.response_due ? daysLeft(x.response_due) : '<span class="muted">15 days from the plan notification</span>'}</td>
           <td>${rspBadge(x.response_status)}</td>
           <td><button class="mini" onclick="Views.respondOpen('${k}','${x.case_id}')">${x.response_status === "AWAITING" ? "Respond" : "Open"}</button></td></tr>`).join("")}</tbody></table>`
-        : `<p class="muted">No disputes against ${k === "tpa" ? "your clients" : "you"} right now. When one is filed and its fee paid, it appears here with its response deadline.</p>`;
+        : `<p class="muted">No disputes against you right now. When the review team finds a dispute against you eligible, it appears here with its response deadline, and you are emailed.</p>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
   async function respondOpen(k, caseId) {

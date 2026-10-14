@@ -154,12 +154,13 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 // for a second look, the decision stands), and once it has joined (it was
 // told: notified_at / emailed_at) it keeps the dispute through a later hold
 // (HOLD_AOR) and loses it only when the dispute is found INELIGIBLE. Before
-// the first ELIGIBLE it is neither shown the dispute nor told of it.
+// the first ELIGIBLE it is neither shown the dispute nor told of it -- except
+// a side told of it already (before this rule) with no review on file yet.
 const eligibleForOtherSide = `coalesce((SELECT CASE WHEN e.result = 'ELIGIBLE' THEN true
 	                       WHEN e.result = 'INELIGIBLE' THEN false
 	                       ELSE (rs.notified_at IS NOT NULL OR rs.emailed_at IS NOT NULL) END
 	FROM public.eligibility_reviews e WHERE e.tenant = rs.tenant AND e.case_id = rs.case_id
-	ORDER BY e.created_at DESC LIMIT 1), false)`
+	ORDER BY e.created_at DESC LIMIT 1), rs.notified_at IS NOT NULL OR rs.emailed_at IS NOT NULL)`
 
 // freemailDomains: public email providers. A shared domain there says nothing
 // about who owns an address, so a dispute is linked to an organization on one
