@@ -41,3 +41,8 @@ ALTER TABLE public.tpa_dispute_batch_items
 -- When the other side was told, in the portal, that the dispute is against
 -- it (org_notify.go: once, when the dispute opens).
 ALTER TABLE public.case_respondents ADD COLUMN IF NOT EXISTS notified_at timestamptz;
+
+-- When the other side's notice address was emailed that the dispute is open
+-- (org_notify.go). Separate from notified_at (the portal notice), so a plan
+-- that registers later still gets its portal notice.
+ALTER TABLE public.case_respondents ADD COLUMN IF NOT EXISTS emailed_at timestamptz;

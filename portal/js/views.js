@@ -6358,7 +6358,7 @@ const Views = (() => {
               <input name="other_party_naic" placeholder="plan NAIC (optional)" />
               <input name="notes" placeholder="notes" />
               <button class="mini">File dispute</button></form>
-            <p class="muted">The payment link and the case instructions come to your TPA email: you pay and manage documents for the client.</p>
+            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all) and manage documents for the client. Once it is paid, the health plan is emailed that the dispute is against it.</p>
             <div id="tpa-file-result"></div></div>
         </section>
 
@@ -6734,7 +6734,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="other_party_npi" placeholder="provider NPI (optional)" />
             <input name="notes" placeholder="notes" />
             <button class="mini">Submit dispute</button></form>
-          <p class="muted">The payment link and case instructions come to your plan contact — you pay and manage documents on behalf of the party.</p>
+          <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all above) and manage documents on behalf of the party. Once it is paid, the provider is emailed that the dispute is against it.</p>
           <div id="hp-file-result"></div></div>
         </section>
         <section data-hp-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
@@ -6980,7 +6980,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
         other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_npi: form.other_party_npi.value,
       });
-      out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.party)}</b>. ${r.payment_required ? "Payment link sent to your plan email." : ""}</p>`;
+      out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.party)}</b>. ${r.payment_required ? `Pay its fee to open it: <a href="#/cases/${r.case_id}">Pay now</a>.` : ""}</p>`;
       form.reset(); hpOnboardingBox();
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -7052,7 +7052,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
         other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_naic: form.other_party_naic.value,
       });
-      out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? "Payment link sent to your TPA email." : ""}</p>`;
+      out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? `Pay its fee to open it: <a href="#/cases/${r.case_id}">Pay now</a>.` : ""}</p>`;
       // A filed package leaves the board and the "file with" list.
       form.reset(); tpaDashBox(); tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }

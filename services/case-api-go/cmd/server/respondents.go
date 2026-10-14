@@ -118,20 +118,20 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 		var id string
 		if s.db.QueryRow(ctx, `
 			SELECT id::text FROM public.health_plans WHERE tenant=$1 AND status='ACTIVE'
-			  AND split_part(lower(contact_email),'@',2) = split_part(lower($3),'@',2)
+			  AND ((split_part(lower(contact_email),'@',2) = split_part(lower($3),'@',2) AND NOT $5) OR lower(contact_email)=lower($3))
 			  AND (($2 <> '' AND naic=$2) OR lower(contact_email)=lower($3) OR lower(name)=lower($4))
 			ORDER BY (lower(contact_email)=lower($3)) DESC, ($2 <> '' AND naic=$2 AND lower(name)=lower($4)) DESC,
-			         ($2 <> '' AND naic=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NAIC, rsp.Email, rsp.Name).Scan(&id) == nil {
+			         ($2 <> '' AND naic=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NAIC, rsp.Email, rsp.Name, isFreemail(rsp.Email)).Scan(&id) == nil {
 			planID = &id
 		}
 	} else {
 		var t, c string
 		if s.db.QueryRow(ctx, `
 			SELECT tpa_id::text, id::text FROM public.tpa_clients WHERE tenant=$1 AND status='ACTIVE'
-			  AND split_part(lower(coalesce(contact_email,'')),'@',2) = split_part(lower($4),'@',2)
+			  AND ((split_part(lower(coalesce(contact_email,'')),'@',2) = split_part(lower($4),'@',2) AND NOT $5) OR lower(contact_email)=lower($4))
 			  AND (($2 <> '' AND npi=$2) OR lower(party_name)=lower($3))
 			ORDER BY ($2 <> '' AND npi=$2 AND lower(party_name)=lower($3)) DESC, (lower(party_name)=lower($3)) DESC,
-			         ($2 <> '' AND npi=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NPI, rsp.Name, rsp.Email).Scan(&t, &c) == nil {
+			         ($2 <> '' AND npi=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NPI, rsp.Name, rsp.Email, isFreemail(rsp.Email)).Scan(&t, &c) == nil {
 			tpaID, clientID = &t, &c
 		}
 	}
@@ -155,15 +155,30 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 	s.tellRespondentOpened(ctx, tenant, caseID) // now, if no fee holds the dispute back; else when it is paid
 }
 
+// freemailDomains: public email providers. A shared domain there says nothing
+// about who owns an address, so a dispute is linked to an organization on one
+// of them only by the exact address.
+var freemailDomains = map[string]bool{
+	"gmail.com": true, "googlemail.com": true, "yahoo.com": true, "yahoo.co.uk": true, "ymail.com": true, "rocketmail.com": true,
+	"outlook.com": true, "hotmail.com": true, "live.com": true, "msn.com": true, "icloud.com": true, "me.com": true, "mac.com": true,
+	"aol.com": true, "proton.me": true, "protonmail.com": true, "gmx.com": true, "gmx.net": true, "mail.com": true, "zoho.com": true,
+	"yandex.com": true, "yandex.ru": true, "comcast.net": true, "att.net": true, "verizon.net": true, "sbcglobal.net": true,
+}
+
+func isFreemail(email string) bool {
+	_, domain, _ := strings.Cut(strings.ToLower(strings.TrimSpace(email)), "@")
+	return freemailDomains[domain]
+}
+
 // linkRespondentsToPlan: a newly registered health plan sees every dispute
 // already naming it (by NAIC, notice email or name).
 func (s *server) linkRespondentsToPlan(ctx context.Context, tenant, planID, naic, email, name string) int64 {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE public.case_respondents SET plan_id=$2::uuid
 		WHERE tenant=$1 AND side='HEALTH_PLAN' AND plan_id IS NULL
-		  AND split_part(lower(email),'@',2) = split_part(lower($4),'@',2)
+		  AND ((split_part(lower(email),'@',2) = split_part(lower($4),'@',2) AND NOT $6) OR lower(email)=lower($4))
 		  AND (($3 <> '' AND naic=$3) OR lower(email)=lower($4) OR lower(name)=lower($5))`,
-		tenant, planID, naic, email, name)
+		tenant, planID, naic, email, name, isFreemail(email))
 	if err != nil {
 		return 0
 	}

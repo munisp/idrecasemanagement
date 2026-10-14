@@ -913,7 +913,10 @@ func (s *server) autoShareLink(r *http.Request, tenant, caseID, kind, objectKey 
 		return "/s/"
 	}
 	token := hex.EncodeToString(buf)
-	p := r.Context().Value(ctxPrincipal{}).(principal)
+	p, _ := r.Context().Value(ctxPrincipal{}).(principal) // none in background work (a payment settled by the reconcile pass)
+	if p.Subject == "" {
+		p.Subject = "system"
+	}
 	if _, err := s.db.Exec(r.Context(), `
 		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, max_files, created_by)
 		VALUES ($1,$2,$3,$4, nullif($5,''), now() + interval '7 days', $7, $7, $6)`,

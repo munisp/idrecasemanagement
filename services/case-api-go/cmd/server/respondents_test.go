@@ -23,3 +23,12 @@ func TestRespondentCheck(t *testing.T) {
 		t.Fatalf("valid provider refused: %q", msg)
 	}
 }
+
+// On a public email provider the domain proves nothing: only the exact address links.
+func TestFreemailNeedsTheExactAddress(t *testing.T) {
+	for e, want := range map[string]bool{"claims@gmail.com": true, "A@Outlook.COM": true, "notices@sunshinehealth.com": false, "x@idre.test": false, "": false} {
+		if got := isFreemail(e); got != want {
+			t.Errorf("isFreemail(%q) = %v, want %v", e, got, want)
+		}
+	}
+}
