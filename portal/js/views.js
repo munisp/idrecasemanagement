@@ -1245,7 +1245,7 @@ const Views = (() => {
         <span id="filer-fee-${id}"></span></div>` : ""}
       ${clocks.length ? `<div class="sla-cluster">` + clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
         <span class="lbl">${esc(cl.label)}</span><span class="cite">due ${esc(cl.due)}</span></div>`).join("") + `</div>` : ""}
-      <div class="card"><h2>Documents</h2>${list.length ? `<table><thead><tr><th>File</th><th>Type</th><th>Received</th><th></th></tr></thead><tbody>` +
+      <div class="card"><h2>Documents</h2>${list.length && (can("TPA") || can("HEALTH_PLAN")) ? `<p><button class="mini secondary" onclick="Views.orgDocsDownload('${can("TPA") ? "tpa" : "hp"}', {case_id: '${id}'}, this)">Download all documents</button></p>` : ""}${list.length ? `<table><thead><tr><th>File</th><th>Type</th><th>Received</th><th></th></tr></thead><tbody>` +
         list.map((x) => `<tr><td>${esc(x.filename || x.name || "document")}</td><td>${esc(x.doc_type || "")}</td><td>${fmtDate(x.uploaded_at || x.created_at)}</td>
           <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
         : `<p class="muted">No documents yet. Use the upload link in your email to send the claim documents.</p>`}</div>
@@ -6394,6 +6394,7 @@ CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr
 CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
                   <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. Up to 500 disputes per ZIP.</p>
                   <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div></details>
+            <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
             <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
               <input name="file" type="file" accept=".zip,application/zip" required />
@@ -6726,6 +6727,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <div id="hp-onboarding"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>Onboarding — bulk packages (ZIP)</h2>
           <p class="muted">One ZIP, many parties: top-level folder = party name. Inside each folder, either the six slot-named files (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code> — split and validated page by page. Plan-side offer substantiation must document the QPA methodology.</p>
+          <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpZipFn(this)">
             <input name="file" type="file" accept=".zip,application/zip" required />
             <button class="mini">Upload packages ZIP</button></form>
@@ -7096,7 +7098,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <span class="muted">${g.rows.length} dispute${g.rows.length === 1 ? "" : "s"} · ${paid} paid${pending ? ` · ${pending} pending` : ""}</span>
           <span class="prov-pay">${unpaid.length
             ? `<span class="badge s-needs-review">${unpaid.length} unpaid · ${usdC(due)}</span>${canPay ? ` <button class="mini" onclick="event.preventDefault(); event.stopPropagation(); Views.payClientFn('${g.id}', this)">Pay all — ${usdC(due)}</button>` : ""}`
-            : '<span class="badge s-filed">Nothing owed</span>'}</span></summary>
+            : '<span class="badge s-filed">Nothing owed</span>'}${canPay && g.id ? ` <button class="mini secondary" onclick="event.preventDefault(); event.stopPropagation(); Views.orgDocsDownload('tpa', {client_id: '${g.id}'}, this)">Download documents</button>` : ""}</span></summary>
         <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
         ${g.rows.map((x) => `<tr>
           <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
@@ -7160,7 +7162,8 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <select id="tpa-cases-status" onchange="Views.tpaCasesFilter()"><option value="">All statuses</option>
           ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}
           <optgroup label="Payment"><option value="UNPAID">Unpaid</option><option value="PENDING">Pending</option><option value="FAILED">Failed</option><option value="PAID">Paid</option></optgroup></select>
-        <input id="tpa-cases-q" placeholder="Filter by party or case #…" oninput="Views.tpaCasesFilter()" /></p>` : "";
+        <input id="tpa-cases-q" placeholder="Filter by party or case #…" oninput="Views.tpaCasesFilter()" />
+        ${window._tpaCanEdit ? `<button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {}, this)">Download all documents</button>` : ""}</p>` : "";
       box.innerHTML = tpaCasesHtml(window._tpaCases, "", "");
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -7321,6 +7324,14 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <button onclick="Views.tpaFeesPay(this)">Pay ${usdC(f.amount_cents)} for ${f.unpaid} dispute${f.unpaid === 1 ? "" : "s"}</button></div>` : "";
     } catch { box.innerHTML = ""; }
   }
+  // One ZIP of an organization's own disputes' documents (org_documents_zip.go).
+  async function orgDocsDownload(kind, params, btn) {
+    const label = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Preparing the ZIP…"; }
+    try { await Api.program.orgDocsZip(kind, params); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
+  }
   // A dispute's initial fee, in words (fee_payments.go feeStates).
   const FEE_PILL = { PAID: ["filed", "Paid"], UNPAID: ["needs-review", "Unpaid"], PENDING: ["validating", "Pending"],
     FAILED: ["rejected", "Failed"], REFUNDED: ["", "Refunded"] };
@@ -7369,6 +7380,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       box.innerHTML = f.unpaid ? `<div class="tpa-paybar"><div><b>${f.unpaid} dispute${f.unpaid === 1 ? "" : "s"} you filed ${f.unpaid === 1 ? "is" : "are"} waiting for the initial fee — ${usdC(f.amount_cents)}</b>
           <div class="muted">One payment covers all of them. Each dispute opens once paid.</div></div>
           <button onclick="Views.hpFeesPay(this)">Pay all — ${usdC(f.amount_cents)}</button></div>` : "";
+      box.innerHTML += `<p><button class="mini secondary" onclick="Views.orgDocsDownload('hp', {}, this)">Download the documents of every dispute you filed</button></p>`;
     } catch { box.innerHTML = ""; }
   }
   // Back from Stripe: the payment is confirmed a few seconds later, so check
@@ -7449,6 +7461,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <h4>Against</h4><p>${esc(x.other_party || "—")}${x.response_status ? ` · ${theirResponse(x.response_status)}` : ""}</p>
             ${x.notes ? `<p class="muted">${esc(x.notes)}</p>` : ""}${x.error ? `<p class="error">${esc(x.error)}</p>` : ""}</div></div>`;
       box.innerHTML = `
+        ${items.some((x) => x.case_id) ? `<p><button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {batch_id: '${batchId}'}, this)">Download this upload's documents</button></p>` : ""}
         ${unpaid.length ? `<div class="tpa-paybar"><div><b>${unpaid.length} filed dispute${unpaid.length === 1 ? "" : "s"} waiting for their fee — ${usdC(due)}</b>
             <div class="muted">One payment covers all of them. Each dispute opens, with its case number and document link, once paid.</div></div>
             <button onclick="Views.tpaBdPay('${batchId}', this)">Pay ${usdC(due)} for ${unpaid.length} dispute${unpaid.length === 1 ? "" : "s"}</button></div>`
@@ -7553,6 +7566,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     orgDocReqBox("docreq-org", kind);
     return `<div class="view-head"><h1>Document requests</h1></div>
       <div class="card"><p class="muted">Documents the review team asked you for. Upload them here and send them — that is your answer; there is no need to reply by email.</p>
+        <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
         <div id="docreq-org"><p class="muted">Loading…</p></div></div>`;
   }
   async function orgDocReqBox(boxId, kind) {
@@ -8374,5 +8388,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, orgDocsDownload };
 })();

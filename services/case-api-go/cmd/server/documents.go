@@ -139,7 +139,7 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	sealedDoc := r.FormValue("sealed") == "true" // offer justifications: sealed until reveal
 
 	// security gate: content policy + ClamAV before anything is sealed/stored
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}

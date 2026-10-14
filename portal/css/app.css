@@ -825,3 +825,13 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 .docreq-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .docreq-items { margin: 2px 0 0 18px; padding: 0; }
 .docreq textarea { min-width: min(420px, 100%); }
+
+/* A big file going up in resumable chunks */
+.upl-panel { position: fixed; right: 16px; bottom: 16px; z-index: 60; width: min(360px, calc(100vw - 32px)); background: var(--surface-overlay);
+  border: 1px solid var(--border-default); border-radius: var(--radius-card); box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 12px 14px; display: grid; gap: 8px; }
+.upl-name { font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upl-bar { height: 8px; border-radius: var(--radius-chip); background: var(--surface-sunken); overflow: hidden; }
+.upl-bar span { display: block; height: 100%; width: 0; background: var(--action-primary-bg); transition: width .3s ease; }
+.upl-row { display: flex; align-items: center; gap: 8px; }
+.upl-row .upl-text { flex: 1; font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .upl-bar span { transition: none; } }

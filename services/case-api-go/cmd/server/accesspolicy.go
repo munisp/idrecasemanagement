@@ -62,6 +62,8 @@ var outsideShellPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/prefs$`),             // the caller's own preferences
 	regexp.MustCompile(`^/notifications(/|$)`), // the caller's own notifications
 	regexp.MustCompile(`^/audit/mine$`),        // the caller's own audit trail
+	regexp.MustCompile(`^/upload-policy$`),     // what may be uploaded, and how big
+	regexp.MustCompile(`^/uploads(/|$)`),       // the caller's own resumable uploads
 	regexp.MustCompile(`^/presence/ping$`),
 }
 

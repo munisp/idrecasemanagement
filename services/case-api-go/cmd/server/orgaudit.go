@@ -27,6 +27,8 @@ import (
 // nobody did anything.
 var orgAuditQuiet = map[string]bool{
 	"POST /presence/ping": true, "GET /notifications": true, "GET /program": true, "GET /prefs": true, "PUT /prefs": true,
+	// A resumable upload's chunks: the upload is recorded once, where it is used.
+	"PATCH /uploads/{uploadId}": true, "GET /uploads/{uploadId}": true, "HEAD /uploads/{uploadId}": true, "GET /upload-policy": true,
 }
 
 // orgActionLabels say in words what an action was, for the organization's log.
@@ -66,6 +68,8 @@ var orgActionLabels = map[string]string{
 	"GET /tpa/document-requests": "Viewed document requests", "GET /hp/document-requests": "Viewed document requests",
 	"POST /tpa/document-requests/{reqId}/files": "Uploaded a requested document", "POST /hp/document-requests/{reqId}/files": "Uploaded a requested document",
 	"POST /tpa/document-requests/{reqId}/submit": "Sent the requested documents", "POST /hp/document-requests/{reqId}/submit": "Sent the requested documents",
+	"GET /tpa/documents.zip": "Downloaded dispute documents in bulk", "GET /hp/documents.zip": "Downloaded dispute documents in bulk",
+	"POST /uploads": "Started a large upload", "DELETE /uploads/{uploadId}": "Cancelled a large upload",
 	"GET /tpa/audit": "Viewed the audit log", "GET /hp/audit": "Viewed the audit log",
 	"POST /admin/tpas/{tpaId}/status": "Office changed the TPA's status", "POST /admin/healthplans/{planId}/status": "Office changed the plan's status",
 }

@@ -114,13 +114,13 @@ func (s *server) fillTPAPackage(r *http.Request, tenant, tpaID, pkgID string, me
 		if err != nil {
 			return nil, []string{"merged.pdf unreadable"}
 		}
-		data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes))
+		data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes+1)) // one byte past the limit: an oversized entry is refused, not cut short
 		rc.Close()
 		switch {
 		case !bytes.HasPrefix(data, []byte("%PDF")):
 			return nil, []string{"merged.pdf is not a PDF"}
-		case contentPolicy("merged.pdf", data) != nil:
-			return nil, []string{contentPolicy("merged.pdf", data).Error()}
+		case docPolicy("merged.pdf", data) != nil:
+			return nil, []string{docPolicy("merged.pdf", data).Error()}
 		}
 		if sig, ok := s.scanOrRefuse(discardWriter{}, bytes.NewReader(data), "file"); !ok {
 			return nil, []string{"merged.pdf: malware scan rejected: " + sig}
@@ -154,7 +154,7 @@ func (s *server) fillTPAPackage(r *http.Request, tenant, tpaID, pkgID string, me
 			errs = append(errs, e.name+": unreadable")
 			continue
 		}
-		data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes))
+		data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes+1)) // one byte past the limit: an oversized entry is refused, not cut short
 		rc.Close()
 		if _, err := s.storePackageDoc(r, tenant, tpaID, pkgID, slot, baseName(e.name), data); err != nil {
 			errs = append(errs, e.name+": "+err.Error())
@@ -335,14 +335,13 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, bulkDisputesMaxBytes))
+	raw, err := io.ReadAll(io.LimitReader(f, zipMaxBytes+1))
 	if err != nil {
 		http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
 		return
 	}
-	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
-	if err != nil {
-		http.Error(w, `{"error":"not a valid ZIP archive"}`, http.StatusBadRequest)
+	zr, ok := s.openUploadedZip(w, raw) // size, readable, entries, virus scan
+	if !ok {
 		return
 	}
 	folders, root := zipFolders(zr)
@@ -593,6 +592,7 @@ func (s *server) runBulkDisputeFiler(stop <-chan struct{}) {
 func (s *server) fileReadyBulkDisputes() int {
 	ctx := context.Background()
 	s.healStuckPackages(ctx)
+	s.sweepExpiredUploads(ctx)
 	s.reconcileOpenFeeCheckouts(ctx)
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id::text FROM public.tpa_dispute_batch_items i

@@ -736,7 +736,7 @@ func (s *server) hpStorePackageDoc(r *http.Request, tenant, planID, pkgID, slot,
 	if n, err := s.rds.incrExpire("idre:rl:hpdoc:"+tenant+":"+planID, 3600); err == nil && n > 400 {
 		return "", fmt.Errorf("upload rate limit exceeded (400/hour)")
 	}
-	if err := contentPolicy(filename, raw); err != nil {
+	if err := docPolicy(filename, raw); err != nil {
 		return "", err
 	}
 	if sig, ok := s.scanOrRefuse(discardWriter{}, bytes.NewReader(raw), "file"); !ok {
@@ -870,7 +870,7 @@ func (s *server) hpUploadMerged(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"merged package must be a single PDF"}`, http.StatusUnsupportedMediaType)
 		return
 	}
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}
@@ -1021,8 +1021,8 @@ func (s *server) hpUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 256<<20)
-	if err := r.ParseMultipartForm(256 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, zipMaxBytes+(1<<20))
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, `{"error":"zip too large or malformed"}`, http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -1032,14 +1032,13 @@ func (s *server) hpUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 256<<20))
+	raw, err := io.ReadAll(io.LimitReader(f, zipMaxBytes+1))
 	if err != nil {
 		http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
 		return
 	}
-	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
-	if err != nil {
-		http.Error(w, `{"error":"not a valid ZIP archive"}`, http.StatusBadRequest)
+	zr, ok := s.openUploadedZip(w, raw) // size, readable, entries, virus scan
+	if !ok {
 		return
 	}
 	type entry struct {
@@ -1104,11 +1103,11 @@ func (s *server) hpUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				rep.Errors = append(rep.Errors, "merged.pdf unreadable")
 			} else {
-				data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes))
+				data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes+1)) // one byte past the limit: an oversized entry is refused, not cut short
 				rc.Close()
 				if !bytes.HasPrefix(data, []byte("%PDF")) {
 					rep.Errors = append(rep.Errors, "merged.pdf is not a PDF")
-				} else if err := contentPolicy("merged.pdf", data); err != nil {
+				} else if err := docPolicy("merged.pdf", data); err != nil {
 					rep.Errors = append(rep.Errors, err.Error())
 				} else {
 					objectKey := fmt.Sprintf("%s/hp-packages/%s/merged-%s.enc", tenant, pkgID, newUUID())
@@ -1145,7 +1144,7 @@ func (s *server) hpUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 				rep.Errors = append(rep.Errors, e.name+": unreadable")
 				continue
 			}
-			data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes))
+			data, _ := io.ReadAll(io.LimitReader(rc, maxDocBytes+1)) // one byte past the limit: an oversized entry is refused, not cut short
 			rc.Close()
 			if _, err := s.hpStorePackageDoc(r, tenant, org.ID, pkgID, slot, e.name, data); err != nil {
 				rep.Errors = append(rep.Errors, e.name+": "+err.Error())

@@ -8,6 +8,13 @@ const Api = (() => {
   async function req(method, path, body, isForm) {
     const tok = await Auth.token();
     if (!tok) throw new Error("unauthenticated");
+    // A file in the form: checked against the upload rules first; a big one
+    // goes up in resumable chunks and the form carries its upload_id instead.
+    let sent = null;
+    if (isForm && body instanceof FormData && tenant) {
+      sent = await Uploads.prepare(body);
+      body = sent.form;
+    }
     const headers = { Authorization: `Bearer ${tok}` };
     if (body && !isForm) headers["Content-Type"] = "application/json";
     const resp = await fetch(window.IDRE_CONFIG.apiBase + path, {
@@ -22,6 +29,7 @@ const Api = (() => {
     if (typeof data === "string" && /^\s*\{/.test(data)) {
       try { data = JSON.parse(data); } catch { /* keep the text */ }
     }
+    if (resp.ok && sent) sent.done();
     if (!resp.ok) {
       const msg = typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`;
       const err = new Error(msg); err.status = resp.status; err.data = data;
@@ -63,7 +71,12 @@ const Api = (() => {
     if (!tok) throw new Error("unauthenticated");
     const resp = await fetch(window.IDRE_CONFIG.apiBase + path, { headers: { Authorization: `Bearer ${tok}` } });
     if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
-    if (!resp.ok) throw new Error(`download failed (HTTP ${resp.status})`);
+    if (!resp.ok) {
+      // Say why (the server explains: too many disputes, nothing to download...).
+      let why = `HTTP ${resp.status}`;
+      try { const j = JSON.parse(await resp.text()); if (j.error) why = j.error; } catch { /* keep the status */ }
+      throw new Error(`download failed — ${why}`);
+    }
     const cd = resp.headers.get("content-disposition") || "";
     const name = (cd.match(/filename="?([^"]+)"?/) || [])[1] || fallbackName || "download";
     const blobUrl = URL.createObjectURL(await resp.blob());
@@ -74,6 +87,112 @@ const Api = (() => {
   }
 
   const t = () => `/v1/tenants/${tenant}`;
+
+  // ---- Uploads: the rules first, and big files in chunks that survive a
+  // pause, a dropped connection or a reload (portal_uploads.go). ----
+  const Uploads = (() => {
+    let policyP = null;
+    const policy = () => (policyP ||= req("GET", `${t()}/upload-policy`).catch(() => { policyP = null; return null; }));
+    const mb = (n) => (n >= 1 << 30 ? (n / (1 << 30)).toFixed(1) + " GB" : (n / (1 << 20)).toFixed(1) + " MB");
+    const ext = (name) => "." + (String(name).split(".").pop() || "").toLowerCase();
+    const fp = (f) => `idre.upload.${tenant}.${f.name}|${f.size}|${f.lastModified}`;
+    async function check(file, p) {
+      if (!p) return;
+      if (file.size === 0) throw new Error(`${file.name} is empty`);
+      if (ext(file.name) === ".zip") {
+        if (file.size > p.zip_max_bytes) throw new Error(`${file.name} is ${mb(file.size)} — a ZIP may be at most ${mb(p.zip_max_bytes)}; split it into smaller ZIPs`);
+        return;
+      }
+      const type = (p.types || []).find((x) => x.extensions.includes(ext(file.name)));
+      // A type the rules do not list (a bank file for reconciliation, say) is the server's to judge.
+      if (type && file.size > type.max_bytes) throw new Error(`${file.name} is ${mb(file.size)} — the limit for a ${type.label} file is ${mb(type.max_bytes)}`);
+    }
+    // The panel: progress, Pause/Resume and Cancel for the file going up.
+    function panel(file) {
+      const el = document.createElement("div");
+      el.className = "upl-panel"; el.setAttribute("role", "status");
+      el.innerHTML = `<div class="upl-name"></div><div class="upl-bar"><span></span></div>
+        <div class="upl-row"><span class="upl-text muted">Starting…</span>
+          <button type="button" class="mini upl-pause">Pause</button><button type="button" class="mini secondary upl-cancel">Cancel</button></div>`;
+      el.querySelector(".upl-name").textContent = file.name;
+      document.body.appendChild(el);
+      const st = { paused: false, cancelled: false, wake: null };
+      el.querySelector(".upl-pause").onclick = (e) => {
+        st.paused = !st.paused; e.target.textContent = st.paused ? "Resume" : "Pause";
+        el.querySelector(".upl-text").textContent = st.paused ? "Paused — resume when you are ready" : "Resuming…";
+        if (!st.paused && st.wake) { st.wake(); st.wake = null; }
+      };
+      el.querySelector(".upl-cancel").onclick = () => { st.cancelled = true; if (st.wake) { st.wake(); st.wake = null; } };
+      return {
+        st,
+        show(done, total, note) {
+          el.querySelector(".upl-bar span").style.width = `${Math.floor((done / total) * 100)}%`;
+          if (!st.paused) el.querySelector(".upl-text").textContent = note || `${mb(done)} of ${mb(total)}`;
+        },
+        close() { el.remove(); },
+      };
+    }
+    async function chunk(id, offset, blob) {
+      const tok = await Auth.token();
+      const resp = await fetch(window.IDRE_CONFIG.apiBase + `${t()}/uploads/${id}`, {
+        method: "PATCH", headers: { Authorization: `Bearer ${tok}`, "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" }, body: blob });
+      let data = {}; try { data = JSON.parse(await resp.text()); } catch { /* empty */ }
+      if (resp.status === 409 && typeof data.offset === "number") return { offset: data.offset }; // a retried chunk had landed
+      if (!resp.ok) { const e = new Error(data.error || `HTTP ${resp.status}`); e.status = resp.status; throw e; }
+      return data;
+    }
+    async function send(file, p) {
+      const key = fp(file);
+      let id = null, offset = 0;
+      try { id = localStorage.getItem(key); } catch { /* private window */ }
+      if (id) {
+        const s = await req("GET", `${t()}/uploads/${id}`).catch(() => null);
+        if (s && (s.status === "OPEN" || s.status === "COMPLETE")) offset = s.offset; else id = null;
+      }
+      if (!id) {
+        id = (await req("POST", `${t()}/uploads`, { filename: file.name, size: file.size })).id;
+        try { localStorage.setItem(key, id); } catch { /* private window */ }
+      }
+      const ui = panel(file), size = p.chunk_bytes || 8 << 20;
+      try {
+        let tries = 0;
+        while (offset < file.size) {
+          while (ui.st.paused && !ui.st.cancelled) await new Promise((r) => { ui.st.wake = r; });
+          if (ui.st.cancelled) {
+            await req("DELETE", `${t()}/uploads/${id}`).catch(() => {});
+            try { localStorage.removeItem(key); } catch { /* */ }
+            throw new Error("upload cancelled");
+          }
+          ui.show(offset, file.size);
+          try {
+            offset = (await chunk(id, offset, file.slice(offset, offset + size))).offset;
+            tries = 0;
+          } catch (e) {
+            if (e.status && e.status < 500 && e.status !== 408 && e.status !== 429) throw e; // refused: virus, wrong type...
+            if (++tries > 6) throw new Error(`the connection keeps dropping — choose the same file again later to resume from ${mb(offset)}`);
+            ui.show(offset, file.size, `Connection lost — retrying (${tries})…`);
+            await new Promise((r) => setTimeout(r, 1500 * tries));
+          }
+        }
+        ui.show(file.size, file.size, "Uploaded — checking the file…");
+        return { id, key, ui };
+      } catch (e) { ui.close(); throw e; }
+    }
+    async function prepare(form) {
+      const file = form.get("file");
+      if (!(file instanceof File)) return { form, done() {} };
+      const p = await policy();
+      await check(file, p);
+      if (!p || file.size <= (p.resumable_from_bytes || 8 << 20)) return { form, done() {} };
+      const up = await send(file, p);
+      const out = new FormData();
+      for (const [k, v] of form.entries()) if (k !== "file") out.append(k, v);
+      out.append("upload_id", up.id);
+      setTimeout(() => up.ui.close(), 4000);
+      return { form: out, done() { try { localStorage.removeItem(up.key); } catch { /* */ } } };
+    }
+    return { prepare, policy };
+  })();
   // query-string builder: drops empty values, returns "" or "?a=1&b=2"
   const qs = (params) => {
     const s = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v != null)).toString();
@@ -394,6 +513,13 @@ const Api = (() => {
       checkoutCancel: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/cancel`),
       hpFees: () => req("GET", `${t()}/hp/fees`),
       hpFeesCheckout: () => req("POST", `${t()}/hp/fees/checkout`),
+      // An organization's own disputes' documents in one ZIP: {case_id:[..]} | {client_id} | {batch_id} | {party_id} | {} (all).
+      orgDocsZip: (kind, params) => {
+        const q = new URLSearchParams();
+        for (const [k, v] of Object.entries(params || {})) (Array.isArray(v) ? v : [v]).forEach((x) => x && q.append(k, x));
+        return download(`${t()}/${kind === "hp" ? "hp" : "tpa"}/documents.zip${q.toString() ? "?" + q : ""}`, "documents.zip");
+      },
+      uploadPolicy: () => Uploads.policy(),
       orgAudit: (kind, params) => req("GET", `${t()}/${kind === "mine" ? "audit/mine" : kind === "hp" ? "hp/audit" : "tpa/audit"}?` + new URLSearchParams(params || {})),
       // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
       respondList: (k) => req("GET", `${t()}/${k}/responding`),

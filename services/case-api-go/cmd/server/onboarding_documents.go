@@ -70,7 +70,7 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 	// Parity with case-document uploads: content allowlist + ClamAV gate —
 	// onboarding documents used to bypass BOTH, an unfiltered path into
 	// encrypted storage and the doc-intel queue.
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}
@@ -85,7 +85,7 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 	// This application hasn't been approved yet — applicant-submitted onboarding
 	// documents are the least-trusted upload surface in the platform, same as
 	// case documents (documents.go), so they get the same gate, not a lighter one.
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}

@@ -478,7 +478,7 @@ func (s *server) storeCaseUpload(w http.ResponseWriter, r *http.Request, tenant,
 	if err != nil {
 		return "", "", http.StatusBadRequest, "read failed"
 	}
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		return "", "", http.StatusUnsupportedMediaType, err.Error()
 	}
 	if sig, ok := s.scanOrRefuse(discardWriter{}, bytes.NewReader(raw), "file"); !ok {

@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -142,7 +143,56 @@ var allowedDocExts = map[string]string{
 	".pdf": "pdf", ".docx": "office", ".xlsx": "office", ".pptx": "office",
 	".png": "image", ".jpg": "image", ".jpeg": "image", ".tif": "image",
 	".tiff": "image", ".bmp": "image", ".gif": "image", ".webp": "image",
-	".txt": "text", ".csv": "text", ".md": "text", ".html": "text", ".htm": "text",
+	".txt": "text", ".csv": "text", ".md": "text",
+	// No .html/.htm: the portal shows a document in-page (a blob from its own
+	// origin), and a script in an uploaded page would run as the viewer.
+}
+
+// docSizeLimits: the most a document of each kind may weigh. A ZIP of many
+// documents has its own limit (zipMaxBytes); each file in it is held to these.
+var docSizeLimits = map[string]int64{"pdf": 100 << 20, "office": 50 << 20, "image": 30 << 20, "text": 10 << 20}
+
+var docKindNames = map[string]string{"pdf": "PDF", "office": "Word/Excel/PowerPoint", "image": "image", "text": "text/CSV"}
+
+// docPolicy is contentPolicy plus the document's size: not empty, and within
+// its kind's limit. Every upload of a whole document goes through it.
+func docPolicy(filename string, raw []byte) error {
+	if len(raw) == 0 {
+		return fmt.Errorf("%s is empty", filename)
+	}
+	if err := contentPolicy(filename, raw); err != nil {
+		return err
+	}
+	kind := allowedDocExts[strings.ToLower(filepath.Ext(filename))]
+	if lim := docSizeLimits[kind]; lim > 0 && int64(len(raw)) > lim {
+		return fmt.Errorf("%s is %s — the limit for %s files is %s", filename, humanBytes(int64(len(raw))), docKindNames[kind], humanBytes(lim))
+	}
+	return nil
+}
+
+// docSizeLimitFor: the limit for a file name (ZIPs: zipMaxBytes); 0 = not accepted.
+func docSizeLimitFor(filename string) int64 {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == ".zip" {
+		return zipMaxBytes
+	}
+	return docSizeLimits[allowedDocExts[ext]]
+}
+
+// uploadPolicy: GET /upload-policy -- the accepted types and limits, so the
+// portal can say them up front and check a file before sending it.
+func (s *server) uploadPolicy(w http.ResponseWriter, r *http.Request) {
+	kinds := map[string][]string{}
+	for ext, k := range allowedDocExts {
+		kinds[k] = append(kinds[k], ext)
+	}
+	out := []map[string]any{}
+	for _, k := range []string{"pdf", "office", "image", "text"} {
+		sort.Strings(kinds[k])
+		out = append(out, map[string]any{"kind": k, "label": docKindNames[k], "extensions": kinds[k], "max_bytes": docSizeLimits[k]})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"types": out, "zip_max_bytes": zipMaxBytes, "zip_max_files": zipMaxFiles,
+		"resumable_from_bytes": resumableFromBytes, "chunk_bytes": uploadChunkBytes})
 }
 
 // sniffKind classifies content by magic bytes: pdf / office (ZIP container) /

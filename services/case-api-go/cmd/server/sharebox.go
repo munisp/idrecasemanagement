@@ -173,7 +173,7 @@ func (s *server) shareUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// security gate: content policy + ClamAV, BEFORE anything is sealed/stored
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}

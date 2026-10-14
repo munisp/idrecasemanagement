@@ -517,7 +517,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard)
+		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
@@ -586,6 +586,16 @@ func main() {
 		r.Get("/calendar", s.calendar)
 		r.Get("/audit-log", s.listAuditLog)
 		r.Get("/audit/mine", s.myAuditLog) // everyone's own trail (orgaudit.go)
+		// Uploads (portal_uploads.go): accepted types and limits, and big files in resumable chunks.
+		r.Get("/upload-policy", s.uploadPolicy)
+		r.Post("/uploads", s.createUpload)
+		r.Get("/uploads/{uploadId}", s.uploadStatus)
+		r.Head("/uploads/{uploadId}", s.uploadStatus)
+		r.Patch("/uploads/{uploadId}", s.uploadChunk)
+		r.Delete("/uploads/{uploadId}", s.deleteUpload)
+		// Bulk download of an organization's own disputes' documents (org_documents_zip.go).
+		r.Get("/tpa/documents.zip", s.orgDocumentsZip("tpa"))
+		r.Get("/hp/documents.zip", s.orgDocumentsZip("hp"))
 		r.Get("/notifications", s.listNotifications)
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Post("/notifications/read-all", s.readAllNotifications)
