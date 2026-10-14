@@ -59,3 +59,5 @@ CREATE TABLE IF NOT EXISTS public.payment_groups (
     paid_at        timestamptz
 );
 CREATE INDEX IF NOT EXISTS payment_groups_batch ON public.payment_groups (tenant, batch_id, status);
+-- A checkout can also cover all of a TPA's unpaid fees, not one batch.
+ALTER TABLE public.payment_groups ADD COLUMN IF NOT EXISTS tpa_id uuid REFERENCES public.tpas(id);

@@ -722,6 +722,8 @@ func main() {
 		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
 		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
+		r.Get("/tpa/fees", s.tpaFees)                                   // what this TPA owes now
+		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout)                 // one payment for all unpaid fees
 		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)

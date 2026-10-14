@@ -6278,6 +6278,7 @@ const Views = (() => {
         <section data-tpa-panel="disputes">
           <div class="card"><h2>Your parties' disputes</h2>
             <p class="muted">Every dispute you filed, for every client. Open a case number for its details, payment and documents.</p>
+            <div id="tpa-fees"></div>
             <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
             <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
         </section>
@@ -6297,7 +6298,7 @@ const Views = (() => {
                 <button class="mini">Import clients</button></form>
               <div id="tpa-import-result"></div></details>` : ""}</div>
           ${onb ? `<div class="card"><h2>Where each client stands</h2>
-            <p class="muted">A client is <b>Ready</b> once its profile and payment are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute.</p>
+            <p class="muted">A client is <b>Ready</b> once its profile and payment method are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute. The filing fees are paid by you, the TPA, at checkout — the client's payment method is kept on file for the client.</p>
             <div id="tpa-onboarding"><p class="muted">Loading…</p></div>
             <details class="tpa-more"><summary>Give documents to many clients at once (ZIP)</summary>
               <p class="muted">One folder per client, named exactly like the client, holding its six documents (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code>. To file many disputes, each with its own documents, use <b>Bulk filing</b> instead.</p>
@@ -6343,7 +6344,8 @@ const Views = (() => {
                   <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,contact_name,notes
 CLAIM-001,Gulf Coast Clinic,1980,Dr Lee,ER visit 08/14
 CLAIM-002,Bay Imaging,2450.00,,</pre>
-                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). Up to 500 disputes per ZIP.</p></div></div></details>
+                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). Up to 500 disputes per ZIP.</p>
+                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div></details>
             <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
               <input name="file" type="file" accept=".zip,application/zip" required />
@@ -6418,7 +6420,8 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes");
-      tpaClientsBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
+      tpaClientsBox(); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
+      if (/[?&]paid=/.test(location.hash)) UI.toast("Payment sent — your disputes open as soon as the payment is confirmed (usually within a minute).");
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
       const bref = document.getElementById("tpa-bulk-ref");
@@ -6508,7 +6511,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
       UI.toast("Existing rails:\n" + methods.map((m) =>
         `${m.method} ${m.label || ""} ${m.method === "ACH" ? "routing " + m.routing : m.brand} ····${m.last4} — ${m.verified ? "VERIFIED" : "PENDING"}`).join("\n"));
     }
-    const v = await UI.modal({ title: "Add payment rail", submitLabel: "Add rail", fields: [
+    const v = await UI.modal({ title: "Payment method on file", submitLabel: "Save payment method", body: "Kept on file for this party. Filing fees are paid by you at checkout.", fields: [
       { name: "method", label: "Method", options: [["CARD", "Credit card"], ["ACH", "ACH debit"]] },
       { name: "label", label: "Label", placeholder: "Operating account" },
       { name: "processor_ref", label: "Card: processor token ref", placeholder: "tok_... (never a raw card number)" },
@@ -6525,7 +6528,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
         processor_ref: (v.processor_ref || "").trim(),
         auth_received: (v.auth_received || "").trim().toUpperCase() === "YES" });
       tpaOnboardingBox();
-      UI.toast("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
+      UI.toast("Payment method saved (" + (r.verified ? "verified" : "pending") + ")");
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -6745,7 +6748,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
       UI.toast("Existing rails:\n" + methods.map((m) =>
         `${m.method} ${m.label || ""} ${m.method === "ACH" ? "routing " + m.routing : m.brand} ····${m.last4} — ${m.verified ? "VERIFIED" : "PENDING"}`).join("\n"));
     }
-    const v = await UI.modal({ title: "Add payment rail", submitLabel: "Add rail", fields: [
+    const v = await UI.modal({ title: "Payment method on file", submitLabel: "Save payment method", body: "Kept on file for this party. Filing fees are paid by you at checkout.", fields: [
       { name: "method", label: "Method", options: [["CARD", "Credit card"], ["ACH", "ACH debit"]] },
       { name: "label", label: "Label", placeholder: "Employer group billing account" },
       { name: "processor_ref", label: "Card: processor token ref", placeholder: "tok_... (never a raw card number)" },
@@ -6762,7 +6765,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
         processor_ref: (v.processor_ref || "").trim(),
         auth_received: (v.auth_received || "").trim().toUpperCase() === "YES" });
       hpOnboardingBox();
-      UI.toast("Payment rail added (" + (r.verified ? "verified" : "pending") + ") — onboarding: " + r.onboarding_status);
+      UI.toast("Payment method saved (" + (r.verified ? "verified" : "pending") + ")");
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -7112,6 +7115,42 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
     if (x.rejected) return b("rejected", "Needs a fix — document rejected");
     if (x.needs_review) return b("needs-review", "Waiting for review");
     return b("validating", "Checking documents");
+  }
+  // What the TPA owes across all its disputes, paid with one checkout.
+  async function tpaFeesBox() {
+    const box = document.getElementById("tpa-fees");
+    if (!box) return;
+    try {
+      const f = await Api.program.tpaFees();
+      tpaTabCount("disputes", f.unpaid ? `${f.unpaid} unpaid` : "");
+      box.innerHTML = f.unpaid ? `<div class="tpa-paybar"><div><b>${f.unpaid} dispute${f.unpaid === 1 ? "" : "s"} waiting for the initial fee — ${usdC(f.amount_cents)}</b>
+          <div class="muted">One payment covers all of them, whether filed one by one or in bulk. Each dispute opens, with its case number and document link, once paid.</div></div>
+          <button onclick="Views.tpaFeesPay(this)">Pay ${usdC(f.amount_cents)} for ${f.unpaid} dispute${f.unpaid === 1 ? "" : "s"}</button></div>` : "";
+    } catch { box.innerHTML = ""; }
+  }
+  async function tpaFeesPay(btn) {
+    btn.disabled = true;
+    try { window.location.assign((await Api.program.tpaFeesCheckout()).checkout_url); }
+    catch (e) { btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
+  }
+  // A disputes.csv already holding the TPA's ready clients' exact names, one
+  // row each to copy -- a misspelt party_name is the usual reason a row is refused.
+  async function tpaBdTemplate(btn) {
+    btn.disabled = true;
+    try {
+      const cs = ((await Api.program.tpaOnboarding()).clients || [])
+        .filter((c) => c.status === "ACTIVE" && ["READY", "DOCS_PENDING"].includes(c.onboarding_status));
+      if (!cs.length) { UI.toast("No client is ready yet: finish a client's profile and payment method in the Clients tab first.", { kind: "warn" }); return; }
+      const q = (v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
+      const csv = "dispute_ref,party_name,disputed_amount,contact_name,notes\n" +
+        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.party_name), "", "", ""].join(",")).join("\n") + "\n";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      a.download = "disputes.csv"; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      UI.toast(`disputes.csv with ${cs.length} ready client${cs.length === 1 ? "" : "s"} downloaded — add amounts, one row per dispute.`);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    finally { btn.disabled = false; }
   }
   async function tpaBdPay(batchId, btn) {
     btn.disabled = true;
@@ -7793,5 +7832,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate };
 })();

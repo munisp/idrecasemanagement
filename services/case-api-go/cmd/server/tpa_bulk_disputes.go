@@ -574,6 +574,8 @@ func (s *server) runBulkDisputeFiler(stop <-chan struct{}) {
 
 func (s *server) fileReadyBulkDisputes() int {
 	ctx := context.Background()
+	s.healStuckPackages(ctx)
+	s.reconcileOpenFeeCheckouts(ctx)
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id::text FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_packages pk ON pk.id=i.package_id
@@ -663,4 +665,36 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 		return "", fmt.Errorf("case creation failed: %v", err)
 	}
 	return caseNumber, nil
+}
+
+// healStuckPackages recounts waiting bulk rows' packages whose six documents
+// are all accepted but which still say VALIDATING (a recount lost to a race
+// between two document verdicts), so the row files on this round.
+func (s *server) healStuckPackages(ctx context.Context) {
+	rows, err := s.db.Query(ctx, `
+		SELECT i.tenant, i.package_id::text FROM public.tpa_dispute_batch_items i
+		JOIN public.tpa_packages pk ON pk.id=i.package_id
+		WHERE i.status='WAITING_DOCS' AND pk.status='VALIDATING'
+		  AND (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=pk.id AND d.status='ACCEPTED') >= $1`, len(tpaSlots))
+	if err != nil {
+		return
+	}
+	type stuck struct{ tenant, pkg string }
+	var list []stuck
+	for rows.Next() {
+		var x stuck
+		if rows.Scan(&x.tenant, &x.pkg) == nil {
+			list = append(list, x)
+		}
+	}
+	rows.Close()
+	if len(list) == 0 {
+		return
+	}
+	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/", nil)
+	for _, x := range list {
+		if st := s.refreshOnboardingPackage(r, x.tenant, onboardingKinds["tpa"], x.pkg); st == "READY" {
+			slog.Info("package recounted to READY", "package", x.pkg)
+		}
+	}
 }
