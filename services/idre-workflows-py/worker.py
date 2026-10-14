@@ -41,6 +41,9 @@ from ahca_activities import (
     send_correspondence, set_case_outcome, notify_roles, recommendation_days_left,
 )
 from ahca_workflow import AhcaDisputeWorkflow
+from fee_payments import (
+    FeePaymentWorkflow, charge_fee_group, check_fee_group, give_up_fee_group, summarize_fee_run,
+)
 
 
 async def run_workers(client: Client) -> None:
@@ -83,7 +86,14 @@ async def run_workers(client: Client) -> None:
             flag_cms_breach,  # reused as-is from activities.py -- generic, not CMS-specific at the DB/HTTP layer
         ],
     )
-    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run())
+    # Fee payments charged to saved cards / bank accounts (fee_payments.py).
+    payments_worker = Worker(
+        client,
+        task_queue="idre-payments",
+        workflows=[FeePaymentWorkflow],
+        activities=[charge_fee_group, check_fee_group, give_up_fee_group, summarize_fee_run],
+    )
+    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run(), payments_worker.run())
 
 
 # ---- Dapr binding listener ---------------------------------------------------

@@ -602,6 +602,7 @@ func (s *server) fileReadyBulkDisputes() int {
 	s.healStuckPackages(ctx)
 	s.sweepExpiredUploads(ctx)
 	s.reconcileOpenFeeCheckouts(ctx)
+	s.reconcilePendingSetups(ctx)
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id::text FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_packages pk ON pk.id=i.package_id

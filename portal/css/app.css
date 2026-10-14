@@ -851,3 +851,17 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 .email-hint.ok { color: var(--success-fg, inherit); }
 .email-hint.bad { color: var(--danger-fg); }
 .email-hint button { font: inherit; }
+
+/* A TPA chooses who pays (views.js tpaPayDialog) */
+.pay-choose { display: grid; gap: 10px; }
+.pay-opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border-default); border-radius: 8px; background: var(--surface-raised); cursor: pointer; }
+.pay-opt:has(input:checked) { border-color: var(--accent-fg, #1D4E7E); }
+.pay-opt:has(input:disabled) { opacity: .55; cursor: not-allowed; }
+.pay-opt input { margin-top: 3px; }
+.pay-sub { margin: -4px 0 4px 34px; overflow-x: auto; }
+.pay-sub.dim { opacity: .5; }
+.pay-sub select { max-width: 100%; }
+.pm-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 6px; }
+.pm-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: 6px; }
+.pay-opt input[type=radio] { width: auto; min-height: 0; height: auto; flex: none; box-shadow: none; }
+.pay-sub table { width: 100%; }

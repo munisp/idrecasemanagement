@@ -736,6 +736,14 @@ func main() {
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
 		r.Get("/tpa/fees", s.orgFees("tpa"))            // what this TPA owes now
 		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout) // one payment for all unpaid fees
+		// Saved cards and bank accounts (ACH), the TPA's own and each client's;
+		// a Pay with {"source":"CLIENT"|"TPA"} charges them (tpa_saved_payments.go).
+		r.Post("/tpa/payment-methods/setup", s.tpaPaymentSetup)
+		r.Post("/tpa/payment-methods/setup/{sessionId}/confirm", s.tpaPaymentSetupConfirm)
+		r.Get("/tpa/payment-methods", s.tpaSavedMethodsList)
+		r.Delete("/tpa/payment-methods/{methodId}", s.tpaSavedMethodRemove)
+		r.Post("/tpa/fees/options", s.tpaFeeOptions)
+		r.Get("/tpa/fees/runs/{runId}", s.tpaFeeRun)
 		r.Get("/tpa/audit", s.orgAuditLog("tpa"))       // the TPA's own audit trail (orgaudit.go)
 		r.Get("/hp/audit", s.orgAuditLog("hp"))         // the plan's own audit trail
 		// Document requests (document_requests.go): asked on the case, answered in the portal.
@@ -931,6 +939,11 @@ func main() {
 	// is the auth). The vault calls this before decrypting any offer — reveals
 	// only a boolean + reason header, no case data.
 	r.Get("/internal/reveal-check/{tenant}/{caseId}", s.revealCheck)
+	// The FeePaymentWorkflow's activities (same internal token; tpa_saved_payments.go).
+	r.Post("/internal/payments/{tenant}/groups/{groupId}/charge", s.internalChargeGroup)
+	r.Post("/internal/payments/{tenant}/groups/{groupId}/check", s.internalCheckGroup)
+	r.Post("/internal/payments/{tenant}/groups/{groupId}/give-up", s.internalGiveUpGroup)
+	r.Post("/internal/payments/{tenant}/runs/{runId}/summary", s.internalRunSummary)
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)

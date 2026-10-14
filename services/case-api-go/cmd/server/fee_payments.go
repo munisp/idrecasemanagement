@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -219,6 +220,14 @@ func (s *server) scopedCheckout(w http.ResponseWriter, r *http.Request, kind str
 		http.Error(w, `{"error":"not found"}`, code)
 		return
 	}
+	// A TPA chooses each time: Stripe's page (the default), each client's own
+	// saved card or bank account, or the TPA's (tpa_saved_payments.go).
+	var in savedPayRequest
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in)
+	if kind == "tpa" && (in.Source == "CLIENT" || in.Source == "TPA") {
+		s.feeChargeSaved(w, r, tenant, py, sc, in)
+		return
+	}
 	s.feeCheckout(w, r, tenant, py, sc)
 }
 
@@ -311,10 +320,13 @@ func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant stri
 	form.Set("metadata[payer_org]", py.name)
 	form.Set("payment_intent_data[metadata][payment_group_id]", groupID)
 	form.Set("payment_intent_data[metadata][tenant]", tenant)
+	// Which methods Stripe's page offers (card, US bank account) is set in the
+	// Stripe Dashboard; Checkout no longer takes payment_method_types. A bank
+	// debit settles in days: checkout.session.async_payment_* opens the dispute.
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.payment_groups WHERE id::text=$1`, groupID)
-		http.Error(w, `{"error":"the payment page could not be opened: `+jsonSafe(err.Error())+`"}`, http.StatusBadGateway)
+		http.Error(w, `{"error":"the payment page could not be opened: `+jsonSafe(err.Error())+`"}`, http.StatusFailedDependency) // not 502: Cloudflare would hide the reason
 		return
 	}
 	sessID, _ := sess["id"].(string)
@@ -686,7 +698,7 @@ func (s *server) reconcileOpenFeeCheckouts(ctx context.Context) {
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT tenant, id::text, session_id FROM public.payment_groups
-		WHERE status IN ('OPEN','PROCESSING') AND session_id IS NOT NULL AND created_at > now() - interval '2 days'
+		WHERE status IN ('OPEN','PROCESSING') AND session_id IS NOT NULL AND source='CHECKOUT' AND created_at > now() - interval '2 days'
 		ORDER BY created_at LIMIT 50`)
 	if err != nil {
 		return

@@ -6342,7 +6342,7 @@ const Views = (() => {
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
+        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("paymethods", "Payment methods", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -6357,6 +6357,12 @@ const Views = (() => {
             <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
         </section>
 
+
+        <section data-tpa-panel="paymethods" style="display:none">
+          <div class="card"><h2>Your organization's cards and bank accounts</h2>
+            <p class="muted">Used when you choose "Your organization's card or bank account" at Pay. Each client's own are in the Clients tab (Payment). Saved on Stripe's page — no card or account number is kept here. A bank account (ACH) is verified by Stripe; a debit takes 3–5 business days to clear.</p>
+            <div id="tpa-own-methods"><p class="muted">Loading…</p></div></div>
+        </section>
 
         <section data-tpa-panel="clients" style="display:none">
           <div class="card"><h2>Add a client</h2>
@@ -6487,7 +6493,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       oversight: () => tpaAdminBox(),
       audit: () => orgAuditBox("tpa-audit", "tpa"),
       docreq: () => orgDocReqBox("tpa-docreq", "tpa"),
+      paymethods: () => tpaOwnMethodsBox(),
     }[k] || (() => {}))();
+    if (k === "paymethods" && !tpaTab._booted) tpaOwnMethodsBox();
     if (k === "audit" && !tpaTab._booted) orgAuditBox("tpa-audit", "tpa");
     if (k === "docreq" && !tpaTab._booted) orgDocReqBox("tpa-docreq", "tpa");
     tpaTab._booted = true;
@@ -6529,6 +6537,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
       tpaClientsBox(); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
       feeReturn("tpa", () => { tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); });
+      tpaSetupReturn();
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
       const bref = document.getElementById("tpa-bulk-ref");
@@ -6622,31 +6631,14 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
   }
 
   async function tpaPaymentForm(clientId) {
-    let methods = [];
-    try { methods = (await Api.program.tpaPayments(clientId)).payment_methods || []; } catch { /* none yet */ }
-    if (methods.length) {
-      UI.toast("Existing rails:\n" + methods.map((m) =>
-        `${m.method} ${m.label || ""} ${m.method === "ACH" ? "routing " + m.routing : m.brand} ····${m.last4} — ${m.verified ? "VERIFIED" : "PENDING"}`).join("\n"));
-    }
-    const v = await UI.modal({ title: "Payment method on file", submitLabel: "Save payment method", body: "Kept on file for this party. Filing fees are paid by you at checkout.", fields: [
-      { name: "method", label: "Method", options: [["CARD", "Credit card"], ["ACH", "ACH debit"]] },
-      { name: "label", label: "Label", placeholder: "Operating account" },
-      { name: "processor_ref", label: "Card: processor token ref", placeholder: "tok_... (never a raw card number)" },
-      { name: "brand", label: "Card brand", placeholder: "VISA" },
-      { name: "routing", label: "ACH: routing number (9 digits)", placeholder: "021000021" },
-      { name: "last4", label: "Last 4", required: true, placeholder: "1234" },
-      { name: "auth_received", label: "ACH: type 'YES' to confirm debit authorization captured", placeholder: "YES" },
-    ]});
-    if (!v) return;
-    try {
-      const r = await Api.program.tpaAddPayment(clientId, {
-        method: v.method, label: v.label, brand: v.brand,
-        last4: (v.last4 || "").trim(), routing: (v.routing || "").trim(),
-        processor_ref: (v.processor_ref || "").trim(),
-        auth_received: (v.auth_received || "").trim().toUpperCase() === "YES" });
-      tpaOnboardingBox();
-      UI.toast("Payment method saved (" + (r.verified ? "verified" : "pending") + ")");
-    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    let ms = [];
+    try { ms = (await Api.program.tpaSavedMethods(clientId)).payment_methods || []; } catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    const { scrim } = payScrim(`<div class="modal-h"><h2>This client's cards and bank accounts</h2><button class="icon-btn modal-x" aria-label="Close dialog">✕</button></div>
+      <div class="modal-b"><p class="modal-body">When you pay "from each client's own", this client's disputes are charged here. Cards and bank accounts are saved on Stripe's page; a bank account is verified by Stripe and the debit authorization is recorded there.</p>
+        ${methodList(ms, clientId)}
+        <div class="modal-f"><button type="button" class="btn-secondary m-cancel">Close</button>
+          <button type="button" class="btn-primary" onclick="Views.tpaMethodAdd('${esc(clientId)}')">Add a card or bank account</button></div></div>`);
+    scrim.querySelector(".btn-primary")?.focus();
   }
 
   async function tpaPackageStart(clientId, mode) {
@@ -7380,8 +7372,145 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     try { window.location.assign((await req).checkout_url); }
     catch (e) { if (btn) btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
   }
-  const payDisputeFn = (kind, caseId, btn, from) => payGo(Api.program.payDispute(kind, caseId, from), btn);
-  const payClientFn = (clientId, btn) => payGo(Api.program.payClient(clientId), btn);
+  const payDisputeFn = (kind, caseId, btn, from) => kind === "tpa" ? tpaPayDialog({ case_id: caseId }, btn, from) : payGo(Api.program.payDispute(kind, caseId, from), btn);
+  const payClientFn = (clientId, btn) => tpaPayDialog({ client_id: clientId }, btn);
+
+  // ---- A TPA pays: it chooses each time who pays (tpa_saved_payments.go) ----
+  // Each client's own saved card or bank account (one charge per client), the
+  // TPA's own, or Stripe's page. Saved-method payments are run by Temporal
+  // (FeePaymentWorkflow): a card answers at once, a bank debit (ACH) clears in
+  // a few business days and the disputes open when it does.
+  const methodWords = (m) => m.method === "ACH" ? `${esc(m.bank_name || "Bank account")} ····${esc(m.last4)} <span class="muted">(ACH)</span>` : `${esc(m.brand ? m.brand[0] + m.brand.slice(1).toLowerCase() : "Card")} ····${esc(m.last4)}`;
+  const methodState = (m) => m.chargeable ? "" : m.status === "PENDING_VERIFICATION"
+    ? ` <span class="badge s-validating">Confirm the micro-deposits</span>${m.verify_url ? ` <a href="${esc(m.verify_url)}" target="_blank" rel="noopener">confirm</a>` : ""}`
+    : m.status === "FAILED" ? ' <span class="badge s-rejected">Not verified</span>' : ' <span class="badge">Saved before Stripe — add it again to charge it</span>';
+  function payScrim(inner) {
+    const prev = document.activeElement, scrim = document.createElement("div");
+    scrim.className = "modal-scrim";
+    scrim.innerHTML = `<div class="modal modal-wide" role="dialog" aria-modal="true">${inner}</div>`;
+    document.body.appendChild(scrim);
+    const close = () => { scrim.remove(); prev?.focus?.(); };
+    scrim.addEventListener("mousedown", (e) => { if (e.target === scrim) close(); });
+    scrim.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+    scrim.querySelectorAll(".modal-x,.m-cancel").forEach((b) => { b.onclick = close; });
+    return { scrim, close };
+  }
+  async function tpaPayDialog(scope, btn, from) {
+    if (btn) btn.disabled = true;
+    let o;
+    try { o = await Api.program.tpaFeeOptions(scope); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    finally { if (btn) btn.disabled = false; }
+    if (!o.disputes) { UI.toast("Nothing to pay: these disputes are paid (or no fee is due)."); return; }
+    const clients = o.clients || [], own = o.tpa_methods || [];
+    const ready = (ms) => (ms || []).filter((m) => m.chargeable);
+    const clientsReady = clients.filter((c) => ready(c.methods).length).length;
+    const clientRows = clients.map((c) => {
+      const ms = ready(c.methods);
+      return `<tr><td>${esc(c.name || "—")}</td><td class="num">${c.disputes}</td><td class="num">${usdC(c.amount_cents)}</td>
+        <td>${ms.length ? `<select name="cm-${esc(c.client_id)}">${ms.map((m) => `<option value="${esc(m.id)}">${methodWords(m).replace(/<[^>]+>/g, "")}</option>`).join("")}</select>`
+          : c.client_id ? `<span class="muted">No card or bank account ready</span> <button type="button" class="mini" onclick="Views.tpaMethodAdd('${esc(c.client_id)}')">Add one</button>` : '<span class="muted">—</span>'}</td></tr>`;
+    }).join("");
+    const ownReady = ready(own);
+    const { scrim, close } = payScrim(`
+      <div class="modal-h"><h2>Pay ${o.disputes} dispute${o.disputes === 1 ? "" : "s"} — ${usdC(o.amount_cents)}</h2><button class="icon-btn modal-x" aria-label="Close dialog">✕</button></div>
+      <form class="modal-b pay-choose" novalidate>
+        <p class="modal-body">Who pays this time?</p>
+        <label class="pay-opt"><input type="radio" name="source" value="CLIENT" ${clientsReady ? "" : "disabled"} ${clientsReady ? "checked" : ""} />
+          <span><b>Each client's own card or bank account</b><span class="muted"> — one charge per client, on the method saved for it</span></span></label>
+        <div class="pay-sub" data-for="CLIENT"><table class="tbl"><thead><tr><th>Client</th><th class="num">Disputes</th><th class="num">Fees</th><th>Charged to</th></tr></thead><tbody>${clientRows}</tbody></table>
+          ${clientsReady < clients.length ? `<p class="muted">${clients.length - clientsReady} client${clients.length - clientsReady === 1 ? " has" : "s have"} nothing ready on file; ${clients.length - clientsReady === 1 ? "its" : "their"} disputes stay unpaid this time.</p>` : ""}</div>
+        <label class="pay-opt"><input type="radio" name="source" value="TPA" ${ownReady.length ? "" : "disabled"} ${!clientsReady && ownReady.length ? "checked" : ""} />
+          <span><b>Your organization's card or bank account</b><span class="muted"> — one charge for all of them</span></span></label>
+        <div class="pay-sub" data-for="TPA">${ownReady.length ? `<select name="own">${ownReady.map((m) => `<option value="${esc(m.id)}">${methodWords(m).replace(/<[^>]+>/g, "")}</option>`).join("")}</select>`
+          : `<span class="muted">Nothing saved yet.</span> <button type="button" class="mini" onclick="Views.tpaMethodAdd('')">Add a card or bank account</button>`}</div>
+        <label class="pay-opt"><input type="radio" name="source" value="CHECKOUT" ${!clientsReady && !ownReady.length ? "checked" : ""} />
+          <span><b>Card or bank account on Stripe's page</b><span class="muted"> — enter it now, nothing is saved</span></span></label>
+        <p class="muted">A bank account (ACH debit) takes 3–5 business days to clear; the disputes open when it does. A card opens them straight away.</p>
+        <div class="modal-f"><button type="button" class="btn-secondary m-cancel">Cancel</button><button type="submit" class="btn-primary">Pay ${usdC(o.amount_cents)}</button></div>
+      </form>`);
+    const form = scrim.querySelector("form");
+    const sync = () => { const v = (form.querySelector("input[name=source]:checked") || {}).value;
+      form.querySelectorAll(".pay-sub").forEach((d) => { d.classList.toggle("dim", d.dataset.for !== v); }); };
+    form.addEventListener("change", sync); sync();
+    form.querySelector("input[name=source]:checked")?.focus();
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const source = (form.querySelector("input[name=source]:checked") || {}).value;
+      if (!source) return;
+      const body = { source };
+      if (source === "TPA") body.payment_method_id = form.own.value;
+      if (source === "CLIENT") { body.client_methods = {}; form.querySelectorAll("select[name^=cm-]").forEach((s) => { body.client_methods[s.name.slice(3)] = s.value; }); }
+      const sbtn = form.querySelector("button[type=submit]"); sbtn.disabled = true; sbtn.textContent = "Paying…";
+      const call = scope.case_id ? Api.program.payDispute("tpa", scope.case_id, from, body) : scope.client_id ? Api.program.payClient(scope.client_id, body)
+        : scope.batch_id ? Api.program.tpaBulkCheckout(scope.batch_id, body) : Api.program.tpaFeesCheckout(body);
+      try {
+        const r = await call;
+        if (r.checkout_url) { window.location.assign(r.checkout_url); return; }
+        close(); tpaRunWatch(r);
+      } catch (err) { sbtn.disabled = false; sbtn.textContent = `Pay ${usdC(o.amount_cents)}`; UI.toast(err.message, { kind: "warn", duration: 8000 }); }
+    };
+  }
+  // A saved-method payment as it goes: each charge, until all have an outcome.
+  const RUN_STATE = { PAID: ["filed", "Paid"], PROCESSING: ["validating", "Clearing"], FAILED: ["rejected", "Not charged"], REVIEW: ["needs-review", "With finance"] };
+  async function tpaRunWatch(r) {
+    const { scrim, close } = payScrim(`<div class="modal-h"><h2>Payment</h2><button class="icon-btn modal-x" aria-label="Close dialog">✕</button></div>
+      <div class="modal-b"><div id="pay-run"></div>
+        ${(r.skipped || []).length ? `<p class="muted">Not charged — nothing ready on file: ${r.skipped.map((x) => `${esc(x.name)} (${x.disputes})`).join(", ")}.</p>` : ""}
+        <p class="muted">You can close this; it carries on, and you are told when it finishes.</p>
+        <div class="modal-f"><button type="button" class="btn-primary m-cancel">Close</button></div></div>`);
+    const box = scrim.querySelector("#pay-run");
+    const draw = (charges) => {
+      box.innerHTML = `<table class="tbl"><thead><tr><th>For</th><th class="num">Disputes</th><th class="num">Amount</th><th>Charged to</th><th>Status</th></tr></thead><tbody>${charges.map((c) => {
+        const [cls, t] = RUN_STATE[c.status] || ["", c.status];
+        const m = c.method ? esc(c.method) : methodWords({ method: c.rail, brand: c.brand, bank_name: c.bank_name, last4: c.last4 });
+        return `<tr><td>${esc(c.for)}</td><td class="num">${c.disputes}</td><td class="num">${usdC(c.amount_cents)}</td><td>${m}</td>
+          <td><span class="badge s-${cls}">${t}</span>${c.error ? `<div class="muted fee-note">${esc(c.error)}</div>` : ""}</td></tr>`; }).join("")}</tbody></table>`;
+    };
+    draw((r.charges || []).map((c) => ({ ...c, status: "PROCESSING" })));
+    for (let i = 0; i < 40 && document.body.contains(box); i++) {
+      await new Promise((ok) => setTimeout(ok, i < 10 ? 1500 : 4000));
+      let run; try { run = await Api.program.tpaFeeRun(r.run_id); } catch { continue; }
+      draw(run.charges || []);
+      if ((run.charges || []).every((c) => c.status !== "PROCESSING" || c.rail === "ACH")) break;
+    }
+    if (window.Views && document.getElementById("tpa-fees")) { tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); }
+  }
+  // Save a card or bank account on Stripe's page (for the TPA, or one client).
+  async function tpaMethodAdd(clientId) {
+    try { window.location.assign((await Api.program.tpaMethodSetup(clientId)).setup_url); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function tpaMethodRemove(id, clientId) {
+    if (!(await UI.modal({ title: "Remove this payment method?", body: "It is removed at Stripe too and can no longer be charged.", submitLabel: "Remove", danger: true }))) return;
+    try { await Api.program.tpaMethodRemove(id); UI.toast("Removed."); clientId ? tpaPaymentForm(clientId) : tpaOwnMethodsBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  const methodList = (ms, clientId) => ms.length ? `<ul class="pm-list">${ms.map((m) => `<li><span>${methodWords(m)}${m.label ? ` <span class="muted">· ${esc(m.label)}</span>` : ""}${methodState(m)}</span>
+      <button type="button" class="mini" onclick="Views.tpaMethodRemove('${esc(m.id)}', '${esc(clientId || "")}')">Remove</button></li>`).join("")}</ul>`
+    : '<p class="muted">Nothing saved yet.</p>';
+  async function tpaOwnMethodsBox() {
+    const box = document.getElementById("tpa-own-methods");
+    if (!box) return;
+    try {
+      const ms = (await Api.program.tpaSavedMethods()).payment_methods || [];
+      box.innerHTML = methodList(ms, "") + `<p><button class="mini" onclick="Views.tpaMethodAdd('')">Add a card or bank account</button></p>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  // Back from saving a card or bank account on Stripe's page.
+  async function tpaSetupReturn() {
+    const qs = new URLSearchParams(location.hash.split("?")[1] || "");
+    if (!qs.has("setup") && !qs.has("setup_cancelled")) return;
+    history.replaceState(null, "", location.pathname + location.hash.split("?")[0]);
+    if (qs.has("setup_cancelled")) { UI.toast("Nothing was saved."); return; }
+    try {
+      const m = await Api.program.tpaMethodSetupConfirm(qs.get("setup"));
+      UI.toast(m.status === "ACTIVE" ? `Saved: ${methodWords(m).replace(/<[^>]+>/g, "")} — it can be charged now.`
+        : m.status === "PENDING_VERIFICATION" ? "Bank account saved. Two small deposits arrive in 1–2 business days; confirm them (Payment methods) and it can be charged."
+        : "Stripe could not verify it — try another card or account.", { duration: 9000 });
+      tpaOwnMethodsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   const hpFeesPay = (btn) => payGo(Api.program.hpFeesCheckout(), btn);
   // Back from Stripe (?paid=1&g=<checkout>) or cancelled at it (?cancelled=<checkout>).
   async function feeReturn(kind, refresh) {
@@ -7427,11 +7556,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       }
     }
   }
-  async function tpaFeesPay(btn) {
-    btn.disabled = true;
-    try { window.location.assign((await Api.program.tpaFeesCheckout()).checkout_url); }
-    catch (e) { btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
-  }
+  const tpaFeesPay = (btn) => tpaPayDialog({}, btn);
   // A disputes.csv already holding the TPA's ready clients' exact names, one
   // row each to copy -- a misspelt party_name is the usual reason a row is refused.
   async function tpaBdTemplate(btn) {
@@ -7451,13 +7576,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     finally { btn.disabled = false; }
   }
-  async function tpaBdPay(batchId, btn) {
-    btn.disabled = true;
-    try {
-      const r = await Api.program.tpaBulkCheckout(batchId);
-      window.location.assign(r.checkout_url);
-    } catch (e) { btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
-  }
+  const tpaBdPay = (batchId, btn) => tpaPayDialog({ batch_id: batchId }, btn);
   // Eligibility as decided by the Reviewer (eligibility_reviews), in words.
   const ELIG = { ELIGIBLE: ["filed", "Eligible"], INELIGIBLE: ["rejected", "Not eligible"], HOLD_AOR: ["needs-review", "On hold — authorization (AOR)"] };
   const eligBadge = (x) => {
@@ -8417,5 +8536,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, orgDocsDownload };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, orgDocsDownload };
 })();

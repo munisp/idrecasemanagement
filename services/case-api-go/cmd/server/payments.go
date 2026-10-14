@@ -214,6 +214,10 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.handleSavedPaymentEvent(r.Context(), evt.Type, evt.Data.Object) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	switch evt.Type {
 	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
 		var sess struct {
