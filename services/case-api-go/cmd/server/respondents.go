@@ -31,6 +31,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
+	_ "time/tzdata" // programZone: the image may have no zoneinfo
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
@@ -266,7 +268,8 @@ func (s *server) respondingList(actor string) http.HandlerFunc {
 			       rs.name AS respondent, rs.response_status, coalesce(rs.responded_at::text,'') AS responded_at,
 			       coalesce(cl.party_name,'') AS your_client,
 			       coalesce(c.program_dates->>'date_health_plan_response_due','') AS response_due,
-			       coalesce(c.program_dates->>'plan_notified_at','') AS notified_at
+			       coalesce(c.program_dates->>'plan_notified_at','') AS notified_at,
+			       rs.side, coalesce(least(rs.notified_at, rs.emailed_at)::text,'') AS told_at
 			FROM public.case_respondents rs
 			JOIN tenant_%s.cases c ON c.id::text=rs.case_id
 			LEFT JOIN public.tpa_clients cl ON cl.id=rs.client_id
@@ -276,6 +279,7 @@ func (s *server) respondingList(actor string) http.HandlerFunc {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
 		}
+		s.fillResponseDue(r, tenant, rows)
 		writeJSON(w, http.StatusOK, map[string]any{"cases": rows})
 	}
 }
@@ -298,6 +302,8 @@ func (s *server) respondingCase(actor string) http.HandlerFunc {
 			       coalesce(c.details->>'filed_by_tpa', c.details->>'filed_by_plan', '') AS filed_by,
 			       coalesce(c.details->>'disputed_issue','') AS disputed_issue,
 			       coalesce(c.program_dates->>'date_health_plan_response_due','') AS response_due,
+			       coalesce(c.program_dates->>'plan_notified_at','') AS notified_at,
+			       coalesce(least(rs.notified_at, rs.emailed_at)::text,'') AS told_at,
 			       rs.side, rs.name AS respondent, rs.response_status, coalesce(rs.response_note,'') AS response_note,
 			       coalesce(rs.responded_at::text,'') AS responded_at
 			FROM tenant_%s.cases c JOIN public.case_respondents rs ON rs.case_id=c.id::text AND rs.tenant=$1
@@ -309,6 +315,7 @@ func (s *server) respondingCase(actor string) http.HandlerFunc {
 			ORDER BY created_at`, sanitizeTenant(tenant)), caseID)
 		var c any
 		if len(cs) > 0 {
+			s.fillResponseDue(r, tenant, cs)
 			c = cs[0]
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"case": c, "documents": docs, "you": sc.label})
@@ -467,4 +474,65 @@ func (s *server) respondingOptOut(w http.ResponseWriter, r *http.Request) {
 	s.tellFiler(r.Context(), tenant, caseID, "PLAN_OPT_OUT_REQUESTED",
 		fmt.Sprintf("%s asked to opt out of %s; the office decides", sc.label, caseNumber))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "OPT_OUT_REQUESTED"})
+}
+
+// fillResponseDue sets each row's response deadline. The date the program
+// office recorded (date_health_plan_response_due) wins; until one is, the
+// tenant's PLAN_RESPONSE clock (its days and day type, from the program
+// config) runs from when the other side was told — the recorded
+// plan_notified_at, else when the platform notified or emailed it. The
+// deadline is the end of the due day in the program's time zone, so the
+// portal can count down to it.
+//
+//	response_due      YYYY-MM-DD
+//	response_due_at   RFC 3339, end of that day
+//	response_clock    {label, days, day_type, started, source: recorded|clock}
+func (s *server) fillResponseDue(r *http.Request, tenant string, rows []map[string]any) {
+	rule := ClockRule{Name: "PLAN_RESPONSE", Label: "Health Plan response", Days: 15, DayType: "calendar"}
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		for _, c := range cfg.Clocks {
+			if c.Name == "PLAN_RESPONSE" && c.Days > 0 {
+				rule = c
+			}
+		}
+	}
+	loc := programZone(tenant)
+	str := func(m map[string]any, k string) string { v, _ := m[k].(string); return strings.TrimSpace(v) }
+	for _, row := range rows {
+		due, source, started := str(row, "response_due"), "recorded", ""
+		if len(due) < 10 {
+			due, source = "", "clock"
+			for _, k := range []string{"notified_at", "told_at"} {
+				if v := str(row, k); len(v) >= 10 {
+					started = v[:10]
+					break
+				}
+			}
+			if started != "" {
+				if basis, err := time.Parse("2006-01-02", started); err == nil {
+					if rule.DayType == "business" {
+						due = addBusinessDays(basis, rule.Days).Format("2006-01-02")
+					} else {
+						due = basis.AddDate(0, 0, rule.Days).Format("2006-01-02")
+					}
+				}
+			}
+		}
+		row["response_due"] = due
+		row["response_due_at"] = ""
+		if d, err := time.ParseInLocation("2006-01-02", due[:min(len(due), 10)], loc); err == nil {
+			row["response_due_at"] = d.Add(24*time.Hour - time.Second).Format(time.RFC3339)
+		}
+		row["response_clock"] = map[string]any{"label": rule.Label, "days": rule.Days, "day_type": rule.DayType, "started": started, "source": source}
+		delete(row, "told_at")
+	}
+}
+
+// programZone: the time zone a program's day ends in (Florida's AHCA program
+// runs on Eastern time).
+func programZone(tenant string) *time.Location {
+	if loc, err := time.LoadLocation("America/New_York"); err == nil {
+		return loc
+	}
+	return time.FixedZone("ET", -5*3600)
 }

@@ -4,7 +4,7 @@ const CrmViews = (() => {
   const afterRender = (fn) => setTimeout(fn, 0);
   const $ = (sel) => document.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
+  const fmtDate = (d) => (d ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(d) ? d + "T12:00:00Z" : d).toLocaleDateString("en-US", { dateStyle: "medium", ...(/^\d{4}-\d{2}-\d{2}$/.test(d) ? { timeZone: "UTC" } : {}) }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);

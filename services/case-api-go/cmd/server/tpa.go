@@ -109,6 +109,10 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"enter a valid contact email address — your sign-in details will be sent there"}`, http.StatusBadRequest)
 		return
 	}
+	if msg := emailReachMsg(r.Context(), "the contact email", in.ContactEmail); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg+" — your sign-in details will be sent there")+`"}`, http.StatusBadRequest)
+		return
+	}
 
 	// Public and it sends email: same per-address throttle as the public
 	// dispute form, so it cannot be used to flood a mailbox or mint accounts.
@@ -481,6 +485,10 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	rsp := respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC}
 	if msg := rsp.check(); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := emailReachMsg(r.Context(), "the health plan's email", rsp.Email); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}

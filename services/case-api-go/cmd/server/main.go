@@ -945,6 +945,7 @@ func main() {
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
 	r.Get("/api/public/brand", s.publicBrand)
+	r.Get("/api/public/email-check", s.emailCheck) // does this address take mail (emailcheck.go)
 	r.Post("/api/public/healthplan/register", s.registerHealthPlan)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale

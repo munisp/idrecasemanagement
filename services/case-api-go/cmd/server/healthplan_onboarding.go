@@ -105,6 +105,10 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"enter a valid contact email address — your sign-in details will be sent there"}`, http.StatusBadRequest)
 		return
 	}
+	if msg := emailReachMsg(r.Context(), "the contact email", in.ContactEmail); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg+" — your sign-in details will be sent there")+`"}`, http.StatusBadRequest)
+		return
+	}
 	lob := strings.ToUpper(strings.TrimSpace(in.LineOfBusiness))
 	if !hpLOBs[lob] {
 		http.Error(w, `{"error":"line_of_business is required: FULLY_INSURED|ASO|MEDICARE_ADVANTAGE|MEDICAID_MANAGED"}`, http.StatusBadRequest)
@@ -1192,6 +1196,10 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	rsp := respondent{Side: "PROVIDER", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NPI: in.OtherPartyNPI}
 	if msg := rsp.check(); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := emailReachMsg(r.Context(), "the provider's email", rsp.Email); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}

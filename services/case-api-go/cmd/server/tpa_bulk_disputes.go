@@ -419,6 +419,10 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail(msg)
 			continue
 		}
+		if msg := emailReachMsg(r.Context(), "other_party_email", other.Email); msg != "" {
+			fail(msg)
+			continue
+		}
 		var clientID, cstatus string
 		var npi, tin, addr *string
 		if err := s.db.QueryRow(r.Context(), `
@@ -539,6 +543,9 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		SELECT i.row_no, i.dispute_ref, coalesce(c.party_name,'') AS party, i.status, coalesce(i.error,'') AS error,
 		       coalesce(i.notes,'') AS notes,
 		       coalesce(rs.name, i.other_party_name, '') AS other_party, coalesce(rs.response_status,'') AS response_status,
+		       coalesce(cs.program_dates->>'date_health_plan_response_due','') AS response_due,
+		       coalesce(cs.program_dates->>'plan_notified_at','') AS notified_at,
+		       coalesce(least(rs.notified_at, rs.emailed_at)::text,'') AS told_at,
 		       coalesce(cs.status,'') AS case_status, coalesce(cs.internal_status,'') AS internal_status,
 		       coalesce(el.result,'') AS eligibility, coalesce(el.reason,'') AS eligibility_reason,
 		       coalesce(el.created_at::text,'') AS eligibility_at, coalesce(el.override,false) AS eligibility_override,
@@ -568,6 +575,7 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.attachFeeStates(r.Context(), tenant, rows)
+	s.fillResponseDue(r, tenant, rows)
 	writeJSON(w, http.StatusOK, map[string]any{"batch_id": chi.URLParam(r, "batchId"), "items": rows})
 }
 

@@ -85,3 +85,9 @@ a { color: var(--pine-2); }
 .tab-bar [role="tab"][aria-selected="true"] { opacity: 1; color: var(--pine); border-bottom-color: var(--pine); }
 .tab-bar [role="tab"]:focus-visible { outline: 2px solid var(--pine-2); outline-offset: 2px; }
 .tab-hint { margin-top: 28px; font-size: 14px; }
+
+/* Email fields checked on leaving them (emailcheck.js) */
+.email-hint { display: block; font-size: 13px; margin-top: 4px; font-weight: 400; }
+.email-hint.ok { color: var(--pine-2); }
+.email-hint.bad { color: #A33327; }
+.email-hint button { font: inherit; background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; }

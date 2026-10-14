@@ -835,3 +835,19 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 .upl-row { display: flex; align-items: center; gap: 8px; }
 .upl-row .upl-text { flex: 1; font-size: 13px; }
 @media (prefers-reduced-motion: reduce) { .upl-bar span { transition: none; } }
+
+/* Live deadline countdowns (views.js countdown) */
+.cdown { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.cdown.ok { color: var(--success-fg, inherit); }
+.cdown.soon { color: var(--warning-fg); }
+.cdown.late { color: var(--danger-fg); }
+.sla-card .cdown { display: block; font-size: 12px; margin-top: 2px; }
+.rsp-due { display: grid; gap: 4px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border-default); background: var(--surface-raised); border-radius: 8px; }
+.rsp-due .lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.rsp-due-cd .cdown { font-size: 22px; }
+
+/* Email fields checked on leaving them (emailcheck.js) */
+.email-hint { display: block; font-size: 12px; margin-top: 4px; }
+.email-hint.ok { color: var(--success-fg, inherit); }
+.email-hint.bad { color: var(--danger-fg); }
+.email-hint button { font: inherit; }

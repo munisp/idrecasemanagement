@@ -8,7 +8,11 @@ const Views = (() => {
   // a macrotask runs strictly after it. Every form/handler binding MUST use this.
   const afterRender = (fn) => setTimeout(fn, 0);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const fmtDate = (d) => (d ? new Date(d).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "—");
+  // A plain date (YYYY-MM-DD: a due date, a date of service) is a calendar
+  // day, not midnight UTC -- shown as that day, with no time, in every zone.
+  const fmtDate = (d) => (!d ? "—" : /^\d{4}-\d{2}-\d{2}$/.test(d)
+    ? new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { dateStyle: "medium", timeZone: "UTC" })
+    : new Date(d).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }));
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="App.rerender()">Retry</button></div>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
@@ -379,6 +383,32 @@ const Views = (() => {
     const txt = c.remaining >= 0 ? `${c.remaining} ${c.basis === "business" ? "bd" : "cd"} left` : `Breached ${Math.abs(c.remaining)}d ago`;
     return `<span class="sla ${c.state}" title="${esc(c.label)} · ${esc(c.cite)} · basis: ${esc(c.basis_note)}">◷ ${txt}</span>`;
   };
+  // A live countdown to a deadline: an RFC 3339 instant, or a date (then the
+  // end of that day, Eastern -- the program's day). Every .cdown on the page
+  // ticks from one timer, so a list of them costs nothing extra.
+  const etEndOfDay = (ymd) => {
+    const g = new Date(ymd + "T23:59:59Z");
+    const et = new Date(g.toLocaleString("en-US", { timeZone: "America/New_York" })), utc = new Date(g.toLocaleString("en-US", { timeZone: "UTC" }));
+    return new Date(g.getTime() + (utc - et));
+  };
+  const cdState = (at) => {
+    const ms = new Date(at) - Date.now(), late = ms < 0, s = Math.floor(Math.abs(ms) / 1000);
+    const d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60, sec = s % 60, p = (n) => String(n).padStart(2, "0");
+    const span = d ? `${d}d ${p(h)}h ${p(m)}m ${p(sec)}s` : `${p(h)}:${p(m)}:${p(sec)}`;
+    return { text: late ? `late by ${span}` : `${span} left`, cls: late ? "late" : ms <= 3 * 864e5 ? "soon" : "ok" };
+  };
+  const countdown = (due) => {
+    if (!due) return "";
+    const at = /^\d{4}-\d{2}-\d{2}$/.test(due) ? etEndOfDay(due).toISOString() : due;
+    if (isNaN(new Date(at))) return "";
+    const st = cdState(at);
+    return `<span class="cdown ${st.cls}" data-at="${esc(at)}" title="Due ${esc(new Date(at).toLocaleString())}">${st.text}</span>`;
+  };
+  setInterval(() => document.querySelectorAll(".cdown[data-at]").forEach((el) => {
+    const st = cdState(el.dataset.at);
+    if (el.textContent !== st.text) el.textContent = st.text;
+    el.className = "cdown " + st.cls;
+  }), 1000);
   const nearestClock = (clocks) => clocks && clocks.length
     ? clocks.reduce((a, b) => (a.remaining < b.remaining ? a : b)) : null;
 
@@ -1244,7 +1274,7 @@ const Views = (() => {
       ${c.lock === "AWAITING_PAYMENT" ? `<div class="case-lock" role="status"><b>Awaiting payment.</b> The review starts once the initial fee is paid.
         <span id="filer-fee-${id}"></span></div>` : ""}
       ${clocks.length ? `<div class="sla-cluster">` + clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
-        <span class="lbl">${esc(cl.label)}</span><span class="cite">due ${esc(cl.due)}</span></div>`).join("") + `</div>` : ""}
+        <span class="lbl">${esc(cl.label)}</span><span class="cite">due ${esc(cl.due)}</span>${cl.due && cl.state !== "closed" && cl.state !== "paused" ? countdown(cl.due) : ""}</div>`).join("") + `</div>` : ""}
       <div class="card"><h2>Documents</h2>${list.length && (can("TPA") || can("HEALTH_PLAN")) ? `<p><button class="mini secondary" onclick="Views.orgDocsDownload('${can("TPA") ? "tpa" : "hp"}', {case_id: '${id}'}, this)">Download all documents</button></p>` : ""}${list.length ? `<table><thead><tr><th>File</th><th>Type</th><th>Received</th><th></th></tr></thead><tbody>` +
         list.map((x) => `<tr><td>${esc(x.filename || x.name || "document")}</td><td>${esc(x.doc_type || "")}</td><td>${fmtDate(x.uploaded_at || x.created_at)}</td>
           <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
@@ -6345,7 +6375,7 @@ const Views = (() => {
           ${onb ? `<div class="card"><h2>Where each client stands</h2>
             <p class="muted">A client is <b>Ready</b> once its profile and payment method are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute. The filing fees are paid by you, the TPA, at checkout — the client's payment method is kept on file for the client.</p>
             <div id="tpa-onboarding"><p class="muted">Loading…</p></div>
-            <details class="tpa-more"><summary>Give documents to many clients at once (ZIP)</summary>
+            <details class="tpa-more"><summary>Upload documents to many clients at once (ZIP)</summary>
               <p class="muted">One folder per client, named exactly like the client, holding its six documents (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code>. To file many disputes, each with its own documents, use <b>Bulk filing</b> instead.</p>
               <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaZipFn(this)">
                 <input name="file" type="file" accept=".zip,application/zip" required />
@@ -6364,7 +6394,7 @@ const Views = (() => {
               <input name="contact_name" placeholder="client contact for this dispute" />
               <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
               <input name="other_party_name" placeholder="health plan the dispute is against" required />
-              <input name="other_party_email" type="email" placeholder="health plan's email for notices" required />
+              <input name="other_party_email" type="email" data-email-check placeholder="health plan's email for notices" required />
               <input name="other_party_naic" placeholder="plan NAIC (optional)" />
               <input name="notes" placeholder="notes" />
               <button class="mini">File dispute</button></form>
@@ -6743,7 +6773,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <select name="package_id" id="hp-file-package"><option value="">— no package —</option></select>
             <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
             <input name="other_party_name" placeholder="provider the dispute is against" required />
-            <input name="other_party_email" type="email" placeholder="provider's email for notices" required />
+            <input name="other_party_email" type="email" data-email-check placeholder="provider's email for notices" required />
             <input name="other_party_npi" placeholder="provider NPI (optional)" />
             <input name="notes" placeholder="notes" />
             <button class="mini">Submit dispute</button></form>
@@ -7459,6 +7489,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             ${!x.eligibility && x.status === "FILED" ? `<p class="muted">The reviewer decides eligibility once the dispute is open (its fee paid).</p>` : ""}</div>
           <div><h4>Case</h4>${x.case_number ? `<p><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a> · ${esc(x.internal_status || x.case_status)}</p>` : '<p class="muted">Not filed yet.</p>'}
             <h4>Against</h4><p>${esc(x.other_party || "—")}${x.response_status ? ` · ${theirResponse(x.response_status)}` : ""}</p>
+            ${x.response_status === "AWAITING" && x.response_due ? `<p class="muted">Their response is due ${fmtDate(x.response_due)} · ${countdown(x.response_due_at || x.response_due)}</p>` : ""}
             ${x.notes ? `<p class="muted">${esc(x.notes)}</p>` : ""}${x.error ? `<p class="error">${esc(x.error)}</p>` : ""}</div></div>`;
       box.innerHTML = `
         ${items.some((x) => x.case_id) ? `<p><button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {batch_id: '${batchId}'}, this)">Download this upload's documents</button></p>` : ""}
@@ -7490,11 +7521,6 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
   // answering for its clients) or "party" (an invited responding party).
   const RSP_STATUS = { AWAITING: ["needs-review", "Waiting for your response"], SUBMITTED: ["filed", "Response submitted"], OPT_OUT_REQUESTED: ["validating", "Opt-out requested"] };
   const rspBadge = (st) => { const [cls, label] = RSP_STATUS[st] || ["", st || "—"]; return `<span class="badge s-${cls}">${esc(label)}</span>`; };
-  const daysLeft = (iso) => {
-    if (!iso) return '<span class="muted">—</span>';
-    const d = Math.ceil((new Date(iso + "T23:59:59") - new Date()) / 864e5);
-    return `${fmtDate(iso)}<br><span class="${d < 0 ? "error" : d <= 3 ? "warn" : "muted"}">${d < 0 ? `${-d} day${d === -1 ? "" : "s"} late` : d === 0 ? "due today" : `${d} day${d === 1 ? "" : "s"} left`}</span>`;
-  };
   function prettyDocName(fn) {
     const m = /^([a-z][a-z ]+) — (.*)$/i.exec(fn || "");
     if (!m) return fn || "document";
@@ -7681,7 +7707,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         ${rows.map((x) => `<tr><td class="mono">${esc(x.case_number)}<br><span class="muted">${esc(x.internal_status || x.status)}</span></td>
           <td>${esc(x.initiating_party || "—")}${x.filed_by ? `<br><span class="muted">filed by ${esc(x.filed_by)}</span>` : ""}</td>
           ${k === "tpa" ? `<td>${esc(x.your_client || "—")}</td>` : ""}
-          <td>${usdC(x.disputed_amount_cents)}</td><td>${x.response_status !== "AWAITING" ? '<span class="muted">—</span>' : x.response_due ? daysLeft(x.response_due) : '<span class="muted">15 days from the plan notification</span>'}</td>
+          <td>${usdC(x.disputed_amount_cents)}</td><td>${x.response_status !== "AWAITING" ? '<span class="muted">—</span>' : x.response_due ? `${fmtDate(x.response_due)}<br>${countdown(x.response_due_at || x.response_due)}` : '<span class="muted">starts when you are notified</span>'}</td>
           <td>${rspBadge(x.response_status)}</td>
           <td><button class="mini" onclick="Views.respondOpen('${k}','${x.case_id}')">${x.response_status === "AWAITING" ? "Respond" : "Open"}</button></td></tr>`).join("")}</tbody></table>`
         : `<p class="muted">No disputes against you right now. When the review team finds a dispute against you eligible, it appears here with its response deadline, and you are emailed.</p>`;
@@ -7699,7 +7725,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       const open = c.response_status === "AWAITING";
       panel.innerHTML = `<div class="tpa-pkg-head"><h2>${esc(c.case_number)} — ${esc(c.initiating_party || "")} vs ${esc(c.respondent || "")}</h2>
           <button class="mini" onclick="document.getElementById('${k}-rsp-panel').style.display='none'">Close</button></div>
-        <p>${rspBadge(c.response_status)} · disputed ${usdC(c.disputed_amount_cents)}${c.disputed_issue ? ` · ${esc(c.disputed_issue)}` : ""}${open && c.response_due ? ` · response due ${fmtDate(c.response_due)}` : ""}${c.filed_by ? ` · filed by ${esc(c.filed_by)}` : ""}</p>
+        <p>${rspBadge(c.response_status)} · disputed ${usdC(c.disputed_amount_cents)}${c.disputed_issue ? ` · ${esc(c.disputed_issue)}` : ""}${c.filed_by ? ` · filed by ${esc(c.filed_by)}` : ""}</p>
+        ${open && c.response_due ? `<div class="rsp-due"><div><span class="lbl">Your response is due</span> <b>${fmtDate(c.response_due)}</b> <span class="muted">end of day, Eastern</span></div>
+          <div class="rsp-due-cd">${countdown(c.response_due_at || c.response_due)}</div>
+          <div class="muted">${c.response_clock && c.response_clock.source === "recorded" ? "Date set by the review team." : c.response_clock ? `${c.response_clock.days} ${c.response_clock.day_type} days from when you were notified${c.response_clock.started ? ` (${fmtDate(c.response_clock.started)})` : ""}. No response by then becomes a default determination.` : ""}</div></div>` : ""}
         <div class="rsp-grid"><div><h3>What the filer submitted</h3>${docRows(theirs)}</div>
           <div><h3>Your response documents</h3>${docRows(ours)}
           ${open ? `<form class="inline-form" style="padding-left:0" onsubmit="event.preventDefault(); Views.respondUploadFn(this,'${k}','${caseId}')">
