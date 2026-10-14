@@ -6,8 +6,8 @@ package main
 // A request names who is asked (the provider's side or the health plan's),
 // why (verification, an eligibility re-check, a missing or unreadable
 // document, an RFI), what is needed and by when. When the side is an
-// organization on the platform -- the TPA filing for the provider, the
-// registered plan, or the TPA whose client the provider is -- the request is
+// organization on the platform -- the TPA filing for the provider, or the
+// registered plan -- the request is
 // in its portal (bell, Document requests page) and the email only says to
 // sign in and upload. A side with no portal account gets the secure upload
 // link by email, as before.
@@ -81,12 +81,11 @@ func (s *server) sideContact(ctx context.Context, tenant, caseID, side string) p
 		LEFT JOIN public.health_plans h ON h.id=rs.plan_id
 		LEFT JOIN public.tpas t ON t.id=rs.tpa_id
 		WHERE rs.tenant=$1 AND rs.case_id=$2`, tenant, caseID).Scan(&rName, &rEmail, &rPlan, &rTPA, &rPlanEmail, &rTPAEmail, &rTPAName)
-	switch {
-	case rPlan != "":
+	if rPlan != "" {
 		return partyContact{"plan:" + rPlan, firstNonEmpty(rPlanEmail, rEmail), rName}
-	case rTPA != "":
-		return partyContact{"tpa:" + rTPA, firstNonEmpty(rTPAEmail, rEmail), rTPAName}
 	}
+	// A provider on the other side is reached by its notice email (a TPA
+	// files for its clients; it does not answer for them).
 	return partyContact{"", rEmail, rName}
 }
 
@@ -146,6 +145,10 @@ func (s *server) createDocRequest(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM tenant_%s.cases WHERE id::text=$1)`, sanitizeTenant(tenant)), caseID).Scan(&exists)
 	if !exists {
 		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)
+		return
+	}
+	if !s.sideJoined(r.Context(), tenant, caseID, in.Side) {
+		http.Error(w, `{"error":"the other side is told of this dispute once it is found eligible — ask it for documents after the eligibility review"}`, http.StatusConflict)
 		return
 	}
 	id, pc, err := s.openDocRequest(r, tenant, caseID, in.Side, in.Reason, "reviewer", items, strings.TrimSpace(in.Message), in.DueDays, p.Subject)
@@ -505,4 +508,17 @@ func (s *server) storeCaseUpload(w http.ResponseWriter, r *http.Request, tenant,
 		"object_key": objectKey, "content_type": ctype, "sealed": false, "at": time.Now().UTC(),
 	})
 	return docID, filename, 0, ""
+}
+
+// sideJoined: the filing side always is; the other side once it has joined
+// the dispute (eligibleForOtherSide).
+func (s *server) sideJoined(ctx context.Context, tenant, caseID, side string) bool {
+	var filerType string
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT coalesce(details->>'filing_party_type','PROVIDER') FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&filerType)
+	if strings.EqualFold(filerType, side) {
+		return true
+	}
+	var joined bool
+	err := s.db.QueryRow(ctx, `SELECT `+eligibleForOtherSide+` FROM public.case_respondents rs WHERE rs.tenant=$1 AND rs.case_id=$2`, tenant, caseID).Scan(&joined)
+	return err != nil || joined // no respondent row (an older case): nothing to gate on
 }

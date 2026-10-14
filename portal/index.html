@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Federal IDRE Platform — No Surprises Act Dispute Resolution</title>
+  <title>Capitol Bridge — No Surprises Act Dispute Resolution</title>
   <meta name="description" content="Independent Dispute Resolution case management for the No Surprises Act — 45 CFR Part 149, serving state programs across all 50 states." />
   <link rel="stylesheet" href="/css/site.css" />
 </head>
 <body>
   <header class="site-nav">
     <div class="wrap nav-row">
-      <span class="brand"><span class="brand-mark">ID</span> Federal IDRE Platform</span>
+      <span class="brand"><span class="brand-mark">CB</span> <span class="brand-name">Capitol Bridge</span></span>
       <nav class="nav-links">
         <a href="#how">How it works</a>
         <a href="#states">State programs</a>
@@ -106,7 +106,7 @@
 
   <footer class="site-foot">
     <div class="wrap">
-      <span>Federal IDRE Platform · 45 CFR Part 149 compliance infrastructure</span>
+      <span><span class="brand-name">Capitol Bridge</span> · 45 CFR Part 149 compliance infrastructure</span>
       <span><a href="/dispute.html">File a dispute</a> · <a href="/apply.html">Apply</a> · <a href="/app.html">Portal login</a></span>
     </div>
   </footer>
@@ -119,6 +119,21 @@
     document.getElementById("state-grid").innerHTML = STATES.map(st =>
       `<a class="state-chip" href="/apply.html?state=${st}"><strong>${st}</strong> ${NAMES[st]}${CUSTOM[st] ? `<em>${CUSTOM[st]}</em>` : ""}</a>`
     ).join("");
+  </script>
+  <script>
+    // The tenant's brand on the public pages: ?state=fl shows that program's name (default Capitol Bridge).
+    (async () => {
+      const st = new URLSearchParams(location.search).get("state");
+      if (!st) return;
+      try {
+        const b = (await (await fetch("/api/public/brand?tenant=" + encodeURIComponent(st.toLowerCase()))).json()).brand_name;
+        if (!b || b === "Capitol Bridge") return;
+        window.APP_BRAND = b;
+        document.querySelectorAll(".brand-name").forEach((e) => { e.textContent = b; });
+        document.querySelectorAll(".brand-mark").forEach((e) => { e.textContent = b.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase(); });
+        document.title = document.title.replace("Capitol Bridge", b);
+      } catch { /* the default name stays */ }
+    })();
   </script>
 </body>
 </html>

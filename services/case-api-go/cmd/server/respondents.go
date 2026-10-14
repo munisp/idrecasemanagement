@@ -4,18 +4,18 @@ package main
 //
 // A dispute is between two parties. The initiating party files it (a
 // provider, directly or through its TPA, or a health plan); the responding
-// party answers it. Every filing now names its other side, which is recorded
+// party answers it. A TPA files for its clients; it does not answer disputes
+// filed against them. Every filing names its other side, which is recorded
 // in public.case_respondents and:
 //
 //   - linked to an account (created if new) whose contact gets the notices:
 //     cases.payer_id / provider_id, which the program's letters to "the
 //     health plan" / "the provider" already address;
-//   - linked to the organization on the platform when there is one -- the
-//     registered health plan (by NAIC, notice email or name), or the TPA whose
-//     client the provider is -- so the dispute shows on that organization's
-//     dashboard ("Disputes against us" / "Against your clients");
-//   - otherwise answered through a staff invitation (party workspace,
-//     RESPONDING side).
+//   - for a health plan, linked to the registered plan when there is one (by
+//     NAIC, notice email or name), so the dispute shows on its dashboard
+//     ("Disputes against us");
+//   - for a provider, answered through the secure link its notice email
+//     carries, or a staff invitation (party workspace, RESPONDING side).
 //
 // The responding side opens the filer's documents, adds its own, and submits
 // its response. Submitting counts as the response at once (the user's call):
@@ -124,17 +124,10 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 			         ($2 <> '' AND naic=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NAIC, rsp.Email, rsp.Name, isFreemail(rsp.Email)).Scan(&id) == nil {
 			planID = &id
 		}
-	} else {
-		var t, c string
-		if s.db.QueryRow(ctx, `
-			SELECT tpa_id::text, id::text FROM public.tpa_clients WHERE tenant=$1 AND status='ACTIVE'
-			  AND ((split_part(lower(coalesce(contact_email,'')),'@',2) = split_part(lower($4),'@',2) AND NOT $5) OR lower(contact_email)=lower($4))
-			  AND (($2 <> '' AND npi=$2) OR lower(party_name)=lower($3))
-			ORDER BY ($2 <> '' AND npi=$2 AND lower(party_name)=lower($3)) DESC, (lower(party_name)=lower($3)) DESC,
-			         ($2 <> '' AND npi=$2) DESC, created_at DESC LIMIT 1`, tenant, rsp.NPI, rsp.Name, rsp.Email, isFreemail(rsp.Email)).Scan(&t, &c) == nil {
-			tpaID, clientID = &t, &c
-		}
 	}
+	// The provider side is not linked to a TPA: a TPA files for its clients,
+	// it does not answer for them. The provider answers through its notice
+	// email (a secure link) or a staff invitation.
 	var acct any
 	if accountID != "" {
 		acct = accountID
@@ -154,6 +147,19 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 		map[bool]string{true: " — on the platform; the dispute is on its dashboard", false: ""}[planID != nil || tpaID != nil]))
 	s.tellRespondentOpened(ctx, tenant, caseID) // now, if no fee holds the dispute back; else when it is paid
 }
+
+// eligibleForOtherSide is the SQL test (on a case_respondents row aliased rs)
+// for "the other side is in this dispute now". It joins when the reviewer
+// finds the dispute ELIGIBLE (a borderline call too: that only asks the PM
+// for a second look, the decision stands), and once it has joined (it was
+// told: notified_at / emailed_at) it keeps the dispute through a later hold
+// (HOLD_AOR) and loses it only when the dispute is found INELIGIBLE. Before
+// the first ELIGIBLE it is neither shown the dispute nor told of it.
+const eligibleForOtherSide = `coalesce((SELECT CASE WHEN e.result = 'ELIGIBLE' THEN true
+	                       WHEN e.result = 'INELIGIBLE' THEN false
+	                       ELSE (rs.notified_at IS NOT NULL OR rs.emailed_at IS NOT NULL) END
+	FROM public.eligibility_reviews e WHERE e.tenant = rs.tenant AND e.case_id = rs.case_id
+	ORDER BY e.created_at DESC LIMIT 1), false)`
 
 // freemailDomains: public email providers. A shared domain there says nothing
 // about who owns an address, so a dispute is linked to an organization on one
@@ -182,15 +188,15 @@ func (s *server) linkRespondentsToPlan(ctx context.Context, tenant, planID, naic
 	if err != nil {
 		return 0
 	}
-	// One notice for the open ones, not one per dispute; the rest are told
-	// when their fee is paid (tellRespondentOpened).
+	// One notice for the ones found eligible, not one per dispute; the rest are told
+	// when the reviewer finds them eligible (tellRespondentOpened).
 	var open int
 	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
 		WITH t AS (
 		  UPDATE public.case_respondents rs SET notified_at=now()
 		  FROM tenant_%s.cases c
 		  WHERE rs.tenant=$1 AND rs.plan_id=$2::uuid AND rs.notified_at IS NULL
-		    AND c.id::text=rs.case_id AND c.status <> 'AWAITING_PAYMENT'
+		    AND c.id::text=rs.case_id AND `+eligibleForOtherSide+`
 		  RETURNING 1)
 		SELECT count(*) FROM t`, sanitizeTenant(tenant)), tenant, planID).Scan(&open)
 	if open > 0 {
@@ -201,10 +207,10 @@ func (s *server) linkRespondentsToPlan(ctx context.Context, tenant, planID, naic
 	return tag.RowsAffected()
 }
 
-// respondScope is who is answering: a health plan, a TPA (for its clients)
-// or an invited party, and how its cases are found.
+// respondScope is who is answering: a health plan or an invited party, and
+// how its cases are found.
 type respondScope struct {
-	actor   string // plan | tpa | party
+	actor   string // plan | party
 	orgID   string
 	subject string
 	label   string // shown on the case ("Sunshine Health Plan")
@@ -219,12 +225,6 @@ func (s *server) respondScopeFor(r *http.Request, tenant, actor string) (respond
 			return respondScope{}, err
 		}
 		return respondScope{actor: "plan", orgID: org.ID, subject: p.Subject, label: org.Name}, nil
-	case "tpa":
-		org, err := s.tpaForPrincipal(r, tenant)
-		if err != nil {
-			return respondScope{}, err
-		}
-		return respondScope{actor: "tpa", orgID: org.ID, subject: p.Subject, label: org.Name}, nil
 	}
 	if !hasAnyRole(p, "PARTY") {
 		return respondScope{}, fmt.Errorf("party accounts only")
@@ -237,10 +237,7 @@ func (s *server) respondentOwns(r *http.Request, tenant, caseID string, sc respo
 	var ok bool
 	switch sc.actor {
 	case "plan":
-		_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.case_respondents WHERE tenant=$1 AND case_id=$2 AND plan_id::text=$3)`,
-			tenant, caseID, sc.orgID).Scan(&ok)
-	case "tpa":
-		_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.case_respondents WHERE tenant=$1 AND case_id=$2 AND tpa_id::text=$3)`,
+		_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.case_respondents rs WHERE rs.tenant=$1 AND rs.case_id=$2 AND rs.plan_id::text=$3 AND `+eligibleForOtherSide+`)`,
 			tenant, caseID, sc.orgID).Scan(&ok)
 	default:
 		ok = s.partyOwnsCase(r, tenant, caseID, sc.subject, "RESPONDING")
@@ -248,7 +245,7 @@ func (s *server) respondentOwns(r *http.Request, tenant, caseID string, sc respo
 	return ok
 }
 
-// respondingList: GET /hp/responding, /tpa/responding -- the disputes this
+// respondingList: GET /hp/responding -- the disputes this
 // organization is the other side of. A dispute waiting for the filer's fee
 // is not open yet and is not shown.
 func (s *server) respondingList(actor string) http.HandlerFunc {
@@ -259,7 +256,7 @@ func (s *server) respondingList(actor string) http.HandlerFunc {
 			http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusNotFound)
 			return
 		}
-		col := map[string]string{"plan": "plan_id", "tpa": "tpa_id"}[actor]
+		col := "plan_id"
 		rows, err := s.queryRows(r, fmt.Sprintf(`
 			SELECT c.id::text AS case_id, c.case_number, c.status, coalesce(c.internal_status,'') AS internal_status,
 			       coalesce(c.disputed_amount_cents,0) AS disputed_amount_cents, c.opened_at::text AS opened_at,
@@ -272,7 +269,7 @@ func (s *server) respondingList(actor string) http.HandlerFunc {
 			FROM public.case_respondents rs
 			JOIN tenant_%s.cases c ON c.id::text=rs.case_id
 			LEFT JOIN public.tpa_clients cl ON cl.id=rs.client_id
-			WHERE rs.tenant=$1 AND rs.%s::text=$2 AND c.status <> 'AWAITING_PAYMENT'
+			WHERE rs.tenant=$1 AND rs.%s::text=$2 AND `+eligibleForOtherSide+`
 			ORDER BY (rs.response_status='AWAITING') DESC, c.opened_at DESC LIMIT 500`, sanitizeTenant(tenant), col), tenant, sc.orgID)
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)

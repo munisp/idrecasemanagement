@@ -286,6 +286,12 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 	}
 
 	switch result {
+	case "ELIGIBLE":
+		s.tellRespondentOpened(r.Context(), tenant, caseID) // the other side is in the dispute now
+	case "INELIGIBLE":
+		s.tellRespondentClosed(r.Context(), tenant, caseID) // it was told of it: tell it it ended
+	}
+	switch result {
 	case "HOLD_AOR":
 		_, _ = s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Hold', agency_status='Other', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)

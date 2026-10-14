@@ -16,8 +16,8 @@ const Views = (() => {
   // An outside organization's login (a TPA, a health plan) with no staff role.
   const STAFF_ROLES = ["CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR",
     "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"];
-  const outsideOnly = () => can("TPA", "HEALTH_PLAN") && !can(...STAFF_ROLES);
-  const outsideHome = () => (can("TPA") ? "#/tpa" : "#/healthplan");
+  const outsideOnly = () => can("TPA", "HEALTH_PLAN", "PARTY") && !can(...STAFF_ROLES);
+  const outsideHome = () => (can("TPA") ? "#/tpa" : can("HEALTH_PLAN") ? "#/healthplan" : "#/party");
   // Federal NSA cases price on QPA (qpa_cents); programmed tenants (FL AHCA
   // etc.) have no such concept and always read $0 there -- they use
   // disputed_amount_cents instead (accumulates from imported claims, or a
@@ -396,7 +396,8 @@ const Views = (() => {
     // deliberately blocked from (access-control follow-up); it has its own
     // correctly-scoped "Tracking" card on this same page instead.
     if (can("TPA")) return tpaView();
-    if (outsideOnly()) return hpView(); // a health plan's home is its own page
+    if (outsideOnly() && can("HEALTH_PLAN")) return hpView(); // a health plan's home is its own page
+    if (outsideOnly()) return partyCases(); // an invited party's home is its own disputes
     const me = Auth.claims();
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
@@ -1228,8 +1229,8 @@ const Views = (() => {
     } catch { box.innerHTML = ""; }
   }
   async function filerCase(id) {
-    const kind = can("TPA") ? "tpa" : "hp";
-    filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind)); filerDocReqBanner(id, kind);
+    const kind = can("TPA") ? "tpa" : can("HEALTH_PLAN") ? "hp" : ""; // an invited party pays and answers elsewhere
+    if (kind) { filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind)); filerDocReqBanner(id, kind); }
     let c;
     try { c = await Api.cases.get(id); }
     catch { return `<div class="view-head"><h1>Dispute not found</h1></div>
@@ -5493,6 +5494,8 @@ const Views = (() => {
            <span class="muted">cross-tenant FEDERAL_ADMIN or PLATFORM_ADMIN account</span></p>` : ""}
         <p><button onclick="Views.renameTenantFlow('${esc(curLabel)}')">✎ ${curLabel ? `Rename "${esc(curLabel)}"` : "Set display name"}</button>
            <span class="muted">shown in place of the bare "${esc(Api.getTenant().toUpperCase())}" code throughout the portal</span></p>
+        <p><button onclick="Views.rebrandTenantFlow('${esc(pr?.brand_name || "")}')">✎ Brand name: "${esc(pr?.brand_name || "Capitol Bridge")}"</button>
+           <span class="muted">the portal's name for this tenant — in the sidebar, the page title and the public pages</span></p>
         <p><button id="rule-add">＋ New rule</button>
            <button id="rules-save" class="btn-primary">Save all changes</button></p>
         <div id="rules-list">` +
@@ -5613,6 +5616,19 @@ const Views = (() => {
   // Sets the display name shown in place of the bare tenant code (e.g.
   // "AHCA" instead of "FL") -- the tenant chip (app.js), cross-tenant
   // switcher, and dashboard header all read it once set.
+  async function rebrandTenantFlow(cur) {
+    const v = await UI.modal({
+      title: "Brand name", submitLabel: "Save",
+      body: "The name this tenant's portal shows. Leave it empty to use the platform's name, Capitol Bridge.",
+      fields: [{ name: "brand", label: "Brand name", value: cur, placeholder: "Capitol Bridge" }],
+    });
+    if (!v) return;
+    try {
+      const r = await Api.program.setBrand((v.brand || "").trim());
+      UI.toast(`Brand set to "${r.brand_name}" — reloading`);
+      setTimeout(() => location.reload(), 900);
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
   async function renameTenantFlow(curLabel) {
     const v = await UI.modal({
       title: "Tenant display name", submitLabel: "Save",
@@ -6296,7 +6312,7 @@ const Views = (() => {
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("against", "Against your clients", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
+        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -6311,12 +6327,6 @@ const Views = (() => {
             <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
         </section>
 
-        <section data-tpa-panel="against" style="display:none">
-          <div class="card"><h2>Disputes against your clients</h2>
-            <p class="muted">Disputes a health plan filed against a provider you represent. Open one to see what the plan submitted, add your client's documents and submit the response before the deadline.</p>
-            <div id="tpa-rsp-list"><p class="muted">Loading…</p></div></div>
-          <div class="card tpa-pkg" id="tpa-rsp-panel" style="display:none"></div>
-        </section>
 
         <section data-tpa-panel="clients" style="display:none">
           <div class="card"><h2>Add a client</h2>
@@ -6358,7 +6368,7 @@ const Views = (() => {
               <input name="other_party_naic" placeholder="plan NAIC (optional)" />
               <input name="notes" placeholder="notes" />
               <button class="mini">File dispute</button></form>
-            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all) and manage documents for the client. Once it is paid, the health plan is emailed that the dispute is against it.</p>
+            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all) and manage documents for the client. Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p>
             <div id="tpa-file-result"></div></div>
         </section>
 
@@ -6405,7 +6415,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
 
         <section data-tpa-panel="team" style="display:none"><div id="tpa-team"></div></section>
         <section data-tpa-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
-          <p class="muted">Documents the review team asked you for, on your disputes and on disputes against your clients. Upload and send them here.</p>
+          <p class="muted">Documents the review team asked you for, on the disputes you filed. Upload and send them here.</p>
           <div id="tpa-docreq"><p class="muted">Loading…</p></div></div></section>
         <section data-tpa-panel="audit" style="display:none"><div class="card"><h2>Audit log</h2>
           <p class="muted">Everything done in your organization's account — by your team, by the office on your behalf, and by the system — newest first. Each entry is chained to the one before it, so a removed or altered entry shows.</p>
@@ -6440,7 +6450,6 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     // the background, so what was loaded with the page goes stale.
     if (tpaTab._booted) ({
       disputes: () => { tpaFeesBox(); tpaDashBox(); },
-      against: () => respondListBox("tpa"),
       clients: () => { tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox(); },
       bulk: () => tpaBdBatchesBox(),
       reviews: () => onboardingReviewsBox("tpa-reviews", "tpa"),
@@ -6485,7 +6494,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
-      tpaClientsBox(); tpaDashBox(); tpaFeesBox(); respondListBox("tpa"); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
+      tpaClientsBox(); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
       feeReturn("tpa", () => { tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); });
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
@@ -6734,7 +6743,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="other_party_npi" placeholder="provider NPI (optional)" />
             <input name="notes" placeholder="notes" />
             <button class="mini">Submit dispute</button></form>
-          <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all above) and manage documents on behalf of the party. Once it is paid, the provider is emailed that the dispute is against it.</p>
+          <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all above) and manage documents on behalf of the party. Once the reviewer finds it eligible, the provider is emailed that the dispute is against it, with a secure link to send its response.</p>
           <div id="hp-file-result"></div></div>
         </section>
         <section data-hp-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
@@ -7635,7 +7644,6 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     try {
       const rows = (await Api.program.respondList(k)).cases || [];
       const waiting = rows.filter((x) => x.response_status === "AWAITING").length;
-      if (k === "tpa") tpaTabCount("against", waiting || "");
       if (k === "hp") hpTabCount("against", waiting || "");
       box.innerHTML = rows.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Filed by</th>${k === "tpa" ? "<th>Your client</th>" : ""}<th>Disputed</th><th>Response due</th><th>Status</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td class="mono">${esc(x.case_number)}<br><span class="muted">${esc(x.internal_status || x.status)}</span></td>
@@ -8348,5 +8356,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow };
 })();

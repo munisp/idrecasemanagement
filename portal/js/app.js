@@ -138,7 +138,14 @@
   // Absent flag = on. Loaded fresh on each full boot; a toggle applies on
   // next reload — the server gate applies immediately.
   let FEATURES = {};
-  try { FEATURES = (await Api.program.get()).features || {}; } catch { FEATURES = {}; }
+  let BRAND = "Capitol Bridge";
+  try { const pr0 = await Api.program.get(); FEATURES = pr0.features || {}; BRAND = pr0.brand_name || BRAND; } catch { FEATURES = {}; }
+  // The portal's name for this tenant (tenant_labels.brand_name; editable on the Rules page).
+  const brandMark = BRAND.split(/\s+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "CB";
+  document.querySelectorAll(".rail-word").forEach((el) => { el.textContent = BRAND; });
+  document.querySelectorAll(".rail-mark").forEach((el) => { el.textContent = brandMark; });
+  document.title = BRAND + " Portal";
+  window.APP_BRAND = BRAND;
   const feature = (n) => FEATURES[n] !== false;
 
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
@@ -161,7 +168,7 @@
   // listTasks TPA exclusion.
   // An outside organization's login (a TPA, or a health plan without a
   // staff role) gets its own page, never the tenant-wide screens.
-  const outside = has("TPA") || (has("HEALTH_PLAN") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
+  const outside = has("TPA") || (has("HEALTH_PLAN", "PARTY") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
     "NURSE", "ATTORNEY", "ARBITRATOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"));
   if (!outside) {
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
@@ -230,7 +237,7 @@
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/payments", "🏦", "Payments"]);
   // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
-  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Audit log"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM")) links.push(["#/audit", "⌘", "Program audit log"]);
   // A TPA's or plan's own trail (the office's tenant-wide log above is not theirs).
   else if (outside) links.push(["#/org-audit", "⌘", "Audit log"]);
   if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);

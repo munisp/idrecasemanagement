@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>File a dispute — Federal IDRE Platform</title>
+  <title>File a dispute — Capitol Bridge</title>
   <link rel="stylesheet" href="/css/site.css" />
 </head>
 <body>
   <header class="site-nav">
     <div class="wrap nav-row">
-      <a class="brand" href="/"><span class="brand-mark">ID</span> Federal IDRE Platform</a>
+      <a class="brand" href="/"><span class="brand-mark">CB</span> <span class="brand-name">Capitol Bridge</span></a>
       <nav class="nav-links"><a class="btn ghost" href="/app.html">Log in</a></nav>
     </div>
   </header>
@@ -104,7 +104,7 @@
   </main>
 
   <footer class="site-foot"><div class="wrap">
-    <span>Federal IDRE Platform</span><span><a href="/">Home</a> · <a href="/app.html">Portal login</a></span>
+    <span class="brand-name">Capitol Bridge</span><span><a href="/">Home</a> · <a href="/app.html">Portal login</a></span>
   </div></footer>
 
   <script>
@@ -169,7 +169,7 @@
         document.getElementById("panel-" + t).hidden = !on;
         if (on && focus) btn.focus();
       }
-      document.title = TABS[name] + " — Federal IDRE Platform";
+      document.title = TABS[name] + " — " + (window.APP_BRAND || "Capitol Bridge");
       const hash = HASH[name];
       if (location.hash !== hash) history.replaceState(null, "", hash);
     }
@@ -270,6 +270,21 @@
         btn.disabled = false; btn.textContent = "Register as a health plan";
       }
     });
+  </script>
+  <script>
+    // The tenant's brand on the public pages: ?state=fl shows that program's name (default Capitol Bridge).
+    (async () => {
+      const st = new URLSearchParams(location.search).get("state");
+      if (!st) return;
+      try {
+        const b = (await (await fetch("/api/public/brand?tenant=" + encodeURIComponent(st.toLowerCase()))).json()).brand_name;
+        if (!b || b === "Capitol Bridge") return;
+        window.APP_BRAND = b;
+        document.querySelectorAll(".brand-name").forEach((e) => { e.textContent = b; });
+        document.querySelectorAll(".brand-mark").forEach((e) => { e.textContent = b.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase(); });
+        document.title = document.title.replace("Capitol Bridge", b);
+      } catch { /* the default name stays */ }
+    })();
   </script>
 </body>
 </html>

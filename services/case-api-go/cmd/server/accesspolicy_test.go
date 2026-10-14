@@ -11,13 +11,13 @@ const docA = "c37ea445-470b-4120-accb-a8209f89a6e1"
 func who(roles ...string) principal { return principal{Subject: "u-1", Roles: roles} }
 
 func TestExternalOnly(t *testing.T) {
-	for _, roles := range [][]string{{"TPA"}, {"TPA", "BULK_SUBMITTER"}, {"TPA", "PARTY"}, {"HEALTH_PLAN"}, {}, {"default-roles-idre", "offline_access"}} {
+	for _, roles := range [][]string{{"TPA"}, {"TPA", "BULK_SUBMITTER"}, {"TPA", "PARTY"}, {"HEALTH_PLAN"}, {"PARTY"}, {}, {"default-roles-idre", "offline_access"}} {
 		if !isExternalOnly(who(roles...)) {
 			t.Errorf("%v is an outside account", roles)
 		}
 	}
 	// A staff role alongside it makes the account staff (an admin who claimed a TPA code to help it).
-	for _, roles := range [][]string{{"CASE_MANAGER"}, {"HEALTH_PLAN", "PM"}, {"TPA", "FEDERAL_ADMIN"}, {"TPA", "TENANT_ADMIN"}, {"PM"}, {"STATE_AUDITOR"}, {serviceRole}, {"PARTY"}} {
+	for _, roles := range [][]string{{"CASE_MANAGER"}, {"HEALTH_PLAN", "PM"}, {"TPA", "FEDERAL_ADMIN"}, {"TPA", "TENANT_ADMIN"}, {"PM"}, {"STATE_AUDITOR"}, {serviceRole}, {"PARTY", "CASE_MANAGER"}} {
 		if isExternalOnly(who(roles...)) {
 			t.Errorf("%v is not an outside-only account", roles)
 		}
@@ -62,9 +62,9 @@ func TestATPACannotReachTheRestOfTheTenant(t *testing.T) {
 			t.Errorf("TPA %s should be open to a TPA, got %q", path, d)
 		}
 	}
-	// A filing PARTY is not limited by this guard (see isExternalOnly): the known, reported gap.
-	if d, _, _ := accessDecision(who("PARTY"), http.MethodGet, "/cases/"+caseA); d != "allow" {
-		t.Errorf("PARTY is outside this guard's scope for now; got %q", d)
+	// An invited party reads the cases it was invited to (own-case: party_accounts), nothing else.
+	if d, id, _ := accessDecision(who("PARTY"), http.MethodGet, "/cases/"+caseA); d != "own-case" || id != caseA {
+		t.Errorf("PARTY GET a case: got %q, want own-case", d)
 	}
 	// Path tricks do not turn a staff route into the TPA's own area.
 	for _, path := range []string{"/tpaX/me", "/cases/" + caseA + "/documents/../activities", "/cases/not-a-uuid", "/tpa/../cases"} {
@@ -184,5 +184,27 @@ func TestALoginWithNoRoleGetsNothing(t *testing.T) {
 	}
 	if d, _, _ := accessDecision(who(), http.MethodGet, "/notifications"); d != "allow" {
 		t.Errorf("role-less still gets the shell; got %q", d)
+	}
+}
+
+// An invited party has its workspace and its case's sealed offers, and can
+// start a federal dispute -- and nothing of the office's.
+func TestAPartyCannotReachTheRestOfTheTenant(t *testing.T) {
+	party := who("PARTY")
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/cases"}, {"GET", "/search"}, {"GET", "/accounts"}, {"GET", "/intake"}, {"GET", "/qa"}, {"GET", "/tpa/me"}, {"GET", "/hp/me"},
+		{"POST", "/cases/" + caseA + "/signal"}, {"GET", "/cases/" + caseA + "/activities"}, {"POST", "/cases/" + caseA + "/offers/reveal"},
+	} {
+		if d, _, _ := accessDecision(party, c.method, c.path); d != "deny" {
+			t.Errorf("PARTY %s %s: got %q, want deny", c.method, c.path, d)
+		}
+	}
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/party/cases"}, {"GET", "/party/cases/" + caseA}, {"POST", "/party/cases/" + caseA + "/respond/submit"},
+		{"POST", "/cases/" + caseA + "/offers"}, {"GET", "/cases/" + caseA + "/offers"}, {"POST", "/cases/initiate"}, {"GET", "/notifications"},
+	} {
+		if d, _, _ := accessDecision(party, c.method, c.path); d != "allow" {
+			t.Errorf("PARTY %s %s: got %q, want allow", c.method, c.path, d)
+		}
 	}
 }

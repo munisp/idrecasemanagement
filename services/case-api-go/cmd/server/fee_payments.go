@@ -340,7 +340,7 @@ func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant stri
 func (s *server) expireOverlapping(ctx context.Context, tenant string, ids []string) bool {
 	rows, err := s.db.Query(ctx, `
 		SELECT 'group', id::text, coalesce(session_id,'') FROM public.payment_groups
-		WHERE tenant=$1 AND status IN ('OPEN','PROCESSING') AND invoice_ids && $2::uuid[]
+		WHERE tenant=$1 AND status IN ('OPEN','PROCESSING','REVIEW') AND invoice_ids && $2::uuid[]
 		UNION
 		SELECT 'single', '', session_id FROM public.payments
 		WHERE tenant=$1 AND status='PENDING' AND invoice_id = ANY($2::uuid[]) AND session_id LIKE 'cs_%' AND session_id NOT LIKE '%#%'`, tenant, ids)
@@ -510,7 +510,10 @@ func usd(c int64) string { return fmt.Sprintf("$%d.%02d", c/100, c%100) }
 
 // flagPayment: something about a payment needs a person (finance).
 func (s *server) flagPayment(ctx context.Context, tenant, groupID, why string) {
-	_, _ = s.db.Exec(ctx, `UPDATE public.payment_groups SET last_error=$3, updated_at=now() WHERE tenant=$1 AND id::text=$2`, tenant, groupID, why)
+	// REVIEW: money may have been taken, so the payer sees it pending (not
+	// failed), and the reconcile pass leaves it to finance. The reason is for
+	// finance; the payer is not shown it.
+	_, _ = s.db.Exec(ctx, `UPDATE public.payment_groups SET status='REVIEW', last_error=$3, updated_at=now() WHERE tenant=$1 AND id::text=$2 AND status<>'PAID'`, tenant, groupID, why)
 	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/", nil)
 	s.notify(r, tenant, "role:FINANCE", "PAYMENT_NEEDS_ATTENTION", why, "#/payments")
 	s.logAudit(ctx, tenant, "", "PAYMENT_FLAGGED", map[string]any{"payment_group_id": groupID, "reason": why, "by": "system"})
@@ -781,6 +784,8 @@ func (s *server) feeStates(ctx context.Context, tenant string, caseIDs []string)
 			fi.State = inv
 		case gStatus == "PROCESSING":
 			fi.State = "PENDING"
+		case gStatus == "REVIEW":
+			fi.State, fi.Error = "PENDING", "Payment received; our finance team is confirming it"
 		case gStatus == "FAILED" || (gStatus == "OPEN" && gErr != ""):
 			fi.State, fi.Error = "FAILED", gErr
 		default:

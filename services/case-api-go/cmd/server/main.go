@@ -617,6 +617,7 @@ func main() {
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
 		r.Put("/program/label", s.setTenantLabel)                // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
+		r.Put("/program/brand", s.setTenantBrand)                // program admins: the portal's brand name for this tenant
 		r.Get("/admin/tenant-labels", s.listTenantLabels)        // cross-tenant switcher label map
 		r.Post("/cases/{caseId}/program-date", s.setProgramDate) // record clock-basis events
 		r.Post("/cases/{caseId}/status", s.setDualStatus)        // dual internal/agency status (G5)
@@ -752,19 +753,14 @@ func main() {
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
 		r.Post("/hp/unlink", s.hpUnlink)                                // staff: stop acting for a plan
-		// The other side of disputes (respondents.go): plans and TPAs answer
-		// the disputes filed against them / their clients.
+		// The other side of disputes (respondents.go): a plan answers the
+		// disputes filed against it (a TPA files; it does not answer).
 		r.Get("/hp/responding", s.respondingList("plan"))
 		r.Get("/hp/responding/{caseId}", s.respondingCase("plan"))
 		r.Get("/hp/responding/{caseId}/documents/{docId}/file", s.respondingDocFile("plan"))
 		r.Post("/hp/responding/{caseId}/documents", s.respondingUpload("plan"))
 		r.Post("/hp/responding/{caseId}/submit", s.respondingSubmit("plan"))
 		r.Post("/hp/responding/{caseId}/opt-out", s.respondingOptOut)
-		r.Get("/tpa/responding", s.respondingList("tpa"))
-		r.Get("/tpa/responding/{caseId}", s.respondingCase("tpa"))
-		r.Get("/tpa/responding/{caseId}/documents/{docId}/file", s.respondingDocFile("tpa"))
-		r.Post("/tpa/responding/{caseId}/documents", s.respondingUpload("tpa"))
-		r.Post("/tpa/responding/{caseId}/submit", s.respondingSubmit("tpa"))
 		r.Get("/onboarding/reviews", s.onboardingReviews)               // documents doc-intel left for a person (both rails)
 		r.Get("/onboarding/reviews/{kind}/{docId}/file", s.onboardingReviewFile)
 		r.Post("/onboarding/reviews/{kind}/{docId}", s.onboardingReviewDecide)
@@ -937,6 +933,7 @@ func main() {
 	// Public pre-case intake for programmed tenants (no OIDC; per-IP throttled).
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
+	r.Get("/api/public/brand", s.publicBrand)
 	r.Post("/api/public/healthplan/register", s.registerHealthPlan)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale

@@ -1,6 +1,6 @@
 {
   "appId": "org.example.idre.portal",
-  "appName": "Federal IDRE Portal",
+  "appName": "Capitol Bridge Portal",
   "webDir": ".",
   "backgroundColor": "#123B2F",
   "android": { "allowMixedContent": false },

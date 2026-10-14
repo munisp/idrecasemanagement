@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS public.case_respondents (
     plan_id         uuid REFERENCES public.health_plans(id),
     tpa_id          uuid REFERENCES public.tpas(id),
     client_id       uuid REFERENCES public.tpa_clients(id),
-    response_status text NOT NULL DEFAULT 'AWAITING',  -- AWAITING|SUBMITTED|OPT_OUT_REQUESTED
+    response_status text NOT NULL DEFAULT 'AWAITING',  -- AWAITING|SUBMITTED|OPT_OUT_REQUESTED|CLOSED (found ineligible after it was told)
     response_note   text,
     responded_at    timestamptz,
     responded_by    text,

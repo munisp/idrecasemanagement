@@ -23,32 +23,21 @@ import (
 	"strings"
 )
 
-// isExternalOnly reports whether the principal is an outside organization's
-// account with no staff role: a TPA or a health plan. Such a principal has
-// standing only in its own area and in what it filed. (A health plan's login
-// is created by the public registration page, so it must never pass as
-// staff.)
-//
-// A filing PARTY (the federal process) is outside too, but is NOT covered
-// here: nothing in the platform records which cases belong to a party, so
-// there is no "its own cases" to limit it to, and refusing it everything
-// would stop the federal filing flow. That gap is open and reported; it
-// needs an ownership record before it can be closed.
+// isExternalOnly reports whether the principal is an account of someone
+// outside the office, with no office role: a TPA, a health plan, an invited
+// party. Such a principal has standing only in its own area and in the cases
+// it filed or was invited to (party_accounts). A health plan's login is made
+// by the public registration page, so it must never pass as staff.
 func isExternalOnly(p principal) bool {
-	party := false
 	for _, r := range p.Roles {
-		switch {
-		case tenantStaffRoles[r], r == "FEDERAL_ADMIN", r == "PLATFORM_ADMIN", r == "STATE_AUDITOR", r == serviceRole:
+		if tenantStaffRoles[r] || r == "FEDERAL_ADMIN" || r == "PLATFORM_ADMIN" || r == "STATE_AUDITOR" || r == serviceRole {
 			return false
-		case r == "PARTY":
-			party = true
 		}
 	}
-	// No office role: outside. That includes a login with no role at all --
-	// such an account used to pass as staff, and a public registration whose
-	// role assignment failed produced exactly that. Only a PARTY stays out of
-	// this guard (the gap above), unless it is also a TPA or a plan.
-	return !party || hasAnyRole(p, "TPA", "HEALTH_PLAN")
+	// No office role: outside -- a TPA, a health plan, an invited party, or a
+	// login with no role at all (which used to pass as staff; a public
+	// registration whose role assignment failed produced exactly that).
+	return true
 }
 
 // tpaOpenPaths are the parts of the API a TPA uses that are not about one
@@ -75,6 +64,14 @@ var outsideShellPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/presence/ping$`),
 }
 
+// partyOpenPaths: an invited party's own workspace, and the sealed offers of a
+// case (submitOffer / listOffers admit a PARTY only on a case its
+// party_accounts row names).
+var partyOpenPaths = []*regexp.Regexp{
+	regexp.MustCompile(`^/party(/|$)`),
+	regexp.MustCompile(`^/cases/[0-9a-fA-F-]{36}/offers$`),
+}
+
 func outsideOpenPaths(p principal) []*regexp.Regexp {
 	out := append([]*regexp.Regexp{}, outsideShellPaths...)
 	if hasRole(p, "TPA") {
@@ -82,6 +79,9 @@ func outsideOpenPaths(p principal) []*regexp.Regexp {
 	}
 	if hasRole(p, "HEALTH_PLAN") {
 		out = append(out, hpOpenPaths...)
+	}
+	if hasRole(p, "PARTY") {
+		out = append(out, partyOpenPaths...)
 	}
 	return out
 }
@@ -141,6 +141,10 @@ func filingDetails(details map[string]any) map[string]any {
 // Pure, so every rule above is tested without a database.
 func accessDecision(p principal, method, rel string) (decision, caseID, reason string) {
 	if isExternalOnly(p) {
+		// The federal process: a party starts its own dispute (#/new).
+		if hasRole(p, "PARTY") && method == http.MethodPost && rel == "/cases/initiate" {
+			return "allow", "", ""
+		}
 		for _, re := range outsideOpenPaths(p) {
 			if re.MatchString(rel) {
 				return "allow", "", ""
@@ -188,7 +192,9 @@ func (s *server) accessGuard(next http.Handler) http.Handler {
 				              WHERE o.tenant=$1 AND o.case_id::text=$2 AND u.user_sub=$3)
 				    OR EXISTS(SELECT 1 FROM public.case_origin o
 				              JOIN public.health_plan_users u ON u.plan_id = o.health_plan_id AND u.tenant = o.tenant
-				              WHERE o.tenant=$1 AND o.case_id::text=$2 AND u.user_sub=$3)`,
+				              WHERE o.tenant=$1 AND o.case_id::text=$2 AND u.user_sub=$3)
+				    OR EXISTS(SELECT 1 FROM public.party_accounts pa
+				              WHERE pa.tenant=$1 AND pa.case_id::text=$2 AND pa.kc_subject=$3)`,
 				tenant, caseID, p.Subject).Scan(&mine)
 			if !mine {
 				// Not found, not forbidden: an outside account must not learn which case ids exist.

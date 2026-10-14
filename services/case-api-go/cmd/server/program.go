@@ -10,6 +10,7 @@ package main
 // G6 (escalation auto-trigger), G11 (numbering).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -139,8 +140,9 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	cfg := s.loadProgram(r, tenant)
 	var label string
 	_ = s.db.QueryRow(r.Context(), `SELECT label FROM public.tenant_labels WHERE tenant=$1`, tenant).Scan(&label)
+	brand := s.tenantBrand(r.Context(), tenant)
 	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label, "features": s.tenantFeatures(r, tenant)})
+		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label, "brand_name": brand, "features": s.tenantFeatures(r, tenant)})
 		return
 	}
 	// The templates the portal offers: the standard ones as edited on the
@@ -155,7 +157,7 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isExternalOnly(p) {
 		cfg = publicProgram(cfg)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label, "features": s.tenantFeatures(r, tenant)})
+	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label, "brand_name": brand, "features": s.tenantFeatures(r, tenant)})
 }
 
 // publicProgram is what an outside filer may know about the program: how
@@ -665,4 +667,64 @@ func minI(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// defaultBrand is the platform's name where a tenant has not set its own.
+const defaultBrand = "Capitol Bridge"
+
+// tenantBrand: the name the portal shows for a tenant (tenant_labels.brand_name).
+func (s *server) tenantBrand(ctx context.Context, tenant string) string {
+	var brand string
+	_ = s.db.QueryRow(ctx, `SELECT coalesce(brand_name,'') FROM public.tenant_labels WHERE tenant=$1`, tenant).Scan(&brand)
+	if brand == "" {
+		return defaultBrand
+	}
+	return brand
+}
+
+// setTenantBrand: PUT /v1/tenants/{tenant}/program/brand {"brand_name":"Capitol Bridge"}
+// -- the program's admins (same guard as the rules). Empty resets to the default.
+func (s *server) setTenantBrand(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.rulesAdminGuard(w, r)
+	if !ok {
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var in struct {
+		Brand string `json:"brand_name"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in) != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	brand := strings.TrimSpace(in.Brand)
+	if len([]rune(brand)) > 60 {
+		http.Error(w, `{"error":"keep the brand name to 60 characters"}`, http.StatusBadRequest)
+		return
+	}
+	// The label row may not exist yet: keep the label the portal shows today.
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.tenant_labels (tenant, label, brand_name, updated_by, updated_at)
+		VALUES ($1, upper($1) || ' IDRE', NULLIF($2,''), $3, now())
+		ON CONFLICT (tenant) DO UPDATE SET brand_name=NULLIF($2,''), updated_by=$3, updated_at=now()`,
+		tenant, brand, displayName(p)); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	shown := s.tenantBrand(r.Context(), tenant)
+	s.logActivity(r.Context(), tenant, "", "TENANT_BRAND_UPDATED", fmt.Sprintf("Portal brand set to %q by %s", shown, displayName(p)))
+	s.logAudit(r.Context(), tenant, "", "TENANT_BRAND_UPDATED", map[string]any{"by": p.Subject, "brand_name": shown})
+	writeJSON(w, http.StatusOK, map[string]string{"brand_name": shown})
+}
+
+// publicBrand: GET /api/public/brand?tenant=fl -- for the public pages
+// (home, file a dispute, registration), before anyone signs in.
+func (s *server) publicBrand(w http.ResponseWriter, r *http.Request) {
+	tenant := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tenant")))
+	brand := defaultBrand
+	if tenantCodeRe.MatchString(tenant) {
+		brand = s.tenantBrand(r.Context(), tenant)
+	}
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, map[string]string{"brand_name": brand})
 }
