@@ -18,6 +18,7 @@
     <div class="tab-bar" role="tablist" aria-label="What would you like to do?">
       <button type="button" role="tab" id="tab-file" aria-controls="panel-file" aria-selected="true" data-tab="file">File a dispute</button>
       <button type="button" role="tab" id="tab-tpa" aria-controls="panel-tpa" aria-selected="false" data-tab="tpa" tabindex="-1">Register as a TPA</button>
+      <button type="button" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="false" data-tab="plan" tabindex="-1">Register as a health plan</button>
     </div>
 
     <section id="panel-file" role="tabpanel" aria-labelledby="tab-file">
@@ -69,6 +70,36 @@
     </form>
     <p class="muted tab-hint">Just need to file one dispute for your own organization?
       <a href="#file" data-goto="file">File a dispute</a> — no account needed.</p>
+    </section>
+
+    <section id="panel-plan" role="tabpanel" aria-labelledby="tab-plan" hidden>
+    <h1>Register as a health plan</h1>
+    <p class="muted">For health plans and plan administrators: answer the disputes filed against your plan,
+      and file and pay for disputes on behalf of your employer groups and delegated networks — all from the portal.</p>
+    <p class="muted">This does not file a dispute. We'll email sign-in instructions to the contact email below.
+      Disputes that name your plan with a notice address on the same email domain appear on your dashboard.</p>
+    <form id="plan-form" class="apply-form" novalidate>
+      <label>State program * <select id="p-state" required></select></label>
+      <label>Health plan name * <input id="p-name" maxlength="200" required placeholder="As it appears on EOBs" /></label>
+      <label>Line of business * <select id="p-lob" required>
+        <option value="FULLY_INSURED">Fully insured</option>
+        <option value="ASO">Self-funded (ASO)</option>
+        <option value="MEDICARE_ADVANTAGE">Medicare Advantage</option>
+        <option value="MEDICAID_MANAGED">Medicaid managed care</option></select></label>
+      <div class="grid2">
+        <label>NAIC company code <span id="p-naic-req">*</span> <input id="p-naic" inputmode="numeric" maxlength="5" placeholder="5 digits" /></label>
+        <label>FEIN * <input id="p-fein" inputmode="numeric" maxlength="10" required placeholder="9 digits" /></label>
+      </div>
+      <label>State license / certificate of authority <input id="p-license" maxlength="60" /></label>
+      <div class="grid2">
+        <label>Contact name <input id="p-contact" maxlength="120" /></label>
+        <label>Contact email * <input id="p-email" type="email" required maxlength="200" /></label>
+      </div>
+      <label>QPA methodology contact email <input id="p-qpa" type="email" maxlength="200" /></label>
+      <button class="btn solid" type="submit" id="p-submit">Register as a health plan</button>
+      <p id="p-msg" class="form-msg" role="status"></p>
+    </form>
+    <p class="muted tab-hint">Already registered? <a href="/app.html">Sign in to the portal</a>.</p>
     </section>
   </main>
 
@@ -127,7 +158,8 @@
     });
     // Two separate tasks, one visible at a time. The tab is in the URL
     // (#file / #register-tpa) so each can be linked to directly.
-    const TABS = { file: "File a dispute", tpa: "Register as a TPA" };
+    const TABS = { file: "File a dispute", tpa: "Register as a TPA", plan: "Register as a health plan" };
+    const HASH = { file: "#file", tpa: "#register-tpa", plan: "#register-plan" };
     function showTab(name, focus) {
       if (!TABS[name]) name = "file";
       for (const t of Object.keys(TABS)) {
@@ -138,14 +170,19 @@
         if (on && focus) btn.focus();
       }
       document.title = TABS[name] + " — Federal IDRE Platform";
-      const hash = name === "tpa" ? "#register-tpa" : "#file";
+      const hash = HASH[name];
       if (location.hash !== hash) history.replaceState(null, "", hash);
     }
-    const tabFromHash = () => (location.hash === "#register-tpa" || location.hash === "#tpa" ? "tpa" : "file");
+    const tabFromHash = () => (location.hash === "#register-tpa" || location.hash === "#tpa" ? "tpa"
+      : location.hash === "#register-plan" || location.hash === "#plan" ? "plan" : "file");
     document.querySelectorAll(".tab-bar [data-tab]").forEach((b) => {
       b.addEventListener("click", () => showTab(b.dataset.tab));
       b.addEventListener("keydown", (e) => {
-        if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); showTab(b.dataset.tab === "file" ? "tpa" : "file", true); }
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          const order = Object.keys(TABS), i = order.indexOf(b.dataset.tab);
+          showTab(order[(i + (e.key === "ArrowRight" ? 1 : order.length - 1)) % order.length], true);
+        }
       });
     });
     document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); showTab(a.dataset.goto, true); window.scrollTo(0, 0); }));
@@ -186,6 +223,51 @@
         msg.classList.add("err"); msg.textContent = "Network error — please try again.";
       } finally {
         btn.disabled = false; btn.textContent = "Register as a TPA";
+      }
+    });
+
+    // Health plan registration (registerHealthPlan): the login is emailed to the contact.
+    const psel = document.getElementById("p-state");
+    psel.innerHTML = sel.innerHTML;
+    if (pre) psel.value = pre.toLowerCase();
+    const lob = document.getElementById("p-lob");
+    const naicReq = () => { document.getElementById("p-naic-req").hidden = lob.value === "ASO"; };
+    lob.addEventListener("change", naicReq); naicReq();
+    document.getElementById("plan-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById("p-msg"), btn = document.getElementById("p-submit");
+      msg.className = "form-msg"; msg.textContent = "";
+      const v = (id) => document.getElementById(id).value.trim();
+      const body = {
+        tenant: psel.value, name: v("p-name"), line_of_business: lob.value,
+        naic: v("p-naic"), fein: v("p-fein").replace(/\D/g, ""), state_license: v("p-license"),
+        contact_name: v("p-contact"), contact_email: v("p-email"), qpa_contact_email: v("p-qpa"),
+      };
+      if (!body.tenant || !body.name || !body.contact_email || !body.fein) {
+        msg.classList.add("err"); msg.textContent = "State, plan name, FEIN and contact email are required."; return;
+      }
+      if (body.line_of_business !== "ASO" && !/^\d{5}$/.test(body.naic)) {
+        msg.classList.add("err"); msg.textContent = "Enter the plan's 5-digit NAIC company code (not needed for a self-funded ASO plan)."; return;
+      }
+      if (!/^\d{9}$/.test(body.fein)) { msg.classList.add("err"); msg.textContent = "The FEIN is 9 digits."; return; }
+      btn.disabled = true; btn.textContent = "Registering…";
+      try {
+        const resp = await fetch("/api/public/healthplan/register", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          msg.classList.add("ok");
+          msg.textContent = "Registered. Check your email for how to sign in — if it doesn't arrive in a few minutes, look in your spam folder.";
+          e.target.reset(); naicReq();
+        } else {
+          msg.classList.add("err");
+          msg.textContent = data.error || `Registration failed (${resp.status}).`;
+        }
+      } catch {
+        msg.classList.add("err"); msg.textContent = "Network error — please try again.";
+      } finally {
+        btn.disabled = false; btn.textContent = "Register as a health plan";
       }
     });
   </script>
