@@ -728,6 +728,19 @@ func main() {
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
 		r.Post("/hp/unlink", s.hpUnlink)                                // staff: stop acting for a plan
+		// The other side of disputes (respondents.go): plans and TPAs answer
+		// the disputes filed against them / their clients.
+		r.Get("/hp/responding", s.respondingList("plan"))
+		r.Get("/hp/responding/{caseId}", s.respondingCase("plan"))
+		r.Get("/hp/responding/{caseId}/documents/{docId}/file", s.respondingDocFile("plan"))
+		r.Post("/hp/responding/{caseId}/documents", s.respondingUpload("plan"))
+		r.Post("/hp/responding/{caseId}/submit", s.respondingSubmit("plan"))
+		r.Post("/hp/responding/{caseId}/opt-out", s.respondingOptOut)
+		r.Get("/tpa/responding", s.respondingList("tpa"))
+		r.Get("/tpa/responding/{caseId}", s.respondingCase("tpa"))
+		r.Get("/tpa/responding/{caseId}/documents/{docId}/file", s.respondingDocFile("tpa"))
+		r.Post("/tpa/responding/{caseId}/documents", s.respondingUpload("tpa"))
+		r.Post("/tpa/responding/{caseId}/submit", s.respondingSubmit("tpa"))
 		r.Get("/onboarding/reviews", s.onboardingReviews)               // documents doc-intel left for a person (both rails)
 		r.Get("/onboarding/reviews/{kind}/{docId}/file", s.onboardingReviewFile)
 		r.Post("/onboarding/reviews/{kind}/{docId}", s.onboardingReviewDecide)
@@ -789,6 +802,10 @@ func main() {
 		r.Get("/cases/{caseId}/party-accounts", s.listPartyAccounts)
 		r.Get("/party/cases", s.partyCases) // party workspace
 		r.Get("/party/cases/{caseId}", s.partyCaseDetail)
+		r.Get("/party/cases/{caseId}/respond", s.respondingCase("party")) // an invited responding party answers
+		r.Get("/party/cases/{caseId}/respond/documents/{docId}/file", s.respondingDocFile("party"))
+		r.Post("/party/cases/{caseId}/respond/documents", s.respondingUpload("party"))
+		r.Post("/party/cases/{caseId}/respond/submit", s.respondingSubmit("party"))
 		r.Get("/qa", s.qaQueue) // QA gate queue (G4)
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)

@@ -202,6 +202,9 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logCorrespondence(r, tenant, "", "OUT", "hp_welcome", subject, tpaWelcomeLogNote, []string{in.ContactEmail}, nil, "system:hp-register")
+	if n := s.linkRespondentsToPlan(r.Context(), tenant, id, in.NAIC, in.ContactEmail, in.Name); n > 0 {
+		slog.Info("new health plan linked to disputes already naming it", "plan", id, "disputes", n)
+	}
 	s.logAudit(r.Context(), tenant, "", "HEALTH_PLAN_REGISTERED", map[string]any{
 		"plan_id": id, "name": in.Name, "username": username, "user_id": userID, "credentials_emailed_to": in.ContactEmail})
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -1180,9 +1183,17 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		PackageID           string `json:"package_id"`
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		Notes               string `json:"notes"`
+		OtherPartyName      string `json:"other_party_name"`  // the provider the dispute is against
+		OtherPartyEmail     string `json:"other_party_email"` // where its notices go
+		OtherPartyNPI       string `json:"other_party_npi"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PartyID == "" {
 		http.Error(w, `{"error":"party_id required"}`, http.StatusBadRequest)
+		return
+	}
+	rsp := respondent{Side: "PROVIDER", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NPI: in.OtherPartyNPI}
+	if msg := rsp.check(); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
 	var partyName, partyType, partyStatus string
@@ -1259,6 +1270,8 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		// The checked documents belong to the dispute: put them on the case.
 		s.attachPackageDocsToCase(r, tenant, onboardingKinds["hp"], in.PackageID, caseID, "health-plan:"+org.Name)
 	}
+	s.recordRespondent(r, tenant, caseID, rsp)
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = details || jsonb_build_object('filed_by_plan', $2::text) WHERE id=$1`, sanitizeTenant(tenant)), caseID, org.Name)
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,
 		tenant, caseID, org.Name+" (on behalf of "+partyName+")")

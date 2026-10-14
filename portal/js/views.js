@@ -1089,8 +1089,11 @@ const Views = (() => {
     if (d.invoices && d.invoices.length)
       html += `<h2>Invoices</h2><table class="tbl"><thead><tr><th>Invoice</th><th>Status</th><th>Amount</th><th>Due</th></tr></thead><tbody>` +
         d.invoices.map((i) => `<tr><td class="mono">${esc(i.invoice_number || i.id)}</td><td>${badge(i.status)}</td><td>${usd(i.amount_cents)}</td><td>${fmtDate(i.due_date)}</td></tr>`).join("") + `</tbody></table>`;
+    if (d.your_party === "RESPONDING")
+      html += `<div class="card tpa-pkg" id="party-rsp-panel"><p class="muted">Loading your response…</p></div>`;
     return { html, wire: () => {
       document.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => acts[Number(b.dataset.act)][1]()));
+      if (d.your_party === "RESPONDING") respondOpen("party", caseId);
     } };
   }
 
@@ -6268,7 +6271,7 @@ const Views = (() => {
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}
+        ${tab("disputes", "Disputes", true)}${tab("against", "Against your clients", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -6281,6 +6284,13 @@ const Views = (() => {
             <div id="tpa-fees"></div>
             <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
             <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+        </section>
+
+        <section data-tpa-panel="against" style="display:none">
+          <div class="card"><h2>Disputes against your clients</h2>
+            <p class="muted">Disputes a health plan filed against a provider you represent. Open one to see what the plan submitted, add your client's documents and submit the response before the deadline.</p>
+            <div id="tpa-rsp-list"><p class="muted">Loading…</p></div></div>
+          <div class="card tpa-pkg" id="tpa-rsp-panel" style="display:none"></div>
         </section>
 
         <section data-tpa-panel="clients" style="display:none">
@@ -6318,6 +6328,9 @@ const Views = (() => {
               <select name="package_id" id="tpa-file-package"><option value="">— no package —</option></select>
               <input name="contact_name" placeholder="client contact for this dispute" />
               <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
+              <input name="other_party_name" placeholder="health plan the dispute is against" required />
+              <input name="other_party_email" type="email" placeholder="health plan's email for notices" required />
+              <input name="other_party_naic" placeholder="plan NAIC (optional)" />
               <input name="notes" placeholder="notes" />
               <button class="mini">File dispute</button></form>
             <p class="muted">The payment link and the case instructions come to your TPA email: you pay and manage documents for the client.</p>
@@ -6341,10 +6354,10 @@ const Views = (() => {
 └── CLAIM-002/
     └── merged.pdf        ← or one PDF holding all six</pre>
                 <div><p><b>disputes.csv</b> — one row per dispute:</p>
-                  <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,contact_name,notes
-CLAIM-001,Gulf Coast Clinic,1980,Dr Lee,ER visit 08/14
-CLAIM-002,Bay Imaging,2450.00,,</pre>
-                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). Up to 500 disputes per ZIP.</p>
+                  <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes
+CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14
+CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
+                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. Up to 500 disputes per ZIP.</p>
                   <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div></details>
             <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
@@ -6420,7 +6433,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes");
-      tpaClientsBox(); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
+      tpaClientsBox(); tpaDashBox(); tpaFeesBox(); respondListBox("tpa"); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
       if (/[?&]paid=/.test(location.hash)) UI.toast("Payment sent — your disputes open as soon as the payment is confirmed (usually within a minute).");
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
@@ -6605,10 +6618,23 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
     if (!can("HEALTH_PLAN", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
       return `<div class="view-head"><h1>Health plans</h1></div><p class="muted">Requires a HEALTH_PLAN, CASE_MANAGER, or FINANCE account.</p>`;
     afterRender(hpBoot);
+    const staff = can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const tab = (k, label, ws) => `<button type="button" role="tab" class="rpt-tab rpt-accent-4${ws ? " hp-ws" : ""}" data-tab="${k}" onclick="Views.hpTab('${k}')"${ws ? ' style="display:none"' : ""}>${label} <span class="tab-count" id="hp-tc-${k}"></span></button>`;
     return `<div class="view-head"><h1>Health plans</h1>
-      <span class="muted">Submit and track disputes on behalf of your employer groups, delegated networks, and facilities</span></div>
+      <span class="muted">Answer the disputes filed against your plan, and file disputes for your employer groups, networks and facilities</span></div>
       <div id="hp-org"></div>
+      <div class="rpt-tabs" role="tablist" id="hp-tabs">
+        ${tab("against", "Disputes against us", true)}${tab("parties", "Your parties", true)}${tab("file", "File a dispute", true)}
+        ${staff ? tab("oversight", "All plans", false) + tab("reviews", "Documents to review", false) : ""}
+      </div>
       <div id="hp-body" style="display:none">
+        <section data-hp-panel="against">
+          <div class="card"><h2>Disputes against your plan</h2>
+            <p class="muted">Every dispute a provider (or its TPA) filed against your plan. Open one to see what was submitted, add your documents — your QPA methodology, the EOB, the contract — and submit your response before the deadline.</p>
+            <div id="hp-rsp-list"><p class="muted">Loading…</p></div></div>
+          <div class="card tpa-pkg" id="hp-rsp-panel" style="display:none"></div>
+        </section>
+        <section data-hp-panel="parties" style="display:none">
         <div class="card"><h2>Parties you submit for</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpAddPartyFn(this)">
             <input name="party_name" placeholder="party organization name" required />
@@ -6633,20 +6659,41 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
           <div id="hp-zip-result"></div></div>
         <div class="card" id="hp-pkg-card" style="display:none"><h2>Package — slot verdicts</h2>
           <div id="hp-pkg"></div></div>
+        </section>
+        <section data-hp-panel="file" style="display:none">
         <div class="card"><h2>Submit a dispute on behalf of a party</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpFileFn(this)">
             <select name="party_id" id="hp-file-party" required onchange="Views.filingPackagesFilter('hp-file-party','hp-file-package','party')"></select>
             <select name="package_id" id="hp-file-package"><option value="">— no package —</option></select>
             <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
+            <input name="other_party_name" placeholder="provider the dispute is against" required />
+            <input name="other_party_email" type="email" placeholder="provider's email for notices" required />
+            <input name="other_party_npi" placeholder="provider NPI (optional)" />
             <input name="notes" placeholder="notes" />
             <button class="mini">Submit dispute</button></form>
           <p class="muted">The payment link and case instructions come to your plan contact — you pay and manage documents on behalf of the party.</p>
           <div id="hp-file-result"></div></div>
+        </section>
       </div>
-      ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `
-      <div class="card"><h2>State oversight — all health plans</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div>
-      <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>` : ""}`;
+      ${staff ? `
+      <section data-hp-panel="oversight" style="display:none">
+        <div class="card"><h2>All health plans in this program</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div></section>
+      <section data-hp-panel="reviews" style="display:none">
+        <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}`;
   }
+
+  function hpTab(k) {
+    const btn = document.querySelector(`#hp-tabs [data-tab="${k}"]`);
+    if (!btn || btn.style.display === "none") return;
+    try { localStorage.setItem("idre.hpTab", k); } catch { /* private window */ }
+    document.querySelectorAll("#hp-tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === k));
+    document.querySelectorAll("[data-hp-panel]").forEach((p) => { p.style.display = p.dataset.hpPanel === k ? "" : "none"; });
+  }
+  function hpTabCount(k, text) {
+    const el = document.getElementById("hp-tc-" + k);
+    if (el) el.textContent = text ? String(text) : "";
+  }
+
 
   async function hpBoot() {
     const orgBox = document.getElementById("hp-org");
@@ -6656,14 +6703,20 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
         <div class="muted">${esc(r.health_plan.contact_email)} · ${r.health_plan.naic ? "NAIC " + esc(r.health_plan.naic) + " · " : ""}${esc(r.health_plan.line_of_business || "")} ${badge(r.health_plan.status)}</div>
         ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") && !can("HEALTH_PLAN") ? `<button class="mini" style="margin-top:8px" onclick="Views.hpUnlinkFn()">Stop acting as this plan</button>` : ""}</div></div>`;
       document.getElementById("hp-body").style.display = "";
-      hpOnboardingBox();
+      document.querySelectorAll("#hp-tabs .hp-ws").forEach((b) => { b.style.display = ""; });
+      let saved = ""; try { saved = localStorage.getItem("idre.hpTab") || ""; } catch { /* private window */ }
+      hpTab(saved && document.querySelector(`#hp-tabs [data-tab="${saved}"]`) ? saved : "against");
+      hpOnboardingBox(); respondListBox("hp");
     } catch (e) {
       orgBox.innerHTML = `<div class="card"><h2>Link your health plan organization</h2>
         <p class="muted">Enter the one-time claim code from your health plan registration.</p>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.hpClaimFn(this)">
           <input name="code" placeholder="HP-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
-    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) { hpAdminBox(); onboardingReviewsBox("hp-reviews", "hp"); }
+    if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+      hpAdminBox(); onboardingReviewsBox("hp-reviews", "hp");
+      if (document.getElementById("hp-body").style.display === "none") hpTab("oversight");  // not acting for a plan
+    }
   }
 
   async function hpClaimFn(form) {
@@ -6839,6 +6892,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
       const r = await Api.program.hpIntake({
         party_id: form.party_id.value, package_id: form.package_id ? form.package_id.value : "",
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
+        other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_npi: form.other_party_npi.value,
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.party)}</b>. ${r.payment_required ? "Payment link sent to your plan email." : ""}</p>`;
       form.reset(); hpOnboardingBox();
@@ -6910,6 +6964,7 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
         client_id: form.client_id.value, package_id: form.package_id ? form.package_id.value : "",
         contact_name: form.contact_name.value,
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
+        other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_naic: form.other_party_naic.value,
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? "Payment link sent to your TPA email." : ""}</p>`;
       // A filed package leaves the board and the "file with" list.
@@ -7081,14 +7136,14 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
     out.innerHTML = '<p class="muted">Uploading and reading the ZIP…</p>';
     try {
       const r = await Api.program.tpaBulkDisputes(form.batch_ref.value.trim(), form.file.files[0]);
-      if (r.idempotent_replay) { out.innerHTML = `<p class="muted">${esc(r.note)}</p>`; tpaBdReport(r.batch_id); return; }
+      if (r.idempotent_replay) { out.innerHTML = `<p class="muted">${esc(r.note)}</p>`; tpaBdToggle(r.batch_id, true); return; }
       out.innerHTML = `<p>${r.waiting_for_documents} dispute(s) accepted and waiting for their documents to be checked${r.refused ? `, <b>${r.refused} refused</b>` : ""}.</p>
         <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Documents</th><th>Result</th></tr></thead><tbody>
         ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.dispute_ref)}</td><td>${esc(x.party)}</td>
           <td>${x.mode ? esc(x.mode === "MERGED" ? "merged PDF" : (x.attached || []).length + " of 6 files") : "—"}</td>
           <td>${x.status === "WAITING_DOCS" ? '<span class="badge s-validating">Checking documents</span>' : '<span class="badge s-rejected">Refused</span>'}${(x.errors || []).length ? `<br><span class="muted">${(x.errors || []).map(esc).join("<br>")}</span>` : ""}</td></tr>`).join("")}
         </tbody></table>`;
-      form.reset(); tpaBdBatchesBox(); tpaBdReport(r.batch_id);
+      form.reset(); await tpaBdBatchesBox(); tpaBdToggle(r.batch_id, true);
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
     finally { btn.disabled = false; }
   }
@@ -7098,13 +7153,23 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
     try {
       const bs = (await Api.program.tpaBulkDisputeBatches()).batches || [];
       tpaTabCount("bulk", bs.reduce((n, b) => n + Number(b.waiting || 0), 0) || "");
-      box.innerHTML = bs.length ? `<table class="tbl"><thead><tr><th>Batch</th><th>Uploaded</th><th>Disputes</th><th>Filed</th><th>Waiting</th><th>Refused</th><th>Fees unpaid</th><th></th></tr></thead><tbody>
-        ${bs.map((b) => `<tr><td class="mono">${esc(b.batch_ref)}</td><td>${esc(String(b.created_at || "").slice(0, 16))}</td>
+      box.innerHTML = bs.length ? `<p class="muted">Click a filing to see its disputes.</p><table class="tbl bd-batches"><thead><tr><th>Batch</th><th>Uploaded</th><th>Disputes</th><th>Filed</th><th>Waiting</th><th>Refused</th><th>Fees unpaid</th><th></th></tr></thead><tbody>
+        ${bs.map((b) => `<tr class="bd-row" tabindex="0" onclick="Views.tpaBdToggle('${b.id}')" onkeydown="if(event.key==='Enter')Views.tpaBdToggle('${b.id}')">
+          <td class="mono">${esc(b.batch_ref)}</td><td>${esc(String(b.created_at || "").slice(0, 16))}</td>
           <td>${b.rows}</td><td>${b.filed}</td><td>${b.waiting}</td><td>${b.refused ? `<span class="badge warn">${b.refused}</span>` : "0"}</td>
           <td>${Number(b.unpaid) ? `${b.unpaid} · ${usdC(b.unpaid_cents)}` : '<span class="muted">—</span>'}</td>
-          <td><button class="mini" onclick="Views.tpaBdReport('${b.id}')">Report</button></td></tr>`).join("")}</tbody></table>`
+          <td><span class="bd-chevron" id="bd-chev-${b.id}">▸</span></td></tr>
+          <tr id="bd-detail-${b.id}" class="row-detail" style="display:none"><td colspan="8"><div id="bd-report-${b.id}"></div></td></tr>`).join("")}</tbody></table>`
         : '<p class="muted">No bulk filings yet — upload a disputes ZIP above.</p>';
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  function tpaBdToggle(batchId, forceOpen) {
+    const row = document.getElementById(`bd-detail-${batchId}`), chev = document.getElementById(`bd-chev-${batchId}`);
+    if (!row) return;
+    const open = forceOpen || row.style.display === "none";
+    row.style.display = open ? "" : "none";
+    if (chev) chev.textContent = open ? "▾" : "▸";
+    if (open) tpaBdReport(batchId);
   }
   // A bulk row's state, in words: filed, refused, or waiting on its documents.
   function bdStatus(x) {
@@ -7142,8 +7207,8 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
         .filter((c) => c.status === "ACTIVE" && ["READY", "DOCS_PENDING"].includes(c.onboarding_status));
       if (!cs.length) { UI.toast("No client is ready yet: finish a client's profile and payment method in the Clients tab first.", { kind: "warn" }); return; }
       const q = (v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
-      const csv = "dispute_ref,party_name,disputed_amount,contact_name,notes\n" +
-        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.party_name), "", "", ""].join(",")).join("\n") + "\n";
+      const csv = "dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes\n" +
+        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.party_name), "", "", "", "", "", ""].join(",")).join("\n") + "\n";
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
       a.download = "disputes.csv"; document.body.appendChild(a); a.click(); a.remove();
@@ -7159,29 +7224,152 @@ CLAIM-002,Bay Imaging,2450.00,,</pre>
       window.location.assign(r.checkout_url);
     } catch (e) { btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
   }
+  // Eligibility as decided by the Reviewer (eligibility_reviews), in words.
+  const ELIG = { ELIGIBLE: ["filed", "Eligible"], INELIGIBLE: ["rejected", "Not eligible"], HOLD_AOR: ["needs-review", "On hold — authorization (AOR)"] };
+  const eligBadge = (x) => {
+    if (x.eligibility) { const [cls, t] = ELIG[x.eligibility] || ["", x.eligibility]; return `<span class="badge s-${cls}">${esc(t)}</span>`; }
+    return x.status === "FILED" ? '<span class="muted">Not decided yet</span>' : '<span class="muted">—</span>';
+  };
+  const SLOT_LABEL = { EOB: "EOB", ITEMIZED_BILL: "Itemized bill", PROOF_OF_COVERAGE: "Proof of coverage", OPEN_NEGOTIATION_NOTICE: "Open negotiation notice", OFFER_SUBSTANTIATION: "Offer substantiation", IDRE_ATTESTATION: "Attestation" };
+  const DOC_VERDICT = { ACCEPTED: ["filed", "Accepted"], NEEDS_REVIEW: ["needs-review", "Waiting for review"], REJECTED: ["rejected", "Rejected"], PENDING: ["validating", "Checking"], ANALYZING: ["validating", "Checking"] };
+  // The other side's response, as the filer reads it.
+  const theirResponse = (st) => ({ AWAITING: '<span class="badge s-validating">No response yet</span>', SUBMITTED: '<span class="badge s-filed">Responded</span>',
+    OPT_OUT_REQUESTED: '<span class="badge s-needs-review">Asked to opt out</span>' }[st] || esc(st));
   async function tpaBdReport(batchId) {
-    const box = document.getElementById("tpa-bd-report");
+    const box = document.getElementById(`bd-report-${batchId}`) || document.getElementById("tpa-bd-report");
     if (!box) return;
+    box.innerHTML = '<p class="muted">Loading…</p>';
     try {
       const items = (await Api.program.tpaBulkDisputeBatch(batchId)).items || [];
       const docs = (x) => !x.package_id ? "—" : `${x.accepted} of 6 accepted${x.needs_review ? ` · ${x.needs_review} need review` : ""}${x.rejected ? ` · <b>${x.rejected} rejected</b>` : ""}`;
       const unpaid = items.filter((x) => x.status === "FILED" && x.fee_status === "OPEN");
       const due = unpaid.reduce((n, x) => n + Number(x.fee_cents || 0), 0);
       const paid = items.filter((x) => x.fee_status === "PAID").length;
-      box.innerHTML = `<p style="margin-top:12px"><b>Report</b> <button class="mini" onclick="Views.tpaBdReport('${batchId}')">Refresh</button></p>
+      const counts = { ELIGIBLE: 0, INELIGIBLE: 0, HOLD_AOR: 0, none: 0 };
+      items.filter((x) => x.status === "FILED").forEach((x) => { counts[x.eligibility || "none"] = (counts[x.eligibility || "none"] || 0) + 1; });
+      const detail = (x) => `<div class="bd-item">
+          <div><h4>Documents</h4>${(x.docs || []).length ? `<ul class="bd-docs">${x.docs.map((d) => { const [cls, t] = DOC_VERDICT[d.status] || ["", d.status]; return `<li>${esc(SLOT_LABEL[d.slot] || d.slot)} <span class="badge s-${cls}">${esc(t)}</span></li>`; }).join("")}</ul>` : '<p class="muted">None.</p>'}
+            ${x.package_id && x.status !== "FILED" ? `<button class="mini" onclick="Views.tpaPackageBox('${x.package_id}')">Open the documents</button>` : ""}</div>
+          <div><h4>Eligibility</h4>${eligBadge(x)}${x.eligibility_override ? ' <span class="muted">(override)</span>' : ""}
+            ${x.eligibility_reason ? `<p>${esc(x.eligibility_reason)}</p>` : ""}${x.eligibility_at ? `<p class="muted">Decided ${fmtDate(x.eligibility_at)}</p>` : ""}
+            ${!x.eligibility && x.status === "FILED" ? `<p class="muted">The reviewer decides eligibility once the dispute is open (its fee paid).</p>` : ""}</div>
+          <div><h4>Case</h4>${x.case_number ? `<p><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a> · ${esc(x.internal_status || x.case_status)}</p>` : '<p class="muted">Not filed yet.</p>'}
+            <h4>Against</h4><p>${esc(x.other_party || "—")}${x.response_status ? ` · ${theirResponse(x.response_status)}` : ""}</p>
+            ${x.notes ? `<p class="muted">${esc(x.notes)}</p>` : ""}${x.error ? `<p class="error">${esc(x.error)}</p>` : ""}</div></div>`;
+      box.innerHTML = `
         ${unpaid.length ? `<div class="tpa-paybar"><div><b>${unpaid.length} filed dispute${unpaid.length === 1 ? "" : "s"} waiting for their fee — ${usdC(due)}</b>
-            <div class="muted">One payment covers all of them. Each dispute opens, with its case number and document link, once paid. Disputes filed later in this batch are paid for separately.</div></div>
+            <div class="muted">One payment covers all of them. Each dispute opens, with its case number and document link, once paid.</div></div>
             <button onclick="Views.tpaBdPay('${batchId}', this)">Pay ${usdC(due)} for ${unpaid.length} dispute${unpaid.length === 1 ? "" : "s"}</button></div>`
           : paid ? `<p class="ok">Every filed dispute in this batch is paid.</p>` : ""}
-        <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Amount</th><th>Documents</th><th>Status</th><th>Fee</th><th>Case</th></tr></thead><tbody>
-        ${items.map((x) => `<tr><td>${x.row_no}</td><td>${esc(String(x.dispute_ref).replace(/ \(row \d+\)$/, ""))}</td><td>${esc(x.party || "—")}</td>
-          <td>${x.disputed_amount_cents ? "$" + (x.disputed_amount_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }) : "—"}</td>
-          <td>${docs(x)}${x.package_id && x.status !== "FILED" ? ` <button class="mini" onclick="Views.tpaPackageBox('${x.package_id}')">Open package</button>` : ""}</td>
-          <td>${bdStatus(x)}${x.error ? `<br><span class="muted">${esc(x.error)}</span>` : ""}</td>
+        <p class="muted">Eligibility of the filed disputes: ${counts.ELIGIBLE} eligible · ${counts.INELIGIBLE} not eligible${counts.HOLD_AOR ? ` · ${counts.HOLD_AOR} on hold` : ""} · ${counts.none} not decided yet. Click a dispute for its details.
+          <button class="mini" onclick="Views.tpaBdReport('${batchId}')">Refresh</button></p>
+        <div class="bd-wrap"><table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Against</th><th>Amount</th><th>Documents</th><th>Eligibility</th><th>Status</th><th>Fee</th><th>Case</th></tr></thead><tbody>
+        ${items.map((x, n) => `<tr class="bd-row" tabindex="0" onclick="Views.tpaBdItem('${batchId}',${n})" onkeydown="if(event.key==='Enter')Views.tpaBdItem('${batchId}',${n})">
+          <td>${x.row_no}</td><td>${esc(String(x.dispute_ref).replace(/ \(row \d+\)$/, ""))}</td><td>${esc(x.party || "—")}</td><td>${esc(x.other_party || "—")}</td>
+          <td>${x.disputed_amount_cents ? usdC(x.disputed_amount_cents) : "—"}</td>
+          <td>${docs(x)}</td><td>${eligBadge(x)}</td>
+          <td>${bdStatus(x)}${x.status === "ERROR" && x.error ? `<br><span class="muted">${esc(x.error)}</span>` : ""}</td>
           <td>${x.fee_status === "PAID" ? '<span class="badge s-filed">Paid</span>' : x.fee_status === "OPEN" ? '<span class="badge s-needs-review">Unpaid</span>' : '<span class="muted">—</span>'}</td>
-          <td>${x.case_number ? `<a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a>` : "—"}</td></tr>`).join("")}
-        </tbody></table>`;
+          <td>${x.case_number ? `<a href="#/cases/${esc(x.case_id)}" onclick="event.stopPropagation()">${esc(x.case_number)}</a>` : "—"}</td></tr>
+          <tr id="bd-item-${batchId}-${n}" class="row-detail" style="display:none"><td colspan="10">${detail(x)}</td></tr>`).join("")}
+        </tbody></table></div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  function tpaBdItem(batchId, n) {
+    const row = document.getElementById(`bd-item-${batchId}-${n}`);
+    if (row) row.style.display = row.style.display === "none" ? "" : "none";
+  }
+
+  // ---- The other side of a dispute (respondents.go) ----
+  // k: "hp" (a health plan answering disputes against it), "tpa" (a TPA
+  // answering for its clients) or "party" (an invited responding party).
+  const RSP_STATUS = { AWAITING: ["needs-review", "Waiting for your response"], SUBMITTED: ["filed", "Response submitted"], OPT_OUT_REQUESTED: ["validating", "Opt-out requested"] };
+  const rspBadge = (st) => { const [cls, label] = RSP_STATUS[st] || ["", st || "—"]; return `<span class="badge s-${cls}">${esc(label)}</span>`; };
+  const daysLeft = (iso) => {
+    if (!iso) return '<span class="muted">—</span>';
+    const d = Math.ceil((new Date(iso + "T23:59:59") - new Date()) / 864e5);
+    return `${fmtDate(iso)}<br><span class="${d < 0 ? "error" : d <= 3 ? "warn" : "muted"}">${d < 0 ? `${-d} day${d === -1 ? "" : "s"} late` : d === 0 ? "due today" : `${d} day${d === 1 ? "" : "s"} left`}</span>`;
+  };
+  function prettyDocName(fn) {
+    const m = /^([a-z][a-z ]+) — (.*)$/i.exec(fn || "");
+    if (!m) return fn || "document";
+    const label = m[1].toLowerCase() === "eob" ? "EOB" : m[1][0].toUpperCase() + m[1].slice(1);
+    const rest = m[2], slug = m[1].toLowerCase().replace(/ /g, "_");
+    if (rest.toLowerCase().startsWith(slug)) {
+      const pages = /\(pages [^)]*\)/.exec(rest);
+      return pages ? `${label} ${pages[0]}` : (rest.toLowerCase() === slug + ".pdf" ? label : `${label} · ${rest}`);
+    }
+    return `${label} · ${rest}`;
+  }
+  async function respondListBox(k) {
+    const box = document.getElementById(`${k}-rsp-list`);
+    if (!box) return;
+    try {
+      const rows = (await Api.program.respondList(k)).cases || [];
+      const waiting = rows.filter((x) => x.response_status === "AWAITING").length;
+      if (k === "tpa") tpaTabCount("against", waiting || "");
+      if (k === "hp") hpTabCount("against", waiting || "");
+      box.innerHTML = rows.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Filed by</th>${k === "tpa" ? "<th>Your client</th>" : ""}<th>Disputed</th><th>Response due</th><th>Status</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td class="mono">${esc(x.case_number)}<br><span class="muted">${esc(x.internal_status || x.status)}</span></td>
+          <td>${esc(x.initiating_party || "—")}${x.filed_by ? `<br><span class="muted">filed by ${esc(x.filed_by)}</span>` : ""}</td>
+          ${k === "tpa" ? `<td>${esc(x.your_client || "—")}</td>` : ""}
+          <td>${usdC(x.disputed_amount_cents)}</td><td>${x.response_status !== "AWAITING" ? '<span class="muted">—</span>' : x.response_due ? daysLeft(x.response_due) : '<span class="muted">15 days from the plan notification</span>'}</td>
+          <td>${rspBadge(x.response_status)}</td>
+          <td><button class="mini" onclick="Views.respondOpen('${k}','${x.case_id}')">${x.response_status === "AWAITING" ? "Respond" : "Open"}</button></td></tr>`).join("")}</tbody></table>`
+        : `<p class="muted">No disputes against ${k === "tpa" ? "your clients" : "you"} right now. When one is filed and its fee paid, it appears here with its response deadline.</p>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function respondOpen(k, caseId) {
+    const panel = document.getElementById(`${k}-rsp-panel`);
+    if (!panel) return;
+    panel.style.display = "";
+    try {
+      const d = await Api.program.respondGet(k, caseId);
+      const c = d.case || {};
+      const theirs = (d.documents || []).filter((x) => !x.yours), ours = (d.documents || []).filter((x) => x.yours);
+      const docRows = (list) => list.length ? `<ul class="rsp-docs">${list.map((x) => `<li><button type="button" class="linkish" onclick="Views.respondDocOpen('${k}','${caseId}','${x.id}')">${esc(prettyDocName(x.filename))}</button> <span class="muted">${fmtDate(x.created_at)}</span></li>`).join("")}</ul>` : '<p class="muted">None yet.</p>';
+      const open = c.response_status === "AWAITING";
+      panel.innerHTML = `<div class="tpa-pkg-head"><h2>${esc(c.case_number)} — ${esc(c.initiating_party || "")} vs ${esc(c.respondent || "")}</h2>
+          <button class="mini" onclick="document.getElementById('${k}-rsp-panel').style.display='none'">Close</button></div>
+        <p>${rspBadge(c.response_status)} · disputed ${usdC(c.disputed_amount_cents)}${c.disputed_issue ? ` · ${esc(c.disputed_issue)}` : ""}${open && c.response_due ? ` · response due ${fmtDate(c.response_due)}` : ""}${c.filed_by ? ` · filed by ${esc(c.filed_by)}` : ""}</p>
+        <div class="rsp-grid"><div><h3>What the filer submitted</h3>${docRows(theirs)}</div>
+          <div><h3>Your response documents</h3>${docRows(ours)}
+          ${open ? `<form class="inline-form" style="padding-left:0" onsubmit="event.preventDefault(); Views.respondUploadFn(this,'${k}','${caseId}')">
+              <input name="file" type="file" required /><button class="mini">Add document</button></form>` : ""}</div></div>
+        ${open ? `<form class="rsp-submit" onsubmit="event.preventDefault(); Views.respondSubmitFn(this,'${k}','${caseId}')">
+            <label>Your response (optional when you added documents)<textarea name="note" rows="3" placeholder="e.g. QPA methodology attached; the claim was paid at the median contracted rate."></textarea></label>
+            <div class="rsp-actions"><button>Submit response</button>
+              ${k === "hp" ? `<button type="button" class="mini" onclick="Views.respondOptOutFn('${caseId}')">Ask to opt out</button>` : ""}</div>
+            <p class="muted">Submitting counts as your response straight away; the reviewer is told and the case moves on.</p></form>`
+          : `<p class="muted">${c.response_status === "SUBMITTED" ? `Submitted ${fmtDate(c.responded_at)}.` : `Opt-out requested ${fmtDate(c.responded_at)} — the attorney decides.`}${c.response_note ? ` “${esc(c.response_note)}”` : ""}</p>`}`;
+      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) { panel.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function respondDocOpen(k, caseId, docId) {
+    try {
+      const url = await Api.program.respondFile(k, caseId, docId);
+      await UI.modal({ title: "Document", wide: true, submitLabel: "Close",
+        body: `<iframe class="onb-doc" src="${url}" title="Document"></iframe><p class="muted"><a href="${url}" download="document.pdf">Download</a></p>` });
+      URL.revokeObjectURL(url);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function respondUploadFn(form, k, caseId) {
+    try { await Api.program.respondUpload(k, caseId, form.file.files[0]); UI.toast("Document added"); respondOpen(k, caseId); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function respondSubmitFn(form, k, caseId) {
+    if (!(await UI.confirm("Submit your response?", "It counts as your response straight away; you can't change it afterwards.", "Submit"))) return;
+    try {
+      const r = await Api.program.respondSubmit(k, caseId, form.note.value.trim());
+      UI.toast(r.workflow_signalled === false ? "Response recorded — the reviewer will move the case on." : "Response submitted");
+      respondOpen(k, caseId); if (k !== "party") respondListBox(k);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function respondOptOutFn(caseId) {
+    const reason = (prompt("Why does the plan ask to opt out? The attorney decides.") || "").trim();
+    if (!reason) return;
+    try { await Api.program.respondOptOut(caseId, reason); UI.toast("Opt-out requested — the attorney decides"); respondOpen("hp", caseId); respondListBox("hp"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaAdminBox() {
@@ -7832,5 +8020,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem };
 })();

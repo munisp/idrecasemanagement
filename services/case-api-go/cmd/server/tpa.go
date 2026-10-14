@@ -471,9 +471,17 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		ContactName         string `json:"contact_name"` // client's contact for the dispute
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		Notes               string `json:"notes"`
+		OtherPartyName      string `json:"other_party_name"`  // the health plan the dispute is against
+		OtherPartyEmail     string `json:"other_party_email"` // where its notices go
+		OtherPartyNAIC      string `json:"other_party_naic"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.ClientID == "" {
 		http.Error(w, `{"error":"client_id required"}`, http.StatusBadRequest)
+		return
+	}
+	rsp := respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC}
+	if msg := rsp.check(); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
 	var partyName, partyType, clientEmail, clientStatus string
@@ -527,6 +535,9 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	caseID, caseNumber, st, err := s.fileTPADispute(r, tenant, org, in.ClientID, partyName, partyType, in.PackageID, in.ContactName, in.Notes, in.DisputedAmountCents)
+	if err == nil {
+		s.recordRespondent(r, tenant, caseID, rsp)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, errNotProgrammed):

@@ -385,6 +385,16 @@ const Api = (() => {
       tpaBulkDisputeBatch: (id) => req("GET", `${t()}/tpa/disputes/bulk/${id}`),
       tpaBulkCheckout: (id) => req("POST", `${t()}/tpa/disputes/bulk/${id}/checkout`, {}),
       tpaFees: () => req("GET", `${t()}/tpa/fees`),
+      // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
+      respondList: (k) => req("GET", `${t()}/${k}/responding`),
+      respondGet: (k, id) => req("GET", k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`),
+      respondFile: (k, id, doc) => blobURL((k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + `/documents/${doc}/file`),
+      respondUpload: (k, id, file) => {
+        const fd = new FormData(); fd.append("file", file);
+        return req("POST", (k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + "/documents", fd, true);
+      },
+      respondSubmit: (k, id, note) => req("POST", (k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + "/submit", { note }),
+      respondOptOut: (id, reason) => req("POST", `${t()}/hp/responding/${id}/opt-out`, { reason }),
       tpaFeesCheckout: () => req("POST", `${t()}/tpa/fees/checkout`, {}),
       healthPlanRegister: (body) => req("POST", "/api/public/healthplan/register", body),
       hpClaim: (code) => req("POST", `${t()}/hp/claim`, { code }),

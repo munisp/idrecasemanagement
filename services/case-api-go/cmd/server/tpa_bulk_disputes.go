@@ -366,9 +366,9 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 	for i, h := range records[0] {
 		col[strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h, "\uFEFF")))] = i
 	}
-	for _, need := range []string{"dispute_ref", "party_name", "disputed_amount"} {
+	for _, need := range []string{"dispute_ref", "party_name", "disputed_amount", "other_party_name", "other_party_email"} {
 		if _, ok := col[need]; !ok {
-			http.Error(w, fmt.Sprintf(`{"error":"disputes.csv must have the columns dispute_ref, party_name, disputed_amount (missing %s); contact_name and notes are optional"}`, need), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf(`{"error":"disputes.csv must have the columns dispute_ref, party_name, disputed_amount, other_party_name, other_party_email (missing %s); other_party_naic, contact_name and notes are optional"}`, need), http.StatusBadRequest)
 			return
 		}
 	}
@@ -413,6 +413,11 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 		amount, ok := parseDollars(get(rec, "disputed_amount"))
 		if !ok {
 			fail("disputed_amount must be a positive dollar amount")
+			continue
+		}
+		other := respondent{Side: "HEALTH_PLAN", Name: get(rec, "other_party_name"), Email: get(rec, "other_party_email"), NAIC: get(rec, "other_party_naic")}
+		if msg := other.check(); msg != "" {
+			fail(msg)
 			continue
 		}
 		var clientID, cstatus string
@@ -462,10 +467,11 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := s.db.Exec(r.Context(), `
 			INSERT INTO public.tpa_dispute_batch_items
-			  (tenant, batch_id, row_no, dispute_ref, client_id, package_id, disputed_amount_cents, contact_name, notes)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''))`,
+			  (tenant, batch_id, row_no, dispute_ref, client_id, package_id, disputed_amount_cents, contact_name, notes,
+			   other_party_name, other_party_email, other_party_naic)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$10,$11,NULLIF($12,''))`,
 			tenant, batchID, row.Row, row.DisputeRef, clientID, row.PackageID, amount,
-			get(rec, "contact_name"), get(rec, "notes")); err != nil {
+			get(rec, "contact_name"), get(rec, "notes"), other.Name, other.Email, other.NAIC); err != nil {
 			fail("could not record the dispute")
 			continue
 		}
@@ -530,8 +536,15 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
 		return
 	}
-	rows, err := s.queryRows(r, `
+	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT i.row_no, i.dispute_ref, coalesce(c.party_name,'') AS party, i.status, coalesce(i.error,'') AS error,
+		       coalesce(i.notes,'') AS notes,
+		       coalesce(rs.name, i.other_party_name, '') AS other_party, coalesce(rs.response_status,'') AS response_status,
+		       coalesce(cs.status,'') AS case_status, coalesce(cs.internal_status,'') AS internal_status,
+		       coalesce(el.result,'') AS eligibility, coalesce(el.reason,'') AS eligibility_reason,
+		       coalesce(el.created_at::text,'') AS eligibility_at, coalesce(el.override,false) AS eligibility_override,
+		       (SELECT coalesce(json_agg(json_build_object('slot', d.slot, 'status', d.status, 'filename', coalesce(d.filename,'')) ORDER BY d.slot), '[]'::json)
+		          FROM public.tpa_package_docs d WHERE d.package_id=i.package_id) AS docs,
 		       i.disputed_amount_cents, coalesce(i.package_id::text,'') AS package_id, coalesce(pk.mode,'') AS mode,
 		       coalesce(pk.status,'') AS package_status,
 		       (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=i.package_id AND d.status='ACCEPTED') AS accepted,
@@ -545,8 +558,12 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		JOIN public.tpa_dispute_batches b ON b.id=i.batch_id
 		LEFT JOIN public.tpa_clients c ON c.id=i.client_id
 		LEFT JOIN public.tpa_packages pk ON pk.id=i.package_id
+		LEFT JOIN tenant_%s.cases cs ON cs.id::text=i.case_id
+		LEFT JOIN public.case_respondents rs ON rs.tenant=i.tenant AND rs.case_id=i.case_id
+		LEFT JOIN LATERAL (SELECT e.result, e.reason, e.created_at, e.override FROM public.eligibility_reviews e
+		                   WHERE e.tenant=i.tenant AND e.case_id=i.case_id ORDER BY e.created_at DESC LIMIT 1) el ON true
 		WHERE i.tenant=$1 AND b.tpa_id=$2 AND b.id::text=$3
-		ORDER BY i.row_no`, tenant, org.ID, chi.URLParam(r, "batchId"))
+		ORDER BY i.row_no`, sanitizeTenant(tenant)), tenant, org.ID, chi.URLParam(r, "batchId"))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -596,18 +613,20 @@ func (s *server) fileReadyBulkDisputes() int {
 	type batchKey struct{ tenant, batch string }
 	filedIn := map[batchKey][]string{}
 	for _, id := range ids {
-		var tenant, tpaID, clientID, pkgID, contact, notes, batchID string
+		var tenant, tpaID, clientID, pkgID, contact, notes, batchID, oName, oEmail, oNAIC string
 		var amount int64
 		if err := s.db.QueryRow(ctx, `
 			UPDATE public.tpa_dispute_batch_items i SET status='FILING'
 			FROM public.tpa_dispute_batches b
 			WHERE i.id::text=$1 AND i.status='WAITING_DOCS' AND b.id=i.batch_id
 			RETURNING i.tenant, b.tpa_id::text, i.client_id::text, i.package_id::text, i.disputed_amount_cents,
-			          coalesce(i.contact_name,''), coalesce(i.notes,''), i.batch_id::text`, id).
-			Scan(&tenant, &tpaID, &clientID, &pkgID, &amount, &contact, &notes, &batchID); err != nil {
+			          coalesce(i.contact_name,''), coalesce(i.notes,''), i.batch_id::text,
+			          coalesce(i.other_party_name,''), coalesce(i.other_party_email,''), coalesce(i.other_party_naic,'')`, id).
+			Scan(&tenant, &tpaID, &clientID, &pkgID, &amount, &contact, &notes, &batchID, &oName, &oEmail, &oNAIC); err != nil {
 			continue // another replica claimed it
 		}
-		caseNumber, ferr := s.fileOneBulkDispute(ctx, tenant, tpaID, clientID, pkgID, contact, notes, amount)
+		caseNumber, ferr := s.fileOneBulkDispute(ctx, tenant, tpaID, clientID, pkgID, contact, notes, amount,
+			respondent{Side: "HEALTH_PLAN", Name: oName, Email: oEmail, NAIC: oNAIC})
 		if ferr != nil {
 			_, _ = s.db.Exec(ctx, `UPDATE public.tpa_dispute_batch_items SET status='ERROR', error=$2 WHERE id::text=$1`, id, ferr.Error())
 			slog.Error("bulk dispute filing failed", "item", id, "err", ferr)
@@ -630,7 +649,7 @@ func (s *server) fileReadyBulkDisputes() int {
 // fileOneBulkDispute re-checks what may have changed since the upload (the
 // client suspended, its payment method removed, the package used elsewhere)
 // and files the dispute.
-func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID, pkgID, contact, notes string, amount int64) (string, error) {
+func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID, pkgID, contact, notes string, amount int64, other respondent) (string, error) {
 	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/", nil)
 	var org tpaOrg
 	if err := s.db.QueryRow(ctx, `
@@ -660,9 +679,12 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	if pkgStatus != "READY" {
 		return "", fmt.Errorf("the package is %s, not READY", pkgStatus)
 	}
-	_, caseNumber, _, err := s.fileTPADisputeOpt(r, tenant, &org, clientID, partyName, partyType, pkgID, contact, notes, amount, true)
+	caseID, caseNumber, _, err := s.fileTPADisputeOpt(r, tenant, &org, clientID, partyName, partyType, pkgID, contact, notes, amount, true)
 	if err != nil {
 		return "", fmt.Errorf("case creation failed: %v", err)
+	}
+	if other.Name != "" {
+		s.recordRespondent(r, tenant, caseID, other)
 	}
 	return caseNumber, nil
 }
