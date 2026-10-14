@@ -12,6 +12,7 @@ package main
 // a queue, open the document, and accept or reject it.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -157,7 +158,7 @@ func (s *server) onboardingReviewFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"kind must be tpa or hp"}`, http.StatusBadRequest)
 		return
 	}
-	_, _, _, key, filename, err := s.onboardingReviewDoc(r, tenant, k, chi.URLParam(r, "docId"))
+	viewPkg, _, _, key, filename, err := s.onboardingReviewDoc(r, tenant, k, chi.URLParam(r, "docId"))
 	if err != nil || key == "" {
 		http.Error(w, `{"error":"document not found"}`, http.StatusNotFound)
 		return
@@ -178,7 +179,8 @@ func (s *server) onboardingReviewFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"decrypt failed"}`, http.StatusBadGateway)
 		return
 	}
-	s.logAudit(r.Context(), tenant, "", "ONBOARDING_DOC_VIEWED", map[string]any{"kind": k.prefix, "doc_id": chi.URLParam(r, "docId"), "by": p.Subject})
+	s.logAudit(r.Context(), tenant, "", "ONBOARDING_DOC_VIEWED", map[string]any{"kind": k.prefix, "doc_id": chi.URLParam(r, "docId"), "by": p.Subject,
+		"org": s.packageOrg(r.Context(), tenant, k, viewPkg)})
 	ctype := "application/octet-stream"
 	if strings.HasPrefix(string(pt), "%PDF") {
 		ctype = "application/pdf"
@@ -245,6 +247,19 @@ func (s *server) onboardingReviewDecide(w http.ResponseWriter, r *http.Request) 
 	pkgStatus := s.refreshOnboardingPackage(r, tenant, k, pkgID)
 	s.logAudit(r.Context(), tenant, "", "ONBOARDING_DOC_REVIEWED", map[string]any{
 		"kind": k.prefix, "doc_id": docID, "package_id": pkgID, "slot": slot,
-		"decision": in.Decision, "note": in.Note, "by": p.Subject})
+		"decision": in.Decision, "note": in.Note, "by": p.Subject, "org": s.packageOrg(r.Context(), tenant, k, pkgID)})
 	writeJSON(w, http.StatusOK, map[string]any{"doc_id": docID, "slot": slot, "status": newStatus, "package_status": pkgStatus})
+}
+
+// packageOrg: the organization a package belongs to ("tpa:<id>" / "plan:<id>"), for its audit trail.
+func (s *server) packageOrg(ctx context.Context, tenant string, k onboardingKind, pkgID string) string {
+	col, kind := "tpa_id", "tpa"
+	if k.prefix == "hp" {
+		col, kind = "plan_id", "plan"
+	}
+	var id string
+	if s.db.QueryRow(ctx, fmt.Sprintf(`SELECT %s::text FROM public.%s_packages WHERE tenant=$1 AND id::text=$2`, col, k.prefix), tenant, pkgID).Scan(&id) != nil {
+		return ""
+	}
+	return kind + ":" + id
 }

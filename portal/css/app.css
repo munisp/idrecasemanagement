@@ -799,3 +799,22 @@ button.linkish{background:none;border:0;padding:0;min-height:0;color:var(--accen
 @media (max-width:900px){.bd-item{grid-template-columns:minmax(0,1fr)}}
 .bd-item h4{font-size:13px;margin:4px 0 6px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em}
 .bd-docs{list-style:none;padding:0;margin:0 0 8px;display:grid;gap:4px}
+
+/* Organization audit log (TPA / health plan pages) */
+.tbl-wrap { overflow-x: auto; }
+.audit-tbl td { vertical-align: top; }
+.audit-tbl td.mono { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* TPA disputes grouped by provider, with payment state */
+details.prov { border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--surface-raised); margin: 0 0 10px; }
+details.prov > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 12px 14px; cursor: pointer; list-style: none; }
+details.prov > summary::-webkit-details-marker { display: none; }
+details.prov > summary::before { content: "▸"; color: var(--text-tertiary); width: 1em; }
+details.prov[open] > summary::before { content: "▾"; }
+details.prov > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+details.prov .prov-name { font-weight: 600; color: var(--text-primary); }
+details.prov .prov-pay { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 0 6px 6px; }
+.fee-note { font-size: 12px; margin-top: 2px; max-width: 28ch; }
+.row-actions { white-space: nowrap; }
+.row-actions .mini + .mini { margin-left: 6px; }

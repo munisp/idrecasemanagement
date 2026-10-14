@@ -179,6 +179,8 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_"+status,
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
 	if status == "PAID" {
+		// Paid offline: an open card checkout for this fee must not take it again.
+		_ = s.expireOverlapping(r.Context(), tenant, []string{invID})
 		s.maybeMarkDecidedInvoicePaid(r, tenant, caseID)
 		// Offline settlement (check/ACH/manual) releases a payment-gated
 		// intake exactly like the Stripe webhook path does.

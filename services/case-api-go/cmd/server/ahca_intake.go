@@ -272,6 +272,12 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 // webhook replay a no-op. Called from the Stripe webhook and from
 // settleInvoice's offline PAY path (check/ACH).
 func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
+	s.activatePaidIntakeFor(r, tenant, caseID, true)
+}
+
+// activatePaidIntakeFor: tellFiler false when one payment opened many
+// disputes, and the filer gets one notice for all of them instead.
+func (s *server) activatePaidIntakeFor(r *http.Request, tenant, caseID string, tellFiler bool) {
 	tbl := sanitizeTenant(tenant)
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(
 		`UPDATE tenant_%s.cases SET status='PENDING_INTAKE', updated_at=now()
@@ -305,6 +311,10 @@ func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
 	// The Reviewer is told the case now exists.
 	s.notify(r, tenant, "role:CASE_MANAGER", "AHCA_INTAKE",
 		fmt.Sprintf("Fee paid — case %s opened: confirm the filing packet", caseNumber), "#/cases/"+caseID)
+	if tellFiler {
+		s.tellFiler(r.Context(), tenant, caseID, "PAYMENT_RECEIVED", fmt.Sprintf("Fee received — %s is open", caseNumber))
+	}
+	s.tellRespondentOpened(r.Context(), tenant, caseID)
 }
 
 // sendIntakeLinks mints the filing-instructions download link and the
@@ -387,6 +397,8 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 	form.Set("metadata[invoice_id]", invID)
 	form.Set("metadata[tenant]", tenant)
 	form.Set("metadata[case_id]", caseID)
+	form.Set("payment_intent_data[metadata][invoice_id]", invID)
+	form.Set("payment_intent_data[metadata][tenant]", tenant)
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		return "", err

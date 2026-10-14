@@ -21,6 +21,7 @@ never let an unvalidated package through.
 
 from __future__ import annotations
 
+import hashlib
 import base64
 import io
 import json
@@ -135,12 +136,59 @@ def _verdict(slot: str, filename: str, text: str, classify_text, extract_fields,
     return "NEEDS_REVIEW", reasons
 
 
+def _notify_rejected(conn, tenant: str, package_id: str, prefix: str) -> None:
+    """The TPA or plan hears in the portal's bell that a document of its
+    package was rejected (addressed to the organization, as case-api's
+    notifyOrg does), instead of finding out only by opening the package."""
+    if prefix == "tpa":
+        q = """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+               SELECT p.tenant, 'tpa:' || p.tpa_id::text, 'PACKAGE_REJECTED',
+                      'A document for ' || c.party_name || ' was rejected — open its package to see why and replace it', '#/tpa'
+               FROM public.tpa_packages p JOIN public.tpa_clients c ON c.id = p.client_id
+               WHERE p.tenant=%s AND p.id=%s"""
+    else:
+        q = """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+               SELECT p.tenant, 'plan:' || p.plan_id::text, 'PACKAGE_REJECTED',
+                      'A document for ' || c.party_name || ' was rejected — open its package to see why and replace it', '#/healthplan'
+               FROM public.hp_packages p JOIN public.hp_parties c ON c.id = p.party_id
+               WHERE p.tenant=%s AND p.id=%s"""
+    conn.execute(q, (tenant, package_id))
+
+
+def _audit_package(conn, tenant: str, package_id: str, prefix: str, status: str) -> None:
+    """A package's checked status goes into the organization's audit trail
+    (public.audit_log, hash-chained exactly as case-api's logAudit does:
+    hash = sha256(prev_hash + payload text), one writer per tenant)."""
+    if prefix == "tpa":
+        row = conn.execute("""SELECT p.tpa_id::text, c.party_name FROM public.tpa_packages p
+                              JOIN public.tpa_clients c ON c.id = p.client_id WHERE p.tenant=%s AND p.id=%s""",
+                           (tenant, package_id)).fetchone()
+        org = f"tpa:{row[0]}" if row else ""
+    else:
+        row = conn.execute("""SELECT p.plan_id::text, c.party_name FROM public.hp_packages p
+                              JOIN public.hp_parties c ON c.id = p.party_id WHERE p.tenant=%s AND p.id=%s""",
+                           (tenant, package_id)).fetchone()
+        org = f"plan:{row[0]}" if row else ""
+    if not row:
+        return
+    payload = json.dumps({"org": org, "package_id": str(package_id), "party": row[1], "status": status, "by": "system:doc-intel"},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext('audit_log:' || %s))", (tenant,))
+    prev = conn.execute("SELECT hash FROM public.audit_log WHERE tenant=%s ORDER BY id DESC LIMIT 1", (tenant,)).fetchone()
+    prev_hash = prev[0] if prev else "GENESIS"
+    digest = hashlib.sha256((prev_hash + payload).encode()).hexdigest()
+    conn.execute("""INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org)
+                    VALUES (%s, '', 'PACKAGE_STATUS', %s, %s, %s, %s)""", (tenant, payload, prev_hash, digest, org))
+
+
 def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") -> str:
     """Package status from its slot verdicts. READY iff all six ACCEPTED."""
     # Lock the package first: two workers finishing two of its documents at
     # once each counted the other's verdict as not there yet (uncommitted),
     # and the package stayed VALIDATING with all six accepted.
-    conn.execute(f"SELECT 1 FROM public.{prefix}_packages WHERE tenant=%s AND id=%s FOR UPDATE", (tenant, package_id))
+    locked = conn.execute(f"SELECT status FROM public.{prefix}_packages WHERE tenant=%s AND id=%s FOR UPDATE",
+                          (tenant, package_id)).fetchone()
+    was = locked[0] if locked else ""
     rows = conn.execute(
         f"SELECT slot, status FROM public.{prefix}_package_docs WHERE tenant=%s AND package_id=%s",
         (tenant, package_id)).fetchall()
@@ -154,6 +202,10 @@ def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") ->
     conn.execute(
         f"UPDATE public.{prefix}_packages SET status=%s, updated_at=now() WHERE tenant=%s AND id=%s",
         (status, tenant, package_id))
+    if status == "REJECTED" and was != "REJECTED":
+        _notify_rejected(conn, tenant, package_id, prefix)
+    if status != was:
+        _audit_package(conn, tenant, package_id, prefix, status)
     # A READY package can complete the party's docs gate (employer groups on
     # the health-plan rail have no NPI requirement).
     if prefix == "tpa":

@@ -13,6 +13,11 @@ const Views = (() => {
   const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="App.rerender()">Retry</button></div>`;
   const role = (r) => (Auth.claims()?.roles || []).includes(r);
   const can = (...rs) => Auth.can(...rs);
+  // An outside organization's login (a TPA, a health plan) with no staff role.
+  const STAFF_ROLES = ["CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR",
+    "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"];
+  const outsideOnly = () => can("TPA", "HEALTH_PLAN") && !can(...STAFF_ROLES);
+  const outsideHome = () => (can("TPA") ? "#/tpa" : "#/healthplan");
   // Federal NSA cases price on QPA (qpa_cents); programmed tenants (FL AHCA
   // etc.) have no such concept and always read $0 there -- they use
   // disputed_amount_cents instead (accumulates from imported claims, or a
@@ -391,6 +396,7 @@ const Views = (() => {
     // deliberately blocked from (access-control follow-up); it has its own
     // correctly-scoped "Tracking" card on this same page instead.
     if (can("TPA")) return tpaView();
+    if (outsideOnly()) return hpView(); // a health plan's home is its own page
     const me = Auth.claims();
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
       <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
@@ -1210,29 +1216,42 @@ const Views = (() => {
   // What a TPA sees of a dispute it filed: where it stands, its deadlines and
   // its documents. The office's working page -- notes, review, letters,
   // money -- is not a filer's, and the API gives a filer none of it.
+  // The fee box on a filer's own dispute: its state and a Pay now button.
+  async function filerFeeBox(id, kind) {
+    // The page is drawn after its data arrives: wait for the box to be on it.
+    let box = null;
+    for (let i = 0; i < 50 && !(box = document.getElementById("filer-fee-" + id)); i++) await new Promise((r) => setTimeout(r, 200));
+    if (!box) return;
+    try {
+      const f = await Api.program.disputeFee(kind, id);
+      box.innerHTML = ` ${feePill(f)} ${feePayable(f) ? `<button class="mini" onclick="Views.payDisputeFn('${kind}', '${id}', this, 'case')">Pay now — ${usdC(f.fee_cents)}</button>` : ""}`;
+    } catch { box.innerHTML = ""; }
+  }
   async function filerCase(id) {
+    const kind = can("TPA") ? "tpa" : "hp";
+    filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind));
     let c;
     try { c = await Api.cases.get(id); }
     catch { return `<div class="view-head"><h1>Dispute not found</h1></div>
-      <p class="muted">This dispute isn't one your organization filed, or it no longer exists.</p><p><a href="#/tpa">Back to your disputes</a></p>`; }
+      <p class="muted">This dispute isn't one your organization filed, or it no longer exists.</p><p><a href="${outsideHome()}">Back to your disputes</a></p>`; }
     const [docs, clocks] = await Promise.all([Api.cases.documents(id).catch(() => []), Api.cm.clocks(id).catch(() => [])]);
     const d = c.details || {};
     const list = Array.isArray(docs) ? docs : (docs.documents || []);
     return `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>${badge(c.status)}</div>
       <p class="muted">Filed for ${esc(d.initiating_party || "your client")} · opened ${fmtDate(c.opened_at)}</p>
-      ${c.lock === "AWAITING_PAYMENT" ? `<div class="case-lock" role="status"><b>Awaiting payment.</b> The review starts once the initial fee is paid — the payment link was sent to your TPA contact email.</div>` : ""}
+      ${c.lock === "AWAITING_PAYMENT" ? `<div class="case-lock" role="status"><b>Awaiting payment.</b> The review starts once the initial fee is paid.
+        <span id="filer-fee-${id}"></span></div>` : ""}
       ${clocks.length ? `<div class="sla-cluster">` + clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
         <span class="lbl">${esc(cl.label)}</span><span class="cite">due ${esc(cl.due)}</span></div>`).join("") + `</div>` : ""}
       <div class="card"><h2>Documents</h2>${list.length ? `<table><thead><tr><th>File</th><th>Type</th><th>Received</th><th></th></tr></thead><tbody>` +
         list.map((x) => `<tr><td>${esc(x.filename || x.name || "document")}</td><td>${esc(x.doc_type || "")}</td><td>${fmtDate(x.uploaded_at || x.created_at)}</td>
           <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
         : `<p class="muted">No documents yet. Use the upload link in your email to send the claim documents.</p>`}</div>
-      <p><a href="#/tpa">Back to your disputes</a></p>`;
+      <p><a href="${outsideHome()}">Back to your disputes</a></p>`;
   }
 
   async function caseDetail(id) {
-    if (can("TPA") && !can("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR",
-      "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) return filerCase(id);
+    if (outsideOnly()) return filerCase(id);
     try {
       const [c, docs, activities, checklist, rels, clocks, notesRes, prog] = await Promise.all([
         Api.cases.get(id), Api.cases.documents(id), Api.cases.activities(id),
@@ -2436,7 +2455,7 @@ const Views = (() => {
         el.innerHTML = (r.invoices || []).length ? `<table><tbody>` + r.invoices.map((v) =>
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
            <td>${badge(v.status)}</td>
-           <td>${v.status === "OPEN" ? `<a href="javascript:void(0)" onclick="Views.payInvoice('${v.id}')">💳 pay by card</a>${canSettle ? ` ·
+           <td>${v.status === "OPEN" ? `<button class="mini" onclick="Views.payInvoice('${v.id}')">Pay now</button>${canSettle ? ` ·
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY',this)">mark paid</a> ·
              <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}` : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
@@ -6205,7 +6224,8 @@ const Views = (() => {
       const statuses = [...new Set(window._reconBatches.map((b) => b.status))].sort();
       const filter = window._reconBatches.length && statuses.length > 1
         ? `<select onchange="Views.reconBatchFilter(this.value)"><option value="">All statuses</option>
-            ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>` : "";
+            ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}
+          <optgroup label="Payment"><option value="UNPAID">Unpaid</option><option value="PENDING">Pending</option><option value="FAILED">Failed</option><option value="PAID">Paid</option></optgroup></select>` : "";
       box.innerHTML = `<div class="view-head"><h2>Batches</h2>${filter}</div>
         <div id="recon-batches-list">${reconBatchRowsHtml(window._reconBatches, "")}</div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -6271,7 +6291,7 @@ const Views = (() => {
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("against", "Against your clients", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}
+        ${tab("disputes", "Disputes", true)}${tab("against", "Against your clients", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -6379,6 +6399,13 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         </section>
 
         <section data-tpa-panel="team" style="display:none"><div id="tpa-team"></div></section>
+        <section data-tpa-panel="audit" style="display:none"><div class="card"><h2>Audit log</h2>
+          <p class="muted">Everything done in your organization's account — by your team, by the office on your behalf, and by the system — newest first. Each entry is chained to the one before it, so a removed or altered entry shows.</p>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('tpa-audit', 'tpa')">
+            <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
+            <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('tpa-audit', 'tpa')"> Include page views</label>
+            <button>Search</button></form>
+          <div id="tpa-audit"><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-tpa-panel="oversight" style="display:none">
@@ -6410,7 +6437,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       bulk: () => tpaBdBatchesBox(),
       reviews: () => onboardingReviewsBox("tpa-reviews", "tpa"),
       oversight: () => tpaAdminBox(),
+      audit: () => orgAuditBox("tpa-audit", "tpa"),
     }[k] || (() => {}))();
+    if (k === "audit" && !tpaTab._booted) orgAuditBox("tpa-audit", "tpa");
     tpaTab._booted = true;
   }
   function tpaTabCount(k, text) {
@@ -6447,7 +6476,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
       tpaClientsBox(); tpaDashBox(); tpaFeesBox(); respondListBox("tpa"); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
-      if (/[?&]paid=/.test(location.hash)) UI.toast("Payment sent — your disputes open as soon as the payment is confirmed (usually within a minute).");
+      feeReturn("tpa", () => { tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); });
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
       const bref = document.getElementById("tpa-bulk-ref");
@@ -6637,7 +6666,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       <span class="muted">Answer the disputes filed against your plan, and file disputes for your employer groups, networks and facilities</span></div>
       <div id="hp-org"></div>
       <div class="rpt-tabs" role="tablist" id="hp-tabs">
-        ${tab("against", "Disputes against us", true)}${tab("parties", "Your parties", true)}${tab("file", "File a dispute", true)}
+        ${tab("against", "Disputes against us", true)}${tab("parties", "Your parties", true)}${tab("file", "File a dispute", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All plans", false) + tab("reviews", "Documents to review", false) : ""}
       </div>
       <div id="hp-body" style="display:none">
@@ -6674,6 +6703,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <div id="hp-pkg"></div></div>
         </section>
         <section data-hp-panel="file" style="display:none">
+        <div id="hp-fees"></div>
         <div class="card"><h2>Submit a dispute on behalf of a party</h2>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpFileFn(this)">
             <select name="party_id" id="hp-file-party" required onchange="Views.filingPackagesFilter('hp-file-party','hp-file-package','party')"></select>
@@ -6687,6 +6717,13 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <p class="muted">The payment link and case instructions come to your plan contact — you pay and manage documents on behalf of the party.</p>
           <div id="hp-file-result"></div></div>
         </section>
+        <section data-hp-panel="audit" style="display:none"><div class="card"><h2>Audit log</h2>
+          <p class="muted">Everything done in your organization's account — by your team, by the office on your behalf, and by the system — newest first. Each entry is chained to the one before it, so a removed or altered entry shows.</p>
+          <form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('hp-audit', 'hp')">
+            <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
+            <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('hp-audit', 'hp')"> Include page views</label>
+            <button>Search</button></form>
+          <div id="hp-audit"><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-hp-panel="oversight" style="display:none">
@@ -6707,7 +6744,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       file: () => hpOnboardingBox(),
       reviews: () => onboardingReviewsBox("hp-reviews", "hp"),
       oversight: () => hpAdminBox(),
+      audit: () => orgAuditBox("hp-audit", "hp"),
     }[k] || (() => {}))();
+    if (k === "audit" && !hpTab._booted) orgAuditBox("hp-audit", "hp");
     hpTab._booted = true;
   }
   function hpTabCount(k, text) {
@@ -6727,7 +6766,8 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       document.querySelectorAll("#hp-tabs .hp-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.hpTab") || ""; } catch { /* private window */ }
       hpTab(saved && document.querySelector(`#hp-tabs [data-tab="${saved}"]`) ? saved : "against", true);
-      hpOnboardingBox(); respondListBox("hp");
+      hpOnboardingBox(); respondListBox("hp"); hpFeesBox();
+      feeReturn("hp", () => { hpFeesBox(); hpOnboardingBox(); });
     } catch (e) {
       orgBox.innerHTML = `<div class="card"><h2>Link your health plan organization</h2>
         <p class="muted">Enter the one-time claim code from your health plan registration.</p>
@@ -6993,18 +7033,43 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
+  // The TPA's disputes, grouped under the provider (client) they were filed
+  // for: each provider opens and closes, shows what it owes, and pays all of
+  // its unpaid disputes at once; each dispute can also be paid on its own.
+  window._tpaProvOpen = window._tpaProvOpen || {};
   function tpaCasesHtml(cases, status, q) {
     let shown = cases;
-    if (status) shown = shown.filter((x) => x.status === status);
+    if (status) shown = shown.filter((x) => x.status === status || x.fee_state === status);
     if (q) shown = shown.filter((x) => (x.client_name || "").toLowerCase().includes(q) || (x.case_number || "").toLowerCase().includes(q));
     if (!shown.length) return '<p class="muted">No disputes match this filter.</p>';
-    return `<table class="tbl"><thead><tr><th>Initiating party</th><th>Type</th><th>Case</th><th>Status</th><th>Disputed</th><th>Invoiced</th><th>Paid</th><th>Filed</th><th></th></tr></thead><tbody>` +
-      shown.map((x) => `<tr><td>${esc(x.client_name)}</td><td>${badge(x.initiating_party_type)}</td>
-        <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
-        <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${usdC(x.invoiced_cents)}</td><td>${usdC(x.paid_cents)}</td><td>${esc(x.filed)}</td>
-        <td>${x.status === "AWAITING_PAYMENT" && window._tpaCanEdit ? `<button class="mini" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")
-      + `</tbody></table>`;
+    const groups = new Map();
+    for (const x of shown) {
+      const k = x.client_id || x.client_name;
+      if (!groups.has(k)) groups.set(k, { id: x.client_id, name: x.client_name, rows: [] });
+      groups.get(k).rows.push(x);
+    }
+    const canPay = window._tpaCanEdit;
+    return [...groups.values()].map((g) => {
+      const unpaid = g.rows.filter(feePayable), due = unpaid.reduce((n, x) => n + Number(x.fee_cents || 0), 0);
+      const paid = g.rows.filter((x) => x.fee_state === "PAID").length, pending = g.rows.filter((x) => x.fee_state === "PENDING").length;
+      const open = window._tpaProvOpen[g.id] ?? (unpaid.length > 0 || groups.size === 1);
+      return `<details class="prov" ${open ? "open" : ""} ontoggle="Views.tpaProvToggle('${g.id}', this.open)">
+        <summary><span class="prov-name">${esc(g.name || "—")}</span>
+          <span class="muted">${g.rows.length} dispute${g.rows.length === 1 ? "" : "s"} · ${paid} paid${pending ? ` · ${pending} pending` : ""}</span>
+          <span class="prov-pay">${unpaid.length
+            ? `<span class="badge s-needs-review">${unpaid.length} unpaid · ${usdC(due)}</span>${canPay ? ` <button class="mini" onclick="event.preventDefault(); event.stopPropagation(); Views.payClientFn('${g.id}', this)">Pay all — ${usdC(due)}</button>` : ""}`
+            : '<span class="badge s-filed">Nothing owed</span>'}</span></summary>
+        <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
+        ${g.rows.map((x) => `<tr>
+          <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
+          <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${x.fee_cents ? usdC(x.fee_cents) : "—"}</td>
+          <td>${feePill(x)}</td><td>${esc(x.filed)}</td>
+          <td class="row-actions">${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
+            ${x.status === "AWAITING_PAYMENT" && canPay ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}
+        </tbody></table></div></details>`;
+    }).join("");
   }
+  function tpaProvToggle(id, open) { window._tpaProvOpen[id] = open; }
   // A TPA may correct its own filing until the fee is paid; after that the
   // server refuses (409) and the row loses its Edit button on the next load.
   async function tpaEditDisputeFn(caseId) {
@@ -7051,11 +7116,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       window._tpaCases = r.cases || [];
       // Editable only on the caller's own org view, not staff oversight of another TPA.
       window._tpaCanEdit = !tpaId;
-      roll.innerHTML = (r.by_client || []).map((x) => `<span class="chip">${esc(x.initiating_party)} · ${x.cases} case${x.cases == 1 ? "" : "s"} (${x.open} open) · invoiced ${usdC(x.invoiced_cents)} · paid ${usdC(x.paid_cents)}</span> `).join("");
+      roll.innerHTML = "";
       const statuses = [...new Set(window._tpaCases.map((x) => x.status))].sort();
       if (filtersBox) filtersBox.innerHTML = window._tpaCases.length ? `<p>
         <select id="tpa-cases-status" onchange="Views.tpaCasesFilter()"><option value="">All statuses</option>
-          ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+          ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}
+          <optgroup label="Payment"><option value="UNPAID">Unpaid</option><option value="PENDING">Pending</option><option value="FAILED">Failed</option><option value="PAID">Paid</option></optgroup></select>
         <input id="tpa-cases-q" placeholder="Filter by party or case #…" oninput="Views.tpaCasesFilter()" /></p>` : "";
       box.innerHTML = tpaCasesHtml(window._tpaCases, "", "");
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -7173,6 +7239,8 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     if (!box) return;
     try {
       const bs = (await Api.program.tpaBulkDisputeBatches()).batches || [];
+      // A refresh redraws the list: keep the filings someone has open, open.
+      const open = [...box.querySelectorAll("tr.row-detail")].filter((r) => r.style.display !== "none").map((r) => r.id.slice("bd-detail-".length));
       tpaTabCount("bulk", bs.reduce((n, b) => n + Number(b.waiting || 0), 0) || "");
       box.innerHTML = bs.length ? `<p class="muted">Click a filing to see its disputes.</p><table class="tbl bd-batches"><thead><tr><th>Batch</th><th>Uploaded</th><th>Disputes</th><th>Filed</th><th>Waiting</th><th>Refused</th><th>Fees unpaid</th><th></th></tr></thead><tbody>
         ${bs.map((b) => `<tr class="bd-row" tabindex="0" onclick="Views.tpaBdToggle('${b.id}')" onkeydown="if(event.key==='Enter')Views.tpaBdToggle('${b.id}')">
@@ -7182,6 +7250,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <td><span class="bd-chevron" id="bd-chev-${b.id}">▸</span></td></tr>
           <tr id="bd-detail-${b.id}" class="row-detail" style="display:none"><td colspan="8"><div id="bd-report-${b.id}"></div></td></tr>`).join("")}</tbody></table>`
         : '<p class="muted">No bulk filings yet — upload a disputes ZIP above.</p>';
+      open.forEach((id) => tpaBdToggle(id, true));
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
   function tpaBdToggle(batchId, forceOpen) {
@@ -7213,6 +7282,70 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <div class="muted">One payment covers all of them, whether filed one by one or in bulk. Each dispute opens, with its case number and document link, once paid.</div></div>
           <button onclick="Views.tpaFeesPay(this)">Pay ${usdC(f.amount_cents)} for ${f.unpaid} dispute${f.unpaid === 1 ? "" : "s"}</button></div>` : "";
     } catch { box.innerHTML = ""; }
+  }
+  // A dispute's initial fee, in words (fee_payments.go feeStates).
+  const FEE_PILL = { PAID: ["filed", "Paid"], UNPAID: ["needs-review", "Unpaid"], PENDING: ["validating", "Pending"],
+    FAILED: ["rejected", "Failed"], REFUNDED: ["", "Refunded"] };
+  const feePayable = (x) => x.fee_state === "UNPAID" || x.fee_state === "FAILED";
+  function feePill(x) {
+    if (!x.fee_state) return '<span class="muted">—</span>';
+    const [cls, t] = FEE_PILL[x.fee_state] || ["", x.fee_state];
+    return `<span class="badge s-${cls}">${t}</span>`
+      + (x.fee_state === "FAILED" && x.fee_error ? `<div class="muted fee-note">${esc(x.fee_error)}</div>` : "")
+      + (x.fee_state === "PENDING" ? '<div class="muted fee-note">Payment taken, waiting for the bank</div>' : "")
+      + (x.fee_state === "UNPAID" && x.fee_checkout_open ? '<div class="muted fee-note">A checkout is open</div>' : "");
+  }
+  // Every Pay button: the server works out the amount and opens Stripe's checkout.
+  async function payGo(req, btn) {
+    if (btn) btn.disabled = true;
+    try { window.location.assign((await req).checkout_url); }
+    catch (e) { if (btn) btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
+  }
+  const payDisputeFn = (kind, caseId, btn, from) => payGo(Api.program.payDispute(kind, caseId, from), btn);
+  const payClientFn = (clientId, btn) => payGo(Api.program.payClient(clientId), btn);
+  const hpFeesPay = (btn) => payGo(Api.program.hpFeesCheckout(), btn);
+  // Back from Stripe (?paid=1&g=<checkout>) or cancelled at it (?cancelled=<checkout>).
+  async function feeReturn(kind, refresh) {
+    const qs = new URLSearchParams(location.hash.split("?")[1] || "");
+    if (!qs.has("paid") && !qs.has("cancelled")) return;
+    history.replaceState(null, "", location.pathname + location.hash.split("?")[0]);
+    if (qs.has("cancelled")) {
+      let st = "";
+      try { st = (await Api.program.checkoutCancel(kind, qs.get("cancelled"))).status; } catch { /* already closed */ }
+      UI.toast(st === "PAID" ? "Payment confirmed — your disputes are open." : "Payment cancelled — nothing was charged.");
+      refresh();
+      return;
+    }
+    UI.toast("Payment sent — confirming it with Stripe…");
+    let st = "";
+    if (qs.get("g")) { try { st = (await Api.program.checkoutConfirm(kind, qs.get("g"))).status; } catch { /* the background check settles it */ } }
+    if (st === "PAID") { UI.toast("Payment confirmed — your disputes are open."); refresh(); return; }
+    if (st === "PROCESSING") { UI.toast("Your payment is being processed — the disputes open when it clears."); refresh(); return; }
+    if (kind === "tpa") tpaAwaitPayment(); else refresh();
+  }
+  async function hpFeesBox() {
+    const box = document.getElementById("hp-fees");
+    if (!box) return;
+    try {
+      const f = await Api.program.hpFees();
+      box.innerHTML = f.unpaid ? `<div class="tpa-paybar"><div><b>${f.unpaid} dispute${f.unpaid === 1 ? "" : "s"} you filed ${f.unpaid === 1 ? "is" : "are"} waiting for the initial fee — ${usdC(f.amount_cents)}</b>
+          <div class="muted">One payment covers all of them. Each dispute opens once paid.</div></div>
+          <button onclick="Views.hpFeesPay(this)">Pay all — ${usdC(f.amount_cents)}</button></div>` : "";
+    } catch { box.innerHTML = ""; }
+  }
+  // Back from Stripe: the payment is confirmed a few seconds later, so check
+  // until nothing is owed (or two minutes pass) and refresh what it changes.
+  async function tpaAwaitPayment() {
+    for (let i = 0; i < 24; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      if (!document.getElementById("tpa-fees")) return;
+      let f; try { f = await Api.program.tpaFees(); } catch { continue; }
+      if (!f.unpaid) {
+        UI.toast("Payment confirmed — your disputes are open.");
+        tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox();
+        return;
+      }
+    }
   }
   async function tpaFeesPay(btn) {
     btn.disabled = true;
@@ -7263,7 +7396,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     try {
       const items = (await Api.program.tpaBulkDisputeBatch(batchId)).items || [];
       const docs = (x) => !x.package_id ? "—" : `${x.accepted} of 6 accepted${x.needs_review ? ` · ${x.needs_review} need review` : ""}${x.rejected ? ` · <b>${x.rejected} rejected</b>` : ""}`;
-      const unpaid = items.filter((x) => x.status === "FILED" && x.fee_status === "OPEN");
+      const unpaid = items.filter((x) => x.status === "FILED" && feePayable(x));
       const due = unpaid.reduce((n, x) => n + Number(x.fee_cents || 0), 0);
       const paid = items.filter((x) => x.fee_status === "PAID").length;
       const counts = { ELIGIBLE: 0, INELIGIBLE: 0, HOLD_AOR: 0, none: 0 };
@@ -7290,7 +7423,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <td>${x.disputed_amount_cents ? usdC(x.disputed_amount_cents) : "—"}</td>
           <td>${docs(x)}</td><td>${eligBadge(x)}</td>
           <td>${bdStatus(x)}${x.status === "ERROR" && x.error ? `<br><span class="muted">${esc(x.error)}</span>` : ""}</td>
-          <td>${x.fee_status === "PAID" ? '<span class="badge s-filed">Paid</span>' : x.fee_status === "OPEN" ? '<span class="badge s-needs-review">Unpaid</span>' : '<span class="muted">—</span>'}</td>
+          <td>${feePill(x)}${feePayable(x) && x.case_id ? `<div><button class="mini" onclick="event.stopPropagation(); Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now — ${usdC(x.fee_cents)}</button></div>` : ""}</td>
           <td>${x.case_number ? `<a href="#/cases/${esc(x.case_id)}" onclick="event.stopPropagation()">${esc(x.case_number)}</a>` : "—"}</td></tr>
           <tr id="bd-item-${batchId}-${n}" class="row-detail" style="display:none"><td colspan="10">${detail(x)}</td></tr>`).join("")}
         </tbody></table></div>`;
@@ -7321,6 +7454,29 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       return pages ? `${label} ${pages[0]}` : (rest.toLowerCase() === slug + ".pdf" ? label : `${label} · ${rest}`);
     }
     return `${label} · ${rest}`;
+  }
+  // An organization's own audit trail (orgaudit.go): the TPA or plan page's "Audit log" tab.
+  async function orgAuditBox(boxId, kind) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const form = box.parentElement.querySelector("form");
+    const params = {};
+    if (form?.q.value.trim()) params.q = form.q.value.trim();
+    if (form?.views.checked) params.views = "1";
+    box.innerHTML = '<p class="muted">Loading…</p>';
+    try {
+      const es = (await Api.program.orgAudit(kind, params)).entries || [];
+      if (!es.length) { box.innerHTML = '<p class="muted">Nothing recorded yet' + (params.q ? " for this search" : "") + ".</p>"; return; }
+      const res = (o) => o === "ok" ? '<span class="badge s-filed">Done</span>'
+        : o === "denied" || o === "not_found" ? '<span class="badge s-rejected">Refused</span>' : `<span class="badge s-needs-review">${esc(o)}</span>`;
+      box.innerHTML = `<div class="tbl-wrap"><table class="tbl audit-tbl"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Dispute</th><th>Result</th><th>Record</th></tr></thead><tbody>
+        ${es.map((e) => `<tr><td class="mono">${esc(String(e.at).replace("T", " ").slice(0, 19))}</td>
+          <td>${esc(e.who || "—")}${e.office ? ' <span class="badge">office</span>' : ""}</td>
+          <td>${esc(e.what)}${e.detail ? `<div class="muted">${esc(e.detail)}</div>` : ""}</td>
+          <td class="mono">${esc(e.case_number || "")}</td><td>${res(e.outcome)}</td>
+          <td class="mono muted" title="Entry fingerprint (chained to the previous entry)">${esc(e.hash)}</td></tr>`).join("")}</tbody></table></div>
+        <p class="muted">Showing the latest ${es.length} entries.</p>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
   async function respondListBox(k) {
     const box = document.getElementById(`${k}-rsp-list`);
@@ -8041,5 +8197,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaProvToggle };
 })();

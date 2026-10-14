@@ -568,6 +568,7 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	s.attachFeeStates(r.Context(), tenant, rows)
 	writeJSON(w, http.StatusOK, map[string]any{"batch_id": chi.URLParam(r, "batchId"), "items": rows})
 }
 
@@ -686,6 +687,9 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	if other.Name != "" {
 		s.recordRespondent(r, tenant, caseID, other)
 	}
+	s.logAudit(ctx, tenant, caseID, "BULK_DISPUTE_FILED", map[string]any{
+		"tpa_id": tpaID, "client_id": clientID, "package_id": pkgID, "case_number": caseNumber, "by": "system:bulk-filer",
+		"notice": caseNumber + " filed for " + partyName})
 	return caseNumber, nil
 }
 

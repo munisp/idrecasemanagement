@@ -37,3 +37,7 @@ ALTER TABLE public.tpa_dispute_batch_items
     ADD COLUMN IF NOT EXISTS other_party_name  text,
     ADD COLUMN IF NOT EXISTS other_party_email text,
     ADD COLUMN IF NOT EXISTS other_party_naic  text;
+
+-- When the other side was told, in the portal, that the dispute is against
+-- it (org_notify.go: once, when the dispute opens).
+ALTER TABLE public.case_respondents ADD COLUMN IF NOT EXISTS notified_at timestamptz;

@@ -385,6 +385,15 @@ const Api = (() => {
       tpaBulkDisputeBatch: (id) => req("GET", `${t()}/tpa/disputes/bulk/${id}`),
       tpaBulkCheckout: (id) => req("POST", `${t()}/tpa/disputes/bulk/${id}/checkout`, {}),
       tpaFees: () => req("GET", `${t()}/tpa/fees`),
+      // Fee payments: the server works out what is owed; these only name the scope.
+      payDispute: (kind, caseId, from) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/pay${from ? "?from=" + from : ""}`),
+      disputeFee: (kind, caseId) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/fee`),
+      payClient: (clientId) => req("POST", `${t()}/tpa/clients/${clientId}/fees/checkout`),
+      checkoutConfirm: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/confirm`),
+      checkoutCancel: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/cancel`),
+      hpFees: () => req("GET", `${t()}/hp/fees`),
+      hpFeesCheckout: () => req("POST", `${t()}/hp/fees/checkout`),
+      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/audit?` + new URLSearchParams(params || {})),
       // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
       respondList: (k) => req("GET", `${t()}/${k}/responding`),
       respondGet: (k, id) => req("GET", k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`),

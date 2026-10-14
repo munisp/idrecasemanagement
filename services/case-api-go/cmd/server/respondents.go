@@ -153,6 +153,7 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 	s.logActivity(ctx, tenant, caseID, "RESPONDENT_NAMED", fmt.Sprintf("Responding party: %s (%s, notices to %s)%s",
 		rsp.Name, map[string]string{"HEALTH_PLAN": "health plan", "PROVIDER": "provider"}[rsp.Side], rsp.Email,
 		map[bool]string{true: " — on the platform; the dispute is on its dashboard", false: ""}[planID != nil || tpaID != nil]))
+	s.tellRespondentOpened(ctx, tenant, caseID) // now, if no fee holds the dispute back; else when it is paid
 }
 
 // linkRespondentsToPlan: a newly registered health plan sees every dispute
@@ -166,6 +167,22 @@ func (s *server) linkRespondentsToPlan(ctx context.Context, tenant, planID, naic
 		tenant, planID, naic, email, name)
 	if err != nil {
 		return 0
+	}
+	// One notice for the open ones, not one per dispute; the rest are told
+	// when their fee is paid (tellRespondentOpened).
+	var open int
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`
+		WITH t AS (
+		  UPDATE public.case_respondents rs SET notified_at=now()
+		  FROM tenant_%s.cases c
+		  WHERE rs.tenant=$1 AND rs.plan_id=$2::uuid AND rs.notified_at IS NULL
+		    AND c.id::text=rs.case_id AND c.status <> 'AWAITING_PAYMENT'
+		  RETURNING 1)
+		SELECT count(*) FROM t`, sanitizeTenant(tenant)), tenant, planID).Scan(&open)
+	if open > 0 {
+		s.notifyOrg(ctx, tenant, "plan", planID, "", "DISPUTE_AGAINST_YOU",
+			fmt.Sprintf("%d dispute%s filed before you registered name%s you — respond under Disputes against us",
+				open, map[bool]string{true: "", false: "s"}[open == 1], map[bool]string{true: "s", false: ""}[open == 1]), "#/healthplan")
 	}
 	return tag.RowsAffected()
 }
@@ -448,6 +465,8 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 			s.notify(r, tenant, "role:"+role, "RESPONDENT_RESPONDED",
 				fmt.Sprintf("%s responded to %s (%d document(s))", sc.label, caseNumber, docs), "#/cases/"+caseID)
 		}
+		s.tellFiler(r.Context(), tenant, caseID, "RESPONDENT_RESPONDED",
+			fmt.Sprintf("%s responded to %s (%d document(s))", sc.label, caseNumber, docs))
 		writeJSON(w, http.StatusOK, map[string]any{"status": "SUBMITTED", "workflow_signalled": signalled})
 	}
 }
@@ -482,5 +501,7 @@ func (s *server) respondingOptOut(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "PLAN_OPT_OUT_REQUESTED", fmt.Sprintf("%s asked to opt out: %s", sc.label, strings.TrimSpace(in.Reason)))
 	s.notify(r, tenant, "role:ATTORNEY", "PLAN_OPT_OUT_REQUESTED",
 		fmt.Sprintf("%s asks to opt out of %s — decide it on the case", sc.label, caseNumber), "#/cases/"+caseID)
+	s.tellFiler(r.Context(), tenant, caseID, "PLAN_OPT_OUT_REQUESTED",
+		fmt.Sprintf("%s asked to opt out of %s; the office decides", sc.label, caseNumber))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "OPT_OUT_REQUESTED"})
 }

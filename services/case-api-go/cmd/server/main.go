@@ -517,7 +517,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, noteActor, tenancy, s.accessGuard, s.caseLockGuard)
+		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
@@ -722,8 +722,22 @@ func main() {
 		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
 		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
-		r.Get("/tpa/fees", s.tpaFees)                                   // what this TPA owes now
-		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout)                 // one payment for all unpaid fees
+		r.Get("/tpa/fees", s.orgFees("tpa"))            // what this TPA owes now
+		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout) // one payment for all unpaid fees
+		r.Get("/tpa/audit", s.orgAuditLog("tpa"))       // the TPA's own audit trail (orgaudit.go)
+		r.Get("/hp/audit", s.orgAuditLog("hp"))         // the plan's own audit trail
+		// Fee payments (fee_payments.go): one dispute, one provider, a bulk upload, or everything.
+		r.Post("/tpa/clients/{clientId}/fees/checkout", s.tpaClientCheckout)
+		r.Post("/tpa/disputes/{caseId}/pay", s.disputePay("tpa"))
+		r.Get("/tpa/disputes/{caseId}/fee", s.disputeFee("tpa"))
+		r.Post("/tpa/fees/checkout/{groupId}/confirm", s.checkoutConfirm("tpa"))
+		r.Post("/tpa/fees/checkout/{groupId}/cancel", s.checkoutCancel("tpa"))
+		r.Get("/hp/fees", s.orgFees("hp"))
+		r.Post("/hp/fees/checkout", s.hpFeesCheckout)
+		r.Post("/hp/disputes/{caseId}/pay", s.disputePay("hp"))
+		r.Get("/hp/disputes/{caseId}/fee", s.disputeFee("hp"))
+		r.Post("/hp/fees/checkout/{groupId}/confirm", s.checkoutConfirm("hp"))
+		r.Post("/hp/fees/checkout/{groupId}/cancel", s.checkoutCancel("hp"))
 		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)

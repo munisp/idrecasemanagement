@@ -45,7 +45,7 @@ func notifTargets(p principal) []string {
 	// broadcasts ("*") are staff news -- which document was read, which case
 	// moved -- and none of an outsider's business.
 	if isExternalOnly(p) {
-		return []string{p.Subject, "role:TPA"}
+		return []string{p.Subject} // and its organization's (orgNotifTargets)
 	}
 	out := []string{p.Subject, "*"}
 	for _, r := range p.Roles {

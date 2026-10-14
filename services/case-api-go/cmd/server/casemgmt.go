@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -108,17 +109,47 @@ func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, pa
 	if err != nil {
 		return
 	}
+	// One writer at a time per tenant: two entries written at once both read
+	// the same last hash, and the chain forked. Every outside organization's
+	// action is audited now (orgaudit.go), so "at once" is common.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		slog.Error("audit", "action", action, "err", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	_, _ = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('audit_log:' || $1))`, tenant)
 	var prevHash string
-	if err := s.db.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT hash FROM public.audit_log WHERE tenant=$1 ORDER BY id DESC LIMIT 1`, tenant).
 		Scan(&prevHash); err != nil {
 		prevHash = "GENESIS"
 	}
 	sum := sha256.Sum256([]byte(prevHash + string(body)))
 	hash := hex.EncodeToString(sum[:])
-	_, _ = s.db.Exec(ctx, `
-		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash)
-		VALUES ($1,$2,$3,$4,$5,$6)`, tenant, caseID, action, string(body), prevHash, hash)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org)
+		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''))`, tenant, caseID, action, string(body), prevHash, hash, auditOrg(payload)); err != nil {
+		slog.Error("audit", "action", action, "err", err)
+		return
+	}
+	_ = tx.Commit(ctx)
+}
+
+// auditOrg: the outside organization an entry is about, so its own audit
+// log (orgaudit.go) can show it -- "org" when the writer says so, else the
+// tpa_id / plan_id the entry already names.
+func auditOrg(payload map[string]any) string {
+	if o, _ := payload["org"].(string); o != "" {
+		return o
+	}
+	if id := fmt.Sprint(payload["tpa_id"]); payload["tpa_id"] != nil && id != "" {
+		return "tpa:" + id
+	}
+	if id := fmt.Sprint(payload["plan_id"]); payload["plan_id"] != nil && id != "" {
+		return "plan:" + id
+	}
+	return ""
 }
 
 // listAuditLog: GET /v1/tenants/{tenant}/audit-log — the hash-chained,
@@ -224,7 +255,7 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 		SELECT id, type, body, COALESCE(link,''), created_at
 		FROM public.notifications
 		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL
-		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, notifTargets(p))
+		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, s.notifTargetsFor(r.Context(), tenant, p))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -253,7 +284,7 @@ func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.notifications SET read_at=now()
 		WHERE tenant=$1 AND id=$2 AND user_sub = ANY($3)`,
-		tenant, chi.URLParam(r, "notifId"), notifTargets(p))
+		tenant, chi.URLParam(r, "notifId"), s.notifTargetsFor(r.Context(), tenant, p))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
 }
 
@@ -266,7 +297,7 @@ func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.notifications SET read_at=now()
 		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL`,
-		tenant, notifTargets(p))
+		tenant, s.notifTargetsFor(r.Context(), tenant, p))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
 }
 

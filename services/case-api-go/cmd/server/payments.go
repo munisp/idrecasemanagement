@@ -129,6 +129,12 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invoice is not open"}`, http.StatusConflict)
 		return
 	}
+	// One open checkout per fee: a TPA's or plan's checkout for this fee is
+	// closed first, so the fee cannot be paid twice.
+	if !s.expireOverlapping(r.Context(), tenant, []string{invID}) {
+		http.Error(w, `{"error":"a payment for this fee is being completed — check again in a minute"}`, http.StatusConflict)
+		return
+	}
 	// Provider selection: default stripe; provider=mojaloop routes through the
 	// scheme adapter (prepare/fulfil) when MOJALOOP_ADAPTER_URL is configured.
 	if r.URL.Query().Get("provider") == "mojaloop" {
@@ -156,6 +162,8 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 	// as customer_email on completion). Passed by the staffer issuing checkout.
 	form.Set("metadata[payer_name]", r.URL.Query().Get("payer_name"))
 	form.Set("metadata[payer_org]", r.URL.Query().Get("payer_org"))
+	form.Set("payment_intent_data[metadata][invoice_id]", invID)
+	form.Set("payment_intent_data[metadata][tenant]", tenant)
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
@@ -207,62 +215,61 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch evt.Type {
-	case "checkout.session.completed":
+	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
 		var sess struct {
 			ID            string            `json:"id"`
 			PaymentIntent string            `json:"payment_intent"`
+			PaymentStatus string            `json:"payment_status"`
+			AmountTotal   int64             `json:"amount_total"`
 			Email         string            `json:"customer_email"`
-			Metadata      map[string]string `json:"metadata"`
+			Details       struct {
+				Email string `json:"email"`
+			} `json:"customer_details"`
+			Metadata map[string]string `json:"metadata"`
 		}
 		if json.Unmarshal(evt.Data.Object, &sess) != nil {
 			break
 		}
+		if sess.Email == "" {
+			sess.Email = sess.Details.Email
+		}
 		tenant, invID, caseID := sess.Metadata["tenant"], sess.Metadata["invoice_id"], sess.Metadata["case_id"]
-		// A bulk batch's one checkout covers many invoices (tpa_bulk_payments.go).
+		// A fee checkout covers one or many invoices (fee_payments.go).
 		if gid := sess.Metadata["payment_group_id"]; gid != "" {
+			if sess.PaymentStatus != "paid" {
+				// Completed, but the money is not confirmed yet (bank debit): pending.
+				_, _ = s.db.Exec(r.Context(), `UPDATE public.payment_groups SET status='PROCESSING', updated_at=now() WHERE tenant=$1 AND id::text=$2 AND status='OPEN'`, tenant, gid)
+				break
+			}
+			var want int64
+			if s.db.QueryRow(r.Context(), `SELECT amount_cents FROM public.payment_groups WHERE tenant=$1 AND id::text=$2`, tenant, gid).Scan(&want) == nil && want != sess.AmountTotal {
+				s.flagPayment(r.Context(), tenant, gid, fmt.Sprintf("Stripe took %s for a checkout of %s — not settled, check it", usd(sess.AmountTotal), usd(want)))
+				break
+			}
 			s.settlePaymentGroup(r, tenant, gid, sess.ID, sess.PaymentIntent, sess.Email)
 			break
 		}
-		// mark payment PAID (+ Field Criteria auto-fill: who paid, org, email)
-		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.payments SET status='PAID', payment_intent=$3, payer_email=$4,
-			       payer_name=$6, payer_org=$7, raw=$5, updated_at=now()
-			WHERE session_id=$1 AND tenant=$2`, sess.ID, tenant, sess.PaymentIntent, sess.Email,
+		if sess.PaymentStatus != "" && sess.PaymentStatus != "paid" {
+			break // async payment: settled on async_payment_succeeded
+		}
+		s.settleSingleSession(r, tenant, sess.ID, invID, caseID, sess.PaymentIntent, sess.Email, sess.AmountTotal,
 			evt.Data.Object, sess.Metadata["payer_name"], sess.Metadata["payer_org"])
-		// settle the invoice (remittance ref = Stripe payment intent)
-		var amount int64
-		var party string
-		_ = s.db.QueryRow(r.Context(), `
-			UPDATE public.invoices SET status='PAID', remittance_ref=$3, paid_at=now()::date
-			WHERE tenant=$1 AND id=$2 AND status='OPEN' RETURNING amount_cents, party`,
-			tenant, invID, sess.PaymentIntent).Scan(&amount, &party)
-		s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, party, sess.PaymentIntent, "stripe-webhook")
-		// Money moved here exactly as much as it does through settleInvoice's
-		// own UI-triggered path -- the only difference is who called it.
-		s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
-			"by": "stripe-webhook", "invoice_id": invID, "action": "PAY", "status": "PAID",
-			"amount_cents": amount, "party": party, "remittance_ref": sess.PaymentIntent,
-		})
-		s.postPaymentLedger(tenant, caseID, sess.PaymentIntent, party, uint64(amount), false) // clearing → escrow
-		// Payment-gated intake: if this case was held in AWAITING_PAYMENT, the
-		// settled INITIAL_FEE invoice releases the case number + upload link.
-		s.activatePaidIntake(r, tenant, caseID)
-		s.maybeAdvanceStatus(r, tenant, caseID)                                               // invoice PAID => case may close
-		s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED",
-			fmt.Sprintf("Card payment of $%d.%02d received via Stripe (%s) — invoice settled, ledger posted", amount/100, amount%100, sess.PaymentIntent))
-		// Program rules (invoice.settled) — settlement is already committed in
-		// Postgres + TigerBeetle, so block_request is meaningless here and is
-		// ignored (logged suspect); notify/log_activity/set_detail/flag_review
-		// drive the post-settlement workflow (e.g. late-payment escalation,
-		// remittance reconciliation alerts).
-		s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
-			"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
-			"party": party, "method": "card", "remittance_ref": sess.PaymentIntent,
-			"tenant": tenant,
-		})
-		// Settlement landed — case status and checklist follow the money.
-		s.maybeAdvanceStatus(r, tenant, caseID)
-		s.autoChecklist(r, tenant, caseID)
+
+	case "checkout.session.async_payment_failed":
+		var sess struct {
+			ID       string            `json:"id"`
+			Metadata map[string]string `json:"metadata"`
+		}
+		if json.Unmarshal(evt.Data.Object, &sess) == nil {
+			tenant := sess.Metadata["tenant"]
+			if gid := sess.Metadata["payment_group_id"]; gid != "" {
+				_, _ = s.db.Exec(r.Context(), `UPDATE public.payment_groups SET status='OPEN' WHERE tenant=$1 AND id::text=$2 AND status='PROCESSING'`, tenant, gid)
+				s.closeGroup(r.Context(), tenant, gid, "FAILED", "the bank payment failed")
+			} else {
+				_, _ = s.db.Exec(r.Context(), `UPDATE public.payments SET status='FAILED', last_error='the bank payment failed', raw=$3, updated_at=now()
+					WHERE session_id=$1 AND tenant=$2 AND status='PENDING'`, sess.ID, tenant, evt.Data.Object)
+			}
+		}
 
 	case "checkout.session.expired":
 		var sess struct {
@@ -270,9 +277,34 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 			Metadata map[string]string `json:"metadata"`
 		}
 		if json.Unmarshal(evt.Data.Object, &sess) == nil {
-			_, _ = s.db.Exec(r.Context(), `
-				UPDATE public.payments SET status='EXPIRED', raw=$3, updated_at=now()
-				WHERE session_id=$1 AND tenant=$2`, sess.ID, sess.Metadata["tenant"], evt.Data.Object)
+			tenant := sess.Metadata["tenant"]
+			if gid := sess.Metadata["payment_group_id"]; gid != "" {
+				s.closeGroup(r.Context(), tenant, gid, "EXPIRED", "")
+			} else {
+				_, _ = s.db.Exec(r.Context(), `
+					UPDATE public.payments SET status='EXPIRED', raw=$3, updated_at=now()
+					WHERE session_id=$1 AND tenant=$2 AND status='PENDING'`, sess.ID, tenant, evt.Data.Object)
+			}
+		}
+
+	case "payment_intent.payment_failed":
+		// A declined card: the checkout stays open for another try; the payer
+		// sees why the last one failed.
+		var pi struct {
+			Metadata  map[string]string `json:"metadata"`
+			LastError struct {
+				Message string `json:"message"`
+			} `json:"last_payment_error"`
+		}
+		if json.Unmarshal(evt.Data.Object, &pi) == nil && pi.LastError.Message != "" {
+			tenant := pi.Metadata["tenant"]
+			if gid := pi.Metadata["payment_group_id"]; gid != "" {
+				_, _ = s.db.Exec(r.Context(), `UPDATE public.payment_groups SET last_error=$3, updated_at=now() WHERE tenant=$1 AND id::text=$2 AND status IN ('OPEN','PROCESSING')`,
+					tenant, gid, pi.LastError.Message)
+			} else if inv := pi.Metadata["invoice_id"]; inv != "" {
+				_, _ = s.db.Exec(r.Context(), `UPDATE public.payments SET last_error=$3, updated_at=now() WHERE tenant=$1 AND invoice_id::text=$2 AND status='PENDING'`,
+					tenant, inv, pi.LastError.Message)
+			}
 		}
 
 	case "charge.refunded":

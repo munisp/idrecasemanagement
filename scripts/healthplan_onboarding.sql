@@ -118,3 +118,28 @@ CREATE INDEX IF NOT EXISTS hp_package_docs_pkg ON public.hp_package_docs (tenant
 ALTER TABLE public.case_origin
     ADD COLUMN IF NOT EXISTS health_plan_id uuid REFERENCES public.health_plans(id),
     ADD COLUMN IF NOT EXISTS hp_party_id    uuid REFERENCES public.hp_parties(id);
+
+-- A plan-filed dispute has no TPA and no TPA client: without this the
+-- origin row of every plan filing failed its NOT NULL and was dropped, so
+-- the plan could not open its own filings.
+ALTER TABLE public.case_origin ALTER COLUMN tpa_id DROP NOT NULL;
+ALTER TABLE public.case_origin ALTER COLUMN client_id DROP NOT NULL;
+
+-- The plan filings made before the fix (details.filed_by_plan names the plan).
+DO $$
+DECLARE t text;
+BEGIN
+  FOR t IN SELECT DISTINCT tenant FROM public.health_plans LOOP
+    IF to_regclass(format('tenant_%s.cases', t)) IS NOT NULL THEN
+      EXECUTE format($q$
+        INSERT INTO public.case_origin (tenant, case_id, health_plan_id, hp_party_id, initiating_party_name, initiating_party_type, filed_by_email)
+        SELECT %1$L, c.id::text, hp.id, pa.id, coalesce(c.details->>'initiating_party', hp.name),
+               coalesce(c.details->>'filing_party_type', 'HEALTH_PLAN'), hp.contact_email
+        FROM tenant_%1$s.cases c
+        JOIN public.health_plans hp ON hp.tenant=%1$L AND hp.name = c.details->>'filed_by_plan'
+        LEFT JOIN public.hp_parties pa ON pa.tenant=%1$L AND pa.plan_id=hp.id AND pa.party_name = c.details->>'initiating_party'
+        WHERE c.details ? 'filed_by_plan'
+        ON CONFLICT (tenant, case_id) DO NOTHING$q$, t);
+    END IF;
+  END LOOP;
+END $$;

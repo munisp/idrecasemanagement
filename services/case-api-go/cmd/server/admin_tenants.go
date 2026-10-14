@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -148,10 +149,31 @@ func (s *server) kcEnsureGroup(ctx context.Context, tok, tenant string) (already
 // kcAssignRealmRole assigns one realm role to a user by name. Keycloak's
 // POST .../users/{id}/role-mappings/realm needs the role's id (not just its
 // name), so this looks the role up first via GET .../roles/{roleName}.
+// selfServeRoles are the outside roles the public registration pages hand
+// out. One missing from the realm (HEALTH_PLAN was never in the realm
+// import) is created on first use: without it every plan login was created
+// with no role at all.
+var selfServeRoles = map[string]bool{"TPA": true, "HEALTH_PLAN": true, "PARTY": true}
+
 func (s *server) kcAssignRealmRole(ctx context.Context, tok, userID, roleName string) error {
 	roleResp, err := s.kcDo(ctx, http.MethodGet, "/admin/realms/idre/roles/"+roleName, tok, nil)
 	if err != nil {
 		return err
+	}
+	if roleResp.StatusCode == http.StatusNotFound && selfServeRoles[roleName] {
+		roleResp.Body.Close()
+		body, _ := json.Marshal(map[string]string{"name": roleName, "description": "outside organization account (created by case-api)"})
+		cr, err := s.kcDo(ctx, http.MethodPost, "/admin/realms/idre/roles", tok, body)
+		if err != nil {
+			return err
+		}
+		cr.Body.Close()
+		if cr.StatusCode != http.StatusCreated && cr.StatusCode != http.StatusConflict {
+			return fmt.Errorf("role create: status %d", cr.StatusCode)
+		}
+		if roleResp, err = s.kcDo(ctx, http.MethodGet, "/admin/realms/idre/roles/"+roleName, tok, nil); err != nil {
+			return err
+		}
 	}
 	defer roleResp.Body.Close()
 	if roleResp.StatusCode != http.StatusOK {
@@ -230,7 +252,12 @@ func (s *server) kcCreateUser(ctx context.Context, tok, username, email, role st
 		}
 		out["user_id"] = userID // == the JWT "sub" this account will present once it logs in
 		if err := s.kcAssignRealmRole(ctx, tok, userID, role); err != nil {
-			out["role_assignment_error"] = "user created but role assignment failed: " + err.Error()
+			// A login without its role is not a smaller account, it is an
+			// unknown one: take it back rather than hand it out.
+			if derr := s.kcDeleteUser(ctx, tok, userID); derr != nil {
+				slog.Error("keycloak user left without its role", "user_id", userID, "role", role, "err", derr)
+			}
+			return map[string]any{"error": "the account could not be given its role (" + role + "): " + err.Error()}
 		}
 		return out
 	case http.StatusConflict:

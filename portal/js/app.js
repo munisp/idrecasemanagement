@@ -159,14 +159,18 @@
   // itself, which is exactly what its own #/tpa "Tracking" card already
   // shows. Matches the backend's listCases/listAccounts/listLeads/
   // listTasks TPA exclusion.
-  if (!has("TPA")) {
+  // An outside organization's login (a TPA, or a health plan without a
+  // staff role) gets its own page, never the tenant-wide screens.
+  const outside = has("TPA") || (has("HEALTH_PLAN") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
+    "NURSE", "ATTORNEY", "ARBITRATOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"));
+  if (!outside) {
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
       ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
   }
   if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
-  if (!has("TPA") && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
+  if (!outside && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
   // Party workspace: an invited party's own disputes (party_accounts is the only source of access).
   if (has("PARTY") && feature("party_workspace")) links.push(["#/party", "⚭", "My disputes"]);
   // Specialty review queues: each specialist sees their own, the PM all three
@@ -192,13 +196,13 @@
   if (has("PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/ops", "◔", "Ops"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
-  if (!has("TPA")) links.push(["#/timesheet", "⏱", "My timesheet"]);
-  links.push(["#/calendar", "▨", "Calendar"]);
+  if (!outside) links.push(["#/timesheet", "⏱", "My timesheet"]);
+  if (!outside || has("TPA")) links.push(["#/calendar", "▨", "Calendar"]);
   // TPA excluded -- Onboarding is for registering NEW provider/payer/IDRE
   // entity/auditor organizations and reviewing those applications; a TPA
   // registers through its own dedicated flow (dispute.html) and has no
   // use for this screen.
-  if (!has("TPA")) links.push(["#/onboarding", "⚑", "Onboarding"]);
+  if (!outside) links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
@@ -433,7 +437,7 @@
     // Pages reached from another page rather than from the menu.
     if (page === "search") return menu.has("cases");
     // A TPA has no Disputes list, but opens the disputes it filed from its own page.
-    if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return has("TPA");
+    if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return outside;
     return false;
   }
   const noAccess = () => `<div class="view-head"><h1>No access</h1></div>

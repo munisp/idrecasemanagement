@@ -592,9 +592,9 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 		       coalesce(c.details->>'initiating_party_contact','') AS contact_name,
 		       coalesce(c.details->>'filing_notes','') AS notes,
 		       (SELECT coalesce(sum(i.amount_cents),0) FROM public.invoices i
-		         WHERE i.tenant=o.tenant AND i.case_id=o.case_id) AS invoiced_cents,
+		         WHERE i.tenant=o.tenant AND i.case_id=o.case_id)::bigint AS invoiced_cents,
 		       (SELECT coalesce(sum(py.amount_cents),0) FROM public.payments py
-		         WHERE py.tenant=o.tenant AND py.case_id=o.case_id AND py.status='PAID') AS paid_cents
+		         WHERE py.tenant=o.tenant AND py.case_id=o.case_id AND py.status='PAID')::bigint AS paid_cents
 		FROM public.case_origin o
 		JOIN public.tpa_clients cl ON cl.id = o.client_id
 		JOIN tenant_%s.cases c ON c.id::text = o.case_id
@@ -604,6 +604,7 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	s.attachFeeStates(r.Context(), tenant, rows)
 	// Roll up per initiating party.
 	type rollup struct {
 		ClientID   string `json:"client_id"`

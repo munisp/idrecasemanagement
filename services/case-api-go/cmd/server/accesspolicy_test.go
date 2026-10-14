@@ -11,13 +11,13 @@ const docA = "c37ea445-470b-4120-accb-a8209f89a6e1"
 func who(roles ...string) principal { return principal{Subject: "u-1", Roles: roles} }
 
 func TestExternalOnly(t *testing.T) {
-	for _, roles := range [][]string{{"TPA"}, {"TPA", "BULK_SUBMITTER"}, {"TPA", "PARTY"}} {
+	for _, roles := range [][]string{{"TPA"}, {"TPA", "BULK_SUBMITTER"}, {"TPA", "PARTY"}, {"HEALTH_PLAN"}, {}, {"default-roles-idre", "offline_access"}} {
 		if !isExternalOnly(who(roles...)) {
 			t.Errorf("%v is an outside account", roles)
 		}
 	}
 	// A staff role alongside it makes the account staff (an admin who claimed a TPA code to help it).
-	for _, roles := range [][]string{{"CASE_MANAGER"}, {"TPA", "FEDERAL_ADMIN"}, {"TPA", "TENANT_ADMIN"}, {"PM"}, {"STATE_AUDITOR"}, {}, {serviceRole}, {"PARTY"}} {
+	for _, roles := range [][]string{{"CASE_MANAGER"}, {"HEALTH_PLAN", "PM"}, {"TPA", "FEDERAL_ADMIN"}, {"TPA", "TENANT_ADMIN"}, {"PM"}, {"STATE_AUDITOR"}, {serviceRole}, {"PARTY"}} {
 		if isExternalOnly(who(roles...)) {
 			t.Errorf("%v is not an outside-only account", roles)
 		}
@@ -77,10 +77,10 @@ func TestATPACannotReachTheRestOfTheTenant(t *testing.T) {
 // A page's data follows the page: a role without it in the menu does not
 // get it by address.
 func TestAnOutsiderHearsOnlyItsOwnNotices(t *testing.T) {
-	got := notifTargets(principal{Subject: "u1", Roles: []string{"TPA"}})
-	for _, g := range got {
-		if g == "*" || g == "role:CASE_MANAGER" {
-			t.Errorf("a TPA must not receive staff broadcasts; targets %v", got)
+	for _, role := range []string{"TPA", "HEALTH_PLAN"} {
+		got := notifTargets(principal{Subject: "u1", Roles: []string{role}})
+		if len(got) != 1 || got[0] != "u1" {
+			t.Errorf("a %s hears only what is addressed to it (and its organization); targets %v", role, got)
 		}
 	}
 	if staff := notifTargets(principal{Subject: "u2", Roles: []string{"PM"}}); !contains(staff, "*") {
@@ -139,5 +139,50 @@ func TestPageDataFollowsThePage(t *testing.T) {
 	// Writing to those paths is not this guard's business; the handlers have their own role checks.
 	if d, _, _ := accessDecision(who("CODER"), http.MethodPost, "/intake"); d != "allow" {
 		t.Errorf("the page policy is for reads; got %q", d)
+	}
+}
+
+// A health plan's login comes from the public registration page: it has its
+// own area and its own filings, and nothing of the tenant beyond them.
+func TestAHealthPlanCannotReachTheRestOfTheTenant(t *testing.T) {
+	hp := who("HEALTH_PLAN")
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/cases"}, {"GET", "/search"}, {"GET", "/accounts"}, {"GET", "/intake"}, {"GET", "/qa"},
+		{"GET", "/reports/summary"}, {"GET", "/calendar"}, {"GET", "/tpa/me"}, {"POST", "/tpa/intake"},
+		{"GET", "/admin/healthplans"}, {"GET", "/onboarding/reviews"}, {"POST", "/graph/ask"},
+		{"GET", "/cases/" + caseA + "/activities"}, {"POST", "/cases/" + caseA + "/signal"},
+	} {
+		if d, _, _ := accessDecision(hp, c.method, c.path); d != "deny" {
+			t.Errorf("HEALTH_PLAN %s %s: got %q, want deny", c.method, c.path, d)
+		}
+	}
+	for _, path := range []string{"/hp/me", "/hp/responding", "/hp/responding/" + caseA, "/hp/onboarding", "/program", "/notifications"} {
+		if d, _, _ := accessDecision(hp, http.MethodGet, path); d != "allow" {
+			t.Errorf("HEALTH_PLAN %s: got %q, want allow", path, d)
+		}
+	}
+	if d, id, _ := accessDecision(hp, http.MethodGet, "/cases/"+caseA); d != "own-case" || id != caseA {
+		t.Errorf("a plan reads the disputes it filed (own-case), got %q", d)
+	}
+	// A TPA does not get the plan's area either.
+	if d, _, _ := accessDecision(who("TPA"), http.MethodGet, "/hp/me"); d != "deny" {
+		t.Errorf("TPA /hp/me: got %q, want deny", d)
+	}
+	// Staff acting for a plan keep their staff access.
+	if d, _, _ := accessDecision(who("HEALTH_PLAN", "PM"), http.MethodGet, "/cases"); d != "allow" {
+		t.Errorf("PM with a plan linked: got %q, want allow", d)
+	}
+}
+
+// A login with no role (a registration whose role was never assigned) gets
+// the shell and nothing else -- it used to pass as staff.
+func TestALoginWithNoRoleGetsNothing(t *testing.T) {
+	for _, path := range []string{"/cases", "/search", "/accounts", "/calendar", "/tpa/me", "/hp/me"} {
+		if d, _, _ := accessDecision(who("default-roles-idre"), http.MethodGet, path); d != "deny" {
+			t.Errorf("role-less GET %s: got %q, want deny", path, d)
+		}
+	}
+	if d, _, _ := accessDecision(who(), http.MethodGet, "/notifications"); d != "allow" {
+		t.Errorf("role-less still gets the shell; got %q", d)
 	}
 }
