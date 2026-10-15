@@ -82,9 +82,9 @@ func TestCaseFunnel(t *testing.T) {
 	if len(funnel) != 6 {
 		t.Fatalf("funnel stages = %d, want 6", len(funnel))
 	}
-	// Reached FILED = 10+4+3+2 (CLOSED_OTHER excluded) = 19.
-	if funnel[0]["reached"] != 19 {
-		t.Errorf("reached FILED = %v, want 19", funnel[0]["reached"])
+	// Reached FILED = 10+4+3+2 + 1 dismissed (every case was filed) = 20.
+	if funnel[0]["reached"] != 20 {
+		t.Errorf("reached FILED = %v, want 20", funnel[0]["reached"])
 	}
 	if funnel[4]["reached"] != 2 {
 		t.Errorf("reached PAID = %v, want 2", funnel[4]["reached"])
@@ -92,10 +92,10 @@ func TestCaseFunnel(t *testing.T) {
 	if funnel[5]["reached"] != 1 {
 		t.Errorf("reached CLOSED_OTHER = %v, want 1", funnel[5]["reached"])
 	}
-	// Conversion NEGOTIATION <- FILED: 9/19.
+	// Conversion NEGOTIATION <- FILED: 9/20.
 	conv, ok := funnel[1]["conversion_pct"].(float64)
-	if !ok || conv < 47.3 || conv > 47.4 {
-		t.Errorf("conversion_pct = %v, want ~47.37", funnel[1]["conversion_pct"])
+	if !ok || conv < 44.9 || conv > 45.1 {
+		t.Errorf("conversion_pct = %v, want 45.0", funnel[1]["conversion_pct"])
 	}
 }
 

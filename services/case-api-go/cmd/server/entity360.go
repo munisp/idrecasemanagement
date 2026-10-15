@@ -140,6 +140,42 @@ func (s *server) suggestEntities(ctx context.Context, tenant, name string) []map
 		}
 		out = append(out, m)
 	}
+	// Trigram fallback (#5): a substring gate misses reworded names entirely
+	// ("Gulf Coast ER Physicians"). When the gate yields little, widen with
+	// pg_trgm similarity; a tenant without the extension just keeps the
+	// substring results.
+	if len(out) < 3 {
+		seen := map[string]bool{}
+		for _, m := range out {
+			seen[m["id"].(string)] = true
+		}
+		if rows2, err2 := s.db.Query(ctx, `
+			SELECT e.id::text, e.entity_type, e.canonical_name, e.npi, e.naic,
+			       c.valid, coalesce(c.registry_name,'')
+			FROM public.entities e
+			LEFT JOIN public.npi_cache c ON c.npi = e.npi
+			WHERE e.tenant=$1 AND e.status='ACTIVE'
+			  AND similarity(lower(e.canonical_name), lower($2)) > 0.25
+			ORDER BY similarity(lower(e.canonical_name), lower($2)) DESC LIMIT 10`, tenant, name); err2 == nil {
+			defer rows2.Close()
+			for rows2.Next() {
+				var id, typ, cname, npi, naic, regName string
+				var valid *bool
+				if rows2.Scan(&id, &typ, &cname, &npi, &naic, &valid, &regName) != nil || seen[id] {
+					continue
+				}
+				score := tokenJaccard(qTokens, npiNameTokens(cname))
+				m := map[string]any{
+					"id": id, "entity_type": typ, "canonical_name": cname, "npi": npi, "naic": naic,
+					"score": float64(int(score*100+0.5)) / 100,
+				}
+				if valid != nil && *valid && regName != "" {
+					m["registry_confirmed"] = tokenJaccard(npiNameTokens(cname), npiNameTokens(regName)) >= 0.5
+				}
+				out = append(out, m)
+			}
+		}
+	}
 	sort.Slice(out, func(i, j int) bool {
 		si, _ := out[i]["score"].(float64)
 		sj, _ := out[j]["score"].(float64)
