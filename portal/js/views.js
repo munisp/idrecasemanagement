@@ -2751,7 +2751,7 @@ const Views = (() => {
       const list = (v) => (Array.isArray(v) ? v : []).join(", ");
       const sendHtml = toSend.length
         ? `<h2>Passed QA — ready to send</h2>
-          <p class="muted">These drafts were approved and are back with the Reviewer. Check the addresses and send; the send is logged and the case's dates are set.</p>
+          <p class="muted">These drafts were approved and are back with the person who drafted them. Check the addresses and send; the send is logged and the case's dates are set.</p>
           <table><thead><tr><th>Subject</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
           toSend.map((i) => `<tr><td>${esc(i.subject)}</td><td>${esc(i.reviewed_by || "—")}</td><td class="muted">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
             <td>${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
@@ -2771,13 +2771,14 @@ const Views = (() => {
         return `<div class="view-head"><h1>QA gate</h1>
           <span class="muted">nothing reaches a party without approval on gated templates</span></div>
           ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}`;
+      // A drafter (the Coder) sees only their own drafts, and never reviews one.
       const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
             <td>${esc(i.drafted_by)}</td>
-            <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
+            <td>${r.own_only ? '<span class="muted">waiting for QA</span>' : `<button class="mini" onclick="Views.qaReview('${i.id}')">review</button>`}</td></tr>`).join("");
       const { bodyHtml, pagerHtml } = initClientPager("qa", q, rowsHtml);
       afterRender(() => bindClientPager("qa", "#qa-tb tbody"));
       return `<div class="view-head"><h1>QA gate</h1>
-        <span class="muted">nothing reaches a party without approval on gated templates</span></div>
+        <span class="muted">${r.own_only ? "your drafts: waiting for QA, and ready for you to send" : "nothing reaches a party without approval on gated templates"}</span></div>
         ${intro}<h2>Awaiting review (${q.length})</h2>
         <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead>
         <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}`;

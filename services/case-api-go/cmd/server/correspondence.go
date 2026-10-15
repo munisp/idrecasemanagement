@@ -428,7 +428,12 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 // PENDING review marks it SENT and writes the correspondence log — nothing
 // reaches a party without passing the gate.
 func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, qaReadRoles...) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, qaReadRoles...) {
+		if hasAnyRole(p, qaDraftOnlyRoles...) {
+			s.qaQueueOwn(w, r, p)
+			return
+		}
 		http.Error(w, `{"error":"forbidden: requires a case-staff or QA role"}`, http.StatusForbidden)
 		return
 	}
@@ -468,6 +473,35 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
 		ORDER BY reviewed_at`, tenant)
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend})
+}
+
+// qaDraftOnlyRoles draft a gated letter without reviewing any: the Coder
+// drafts the Full Review Estimated Cost email, the PM approves it, and the
+// Coder sends it. They see only their own drafts in the QA gate.
+var qaDraftOnlyRoles = []string{"CODER"}
+
+// qaQueueOwn: the QA gate for a drafter -- their own drafts awaiting review,
+// the approved ones waiting for them to send, and their recent decisions.
+func (s *server) qaQueueOwn(w http.ResponseWriter, r *http.Request, p principal) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	rows, err := s.queryRows(r, `
+		SELECT id, case_id, artifact, channel, subject, status, drafted_by, created_at
+		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' AND requested_by_sub=$2 ORDER BY created_at`, tenant, p.Subject)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	recent, _ := s.queryRows(r, `
+		SELECT id, case_id, subject, status, drafted_by, reviewed_by, reviewed_at
+		FROM public.qa_reviews WHERE tenant=$1 AND status<>'PENDING' AND requested_by_sub=$2
+		ORDER BY reviewed_at DESC NULLS LAST LIMIT 20`, tenant, p.Subject)
+	toSend, _ := s.queryRows(r, `
+		SELECT id, case_id, artifact, subject, drafted_by, reviewed_by, reviewed_at, coalesce(requested_by_sub,'') AS requested_by_sub,
+		       to_recipients, cc_recipients
+		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
+		  AND requested_by_sub=$2
+		ORDER BY reviewed_at`, tenant, p.Subject)
+	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend, "own_only": true})
 }
 
 func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
