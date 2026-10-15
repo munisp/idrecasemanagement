@@ -239,3 +239,28 @@ func TestWorkflowLetterHandBack(t *testing.T) {
 		t.Errorf("legacy case past acceptance: next is %+v, want the plan notification draft", n)
 	}
 }
+
+// The clinical step belongs to the Nurse / Physician, and to accounts made
+// with the older DOCTOR or NURSE roles, which the Team page used to offer.
+func TestClinicalStepOwners(t *testing.T) {
+	f := wfBase()
+	f.Act["CODING_REVIEW_COMPLETE"] = wfAct{Body: `{"clinical_requested":true}`, At: time.Now()}
+	var st *wfStep
+	for i, s := range buildWorkflowSteps(f) {
+		if s.Key == "clinical_review" {
+			ss := buildWorkflowSteps(f)[i]
+			st = &ss
+		}
+	}
+	if st == nil {
+		t.Fatal("no clinical review step when the Coder asked for one")
+	}
+	for _, role := range []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE"} {
+		if !wfMayAct(principal{Roles: []string{role}}, *st) {
+			t.Errorf("%s should be able to act on the clinical review step", role)
+		}
+	}
+	if wfMayAct(principal{Roles: []string{"CODER"}}, *st) {
+		t.Error("a Coder must not act on the clinical review step")
+	}
+}

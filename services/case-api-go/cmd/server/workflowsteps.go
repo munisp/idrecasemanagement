@@ -178,6 +178,8 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") {
 			add("clinical_review", "Clinical review", "NURSE_PHYSICIAN", "signal:CLINICAL_REVIEW_COMPLETE",
 				has("CLINICAL_REVIEW_COMPLETE"), "Add Clinical Review notes.")
+			// Accounts made before NURSE_PHYSICIAN existed hold DOCTOR or NURSE.
+			steps[len(steps)-1].OwnerRoles = []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE"}
 		}
 		add("attorney_review", "Final rationale and Final Order package", "ATTORNEY", "signal:ATTORNEY_REVIEW_COMPLETE",
 			has("ATTORNEY_REVIEW_COMPLETE"), "Enter the rationale; record the outcome.")

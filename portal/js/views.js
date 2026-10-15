@@ -5614,8 +5614,9 @@ const Views = (() => {
         { name: "username", label: "First user — username" },
         { name: "email", label: "First user — email" },
         { name: "role", label: "First user — role", value: "CASE_MANAGER", options: [
-          ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
-          ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
+          ["CASE_MANAGER", "Reviewer (Case Manager)"], ["PM", "PM"], ["CODER", "Coder"],
+          ["NURSE_PHYSICIAN", "Nurse / Physician"], ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"],
+          ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
       ],
     });
@@ -5780,8 +5781,9 @@ const Views = (() => {
         { name: "username", label: "Username", required: true },
         { name: "email", label: "Email", required: true },
         { name: "role", label: "Role", value: "CASE_MANAGER", options: [
-          ["CASE_MANAGER", "Case Manager"], ["ARBITRATOR", "Arbitrator"], ["PM", "PM"],
-          ["CODER", "Coder"], ["DOCTOR", "Doctor"], ["NURSE", "Nurse"], ["ATTORNEY", "Attorney"],
+          ["CASE_MANAGER", "Reviewer (Case Manager)"], ["PM", "PM"], ["CODER", "Coder"],
+          ["NURSE_PHYSICIAN", "Nurse / Physician"], ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"],
+          ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"],
           // Minting a TENANT_ADMIN is federal/platform-admin-only server-side
           // (avoids a self-escalating admin chain within one state) -- the
@@ -6379,7 +6381,7 @@ const Views = (() => {
                 <button class="mini">Import clients</button></form>
               <div id="tpa-import-result"></div></details>` : ""}</div>
           ${onb ? `<div class="card"><h2>Where each client stands</h2>
-            <p class="muted">A client is <b>Ready</b> once its profile and payment method are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute. The filing fees are paid by you, the TPA, at checkout — the client's payment method is kept on file for the client.</p>
+            <p class="muted">A client is <b>Ready</b> once its profile and payment method are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute. Each time you pay, you choose who pays: each client's own saved card or bank account, your organization's, or a card or bank account on Stripe's page.</p>
             <div id="tpa-onboarding"><p class="muted">Loading…</p></div>
             <details class="tpa-more"><summary>Upload documents to many clients at once (ZIP)</summary>
               <p class="muted">One folder per client, named exactly like the client, holding its six documents (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code>. To file many disputes, each with its own documents, use <b>Bulk filing</b> instead.</p>
