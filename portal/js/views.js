@@ -6637,6 +6637,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       const isStaff = can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
       orgBox.innerHTML = `<div class="tpa-org-line"><span class="tpa-org-name">${esc(r.tpa.name)}</span>
         <span class="muted">${esc(r.tpa.contact_email)}</span> ${badge(r.tpa.status)}
+        ${App.feature("entity360") && isStaff ? `<button class="mini" onclick="CrmViews.openEntity360('tpas','${r.tpa.id}')">Entity 360</button>` : ""}
         ${isStaff ? `<button class="mini" onclick="Views.tpaUnlinkFn()">Stop acting as this TPA</button>` : ""}</div>`;
       document.getElementById("tpa-team").innerHTML = `
         <div class="card"><h2>Add a teammate</h2>
@@ -6941,6 +6942,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       const r = await Api.program.hpMe();
       orgBox.innerHTML = `<div class="stat-grid"><div class="stat"><div class="stat-num">${esc(r.health_plan.name)}</div>
         <div class="muted">${esc(r.health_plan.contact_email)} · ${r.health_plan.naic ? "NAIC " + esc(r.health_plan.naic) + " · " : ""}${esc(r.health_plan.line_of_business || "")} ${badge(r.health_plan.status)}</div>
+        ${App.feature("entity360") && can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") ? `<button class="mini" style="margin-top:8px" onclick="CrmViews.openEntity360('health_plans','${r.health_plan.id}')">Entity 360</button>` : ""}
         ${can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") && !can("HEALTH_PLAN") ? `<button class="mini" style="margin-top:8px" onclick="Views.hpUnlinkFn()">Stop acting as this plan</button>` : ""}</div></div>`;
       const hpBody = document.getElementById("hp-body");
       if (!hpBody) return; // the page was left while it loaded

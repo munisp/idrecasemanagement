@@ -55,3 +55,8 @@ CREATE INDEX IF NOT EXISTS entity_links_entity ON public.entity_links (tenant, e
 -- account has an NPI or EIN; also settable from the 360 screen).
 ALTER TABLE public.accounts ADD COLUMN IF NOT EXISTS entity_id uuid REFERENCES public.entities(id);
 CREATE INDEX IF NOT EXISTS accounts_entity ON public.accounts (tenant, entity_id) WHERE entity_id IS NOT NULL;
+
+-- Merges: a duplicate entity is tombstoned into the survivor (links move,
+-- identity keys fill gaps); merged_into keeps the trail reversible.
+ALTER TABLE public.entities ADD COLUMN IF NOT EXISTS merged_into uuid REFERENCES public.entities(id);
+CREATE INDEX IF NOT EXISTS entities_merged ON public.entities (tenant, merged_into) WHERE merged_into IS NOT NULL;

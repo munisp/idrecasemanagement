@@ -213,6 +213,9 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, "", "TPA_REGISTERED", map[string]any{
 		"tpa_id": id, "name": in.Name, "username": username, "user_id": userID, "credentials_emailed_to": in.ContactEmail,
 	})
+	if s.featureEnabled(r, tenant, "entity360") {
+		s.ensureEntityQuiet(r.Context(), tenant, "tpas", id, "TPA", in.Name, "", "", "", "")
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"tpa_id": id, "status": "ACTIVE",
 		"next": "Check your email for how to sign in. Your organization is already linked to your portal account.",
@@ -401,6 +404,9 @@ func (s *server) tpaAddClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logAudit(r.Context(), tenant, "", "TPA_CLIENT_ADDED", map[string]any{"tpa_id": org.ID, "client_id": id, "party": in.PartyName, "by": p.Subject})
+	if s.featureEnabled(r, tenant, "entity360") {
+		s.ensureEntityQuiet(r.Context(), tenant, "tpa_clients", id, pt, in.PartyName, "", "", "", "")
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"client_id": id, "party_type": pt, "status": "ACTIVE"})
 }
 

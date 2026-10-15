@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -79,31 +80,71 @@ func (s *server) findEntityByIdentity(ctx context.Context, tenant, npi, tin, nai
 	return id
 }
 
+// tokenJaccard: |A∩B| / |A∪B| over noise-stripped name token sets. 0 when
+// either side has no usable tokens.
+func tokenJaccard(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for t := range a {
+		if b[t] {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
+}
+
 // suggestEntities: name-normalized candidates for human confirmation —
-// never auto-linked.
+// never auto-linked. Each candidate carries a strength score (token Jaccard
+// against the queried name, 0–1) and, when its NPI is in the local NPPES
+// cache, a registry_confirmed badge meaning the registry name for that NPI
+// shares tokens with the entity name. Results are sorted by score.
 func (s *server) suggestEntities(ctx context.Context, tenant, name string) []map[string]any {
 	norm := normEntityName(name)
 	if norm == "" {
 		return nil
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT id::text, entity_type, canonical_name, npi, naic
-		FROM public.entities
-		WHERE tenant=$1 AND status='ACTIVE'
-		  AND lower(regexp_replace(canonical_name, '[^a-zA-Z0-9 ]', '', 'g'))
+		SELECT e.id::text, e.entity_type, e.canonical_name, e.npi, e.naic,
+		       c.valid, coalesce(c.registry_name,'')
+		FROM public.entities e
+		LEFT JOIN public.npi_cache c ON c.npi = e.npi
+		WHERE e.tenant=$1 AND e.status='ACTIVE'
+		  AND lower(regexp_replace(e.canonical_name, '[^a-zA-Z0-9 ]', '', 'g'))
 		      LIKE '%' || $2 || '%'
-		ORDER BY canonical_name LIMIT 10`, tenant, norm)
+		ORDER BY e.canonical_name LIMIT 10`, tenant, norm)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
+	qTokens := npiNameTokens(name)
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, typ, name, npi, naic string
-		if rows.Scan(&id, &typ, &name, &npi, &naic) == nil {
-			out = append(out, map[string]any{"id": id, "entity_type": typ, "canonical_name": name, "npi": npi, "naic": naic})
+		var id, typ, cname, npi, naic, regName string
+		var valid *bool
+		if rows.Scan(&id, &typ, &cname, &npi, &naic, &valid, &regName) != nil {
+			continue
 		}
+		score := tokenJaccard(qTokens, npiNameTokens(cname))
+		m := map[string]any{
+			"id": id, "entity_type": typ, "canonical_name": cname, "npi": npi, "naic": naic,
+			"score": float64(int(score*100+0.5)) / 100,
+		}
+		if valid != nil && *valid && regName != "" {
+			m["registry_confirmed"] = tokenJaccard(npiNameTokens(cname), npiNameTokens(regName)) >= 0.5
+		}
+		out = append(out, m)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		si, _ := out[i]["score"].(float64)
+		sj, _ := out[j]["score"].(float64)
+		return si > sj
+	})
 	return out
 }
 

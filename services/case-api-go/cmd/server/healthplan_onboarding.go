@@ -196,6 +196,9 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "registration failed while linking the account — nothing was registered, try again"})
 		return
 	}
+	if s.featureEnabled(r, tenant, "entity360") {
+		s.ensureEntityQuiet(r.Context(), tenant, "health_plans", id, "HEALTH_PLAN", in.Name, "", in.FEIN, in.NAIC, in.FEIN)
+	}
 	tempPassword, _ := result["temporary_password"].(string)
 	subject, body := hpWelcomeMail(in.Name, in.ContactName, username, tempPassword, s.cfg.PortalBaseURL)
 	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
@@ -367,6 +370,9 @@ func (s *server) hpAddParty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logAudit(r.Context(), tenant, "", "HP_PARTY_ADDED", map[string]any{"plan_id": org.ID, "party_id": id, "party_name": in.PartyName})
+	if s.featureEnabled(r, tenant, "entity360") {
+		s.ensureEntityQuiet(r.Context(), tenant, "hp_parties", id, ptype, in.PartyName, "", "", "", "")
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"party_id": id, "onboarding_status": "PROFILE_INCOMPLETE"})
 }
 
@@ -596,6 +602,9 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 					s.saveNPICheck(r.Context(), "hp", tenant, id, chk)
 				}
 				s.recomputeHpPartyStatus(r, tenant, id)
+				if s.featureEnabled(r, tenant, "entity360") {
+					s.ensureEntityQuiet(r.Context(), tenant, "hp_parties", id, ptype, name, npi, tin, "", "")
+				}
 			}
 		}
 		report = append(report, res)

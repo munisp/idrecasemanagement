@@ -327,10 +327,12 @@
       : h.kind === "task" ? (h.case_id ? `#/cases/${h.case_id}` : "#/crm/tasks")
       : h.kind === "invoice" ? (h.case_id ? `#/cases/${h.case_id}` : "#/finance")
       : h.kind === "account" ? `#/crm/accounts/${h.id}`
+      : h.kind === "entity" ? `#/crm/360/${h.id}`
       : h.kind === "lead" ? "#/crm/leads" : "#/crm/accounts";
     const iconFor = (h) => h.kind === "page" ? h.icon
       : h.kind === "case" ? "▦" : h.kind === "document" ? "🗎"
-      : h.kind === "task" ? "☑" : h.kind === "invoice" ? "🧾" : "◈";
+      : h.kind === "task" ? "☑" : h.kind === "invoice" ? "🧾"
+      : h.kind === "entity" ? "◉" : "◈";
     let timer = 0, items = [], sel = -1;
     const closeDrop = () => { drop.hidden = true; items = []; sel = -1; };
     async function refresh() {
