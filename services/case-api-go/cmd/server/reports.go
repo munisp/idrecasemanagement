@@ -71,9 +71,14 @@ func (s *server) slaReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(), `
-		SELECT case_id, clock, COALESCE(detail,''), created_at
-		FROM public.sla_breaches WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
+	q := `SELECT case_id, clock, COALESCE(detail,''), created_at FROM public.sla_breaches WHERE tenant=$1`
+	args := []any{tenant}
+	if clock := r.URL.Query().Get("clock"); clock != "" {
+		args = append(args, clock)
+		q += fmt.Sprintf(` AND clock=$%d`, len(args))
+	}
+	q += ` ORDER BY created_at DESC LIMIT 200`
+	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -111,13 +116,23 @@ func (s *server) summaryReport(w http.ResponseWriter, r *http.Request) {
 	programmed := s.loadProgram(r, tenant) != nil
 	statusExpr := "status"
 	amountExpr := "qpa_cents"
+	agencyExpr := "''"
 	if programmed {
 		statusExpr = "coalesce(internal_status, status)"
 		amountExpr = "disputed_amount_cents"
+		// agency_status is the one marker the backend sets consistently
+		// across every terminal internal_status (FL's internal_status
+		// vocabulary has no common "closed" prefix a client can pattern-
+		// match on -- confirmed live, the UI's own open-count regex missed
+		// "Provider Closure Letter Issued"/"Provider - Withdrawal" entirely
+		// and overcounted open disputes). Exposing it per row lets the
+		// frontend classify open/closed correctly instead of guessing from
+		// the label text.
+		agencyExpr = "coalesce(agency_status,'')"
 	}
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT %s, COUNT(*), COALESCE(AVG(%s),0)
-		FROM tenant_%s.cases GROUP BY 1 ORDER BY 2 DESC`, statusExpr, amountExpr, sanitizeTenant(tenant)))
+		SELECT %s, %s, COUNT(*), COALESCE(AVG(%s),0)
+		FROM tenant_%s.cases GROUP BY 1, 2 ORDER BY 3 DESC`, statusExpr, agencyExpr, amountExpr, sanitizeTenant(tenant)))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -125,12 +140,12 @@ func (s *server) summaryReport(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var status string
+		var status, agencyStatus string
 		var n int
 		var avg float64
-		if rows.Scan(&status, &n, &avg) == nil {
+		if rows.Scan(&status, &agencyStatus, &n, &avg) == nil {
 			out = append(out, map[string]any{
-				"status": status, "count": n, "avg_amount_usd": avg / 100,
+				"status": status, "agency_status": agencyStatus, "count": n, "avg_amount_usd": avg / 100,
 				"amount_label": map[bool]string{true: "Disputed", false: "QPA"}[programmed],
 			})
 		}

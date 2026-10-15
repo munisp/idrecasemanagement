@@ -38,3 +38,13 @@ func TestFeatureAdminGate(t *testing.T) {
 		}
 	}
 }
+
+func TestStoredFlagsOverlayTheProgramSettings(t *testing.T) {
+	got := mergeFlags([]byte(`{"benchmarks":false,"fraud_signals":false}`), []byte(`{"benchmarks":true}`), []byte(`not json`))
+	if got["benchmarks"] != true || got["fraud_signals"] != false || len(got) != 2 {
+		t.Errorf("tenant_features wins over program settings; got %v", got)
+	}
+	if len(mergeFlags(nil, nil)) != 0 {
+		t.Errorf("nothing stored: no flags")
+	}
+}

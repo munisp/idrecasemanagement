@@ -69,6 +69,10 @@ func (s *server) shareCreateUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}
+	if lim := docSizeLimitFor(in.Filename); lim > 0 && in.Size > lim {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, fmt.Sprintf("%s is %s — the limit for this type is %s", in.Filename, humanBytes(in.Size), humanBytes(lim))), http.StatusRequestEntityTooLarge)
+		return
+	}
 	if !s.checkLinkBudgets(w, r, token, in.Size) {
 		return
 	}

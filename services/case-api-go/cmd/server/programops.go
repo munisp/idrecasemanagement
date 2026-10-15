@@ -24,8 +24,9 @@ import (
 // number equals the case number (program convention); both parties can carry
 // independent receivables on one case (dual receivables).
 func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// The PM creates invoices (SOP); the Reviewer does not.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: invoices are created by the PM"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -43,6 +44,10 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Kind == "" {
 		in.Kind = "INITIAL_FEE"
+	}
+	// The review invoice is a step of its own (after the Attorney's review).
+	if in.Kind != "INITIAL_FEE" && !s.stepGuard(w, r, tenant, caseID, "invoice") {
+		return
 	}
 	if in.DueDays <= 0 {
 		in.DueDays = 30
@@ -70,8 +75,8 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_ISSUED",
 		fmt.Sprintf("Invoice %s issued to %s for $%d.%02d (%s, %d-day terms) by %s",
-			caseNumber, in.Party, in.AmountCents/100, in.AmountCents%100, in.Kind, in.DueDays, p.Subject))
-	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", in.AmountCents, in.Party, caseNumber, p.Subject)
+			caseNumber, in.Party, in.AmountCents/100, in.AmountCents%100, in.Kind, in.DueDays, displayName(p)))
+	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", in.AmountCents, in.Party, caseNumber, displayName(p))
 	s.logAudit(r.Context(), tenant, caseID, "INVOICE_ISSUED", map[string]any{
 		"by": p.Subject, "invoice_id": invID, "party": in.Party, "kind": in.Kind, "amount_cents": in.AmountCents,
 	})
@@ -112,8 +117,12 @@ func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
 // settleInvoice records a payment, void, or refund (remittance reference kept
 // for reconciliation with the payment provider).
 func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// PM removed (access-control audit, AC-5 separation of duties): PM
+	// holds case-adjacent QA/review powers, so settling real money sits
+	// with FINANCE/admins alone -- same reasoning CASE_MANAGER was already
+	// excluded for.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires FINANCE, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -139,21 +148,39 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// REFUND requires the invoice to actually be PAID first -- PAY and VOID
+	// both require OPEN (you settle or void something outstanding). Before
+	// this, all three actions shared the same `status='OPEN'` filter, so
+	// REFUND on a never-paid OPEN invoice passed the filter and jumped
+	// straight OPEN -> REFUNDED. refundCardPayment() deliberately no-ops
+	// (returns nil) when it finds no Stripe payment on file, trusting that
+	// to mean "paid offline, refund handled outside the system" -- a
+	// reasonable assumption for an invoice that really was PAID, but for
+	// one that was NEVER paid it let the code log a real "$X refund issued"
+	// ledger entry (REFUND_ISSUED/OUT) for money that never moved. Confirmed
+	// live: an unpaid invoice went OPEN -> REFUNDED with a ledger entry and
+	// no refund email.
+	requiredStatus := "OPEN"
+	if in.Action == "REFUND" {
+		requiredStatus = "PAID"
+	}
 	var caseID string
 	var amount int64
 	var party string
 	err := s.db.QueryRow(r.Context(), `
 		UPDATE public.invoices SET status=$3, remittance_ref=$4,
 		       paid_at = CASE WHEN $3='PAID' THEN now()::date ELSE paid_at END
-		WHERE tenant=$1 AND id=$2 AND status='OPEN' RETURNING case_id, amount_cents, party`,
-		tenant, invID, status, in.RemittanceRef).Scan(&caseID, &amount, &party)
+		WHERE tenant=$1 AND id=$2 AND status=$5 RETURNING case_id, amount_cents, party`,
+		tenant, invID, status, in.RemittanceRef, requiredStatus).Scan(&caseID, &amount, &party)
 	if err != nil {
-		http.Error(w, `{"error":"not open or not found"}`, http.StatusConflict)
+		http.Error(w, fmt.Sprintf(`{"error":"invoice not %s or not found"}`, strings.ToLower(requiredStatus)), http.StatusConflict)
 		return
 	}
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_"+status,
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
 	if status == "PAID" {
+		// Paid offline: an open card checkout for this fee must not take it again.
+		_ = s.expireOverlapping(r.Context(), tenant, []string{invID})
 		s.maybeMarkDecidedInvoicePaid(r, tenant, caseID)
 		// Offline settlement (check/ACH/manual) releases a payment-gated
 		// intake exactly like the Stripe webhook path does.
@@ -173,10 +200,14 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	} else if in.Action == "REFUND" {
 		kind, dir = "REFUND_ISSUED", "OUT"
 	}
-	actor := r.Context().Value(ctxPrincipal{}).(principal).Subject
-	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, actor)
+	// finEvent's actor is shown to reviewers (financial-report transaction
+	// stream) and gets displayName(); logAudit's "by" stays the stable
+	// subject ID -- a tamper-evident compliance record should point at the
+	// permanent account identity, not a display name that could change.
+	actorP := r.Context().Value(ctxPrincipal{}).(principal)
+	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, displayName(actorP))
 	s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
-		"by": actor, "invoice_id": invID, "action": in.Action, "status": status,
+		"by": actorP.Subject, "invoice_id": invID, "action": in.Action, "status": status,
 		"amount_cents": amount, "party": party, "remittance_ref": in.RemittanceRef,
 	})
 	// Money moved — the case status and checklist follow the fact.
@@ -398,8 +429,15 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 // mirrors the notification flow (the NON-filing party receives the plan
 // notification packet).
 func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// CASE_MANAGER removed, PM added, per the "reviewer only reviews"
+	// follow-up: opening a new intake is a creation action, not a review
+	// one -- reviewer keeps advanceIntake (working an existing intake)
+	// but not this. TENANT_ADMIN added back -- see reportsReadRoles
+	// (casemgmt.go) for why.
+	// CASE_MANAGER is back: the SOP has the Reviewer send the submission
+	// instructions, and that is what opening an intake does.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -411,6 +449,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		QPACents            int64  `json:"qpa_cents"` // federal NSA tenants only — programmed tenants use disputed_amount_cents
+		ServiceLine         string `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
@@ -434,7 +473,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	// row that would otherwise need a separate manual CONVERTED-linking
 	// step later, and that never gets a case number of its own at all.
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
-		caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.ContactName, in.Org, fpt, in.DisputedAmountCents)
+		caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.ContactName, in.Org, fpt, in.DisputedAmountCents, in.ServiceLine)
 		if err != nil {
 			if isUniqueViolation(err) {
 				http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
@@ -622,7 +661,8 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRows(r, `
 		SELECT id, email, contact_name, org, status, outreach_at, case_id, created_at,
 		       filing_party_type, packet_complete_at, NULL::text AS case_number,
-		       NULL::bigint AS disputed_amount_cents, qpa_cents, 'legacy' AS origin
+		       NULL::bigint AS disputed_amount_cents, qpa_cents, 'legacy' AS origin,
+		       NULL::text AS service_line
 		FROM public.intake_requests WHERE tenant=$1 ORDER BY created_at DESC LIMIT 200`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -650,7 +690,8 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 			       case_number,
 			       disputed_amount_cents,
 			       qpa_cents,
-			       'case' AS origin
+			       'case' AS origin,
+			       service_line
 			FROM tenant_%s.cases
 			WHERE details->>'requester_email' IS NOT NULL
 			ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))
@@ -661,7 +702,19 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 	// legacy intake_requests and programmed-tenant cases come from two
 	// different tables with no shared key to UNION on, so this can't be one
 	// paginated SQL query the way accounts/leads/tasks are -- merge, sort,
-	// then paginate the combined set in memory.
+	// then paginate the combined set in memory. Filtering after the merge
+	// for the same reason: one status value, two sources with different
+	// status vocabularies already normalized into the same "status" field
+	// by the queries above.
+	if status := r.URL.Query().Get("status"); status != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if str(row["status"]) == status {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		ti, _ := rows[i]["created_at"].(time.Time)
 		tj, _ := rows[j]["created_at"].(time.Time)
@@ -694,20 +747,24 @@ func (s *server) listDeliverables(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"deliverables": []any{}})
 		return
 	}
-	var rules []struct {
-		Name    string `json:"name"`
-		DueRule string `json:"due_rule"`
-		Format  string `json:"format"`
-	}
+	var rules []deliverableRule
 	_ = json.Unmarshal(raw, &rules)
 	type dv struct {
-		Name    string `json:"name"`
-		DueRule string `json:"due_rule"`
-		Format  string `json:"format"`
-		NextDue string `json:"next_due"`
+		Name        string `json:"name"`
+		ContractRef string `json:"contract_ref"`
+		DueRule     string `json:"due_rule"`
+		Format      string `json:"format"`
+		NextDue     string `json:"next_due"`
 	}
 	out := []dv{}
 	now := time.Now()
+	// The contract's own dates drive the contract-level deliverables.
+	contract := map[string]string{}
+	var craw []byte
+	if s.db.QueryRow(r.Context(),
+		`SELECT coalesce(config->'contract','{}'::jsonb) FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&craw) == nil {
+		_ = json.Unmarshal(craw, &contract)
+	}
 	for _, d := range rules {
 		next := ""
 		switch {
@@ -726,16 +783,37 @@ func (s *server) listDeliverables(w http.ResponseWriter, r *http.Request) {
 				cand = cand.AddDate(0, 1, 0)
 			}
 			next = cand.Format("2006-01-02")
+		case strings.HasPrefix(d.DueRule, "contract:"):
+			next = contractDue(d.DueRule, contract)
+			if next == "" {
+				next = "set the contract dates"
+				if d.DueRule == "contract:standing" {
+					next = "standing"
+				}
+			}
+		case strings.HasPrefix(d.DueRule, "case:"):
+			next = "per case"
 		default:
 			next = "event-driven"
 		}
-		out = append(out, dv{d.Name, d.DueRule, d.Format, next})
+		out = append(out, dv{d.Name, d.ContractRef, d.DueRule, d.Format, next})
 	}
-	// persisted deliverable instances (status + delivery timestamps)
-	rows, _ := s.queryRows(r, `
-		SELECT name, case_id, due_date, status, delivered_at FROM public.deliverables
-		WHERE tenant=$1 ORDER BY due_date DESC NULLS LAST LIMIT 50`, tenant)
-	writeJSON(w, http.StatusOK, map[string]any{"deliverables": out, "history": rows})
+	// persisted deliverable instances (status + delivery timestamps) --
+	// sorted by when it was actually delivered, not by due date: this is a
+	// delivery HISTORY, and due_date DESC put next-due-soonest items above
+	// ones delivered just now, which read as backwards live.
+	rows, _ := s.queryRows(r, fmt.Sprintf(`
+		SELECT d.name, d.case_id, c.case_number, d.due_date::text AS due_date, d.hard_due_date::text AS hard_due_date,
+		       d.status, d.delivered_at, coalesce(d.timeliness,'') AS timeliness, coalesce(d.period,'') AS period,
+		       coalesce(d.contract_ref,'') AS contract_ref
+		FROM public.deliverables d LEFT JOIN tenant_%s.cases c ON c.id::text = d.case_id
+		WHERE d.tenant=$1 ORDER BY (d.status='DUE') DESC, d.delivered_at DESC NULLS LAST, d.due_date DESC LIMIT 500`,
+		sanitizeTenant(tenant)), tenant)
+	resp := map[string]any{"deliverables": out, "history": rows, "contract": contract}
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		resp["outstanding"] = s.outstandingDeliverables(r, tenant, cfg)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
@@ -756,6 +834,20 @@ func (s *server) submitDeliverable(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.DueRule == "" {
 		in.DueRule = "adhoc"
+	}
+	// A calendar report has a DUE entry for its period (sweepReportDeliverables):
+	// delivering it closes the oldest open one, graded against its due date.
+	if in.CaseID == "" {
+		if res, err := s.db.Exec(r.Context(), `
+			UPDATE public.deliverables SET status='DELIVERED', delivered_at=now(),
+			       timeliness = CASE WHEN current_date <= due_date THEN 'ON_TIME' ELSE 'BREACH' END
+			WHERE id = (SELECT id FROM public.deliverables
+			            WHERE tenant=$1 AND name=$2 AND status='DUE' ORDER BY due_date LIMIT 1)`, tenant, in.Name); err == nil && res.RowsAffected() > 0 {
+			s.logAudit(r.Context(), tenant, "", "DELIVERABLE_SUBMITTED", map[string]any{
+				"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "name": in.Name, "closed_due_entry": true})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "DELIVERED"})
+			return
+		}
 	}
 	_, insErr := s.db.Exec(r.Context(), `
 		INSERT INTO public.deliverables (tenant, name, due_rule, case_id, due_date, status, delivered_at)
@@ -859,7 +951,15 @@ var terminalInternalStatuses = map[string]bool{
 	"Plan Opt-Out": true, "Ineligible": true, "Dismissed": true, "Withdrawn": true,
 }
 
-const decidedInvoicePaidStatus = "Decided - Invoice Paid"
+const decidedInvoicePaidStatus = "Decided - Invoice Paid" // the earlier resting status; still recognised
+
+// invoicePaidStatus / invoicePaidAgencyStatus: the SOP's closure -- "A case
+// closes when the review costs are paid (Internal Status = Invoice Paid,
+// FL AHCA Status = Closed)".
+const (
+	invoicePaidStatus       = "Invoice Paid"
+	invoicePaidAgencyStatus = "Closed"
+)
 
 // maybeMarkDecidedInvoicePaid sets the completed-case resting status when the
 // last open receivable on a decided case is paid. AHCA: closure is reserved
@@ -878,14 +978,14 @@ func (s *server) maybeMarkDecidedInvoicePaid(r *http.Request, tenant, caseID str
 		sanitizeTenant(tenant)), caseID).Scan(&internal); err != nil {
 		return
 	}
-	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || !decidedEnoughForInvoiceRest(internal) {
-		return // already terminal, already resting, or not yet decided
+	if terminalInternalStatuses[internal] || internal == decidedInvoicePaidStatus || internal == invoicePaidStatus || !decidedEnoughForInvoiceRest(internal) {
+		return // already terminal, already closed, or not yet decided
 	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
-		`UPDATE tenant_%s.cases SET internal_status=$2, updated_at=now() WHERE id=$1`,
-		sanitizeTenant(tenant)), caseID, decidedInvoicePaidStatus)
+		`UPDATE tenant_%s.cases SET internal_status=$2, agency_status=$3, updated_at=now() WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID, invoicePaidStatus, invoicePaidAgencyStatus)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_COMPLETED",
-		"All invoices paid — case rests at 'Decided - Invoice Paid' (completed, not closed)")
+		"All review costs paid — case closed (Internal Status: Invoice Paid, FL AHCA Status: Closed)")
 }
 
 // sweepIntakeDay13: AHCA completeness gate — an RFI may ride with the

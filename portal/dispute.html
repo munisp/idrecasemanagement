@@ -3,18 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>File a dispute — Federal IDRE Platform</title>
+  <title>File a dispute — Capitol Bridge</title>
   <link rel="stylesheet" href="/css/site.css" />
 </head>
 <body>
   <header class="site-nav">
     <div class="wrap nav-row">
-      <a class="brand" href="/"><span class="brand-mark">ID</span> Federal IDRE Platform</a>
+      <a class="brand" href="/"><span class="brand-mark">CB</span> <span class="brand-name">Capitol Bridge</span></a>
       <nav class="nav-links"><a class="btn ghost" href="/app.html">Log in</a></nav>
     </div>
   </header>
 
   <main class="wrap apply-wrap">
+    <div class="tab-bar" role="tablist" aria-label="What would you like to do?">
+      <button type="button" role="tab" id="tab-file" aria-controls="panel-file" aria-selected="true" data-tab="file">File a dispute</button>
+      <button type="button" role="tab" id="tab-tpa" aria-controls="panel-tpa" aria-selected="false" data-tab="tpa" tabindex="-1">Register as a TPA</button>
+      <button type="button" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="false" data-tab="plan" tabindex="-1">Register as a health plan</button>
+    </div>
+
+    <section id="panel-file" role="tabpanel" aria-labelledby="tab-file">
     <h1>File a dispute</h1>
     <p class="muted">No account needed. This opens a real case with the state program right away —
       you'll get an email with filing instructions, a secure upload link for your packet, and
@@ -34,34 +41,73 @@
       <label>Organization name <input id="f-org" maxlength="200" placeholder="Your organization" /></label>
       <div class="grid2">
         <label>Contact name <input id="f-contact" maxlength="120" /></label>
-        <label>Contact email * <input id="f-email" type="email" required maxlength="200" /></label>
+        <label>Contact email * <input id="f-email" type="email" data-email-check required maxlength="200" /></label>
       </div>
       <label>Disputed amount <input id="f-amount" type="number" step="0.01" min="0" placeholder="$0.00" /></label>
       <button class="btn solid lg" type="submit" id="f-submit">Start my dispute</button>
       <p id="f-msg" class="form-msg" role="status"></p>
     </form>
-    <hr style="margin:2.5rem 0" />
-    <h2>Filing on behalf of providers or health plans?</h2>
-    <p class="muted">Third-party administrators (revenue-cycle firms, legal representatives, plan
-      delegates) can register once, then file, pay, and track disputes on behalf of all their
-      client organizations from the portal. Registration is immediate — you'll get a one-time
-      claim code to link your portal account.</p>
+    <p class="muted tab-hint">Filing for several providers or health plans?
+      <a href="#register-tpa" data-goto="tpa">Register as a third-party administrator</a> instead.</p>
+    </section>
+
+    <section id="panel-tpa" role="tabpanel" aria-labelledby="tab-tpa" hidden>
+    <h1>Register as a TPA</h1>
+    <p class="muted">For third-party administrators — revenue-cycle firms, legal representatives and
+      plan delegates who file on behalf of providers or health plans. Register once, then file, pay
+      and track disputes for all your client organizations from the portal.</p>
+    <p class="muted">This does not file a dispute. We'll email sign-in instructions to the contact
+      email below.</p>
     <form id="tpa-form" class="apply-form" novalidate>
       <label>State program * <select id="t-state" required></select></label>
       <label>TPA organization name * <input id="t-org" maxlength="200" required placeholder="Your organization" /></label>
       <div class="grid2">
         <label>Contact name <input id="t-contact" maxlength="120" /></label>
-        <label>Contact email * <input id="t-email" type="email" required maxlength="200" /></label>
+        <label>Contact email * <input id="t-email" type="email" data-email-check required maxlength="200" /></label>
       </div>
       <button class="btn solid" type="submit" id="t-submit">Register as a TPA</button>
       <p id="t-msg" class="form-msg" role="status"></p>
     </form>
+    <p class="muted tab-hint">Just need to file one dispute for your own organization?
+      <a href="#file" data-goto="file">File a dispute</a> — no account needed.</p>
+    </section>
+
+    <section id="panel-plan" role="tabpanel" aria-labelledby="tab-plan" hidden>
+    <h1>Register as a health plan</h1>
+    <p class="muted">For health plans and plan administrators: answer the disputes filed against your plan,
+      and file and pay for disputes on behalf of your employer groups and delegated networks — all from the portal.</p>
+    <p class="muted">This does not file a dispute. We'll email sign-in instructions to the contact email below.
+      Disputes that name your plan with a notice address on the same email domain appear on your dashboard.</p>
+    <form id="plan-form" class="apply-form" novalidate>
+      <label>State program * <select id="p-state" required></select></label>
+      <label>Health plan name * <input id="p-name" maxlength="200" required placeholder="As it appears on EOBs" /></label>
+      <label>Line of business * <select id="p-lob" required>
+        <option value="FULLY_INSURED">Fully insured</option>
+        <option value="ASO">Self-funded (ASO)</option>
+        <option value="MEDICARE_ADVANTAGE">Medicare Advantage</option>
+        <option value="MEDICAID_MANAGED">Medicaid managed care</option></select></label>
+      <div class="grid2">
+        <label>NAIC company code <span id="p-naic-req">*</span> <input id="p-naic" inputmode="numeric" maxlength="5" placeholder="5 digits" /></label>
+        <label>FEIN * <input id="p-fein" inputmode="numeric" maxlength="10" required placeholder="9 digits" /></label>
+      </div>
+      <label>State license / certificate of authority <input id="p-license" maxlength="60" /></label>
+      <div class="grid2">
+        <label>Contact name <input id="p-contact" maxlength="120" /></label>
+        <label>Contact email * <input id="p-email" type="email" data-email-check required maxlength="200" /></label>
+      </div>
+      <label>QPA methodology contact email <input id="p-qpa" type="email" data-email-check maxlength="200" /></label>
+      <button class="btn solid" type="submit" id="p-submit">Register as a health plan</button>
+      <p id="p-msg" class="form-msg" role="status"></p>
+    </form>
+    <p class="muted tab-hint">Already registered? <a href="/app.html">Sign in to the portal</a>.</p>
+    </section>
   </main>
 
   <footer class="site-foot"><div class="wrap">
-    <span>Federal IDRE Platform</span><span><a href="/">Home</a> · <a href="/app.html">Portal login</a></span>
+    <span class="brand-name">Capitol Bridge</span><span><a href="/">Home</a> · <a href="/app.html">Portal login</a></span>
   </div></footer>
 
+  <script src="/js/emailcheck.js"></script>
   <script>
     const STATES = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"];
     const NAMES = {AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
@@ -111,6 +157,39 @@
         btn.disabled = false; btn.textContent = "Start my dispute";
       }
     });
+    // Two separate tasks, one visible at a time. The tab is in the URL
+    // (#file / #register-tpa) so each can be linked to directly.
+    const TABS = { file: "File a dispute", tpa: "Register as a TPA", plan: "Register as a health plan" };
+    const HASH = { file: "#file", tpa: "#register-tpa", plan: "#register-plan" };
+    function showTab(name, focus) {
+      if (!TABS[name]) name = "file";
+      for (const t of Object.keys(TABS)) {
+        const on = t === name, btn = document.getElementById("tab-" + t);
+        btn.setAttribute("aria-selected", on ? "true" : "false");
+        btn.tabIndex = on ? 0 : -1;
+        document.getElementById("panel-" + t).hidden = !on;
+        if (on && focus) btn.focus();
+      }
+      document.title = TABS[name] + " — " + (window.APP_BRAND || "Capitol Bridge");
+      const hash = HASH[name];
+      if (location.hash !== hash) history.replaceState(null, "", hash);
+    }
+    const tabFromHash = () => (location.hash === "#register-tpa" || location.hash === "#tpa" ? "tpa"
+      : location.hash === "#register-plan" || location.hash === "#plan" ? "plan" : "file");
+    document.querySelectorAll(".tab-bar [data-tab]").forEach((b) => {
+      b.addEventListener("click", () => showTab(b.dataset.tab));
+      b.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          const order = Object.keys(TABS), i = order.indexOf(b.dataset.tab);
+          showTab(order[(i + (e.key === "ArrowRight" ? 1 : order.length - 1)) % order.length], true);
+        }
+      });
+    });
+    document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); showTab(a.dataset.goto, true); window.scrollTo(0, 0); }));
+    window.addEventListener("hashchange", () => showTab(tabFromHash()));
+    showTab(tabFromHash());
+
     const tsel = document.getElementById("t-state");
     tsel.innerHTML = sel.innerHTML;
     if (pre) tsel.value = pre.toLowerCase();
@@ -135,7 +214,7 @@
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
-          msg.textContent = `Registered! Your one-time claim code is ${data.claim_code} — save it now, it is shown only once. Then log in to the portal, open TPA, and enter this code to link your organization.`;
+          msg.textContent = "Registered. Check your email for how to sign in — if it doesn't arrive in a few minutes, look in your spam folder.";
           e.target.reset();
         } else {
           msg.classList.add("err");
@@ -147,6 +226,66 @@
         btn.disabled = false; btn.textContent = "Register as a TPA";
       }
     });
+
+    // Health plan registration (registerHealthPlan): the login is emailed to the contact.
+    const psel = document.getElementById("p-state");
+    psel.innerHTML = sel.innerHTML;
+    if (pre) psel.value = pre.toLowerCase();
+    const lob = document.getElementById("p-lob");
+    const naicReq = () => { document.getElementById("p-naic-req").hidden = lob.value === "ASO"; };
+    lob.addEventListener("change", naicReq); naicReq();
+    document.getElementById("plan-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById("p-msg"), btn = document.getElementById("p-submit");
+      msg.className = "form-msg"; msg.textContent = "";
+      const v = (id) => document.getElementById(id).value.trim();
+      const body = {
+        tenant: psel.value, name: v("p-name"), line_of_business: lob.value,
+        naic: v("p-naic"), fein: v("p-fein").replace(/\D/g, ""), state_license: v("p-license"),
+        contact_name: v("p-contact"), contact_email: v("p-email"), qpa_contact_email: v("p-qpa"),
+      };
+      if (!body.tenant || !body.name || !body.contact_email || !body.fein) {
+        msg.classList.add("err"); msg.textContent = "State, plan name, FEIN and contact email are required."; return;
+      }
+      if (body.line_of_business !== "ASO" && !/^\d{5}$/.test(body.naic)) {
+        msg.classList.add("err"); msg.textContent = "Enter the plan's 5-digit NAIC company code (not needed for a self-funded ASO plan)."; return;
+      }
+      if (!/^\d{9}$/.test(body.fein)) { msg.classList.add("err"); msg.textContent = "The FEIN is 9 digits."; return; }
+      btn.disabled = true; btn.textContent = "Registering…";
+      try {
+        const resp = await fetch("/api/public/healthplan/register", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+          msg.classList.add("ok");
+          msg.textContent = "Registered. Check your email for how to sign in — if it doesn't arrive in a few minutes, look in your spam folder.";
+          e.target.reset(); naicReq();
+        } else {
+          msg.classList.add("err");
+          msg.textContent = data.error || `Registration failed (${resp.status}).`;
+        }
+      } catch {
+        msg.classList.add("err"); msg.textContent = "Network error — please try again.";
+      } finally {
+        btn.disabled = false; btn.textContent = "Register as a health plan";
+      }
+    });
+  </script>
+  <script>
+    // The tenant's brand on the public pages: ?state=fl shows that program's name (default Capitol Bridge).
+    (async () => {
+      const st = new URLSearchParams(location.search).get("state");
+      if (!st) return;
+      try {
+        const b = (await (await fetch("/api/public/brand?tenant=" + encodeURIComponent(st.toLowerCase()))).json()).brand_name;
+        if (!b || b === "Capitol Bridge") return;
+        window.APP_BRAND = b;
+        document.querySelectorAll(".brand-name").forEach((e) => { e.textContent = b; });
+        document.querySelectorAll(".brand-mark").forEach((e) => { e.textContent = b.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase(); });
+        document.title = document.title.replace("Capitol Bridge", b);
+      } catch { /* the default name stays */ }
+    })();
   </script>
 </body>
 </html>

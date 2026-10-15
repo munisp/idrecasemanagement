@@ -21,6 +21,7 @@ never let an unvalidated package through.
 
 from __future__ import annotations
 
+import hashlib
 import base64
 import io
 import json
@@ -28,6 +29,8 @@ import uuid
 
 import httpx
 import psycopg
+
+from pipeline import PDFIUM_LOCK
 
 SLOTS = [
     "EOB", "ITEMIZED_BILL", "PROOF_OF_COVERAGE",
@@ -133,8 +136,59 @@ def _verdict(slot: str, filename: str, text: str, classify_text, extract_fields,
     return "NEEDS_REVIEW", reasons
 
 
+def _notify_rejected(conn, tenant: str, package_id: str, prefix: str) -> None:
+    """The TPA or plan hears in the portal's bell that a document of its
+    package was rejected (addressed to the organization, as case-api's
+    notifyOrg does), instead of finding out only by opening the package."""
+    if prefix == "tpa":
+        q = """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+               SELECT p.tenant, 'tpa:' || p.tpa_id::text, 'PACKAGE_REJECTED',
+                      'A document for ' || c.party_name || ' was rejected — open its package to see why and replace it', '#/tpa'
+               FROM public.tpa_packages p JOIN public.tpa_clients c ON c.id = p.client_id
+               WHERE p.tenant=%s AND p.id=%s"""
+    else:
+        q = """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+               SELECT p.tenant, 'plan:' || p.plan_id::text, 'PACKAGE_REJECTED',
+                      'A document for ' || c.party_name || ' was rejected — open its package to see why and replace it', '#/healthplan'
+               FROM public.hp_packages p JOIN public.hp_parties c ON c.id = p.party_id
+               WHERE p.tenant=%s AND p.id=%s"""
+    conn.execute(q, (tenant, package_id))
+
+
+def _audit_package(conn, tenant: str, package_id: str, prefix: str, status: str) -> None:
+    """A package's checked status goes into the organization's audit trail
+    (public.audit_log, hash-chained exactly as case-api's logAudit does:
+    hash = sha256(prev_hash + payload text), one writer per tenant)."""
+    if prefix == "tpa":
+        row = conn.execute("""SELECT p.tpa_id::text, c.party_name FROM public.tpa_packages p
+                              JOIN public.tpa_clients c ON c.id = p.client_id WHERE p.tenant=%s AND p.id=%s""",
+                           (tenant, package_id)).fetchone()
+        org = f"tpa:{row[0]}" if row else ""
+    else:
+        row = conn.execute("""SELECT p.plan_id::text, c.party_name FROM public.hp_packages p
+                              JOIN public.hp_parties c ON c.id = p.party_id WHERE p.tenant=%s AND p.id=%s""",
+                           (tenant, package_id)).fetchone()
+        org = f"plan:{row[0]}" if row else ""
+    if not row:
+        return
+    payload = json.dumps({"org": org, "package_id": str(package_id), "party": row[1], "status": status, "by": "system:doc-intel"},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext('audit_log:' || %s))", (tenant,))
+    prev = conn.execute("SELECT hash FROM public.audit_log WHERE tenant=%s ORDER BY id DESC LIMIT 1", (tenant,)).fetchone()
+    prev_hash = prev[0] if prev else "GENESIS"
+    digest = hashlib.sha256((prev_hash + payload).encode()).hexdigest()
+    conn.execute("""INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org)
+                    VALUES (%s, '', 'PACKAGE_STATUS', %s, %s, %s, %s)""", (tenant, payload, prev_hash, digest, org))
+
+
 def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") -> str:
     """Package status from its slot verdicts. READY iff all six ACCEPTED."""
+    # Lock the package first: two workers finishing two of its documents at
+    # once each counted the other's verdict as not there yet (uncommitted),
+    # and the package stayed VALIDATING with all six accepted.
+    locked = conn.execute(f"SELECT status FROM public.{prefix}_packages WHERE tenant=%s AND id=%s FOR UPDATE",
+                          (tenant, package_id)).fetchone()
+    was = locked[0] if locked else ""
     rows = conn.execute(
         f"SELECT slot, status FROM public.{prefix}_package_docs WHERE tenant=%s AND package_id=%s",
         (tenant, package_id)).fetchall()
@@ -148,6 +202,10 @@ def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") ->
     conn.execute(
         f"UPDATE public.{prefix}_packages SET status=%s, updated_at=now() WHERE tenant=%s AND id=%s",
         (status, tenant, package_id))
+    if status == "REJECTED" and was != "REJECTED":
+        _notify_rejected(conn, tenant, package_id, prefix)
+    if status != was:
+        _audit_package(conn, tenant, package_id, prefix, status)
     # A READY package can complete the party's docs gate (employer groups on
     # the health-plan rail have no NPI requirement).
     if prefix == "tpa":
@@ -170,6 +228,74 @@ def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") ->
                               WHERE m.tenant=c.tenant AND m.party_id=c.id AND m.verified AND m.status='ACTIVE')""",
             (tenant, package_id, status))
     return status
+
+
+# Phrases that name a keyword-floor document in its own heading. Checked on
+# the page's first lines only: an offer substantiation may well mention "open
+# negotiation" further down without being the notice.
+SLOT_TITLES = {
+    "OPEN_NEGOTIATION_NOTICE": ["open negotiation notice", "notice of initiation", "open negotiation period"],
+    "IDRE_ATTESTATION": ["attestation", "i attest", "under penalty of perjury"],
+    "PROOF_OF_COVERAGE": ["proof of coverage", "certificate of coverage", "eligibility verification",
+                          "verification of coverage", "coverage verification"],
+}
+
+
+def _headings(text: str) -> list[str]:
+    """The page's heading lines, lower-cased: among its first four lines, the
+    ones set as a title (all capitals) -- a banner or letterhead may sit above
+    the title, and body sentences can mention other documents."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()][:4]
+    return [ln.lower() for ln in lines if ln.isupper()]
+
+
+def _starts(text: str, phrases: list[str]) -> bool:
+    """A heading names it, or a line among the first four begins with it."""
+    lines = [ln.strip().lower() for ln in (text or "").splitlines() if ln.strip()][:4]
+    return (any(p in h for h in _headings(text) for p in phrases)
+            or any(ln.startswith(p) for ln in lines for p in phrases))
+
+
+def _page_slot(text: str, classify_text) -> str | None:
+    """The slot one page starts or belongs to; None = no signal of its own
+    (a continuation page, which stays with the document before it)."""
+    for slot, titles in SLOT_TITLES.items():
+        if _starts(text, titles):
+            return slot
+    dtype, score, _ = classify_text("", text)
+    if dtype == "eob" and score >= 2:
+        return "EOB"
+    if dtype == "idr_claim" and score >= 2:
+        # An itemized bill and an offer substantiation are both billing
+        # documents; the offer is the one whose heading argues an amount.
+        return "OFFER_SUBSTANTIATION" if _starts(text, ["offer"]) else "ITEMIZED_BILL"
+    return None
+
+
+def split_pages(texts: list[str], classify_text) -> dict[str, tuple[int, int]]:
+    """Slot -> (first page, last page), 0-based inclusive.
+
+    Each page is judged on its own (_page_slot): a page that starts a new
+    document starts a new segment, and only pages with no signal of their own
+    carry on the document before them. The splitter used to classify by
+    document type alone and let every page without a strong type inherit its
+    predecessor, so the coverage letter, the open-negotiation notice and the
+    offer (all after the itemized bill) were swallowed into the bill's
+    segment and reported "not found". The first segment of a slot wins."""
+    segments: list[list] = []  # [slot, start, end]
+    for i, t in enumerate(texts):
+        slot = _page_slot(t, classify_text)
+        if slot is None and segments:
+            segments[-1][2] = i
+        elif segments and segments[-1][0] == slot:
+            segments[-1][2] = i
+        else:
+            segments.append([slot, i, i])
+    assigned: dict[str, tuple[int, int]] = {}
+    for slot, a, b in segments:
+        if slot and slot not in assigned:
+            assigned[slot] = (a, b)
+    return assigned
 
 
 def handle_tpa_doc(evt: dict, ctx: dict) -> None:
@@ -201,9 +327,10 @@ def _handle_discrete(evt: dict, ctx: dict, actor: str = "tpa") -> None:
     try:
         raw = ctx["fetch_and_decrypt"](tenant, evt["object_key"])
         if raw[:4] == b"%PDF":
-            texts, pdf = _pdf_pages(raw)
+            with PDFIUM_LOCK:
+                texts, pdf = _pdf_pages(raw)
+                pdf.close()
             text = "\n".join(texts)
-            pdf.close()
         else:
             text = raw.decode("utf-8", "ignore")
         status, reasons = _verdict(evt["slot"], evt.get("filename") or "", text,
@@ -228,52 +355,23 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
     prefix = "hp" if actor == "healthplan" else "tpa"
     try:
         raw = ctx["fetch_and_decrypt"](tenant, evt["object_key"])
-        texts, pdf = _pdf_pages(raw)
-        # Classify every page; a page inherits its predecessor's type when it
-        # has no signal of its own (continuation pages of a multi-page EOB).
-        page_types: list[str] = []
-        last = "unrelated"
-        for t in texts:
-            dtype, score, _ = ctx["classify_text"]("", t)
-            if dtype == "unrelated" or score < 2:
-                page_types.append(last)
-            else:
-                page_types.append(dtype)
-                last = dtype
-        # Group contiguous pages of one type.
-        segments: list[tuple[str, int, int]] = []  # (type, start, end) inclusive
-        for i, t in enumerate(page_types):
-            if segments and segments[-1][0] == t:
-                segments[-1] = (t, segments[-1][1], i)
-            else:
-                segments.append((t, i, i))
-        # Map segments to slots (first segment of a type wins the slot).
-        slot_for = {"eob": "EOB"}
-        assigned: dict[str, tuple[int, int]] = {}
-        for dtype, start, end in segments:
-            if dtype == "unrelated":
-                continue
-            if dtype == "idr_claim":
-                seg_text = "\n".join(texts[start:end + 1]).lower()
-                slot = ("ITEMIZED_BILL" if any(k in seg_text for k in ("itemized", "ub-04", "ub04", "cms-1500"))
-                        else "OFFER_SUBSTANTIATION")
-            else:
-                slot = slot_for.get(dtype)
-                if slot is None:
-                    # Keyword-floor slots detected inside a merged PDF.
-                    low = "\n".join(texts[start:end + 1]).lower()
-                    slot = next((s for s in ("PROOF_OF_COVERAGE", "OPEN_NEGOTIATION_NOTICE", "IDRE_ATTESTATION")
-                                 if any(k in low for k in SLOT_KEYWORDS[s])), None)
-            if slot and slot not in assigned:
-                assigned[slot] = (start, end)
+        # All PDFium work (read, split, cut out each slot's pages) under the
+        # lock; sealing and storing happen after it is released.
+        with PDFIUM_LOCK:
+            texts, pdf = _pdf_pages(raw)
+            try:
+                assigned = split_pages(texts, ctx["classify_text"])
+                segments = {slot: _export_segment(pdf, a, b) for slot, (a, b) in assigned.items()}
+            finally:
+                pdf.close()
         with psycopg.connect(ctx["dsn"]) as conn:
             for slot in SLOTS:
                 if slot in assigned:
                     start, end = assigned[slot]
-                    seg = _export_segment(pdf, start, end)
+                    seg = segments[slot]
                     key = f"{tenant}/{prefix}-packages/{package_id}/{slot.lower()}-{uuid.uuid4()}.enc"
                     ct = _seal(ctx["vault"], ctx["vault_headers"], tenant, key, seg)
-                    ctx["minio"].put_object("idre-docs", key, io.BytesIO(ct), len(ct))
+                    ctx["minio"].put_object(ctx.get("doc_bucket", "idre-docs"), key, io.BytesIO(ct), len(ct))
                     text = "\n".join(texts[start:end + 1])
                     status, reasons = _verdict(slot, f"{slot.lower()}.pdf", text,
                                                ctx["classify_text"], ctx["extract_fields"], actor)
@@ -306,7 +404,6 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
                                       "detail": "page classification found no segment for this slot"}])))
             pkg_status = _refresh_package(conn, tenant, package_id, prefix)
             conn.commit()
-        pdf.close()
         print(f"tpa-doc merged {package_id}: slots {sorted(assigned)} -> package {pkg_status}", flush=True)
     except Exception as exc:  # noqa: BLE001
         with psycopg.connect(ctx["dsn"]) as conn:

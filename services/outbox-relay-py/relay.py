@@ -17,6 +17,7 @@ import os
 import time
 
 import psycopg
+import otel_setup
 from confluent_kafka import Producer
 
 DSN = os.environ.get("PG_DSN", "postgresql://idre:idre@localhost:5432/idre")
@@ -45,12 +46,18 @@ def relay_once(conn, producer: Producer, schema: str) -> int:
                 ORDER BY id LIMIT {BATCH} FOR UPDATE SKIP LOCKED"""
         ).fetchall()
         for _id, topic, key, payload in rows:
-            producer.produce(
-                topic,
-                key=key.encode(),
-                value=json.dumps(payload).encode(),
-                headers={"source": "outbox-relay", "schema": schema},
-            )
+            # Continue the trace of whatever wrote the outbox row, when it
+            # stamped a traceparent on the payload.
+            tp = payload.get("traceparent") if isinstance(payload, dict) else None
+            with otel_setup.span(f"{topic} publish", traceparent=tp,
+                                 **{"messaging.system": "kafka", "messaging.destination.name": topic,
+                                    "idre.outbox_id": _id}):
+                producer.produce(
+                    topic,
+                    key=key.encode(),
+                    value=json.dumps(payload).encode(),
+                    headers={"source": "outbox-relay", "schema": schema},
+                )
         producer.flush(timeout=10)
         ids = [r[0] for r in rows]
         if ids:
@@ -61,6 +68,7 @@ def relay_once(conn, producer: Producer, schema: str) -> int:
 
 
 def main() -> None:
+    otel_setup.init("idre-outbox-relay")
     producer = Producer({
         "bootstrap.servers": BROKERS,
         "enable.idempotence": True,   # exactly-once on the Kafka side

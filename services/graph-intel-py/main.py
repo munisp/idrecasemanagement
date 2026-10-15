@@ -28,22 +28,56 @@ import epr_kgqa
 import gnn
 import graphdb
 import lakehouse_io
+import otel_setup
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 
 app = FastAPI(title="idre-graph-intel", version="1.0.0")
+otel_setup.init("idre-graph-intel")
+otel_setup.instrument_fastapi(app)
 
 
 def _load_cases(tenant: str) -> list[dict]:
     t = "".join(c for c in tenant.lower() if c.isalnum())
-    with psycopg.connect(DSN) as c:
-        rows = c.execute(
-            f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
-            f" provider_id, payer_id, opened_at FROM tenant_{t}.cases"
-        ).fetchall()
     cols = ["id", "case_number", "status", "service_line", "plan_type",
             "qpa_cents", "provider_id", "payer_id", "opened_at"]
-    return [dict(zip(cols, (str(v) if v is not None else None for v in r))) for r in rows]
+    # The parties as people know them. A program tenant records the filer's
+    # organization and, once read from the documents, the provider's and the
+    # plan's names; provider_id/payer_id there are internal ids nobody can
+    # ask about by name. Names are used where they exist, ids otherwise.
+    named = cols + ["provider_org", "health_plan", "requester_org", "filing_party_type"]
+    with psycopg.connect(DSN, autocommit=True) as c:
+        try:
+            rows = c.execute(
+                f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
+                f" provider_id, payer_id, opened_at, details->>'provider_org', details->>'health_plan',"
+                f" details->>'requester_org', details->>'filing_party_type' FROM tenant_{t}.cases"
+            ).fetchall()
+            use = named
+        except Exception:  # a tenant whose cases table has no details column
+            rows = c.execute(
+                f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
+                f" provider_id, payer_id, opened_at FROM tenant_{t}.cases"
+            ).fetchall()
+            use = cols
+    out = []
+    for r in rows:
+        d = dict(zip(use, (str(v) if v is not None else None for v in r)))
+        filer, by_plan = (d.get("requester_org") or "").strip(), d.get("filing_party_type") == "HEALTH_PLAN"
+        d["provider_name"] = (d.get("provider_org") or "").strip() or ("" if by_plan else filer) or d.get("provider_id")
+        d["payer_name"] = (d.get("health_plan") or "").strip() or (filer if by_plan else "") or d.get("payer_id")
+        out.append(d)
+    return out
+
+
+@app.get("/hints")
+def hints(tenant: str = Query(...), allow: str | None = Query(None)):
+    """Real case numbers and party names for the portal's sample questions,
+    and the categories this caller's role may ask about."""
+    import facts
+    out = facts.hints(tenant)
+    out["categories"] = [c for c in allow.split(",") if c] if allow is not None else [n for n, _ in facts.CATEGORIES]
+    return out
 
 
 @app.get("/healthz")
@@ -62,6 +96,7 @@ def sync_from_db(tenant: str = Query(...)):
     cases = _load_cases(tenant)
     for c in cases:
         graphdb.upsert_case(tenant, c)
+    graphdb.drop_orphan_parties(tenant)
     bronze = lakehouse_io.append_bronze(f"cases-{tenant}", cases)
     silver = lakehouse_io.write_silver_cases(tenant, cases)
     return {"tenant": tenant, "cases": len(cases), "bronze": bronze, "silver": silver}
@@ -105,11 +140,14 @@ class AskRequest(BaseModel):
     tenant: str
     question: str
     k: int = 5
+    # The figure categories the caller's role may read, set by case-api from
+    # the signed-in user's roles. None (a direct, in-cluster call) = all.
+    allow: list[str] | None = None
 
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    return epr_kgqa.ask(req.tenant, req.question, k=req.k)
+    return epr_kgqa.ask(req.tenant, req.question, k=req.k, allow=req.allow)
 
 
 class FeedbackRequest(BaseModel):

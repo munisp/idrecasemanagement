@@ -30,6 +30,7 @@ import tempfile
 from datetime import date
 
 import httpx
+import otel_setup
 import psycopg
 from confluent_kafka import Consumer
 from docx import Document
@@ -49,25 +50,27 @@ minio = Minio(
     secure=False,
 )
 
-TEMPLATE_BUCKET = "idre-templates"
-DOC_BUCKET = "idre-docs"
+# Per deployment: idre and idre-prod share one MinIO on the dev cluster.
+TEMPLATE_BUCKET = os.environ.get("TEMPLATE_BUCKET", "idre-templates")
+DOC_BUCKET = os.environ.get("DOC_BUCKET", "idre-docs")
 
 
 def features_for(tenant: str) -> dict:
-    """Per-tenant feature toggles (orig: config->'features'; NG: manifest).
-    Absent = ON, matching case-api gate semantics."""
+    """Per-tenant feature toggles: any kept in the program settings
+    (config->'features', or the NG manifest) overlaid by public.tenant_features,
+    where case-api writes them. Absent = ON, matching case-api's gate."""
+    flags: dict = {}
     try:
         with psycopg.connect(DSN) as c:
-            row = c.execute(
-                "SELECT config FROM public.program_rules WHERE tenant=%s", (tenant,),
-            ).fetchone()
+            row = c.execute("SELECT config FROM public.program_rules WHERE tenant=%s", (tenant,)).fetchone()
+            cfg = (row[0] if row else None) or {}
+            flags.update((cfg.get("manifest") or {}).get("features") or {})
+            flags.update(cfg.get("features") or {})
+            own = c.execute("SELECT features FROM public.tenant_features WHERE tenant=%s", (tenant,)).fetchone()
+            if own and own[0]:
+                flags.update(own[0])
     except Exception:
-        return {}
-    if not row:
-        return {}
-    cfg = row[0] or {}
-    flags = dict((cfg.get("manifest") or {}).get("features") or {})
-    flags.update(cfg.get("features") or {})
+        pass
     return flags
 
 
@@ -174,11 +177,17 @@ def to_pdf(docx_bytes: bytes) -> bytes:
 
 
 def vault_seal(tenant: str, key: str, pt: bytes) -> bytes:
+    # /docs/seal responds with sealed_b64, not data_b64 -- confirmed against
+    # vault-rs's own seal_doc handler and against documents.go's working
+    # caller, which already reads sealed_b64. This mismatch meant every
+    # letter generation attempt failed here with KeyError('data_b64'),
+    # confirmed live: never caught before because nothing ever reached this
+    # far until the Kafka connectivity fix above let a request through.
     resp = httpx.post(f"{VAULT}/docs/seal", timeout=60, headers=VAULT_HEADERS, json={
         "tenant": tenant, "key": key, "data_b64": base64.b64encode(pt).decode(),
     })
     resp.raise_for_status()
-    return base64.b64decode(resp.json()["data_b64"])
+    return base64.b64decode(resp.json()["sealed_b64"])
 
 
 def template_config(tenant: str, key: str) -> dict:
@@ -244,14 +253,25 @@ def handle(evt: dict) -> None:
     print(f"[lettergen] {tenant}/{case_id}: {key} -> {filename}", flush=True)
 
 
+# Two deployments sharing one Kafka broker must not share topics or a consumer
+# group, or each consumes the other's events. TOPIC_PREFIX namespaces both; the
+# default keeps the original names.
+TOPIC_PREFIX = os.environ.get("TOPIC_PREFIX", "idre")
+CONSUMER_GROUP = "lettergen" if TOPIC_PREFIX == "idre" else f"lettergen-{TOPIC_PREFIX}"
+
+
 def main() -> None:
+    otel_setup.init("idre-lettergen")
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BROKERS", "localhost:9092"),
-        "group.id": "lettergen",
+        "group.id": CONSUMER_GROUP,
+        # Regex subscriptions only see a newly created topic on a metadata
+        # refresh; the 5-minute default delays a tenant's first event that long.
+        "topic.metadata.refresh.interval.ms": 30000,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
     })
-    consumer.subscribe([r"^idre\..*\.letters$"])
+    consumer.subscribe([f"^{re.escape(TOPIC_PREFIX)}\\..*\\.letters$"])
 
     running = True
     def stop(*_):
@@ -267,10 +287,36 @@ def main() -> None:
             continue
         try:
             evt = json.loads(msg.value())
-            handle(evt)
+            with otel_setup.span("letter.requested process", traceparent=evt.get("traceparent"), consumer=True,
+                                 **{"idre.tenant": evt.get("tenant"), "idre.case_id": evt.get("case_id"),
+                                    "idre.template": evt.get("template"), "messaging.system": "kafka"}):
+                handle(evt)
             consumer.commit(msg)  # commit only after the letter exists
         except Exception as e:  # noqa: BLE001 — poison event: log, skip once committed offsets move past
             print(f"[lettergen] ERROR {e}", file=sys.stderr, flush=True)
+            # Previously silent: a reviewer who clicked "Generate letter" saw
+            # it go QUEUED and then nothing, ever, with no error, no retry,
+            # no explanation (confirmed live -- a missing template .docx hit
+            # exactly this path). Surface the failure the same way a real
+            # letter's success is surfaced: a case activity note and a
+            # notification, so staff know to re-upload the template or
+            # escalate instead of waiting on a letter that will never arrive.
+            try:
+                tenant, case_id, key = evt.get("tenant"), evt.get("case_id"), evt.get("template")
+                if tenant and case_id:
+                    with psycopg.connect(DSN, autocommit=True) as c:
+                        c.execute(
+                            """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                               VALUES (%s,%s,'LETTER_GENERATION_FAILED',%s)""",
+                            (tenant, case_id, f"Letter template {key!r} failed to generate: {e}"),
+                        )
+                        c.execute(
+                            """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+                               VALUES (%s,'*','LETTER_GENERATION_FAILED',%s,%s)""",
+                            (tenant, f"Letter {key} failed to generate on case — {e}", f"#/cases/{case_id}"),
+                        )
+            except Exception as notify_exc:  # noqa: BLE001 — failure visibility must never mask the original error
+                print(f"[lettergen] ERROR could not record failure: {notify_exc}", file=sys.stderr, flush=True)
             consumer.commit(msg)
     consumer.close()
 

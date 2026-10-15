@@ -19,6 +19,14 @@ package main
 //
 // Every turn (both directions) persists to public.copilot_threads with the
 // model name and attribution — the thread is part of the case record.
+//
+// Private by default, shareable on request: each worker's thread on a case
+// is their own (user_sub) -- a case with several staff rotating through it
+// no longer means everyone reads everyone else's questions. A worker who
+// wants a colleague to see their thread grants it explicitly via
+// copilot_thread_shares (copilotShareThread). Turns written before this
+// column existed have user_sub NULL and stay visible to everyone with case
+// access, same as always -- grandfathered in rather than orphaned.
 
 import (
 	"context"
@@ -36,6 +44,13 @@ import (
 // for the record, not in the prompt.
 const copilotChatMaxHistory = 12
 
+// copilotThreadVisibilitySQL: a turn is visible to $N if it predates the
+// privacy column (NULL, grandfathered), belongs to $N, or $N has been
+// explicitly granted the owner's thread.
+const copilotThreadVisibilitySQL = `(user_sub IS NULL OR user_sub = $3 OR user_sub IN (
+	SELECT owner_sub FROM public.copilot_thread_shares
+	WHERE tenant=$1 AND case_id=$2 AND shared_with_sub=$3))`
+
 func copilotChatPrompt(f copilotFacts) string {
 	return `You are the case assistant inside a federal No Surprises Act IDRE case platform,
 in a conversation with a case worker about ONE case.
@@ -43,7 +58,7 @@ in a conversation with a case worker about ONE case.
 HARD RULES:
 - Use ONLY the JSON facts below. If a fact is absent, say "not in record" — NEVER invent identifiers, amounts, dates, parties, or legal citations.
 - Answer conversationally and concisely (under 150 words unless detail is asked for). This is a chat, not a report.
-- You are ADVISORY: you can explain the case, its eligibility posture, evidence, deadlines, and options — but you cannot change case state. If asked to DO something (draft, send, approve, assign), say which on-screen action does it (the chips below the input: brief / draft rationale / draft correspondence / propose actions), never claim you did it.
+- You are ADVISORY: you can explain the case, its eligibility posture, evidence, deadlines, and options — but you cannot change case state and this conversation cannot trigger anything, no matter how the worker phrases a request ("approve it", "send it to X") — you have no tool, button, or side effect available to you, only text. If asked to DO something (draft, send, approve, assign), name in plain prose which on-screen button does it (Brief me, Draft rationale, Draft correspondence, or Propose actions) and tell them to click it themselves — never claim you did it, never say it's done, and never write bracket/placeholder markup like "[chip: ...]" standing in for a button; the chat only renders the words you write, nothing else.
 - Amounts are cents in the JSON — speak in dollars.
 - If the question is outside this case's record, say so plainly.
 - Never role-play as a lawyer making a determination; determinations are human decisions.
@@ -72,8 +87,9 @@ func (s *server) copilotChatHistory(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
 		SELECT role, body, coalesce(model,''), created_at
 		FROM (SELECT role, body, model, created_at FROM public.copilot_threads
-		      WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC LIMIT 50) t
-		ORDER BY created_at`, tenant, caseID)
+		      WHERE tenant=$1 AND case_id=$2 AND `+copilotThreadVisibilitySQL+`
+		      ORDER BY created_at DESC LIMIT 50) t
+		ORDER BY created_at`, tenant, caseID, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db (copilot_threads migrated?)"}`, http.StatusInternalServerError)
 		return
@@ -121,10 +137,18 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Thread context: the last N turns, oldest first, as prior messages.
+	// created_at has to survive into the inner subquery's own SELECT list --
+	// confirmed live: the outer ORDER BY can't resolve a column the derived
+	// table t(role, body) never exposed, SQLSTATE 42703, on every single
+	// POST this endpoint has ever received (0 rows doesn't save it; column
+	// resolution happens at parse time). Chip-driven turns (brief/draft/
+	// actions) never hit this query at all, which is the only reason this
+	// endpoint's free-text path looked untested rather than broken.
 	rows, err := s.db.Query(r.Context(), `
-		SELECT role, body FROM (SELECT role, body FROM public.copilot_threads
-		  WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC LIMIT $3) t
-		ORDER BY created_at`, tenant, caseID, copilotChatMaxHistory)
+		SELECT role, body FROM (SELECT role, body, created_at FROM public.copilot_threads
+		  WHERE tenant=$1 AND case_id=$2 AND `+copilotThreadVisibilitySQL+`
+		  ORDER BY created_at DESC LIMIT $4) t
+		ORDER BY created_at`, tenant, caseID, p.Subject, copilotChatMaxHistory)
 	if err != nil {
 		http.Error(w, `{"error":"db (copilot_threads migrated?)"}`, http.StatusInternalServerError)
 		return
@@ -138,6 +162,19 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 
+	// Persist the user's turn NOW, before calling the model -- private by
+	// default, shareable (copilotShareThread) rather than automatically
+	// visible to every other worker on the case. This used to happen only
+	// after a successful reply: a slow or failed model call (confirmed
+	// live: ~90s timeouts on this model aren't rare) meant the question
+	// itself was never saved anywhere, so it silently vanished the next
+	// time the thread reloaded from the server -- reported live as "the
+	// current chat keeps clearing". The user's own words are never lost
+	// now, even on a call that times out or 502s.
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.copilot_threads (tenant, case_id, role, body, user_sub) VALUES ($1,$2,'user',$3,$4)`,
+		tenant, caseID, in.Message, p.Subject)
+
 	reply, err := ollamaChatWithHistory(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel,
 		copilotChatPrompt(facts), history, in.Message, 800)
 	if err != nil {
@@ -148,13 +185,9 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist both directions — the thread is part of the case record.
 	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.copilot_threads (tenant, case_id, role, body) VALUES ($1,$2,'user',$3)`,
-		tenant, caseID, in.Message)
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.copilot_threads (tenant, case_id, role, body, model) VALUES ($1,$2,'assistant',$3,$4)`,
-		tenant, caseID, reply, s.cfg.CopilotModel)
+		INSERT INTO public.copilot_threads (tenant, case_id, role, body, model, user_sub) VALUES ($1,$2,'assistant',$3,$4,$5)`,
+		tenant, caseID, reply, s.cfg.CopilotModel, p.Subject)
 	s.logActivity(r.Context(), tenant, caseID, "COPILOT_CHAT",
 		fmt.Sprintf("Assistant turn by %s (%d chars in, %d out)", p.Subject, len(in.Message), len(reply)))
 	s.logAudit(r.Context(), tenant, caseID, "COPILOT_CHAT", map[string]any{
@@ -164,6 +197,136 @@ func (s *server) copilotChat(w http.ResponseWriter, r *http.Request) {
 		"reply": reply, "model": s.cfg.CopilotModel, "advisory": true,
 		"case_number": facts.CaseNumber,
 	})
+}
+
+// copilotChatLog handles POST /cases/{caseId}/copilot/chat/log
+// {"user":"...","assistant":"..."} -- persists one turn pair WITHOUT calling
+// the model, for the floating widget's fast, deterministic intents (my
+// cases/tasks, what's left, create task, etc.) that answer locally from a
+// REST list call rather than the LLM. Those turns used to never reach the
+// thread at all (confirmed live: "the chat isn't storing" for ordinary
+// typed messages that happened to match one of these intents, e.g.
+// containing the word "task"), which looked identical to the free-text
+// path silently dropping messages, but was actually a different, deliberate
+// code path that just never wrote anything down.
+func (s *server) copilotChatLog(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, copilotRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	caseID := chi.URLParam(r, "caseId")
+	var in struct {
+		User      string `json:"user"`
+		Assistant string `json:"assistant"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	in.User = truncate(strings.TrimSpace(in.User), 2000)
+	in.Assistant = truncate(strings.TrimSpace(in.Assistant), 4000)
+	if in.User == "" && in.Assistant == "" {
+		http.Error(w, `{"error":"user or assistant required"}`, http.StatusBadRequest)
+		return
+	}
+	if in.User != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.copilot_threads (tenant, case_id, role, body, user_sub) VALUES ($1,$2,'user',$3,$4)`,
+			tenant, caseID, in.User, p.Subject)
+	}
+	if in.Assistant != "" {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.copilot_threads (tenant, case_id, role, body, model, user_sub) VALUES ($1,$2,'assistant',$3,'local',$4)`,
+			tenant, caseID, in.Assistant, p.Subject)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// copilotShareThread handles POST /cases/{caseId}/copilot/chat/shares
+// {"user_id": "<keycloak id>"} -- grants that colleague read access to the
+// caller's OWN thread on this case. Only the owner can grant their own
+// thread; there's no "share someone else's" concept.
+func (s *server) copilotShareThread(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, copilotRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	caseID := chi.URLParam(r, "caseId")
+	var in struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.UserID) == "" {
+		http.Error(w, `{"error":"user_id required"}`, http.StatusBadRequest)
+		return
+	}
+	if in.UserID == p.Subject {
+		http.Error(w, `{"error":"already your own thread"}`, http.StatusBadRequest)
+		return
+	}
+	_, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.copilot_thread_shares (tenant, case_id, owner_sub, shared_with_sub)
+		VALUES ($1,$2,$3,$4) ON CONFLICT (tenant, case_id, owner_sub, shared_with_sub) DO NOTHING`,
+		tenant, caseID, p.Subject, in.UserID)
+	if err != nil {
+		http.Error(w, `{"error":"db (copilot_thread_shares migrated?)"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logAudit(r.Context(), tenant, caseID, "COPILOT_THREAD_SHARED", map[string]any{
+		"by": p.Subject, "shared_with": in.UserID,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"shared": true})
+}
+
+// copilotUnshareThread handles DELETE /cases/{caseId}/copilot/chat/shares/{userId}
+// -- revokes a grant the caller previously made on their own thread.
+func (s *server) copilotUnshareThread(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, copilotRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	caseID := chi.URLParam(r, "caseId")
+	userID := chi.URLParam(r, "userId")
+	if _, err := s.db.Exec(r.Context(), `
+		DELETE FROM public.copilot_thread_shares
+		WHERE tenant=$1 AND case_id=$2 AND owner_sub=$3 AND shared_with_sub=$4`,
+		tenant, caseID, p.Subject, userID); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logAudit(r.Context(), tenant, caseID, "COPILOT_THREAD_UNSHARED", map[string]any{
+		"by": p.Subject, "removed": userID,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"shared": false})
+}
+
+// copilotListThreadShares handles GET /cases/{caseId}/copilot/chat/shares --
+// who the CALLER has shared their own thread with (not who's shared with
+// the caller; the point is managing your own grants). The frontend already
+// has the tenant staff list (id+username) from listTenantStaff and
+// cross-references these ids against it for display.
+func (s *server) copilotListThreadShares(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, copilotRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
+	caseID := chi.URLParam(r, "caseId")
+	rows, err := s.queryRows(r, `
+		SELECT shared_with_sub, created_at FROM public.copilot_thread_shares
+		WHERE tenant=$1 AND case_id=$2 AND owner_sub=$3 ORDER BY created_at`,
+		tenant, caseID, p.Subject)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"shares": rows})
 }
 
 // ollamaChatWithHistory is ollamaChat plus prior-turn context. Same wire

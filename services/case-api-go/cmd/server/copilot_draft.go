@@ -52,7 +52,9 @@ attach to a payment determination. Structure:
 3. EVIDENCE — what the trusted document fields support; name low-confidence
    fields as items the reviewer must verify, never as fact.
 4. OPEN QUESTIONS — uncertainties the reviewer must resolve.
-5. PROPOSED RATIONALE — 2-4 sentences the reviewer can accept, edit, or reject.`
+5. PROPOSED RATIONALE — 2-4 sentences the reviewer can accept, edit, or reject.
+Keep sections 1-4 to 1-2 short sentences each — this runs on a slow local
+model, so brevity matters; target 180 words total, never more than 280.`
 	case draftKindCorrespondence:
 		system = base + `
 
@@ -97,6 +99,20 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"kind must be determination_rationale or correspondence"}`, http.StatusBadRequest)
 		return
 	}
+	// In a program with role-owned steps, the assistant drafts only what the
+	// caller could draft by hand: letters are the Reviewer's, the legal
+	// rationale is the Attorney's. (TENANT_ADMIN passes either, as elsewhere.)
+	if s.loadProgram(r, tenant) != nil {
+		owner := "CASE_MANAGER"
+		if in.Kind == draftKindDetermination {
+			owner = "ATTORNEY"
+		}
+		if !hasAnyRole(p, owner, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf(
+				"forbidden: a %s draft belongs to the %s", strings.ReplaceAll(in.Kind, "_", " "), wfOwnerLabels[owner])})
+			return
+		}
+	}
 	// Instructions are reviewer guidance, not a prompt-injection vector into
 	// fact-space, but bound them anyway.
 	in.Instructions = truncate(in.Instructions, 2000)
@@ -107,7 +123,14 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	system, user := copilotDraftPrompt(in.Kind, facts, in.Instructions)
-	draft, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 1500)
+	// 500 tokens ≈ 300 words, comfortably above either prompt's own target
+	// (180/200 words) with headroom -- at this model's observed ~3.3 tok/s,
+	// 1500 meant a draft could run 5+ minutes and 504/502 at every proxy
+	// layer in front of it (confirmed live on the sibling /copilot/brief
+	// endpoint). The real fix is the brevity instructions in the prompts
+	// above; this is just the hard backstop in case the model doesn't
+	// fully comply.
+	draft, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 500)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":  "copilot model unreachable — no draft created; the facts below are still authoritative",
@@ -116,7 +139,7 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	attribution := fmt.Sprintf("copilot:%s (requested by %s)", s.cfg.CopilotModel, p.Subject)
+	attribution := fmt.Sprintf("copilot:%s (requested by %s)", s.cfg.CopilotModel, displayName(p))
 	footed := draft + "\n\n———\nDRAFT — advisory only; not a determination. model=" + s.cfg.CopilotModel +
 		" generated=" + time.Now().UTC().Format(time.RFC3339) + " facts=platform-verified"
 
@@ -140,9 +163,9 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 	ccJ, _ := json.Marshal(in.CC)
 	var qid string
 	if err := s.db.QueryRow(r.Context(), `
-		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9) RETURNING id`,
-		tenant, caseID, artifact, channel, truncate(subject, 400), footed, toJ, ccJ, attribution).Scan(&qid); err != nil {
+		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, requested_by_sub)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10) RETURNING id`,
+		tenant, caseID, artifact, channel, truncate(subject, 400), footed, toJ, ccJ, attribution, p.Subject).Scan(&qid); err != nil {
 		http.Error(w, `{"error":"qa gate insert failed"}`, http.StatusInternalServerError)
 		return
 	}

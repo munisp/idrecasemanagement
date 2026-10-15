@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"bytes"
 	crand "crypto/rand"
 	"encoding/base64"
@@ -25,8 +26,15 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// The documents bucket and the search-index prefix are per deployment, so two
+// deployments sharing one MinIO and one OpenSearch (idre and idre-prod on the
+// dev cluster) keep their files and search results apart.
+var (
+	docBucket      = envOr("DOC_BUCKET", "idre-docs")
+	docIndexPrefix = envOr("DOC_INDEX_PREFIX", "idre-docs")
+)
+
 const (
-	docBucket      = "idre-docs"
 	maxDocBytes    = 100 << 20 // 100 MB hard cap
 	retentionYears = 6         // federal retention mandate
 	// tenantStorageQuota bounds cumulative document bytes per tenant (25 GiB).
@@ -60,11 +68,33 @@ var docFolders = map[string]bool{
 	"OFFERS": true, "DETERMINATION": true, "INVOICES": true, "PARTY_UPLOADS": true,
 }
 
+// tenantStaffRoles are the roles a tenant's own staff hold. A gate that
+// names any of them is a tenant-level permission.
+var tenantStaffRoles = map[string]bool{
+	"CASE_MANAGER": true, "PM": true, "FINANCE": true, "ARBITRATOR": true,
+	"ATTORNEY": true, "CODER": true, "NURSE_PHYSICIAN": true, "DOCTOR": true,
+	"NURSE": true, "TENANT_ADMIN": true,
+}
+
 // hasAnyRole reports whether the principal holds any of the listed roles.
+//
+// TENANT_ADMIN is the tenant's own super-admin: it passes every gate that
+// admits at least one tenant staff role, so it can do anything any staff
+// member of its tenant can (tenancy() still confines it to its own tenant).
+// It does NOT pass gates made up only of platform roles (FEDERAL_ADMIN,
+// PLATFORM_ADMIN, the worker token) -- creating tenants or federal admins --
+// nor identity checks on external roles such as hasAnyRole(p, "TPA").
 func hasAnyRole(p principal, roles ...string) bool {
 	for _, want := range roles {
 		if hasRole(p, want) {
 			return true
+		}
+	}
+	if contains(p.Roles, "TENANT_ADMIN") {
+		for _, want := range roles {
+			if tenantStaffRoles[want] {
+				return true
+			}
 		}
 	}
 	return false
@@ -109,7 +139,7 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	sealedDoc := r.FormValue("sealed") == "true" // offer justifications: sealed until reveal
 
 	// security gate: content policy + ClamAV before anything is sealed/stored
-	if err := contentPolicy(hdr.Filename, raw); err != nil {
+	if err := docPolicy(hdr.Filename, raw); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnsupportedMediaType)
 		return
 	}
@@ -459,11 +489,15 @@ func (s *server) submitDocFeedback(w http.ResponseWriter, r *http.Request) {
 
 // ---- vault helpers ---------------------------------------------------------
 
-// vaultPost posts to the vault with the caller's context and the internal
-// service token (when configured). The vault enforces this token on every
-// route whenever VAULT_INTERNAL_TOKEN is set, so the two sides must agree.
+// vaultPost calls the vault with the incoming request's context, so the call
+// is cancelled with the request and its span joins the request's trace
+// (http.Post used context.Background and started a detached trace).
 func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(r.Context(), "POST", s.cfg.VaultURL+path, bytes.NewReader(body))
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.VaultURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -481,6 +515,9 @@ func (s *server) vaultSealDoc(r *http.Request, tenant, key string, pt []byte) ([
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("vault refused to seal the document: HTTP %d", resp.StatusCode)
+	}
 	var out struct {
 		SealedB64 string `json:"sealed_b64"`
 	}
@@ -497,6 +534,9 @@ func (s *server) vaultOpenDoc(r *http.Request, tenant, key string, ct []byte) ([
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("vault refused to open the document: HTTP %d", resp.StatusCode)
+	}
 	var out struct {
 		DataB64 string `json:"data_b64"`
 	}

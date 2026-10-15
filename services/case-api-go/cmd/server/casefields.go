@@ -54,6 +54,22 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Report formats: state as a 2-letter code, postal code in postal format.
+	if v, ok := in["provider_state"].(string); ok && v != "" {
+		v = strings.ToUpper(strings.TrimSpace(v))
+		if len(v) != 2 || v[0] < 'A' || v[0] > 'Z' || v[1] < 'A' || v[1] > 'Z' {
+			http.Error(w, `{"error":"provider_state must be a 2-letter state code"}`, http.StatusBadRequest)
+			return
+		}
+		in["provider_state"] = v
+	}
+	if v, ok := in["provider_postal"].(string); ok && v != "" {
+		if !validPostal(strings.TrimSpace(v)) {
+			http.Error(w, `{"error":"provider_postal must be a ZIP code: 12345 or 12345-6789"}`, http.StatusBadRequest)
+			return
+		}
+		in["provider_postal"] = strings.TrimSpace(v)
+	}
 	merge, _ := json.Marshal(in)
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET details = details || $2::jsonb, updated_at=now() WHERE id=$1`,
@@ -86,15 +102,26 @@ func (s *server) setCaseDetails(w http.ResponseWriter, r *http.Request) {
 // plan-notification workflow mails to the health plan. Sealed offer documents
 // are excluded until lawful reveal. Streams: each entry is decrypted straight
 // into the zip writer — no temp files.
+// caseZipKey marks a download link that carries the whole document bundle
+// of a case (the "Filing party dispute documentation" zip the plan
+// notification sends) instead of one document.
+const caseZipKey = "zip:case-documents"
+
 func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
+	s.writeCaseZip(w, r, tenant, caseID, s.revealLawful(r, caseID))
+}
+
+// writeCaseZip streams a case's clean documents as one zip. Sealed documents
+// are included only when includeSealed is true (never for a share link).
+func (s *server) writeCaseZip(w http.ResponseWriter, r *http.Request, tenant, caseID string, includeSealed bool) {
 	var caseNumber string
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
 
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT id, object_key, coalesce(filename, id::text), sealed, size_bytes, parts
+		SELECT id, object_key, coalesce(filename, id::text), sealed, size_bytes, parts, coalesce(folder,'')
 		FROM tenant_%s.documents WHERE case_id=$1 AND scan_status='CLEAN'
 		ORDER BY folder, created_at DESC`, sanitizeTenant(tenant)), caseID)
 	if err != nil {
@@ -102,17 +129,17 @@ func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type docRow struct {
-		id, key, name string
-		sealed        bool
-		size          int64
-		parts         []byte
+		id, key, name, folder string
+		sealed                bool
+		size                  int64
+		parts                 []byte
 	}
 	var docs []docRow
 	defer rows.Close()
 	for rows.Next() {
 		var d docRow
 		var sz *int64
-		if rows.Scan(&d.id, &d.key, &d.name, &d.sealed, &sz, &d.parts) == nil {
+		if rows.Scan(&d.id, &d.key, &d.name, &d.sealed, &sz, &d.parts, &d.folder) == nil {
 			if sz != nil {
 				d.size = *sz
 			}
@@ -124,15 +151,20 @@ func (s *server) zipCaseDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	zipName := fmt.Sprintf("dispute documentation %s.zip", caseNumber)
+	zipName := fmt.Sprintf("Filing party dispute documentation %s.zip", caseNumber)
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", zipName))
 	zw := zip.NewWriter(w)
 	fl, _ := w.(http.Flusher)
 	used := map[string]int{}
 	for _, d := range docs {
-		if d.sealed && !s.revealLawful(r, caseID) {
+		if d.sealed && !includeSealed {
 			continue // double-blind: sealed offers never ship in party bundles
+		}
+		// A bundle sent by link is the filing party's own documentation:
+		// the letters this office generated are not part of it.
+		if !includeSealed && (d.folder == "CORRESPONDENCE" || d.folder == "DETERMINATION") {
+			continue
 		}
 		name := d.name
 		if n := used[name]; n > 0 {
@@ -210,8 +242,12 @@ func (s *server) writeDocPlaintext(r *http.Request, tenant, objectKey string, pa
 // Contract deliverable 1.3 (§2.4.4): ad hoc reports are due within 10 business
 // days of the request. The clock starts here — not in a spreadsheet.
 func (s *server) requestAdhocDeliverable(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// CASE_MANAGER removed per the "reviewer only reviews" follow-up:
+	// requesting a new ad hoc deliverable is a creation action; reviewer
+	// keeps submitDeliverable (fulfilling an existing one) but not this.
+	// TENANT_ADMIN added back -- see reportsReadRoles (casemgmt.go) for why.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -240,4 +276,23 @@ func (s *server) requestAdhocDeliverable(w http.ResponseWriter, r *http.Request)
 		"name": in.Name, "contract_ref": in.Ref, "due_date": due.Format("2006-01-02"),
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "due_date": due.Format("2006-01-02")})
+}
+
+// validPostal: US ZIP, five digits or ZIP+4.
+func validPostal(v string) bool {
+	if len(v) != 5 && len(v) != 10 {
+		return false
+	}
+	for i, c := range v {
+		if i == 5 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

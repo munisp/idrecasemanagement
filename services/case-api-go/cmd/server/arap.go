@@ -16,11 +16,11 @@ package main
 // due date exists).
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	tb_types "github.com/tigerbeetle/tigerbeetle-go/pkg/types"
@@ -42,7 +42,12 @@ func agingBucket(days int) string {
 	}
 }
 
-var arapReadRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+// CASE_MANAGER deliberately excluded: the AR/AP subledger is a standalone
+// finance screen, not case-detail info -- hidden from reviewer per the
+// access-control follow-up (visibility, not just the write actions the
+// original audit covered). caseFinancials (one case's own record) is a
+// separate, still-permitted endpoint.
+var arapReadRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 var arapWriteRoles = []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 func asOfDate(r *http.Request) (time.Time, error) {
@@ -147,6 +152,10 @@ func (s *server) listReceivables(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows = withAging(rows, asOf)
+	// Merged from two separate, unordered queries -- never had any sort at
+	// all (confirmed live: rows came back in raw scan order). Newest basis
+	// date first, same convention as every other list in the app.
+	sort.Slice(rows, func(i, j int) bool { return rows[i].BasisDate > rows[j].BasisDate })
 	var total int64
 	for _, r0 := range rows {
 		total += r0.Due
@@ -207,17 +216,10 @@ func (s *server) postAPLedger(tenant, key string, debitCode, creditCode uint32, 
 	if s.tb == nil || amount <= 0 {
 		return
 	}
-	ih := sha256.Sum256([]byte("ap:" + key))
-	var idb [16]byte
-	copy(idb[:], ih[:16])
-	res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-		ID:              tb_types.BytesToUint128(idb),
-		DebitAccountID:  acctID(tenant, debitCode, ""),
-		CreditAccountID: acctID(tenant, creditCode, ""),
-		Amount:          tb_types.ToUint128(uint64(amount)),
-		Ledger:          tenantLedgerID(tenant),
-		Code:            ledgerCodeIDRE,
-	}})
+	res, err := s.postLedger(tenant, ledgerAcct{debitCode, ""}, ledgerAcct{creditCode, ""}, tb_types.Transfer{
+		ID:     ledgerTransferID("ap:" + key),
+		Amount: tb_types.ToUint128(uint64(amount)),
+	})
 	if err != nil {
 		slog.Error("ledger leg failed for payable", "key", key, "err", err)
 		return

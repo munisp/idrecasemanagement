@@ -9,6 +9,123 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 )
 
+// "Reviewer only reviews" follow-up: CASE_MANAGER keeps every DECIDE/
+// ADVANCE/UPDATE action on an existing record (advanceIntake, qaDecide,
+// convertLead, completeTask, addNote, submitDeliverable, assign, escalate,
+// decide) but loses the ability to CREATE a new top-level record. PM picks
+// up the create-side duties that moved off CASE_MANAGER. Pins the exact
+// gate each affected handler now enforces.
+func TestReviewerOnlyReviewsRoleFloors(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		gate  []string
+		want  bool
+	}{
+		// createIntake: the SOP has the Reviewer send the submission
+		// instructions, which is what opening an intake does.
+		{"createIntake: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"createIntake: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"createIntake: CODER rejected", []string{"CODER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// bulkIntake: same policy, in lockstep with createIntake.
+		{"bulkIntake: PM allowed", []string{"PM"}, []string{"BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"bulkIntake: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"BULK_SUBMITTER", "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		// issueInvoice / assignCase: the PM's, per the SOP roles table.
+		{"issueInvoice: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"issueInvoice: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"assignCase: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// requestAdhocDeliverable: requesting a NEW ad hoc deliverable --
+		// submitDeliverable (fulfilling an existing one) is untouched.
+		{"requestAdhocDeliverable: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"requestAdhocDeliverable: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, c.gate...)
+		if got != c.want {
+			t.Errorf("%s: roles=%v gate=%v: got allowed=%v, want %v", c.name, c.roles, c.gate, got, c.want)
+		}
+	}
+
+	// createAccount/createContact/createTask: CASE_MANAGER is excluded by an
+	// inline check layered ON TOP of crmStaffRoles (not removed from the
+	// shared var itself, since reviewer keeps every other crmStaffRoles
+	// action -- convertLead/completeTask/addNote/listNotes). Mirrors each
+	// handler's own two-step gate exactly.
+	crmCreateAllowed := func(roles []string) bool {
+		p := principal{Roles: roles}
+		return hasAnyRole(p, crmStaffRoles...) && !hasRole(p, "CASE_MANAGER")
+	}
+	crmCreateCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"crmCreate: PM allowed", []string{"PM"}, true},
+		{"crmCreate: ARBITRATOR allowed", []string{"ARBITRATOR"}, true},
+		{"crmCreate: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+		{"crmCreate: PARTY rejected (not even in crmStaffRoles)", []string{"PARTY"}, false},
+	}
+	for _, c := range crmCreateCases {
+		if got := crmCreateAllowed(c.roles); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+
+	// submitApplication/claimTPA: open to any authenticated tenant member
+	// EXCEPT CASE_MANAGER (an inline exclusion, not a positive role list) --
+	// mirror that shape exactly rather than a gate array.
+	notCaseManager := func(roles []string) bool { return !hasRole(principal{Roles: roles}, "CASE_MANAGER") }
+	openExceptReviewerCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"submitApplication/claimTPA: PM allowed", []string{"PM"}, true},
+		{"submitApplication/claimTPA: PARTY allowed", []string{"PARTY"}, true},
+		{"submitApplication/claimTPA: TPA allowed", []string{"TPA"}, true},
+		{"submitApplication/claimTPA: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+	}
+	for _, c := range openExceptReviewerCases {
+		if got := notCaseManager(c.roles); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+
+	// opsRoles: reviewer loses the Ops dashboard entirely (tenant-wide
+	// operational/financial KPIs, not dispute-review content).
+	opsCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"opsRoles: PM allowed", []string{"PM"}, true},
+		{"opsRoles: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+	}
+	for _, c := range opsCases {
+		if got := hasAnyRole(principal{Roles: c.roles}, opsRoles...); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+
+	// adminSetTPAStatus (and, before it was removed, staff code minting): the TPA oversight list's action
+	// buttons (mint code / act as / suspend) -- reviewer keeps the
+	// read-only oversight table (adminListTPAs, untouched) but not these.
+	tpaAdminActionCases := []struct {
+		name  string
+		roles []string
+		want  bool
+	}{
+		{"tpaAdminAction: FEDERAL_ADMIN allowed", []string{"FEDERAL_ADMIN"}, true},
+		{"tpaAdminAction: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, false},
+		{"tpaAdminAction: PM rejected (never had this)", []string{"PM"}, false},
+	}
+	for _, c := range tpaAdminActionCases {
+		if got := hasAnyRole(principal{Roles: c.roles}, "FEDERAL_ADMIN", "PLATFORM_ADMIN"); got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+}
+
 func TestHasAnyRole(t *testing.T) {
 	p := principal{Roles: []string{"ARBITRATOR"}}
 	if hasAnyRole(p, "FINANCE", "CASE_MANAGER") {
@@ -23,6 +140,11 @@ func TestHasAnyRole(t *testing.T) {
 // before the RBAC floor existed, an ARBITRATOR token reached
 // postFeeTransfer/escalateCase/reveal with no role check at all (Permify,
 // the only other gate, allows everyone when undeployed).
+//
+// CASE_MANAGER was removed from this gate in the access-control audit
+// (AC-5 separation of duties): the role that decides a dispute's
+// eligibility/outcome shouldn't also post the ledger transfer that moves
+// its money -- same floor settleInvoice/clearCheck already used.
 func TestFeeTransferRoleFloorRejectsWrongRole(t *testing.T) {
 	cases := []struct {
 		roles []string
@@ -30,13 +152,13 @@ func TestFeeTransferRoleFloorRejectsWrongRole(t *testing.T) {
 	}{
 		{[]string{"ARBITRATOR"}, false},
 		{[]string{"PARTY"}, false},
+		{[]string{"CASE_MANAGER"}, false},
 		{[]string{"FINANCE"}, true},
-		{[]string{"CASE_MANAGER"}, true},
 		{[]string{"FEDERAL_ADMIN"}, true},
 		{[]string{"PLATFORM_ADMIN"}, true},
 	}
 	for _, c := range cases {
-		got := hasAnyRole(principal{Roles: c.roles}, "FINANCE", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+		got := hasAnyRole(principal{Roles: c.roles}, "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 		if got != c.want {
 			t.Errorf("roles=%v: got allowed=%v, want %v", c.roles, got, c.want)
 		}
@@ -106,11 +228,14 @@ func TestProgramLayerRoleFloors(t *testing.T) {
 		// checkEligibility: CASE_MANAGER/ATTORNEY/admins only -- not PM/CODER.
 		{"eligibility: ATTORNEY allowed", []string{"ATTORNEY"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"eligibility: PM rejected", []string{"PM"}, []string{"CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
-		// settleInvoice: permanent policy is PM/FINANCE only -- not
+		// settleInvoice: permanent policy is FINANCE/admins only -- not
 		// CASE_MANAGER (separation of duties between the reviewer who drafts
-		// the case and whoever moves money).
-		{"settle: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
-		{"settle: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		// the case and whoever moves money), and PM was removed in the
+		// access-control audit for the same reason (PM holds case-adjacent
+		// QA/review powers, so shouldn't also settle the resulting money).
+		{"settle: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"settle: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
+		{"settle: PM rejected", []string{"PM"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 		// recordOptOut: permanent policy is ATTORNEY only, per the source
 		// docs ("Attorney decides if the plan may opt out") -- not even
 		// CASE_MANAGER.
@@ -177,14 +302,21 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		// initiateCase: who may open a new federal NSA case record. PARTY is
 		// allowed -- the portal's "New dispute" nav + form is self-service
 		// federal NSA filing, not staff-only (confirmed against the UI's own
-		// nav gate: has("PARTY", "CASE_MANAGER")).
-		{"initiate: ARBITRATOR allowed", []string{"ARBITRATOR"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// nav gate: has("PARTY", "PM")). ARBITRATOR was removed in the
+		// access-control audit (AC-5): the role that decides a dispute
+		// shouldn't also be able to file one -- undermines impartiality
+		// regardless of whether it's ever misused. CASE_MANAGER removed (PM
+		// added) per the "reviewer only reviews" follow-up: filing is a
+		// creation action, not a review one.
+		{"initiate: ARBITRATOR rejected", []string{"ARBITRATOR"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"initiate: PARTY allowed", []string{"PARTY"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: PM allowed", []string{"PM"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"initiate: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"initiate: FINANCE rejected", []string{"FINANCE"}, []string{"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// assignCase / bulkCases: reassignment is a management decision, not
 		// routine casework -- narrower than the broad case-staff gate.
-		{"assign: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"assign: ATTORNEY rejected", []string{"ATTORNEY"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"assign: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"assign: ATTORNEY rejected", []string{"ATTORNEY"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		{"bulk: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
 		{"bulk: CODER rejected", []string{"CODER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 		// grabNext: whoever actually works a queued case, not PM/FINANCE oversight.
@@ -195,9 +327,20 @@ func TestSecondRoleAuditFloors(t *testing.T) {
 		{"uploadCheck: NURSE_PHYSICIAN rejected", []string{"NURSE_PHYSICIAN"}, []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
 		// clearCheck: the ONLY path that turns a check image into settled
 		// money -- permanent policy is the same floor as settleInvoice,
-		// CASE_MANAGER excluded.
-		{"clearCheck: FINANCE allowed", []string{"FINANCE"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
-		{"clearCheck: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// CASE_MANAGER and (per the access-control audit) PM both excluded.
+		{"clearCheck: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"clearCheck: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		{"clearCheck: PM rejected", []string{"PM"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// matchCheck: same floor as clearCheck (access-control audit) -- it
+		// determines which case/invoice real money attaches to.
+		{"matchCheck: FINANCE allowed", []string{"FINANCE"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
+		{"matchCheck: PM rejected", []string{"PM"}, []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, false},
+		// transitionInvoice "approve": converts a draft service invoice into
+		// a payable obligation. CASE_MANAGER removed in the access-control
+		// audit; PM still allowed (program-management oversight, one step
+		// short of actually settling money).
+		{"invoice approve: PM allowed", []string{"PM"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, true},
+		{"invoice approve: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, false},
 		// caseStaffRoles: generateLetter/requestLetterGen -- the portal only
 		// ever shows these buttons to CASE_MANAGER/FEDERAL_ADMIN, so this
 		// narrower set (not crmStaffRoles) is a safe superset of the UI.
@@ -313,6 +456,7 @@ func TestThirdRoleAuditFloors_ReadEndpoints(t *testing.T) {
 		// gate exactly -- notably FINANCE and ARBITRATOR are NOT here, unlike
 		// financialReadRoles, because the Reports nav never admitted them.
 		{"reportsRead: PM allowed", []string{"PM"}, reportsReadRoles, true},
+		{"reportsRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, reportsReadRoles, false},
 		{"reportsRead: FINANCE rejected", []string{"FINANCE"}, reportsReadRoles, false},
 		{"reportsRead: ARBITRATOR rejected", []string{"ARBITRATOR"}, reportsReadRoles, false},
 		// opsRoles (opsDashboard, also backs the Reports -> Trends tab): PM
@@ -330,13 +474,55 @@ func TestThirdRoleAuditFloors_ReadEndpoints(t *testing.T) {
 	}
 }
 
+// Access-control follow-up: the original audit restricted CASE_MANAGER's
+// WRITE access to money-moving actions but left its READ access to the
+// standalone finance screens (Financials, Billing, AR/AP, Reconciliation,
+// Checks) untouched -- live testing found a reviewer-role account could
+// still see all of them, which was the actual original ask ("reviewer
+// shouldn't see finance"), not just a write restriction. These are
+// separate screens from a case's own embedded financial record
+// (caseFinancials), which CASE_MANAGER still needs and still has.
+func TestFourthRoleAuditFloors_FinanceVisibility(t *testing.T) {
+	cases := []struct {
+		name  string
+		roles []string
+		gate  []string
+		want  bool
+	}{
+		{"financialRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, financialReadRoles, false},
+		{"financialRead: PM still allowed", []string{"PM"}, financialReadRoles, true},
+		{"arapRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, arapReadRoles, false},
+		{"arapRead: PM still allowed", []string{"PM"}, arapReadRoles, true},
+		{"reconRead: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, reconReadRoles, false},
+		{"reconRead: PM still allowed", []string{"PM"}, reconReadRoles, true},
+		{"billingView: CASE_MANAGER rejected", []string{"CASE_MANAGER"}, billingViewRoles, false},
+		{"billingView: PM still allowed", []string{"PM"}, billingViewRoles, true},
+	}
+	for _, c := range cases {
+		got := hasAnyRole(principal{Roles: c.roles}, c.gate...)
+		if got != c.want {
+			t.Errorf("%s: roles=%v: got allowed=%v, want %v", c.name, c.roles, got, c.want)
+		}
+	}
+	// uploadCheck has its own inline gate rather than a shared role list.
+	if hasAnyRole(principal{Roles: []string{"CASE_MANAGER"}}, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		t.Error("uploadCheck gate: CASE_MANAGER should be rejected")
+	}
+	if !hasAnyRole(principal{Roles: []string{"PM"}}, "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		t.Error("uploadCheck gate: PM should still be allowed")
+	}
+}
+
 // createFederalAdmin / createTenantStaff: there was previously no way to
 // create a FEDERAL_ADMIN/PLATFORM_ADMIN account at all through the app
 // (federal.admin itself was hand-seeded directly in the Keycloak realm),
 // and no way to add a second staff member to an already-existing tenant
 // without resubmitting a whole tenant-creation request. Scoped with the
-// user: either federal tier can mint more of either federal role; a
-// CASE_MANAGER may add tenant staff only to their own tenant.
+// user: either federal tier can mint more of either federal role; a PM
+// may add tenant staff only to their own tenant. CASE_MANAGER was removed
+// from this (and Reports, Team time) per the same access-control
+// follow-up as financialReadRoles -- reviewer loses tenant staff admin
+// entirely, not just a subset.
 func TestAdminCreationRoleFloors(t *testing.T) {
 	t.Run("createFederalAdmin", func(t *testing.T) {
 		cases := []struct {
@@ -359,13 +545,13 @@ func TestAdminCreationRoleFloors(t *testing.T) {
 
 	t.Run("createTenantStaff tenant-scoping", func(t *testing.T) {
 		// Mirrors createTenantStaff's own gate logic (admins bypass the
-		// tenant check; CASE_MANAGER must match the target tenant).
+		// tenant check; PM must match the target tenant).
 		allowed := func(roles []string, callerTenant, targetTenant string) bool {
 			p := principal{Roles: roles}
 			if hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 				return true
 			}
-			return hasRole(p, "CASE_MANAGER") && targetTenant == callerTenant
+			return hasRole(p, "PM") && targetTenant == callerTenant
 		}
 		cases := []struct {
 			name         string
@@ -375,8 +561,9 @@ func TestAdminCreationRoleFloors(t *testing.T) {
 			want         bool
 		}{
 			{"FEDERAL_ADMIN can target any tenant", []string{"FEDERAL_ADMIN"}, "tx", "fl", true},
-			{"CASE_MANAGER can target own tenant", []string{"CASE_MANAGER"}, "fl", "fl", true},
-			{"CASE_MANAGER rejected on a different tenant", []string{"CASE_MANAGER"}, "tx", "fl", false},
+			{"PM can target own tenant", []string{"PM"}, "fl", "fl", true},
+			{"PM rejected on a different tenant", []string{"PM"}, "tx", "fl", false},
+			{"CASE_MANAGER rejected even on own tenant", []string{"CASE_MANAGER"}, "fl", "fl", false},
 			{"ARBITRATOR rejected even on own tenant", []string{"ARBITRATOR"}, "tx", "tx", false},
 		}
 		for _, c := range cases {
@@ -398,5 +585,73 @@ func TestIsUniqueViolation(t *testing.T) {
 	}
 	if !isUniqueViolation(&pgconn.PgError{Code: "23505"}) { // unique_violation
 		t.Fatal("pg error code 23505 must be recognized as a unique violation")
+	}
+}
+
+// TENANT_ADMIN is a different role from reviewer (CASE_MANAGER): it reaches
+// CASE_MANAGER-gated handlers through hasRole's quirk, so every gate that
+// dropped or excluded CASE_MANAGER has to name or exempt TENANT_ADMIN itself.
+func TestTenantAdminKeepsWhatReviewerLost(t *testing.T) {
+	ta := principal{Roles: []string{"TENANT_ADMIN"}}
+	rev := principal{Roles: []string{"CASE_MANAGER"}}
+	lists := map[string][]string{
+		"reportsReadRoles":        reportsReadRoles,
+		"opsRoles":                opsRoles,
+		"timeReport":              {"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"tenantStaff":             {"PM", "TENANT_ADMIN"},
+		"initiateCase":            {"PARTY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"requestAdhocDeliverable": {"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole},
+		"tpaAdminAction":          {"FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"},
+	}
+	for name, gate := range lists {
+		if !hasAnyRole(ta, gate...) {
+			t.Errorf("%s: TENANT_ADMIN must be allowed", name)
+		}
+		if hasAnyRole(rev, gate...) {
+			t.Errorf("%s: CASE_MANAGER must stay rejected", name)
+		}
+	}
+	// Inline exclusions (createAccount/Contact/Task, submitApplication, claimTPA).
+	excluded := func(p principal) bool { return hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") }
+	if excluded(ta) {
+		t.Error("inline reviewer exclusion must not catch TENANT_ADMIN")
+	}
+	if !excluded(rev) {
+		t.Error("inline reviewer exclusion must still catch CASE_MANAGER")
+	}
+}
+
+// TENANT_ADMIN passes any gate that admits a tenant staff role, and nothing
+// else: not platform-only gates, not identity checks on external roles.
+func TestTenantAdminIsTenantSuperAdmin(t *testing.T) {
+	ta := principal{Roles: []string{"TENANT_ADMIN"}}
+	allowed := map[string][]string{
+		"financialReadRoles": financialReadRoles,
+		"billingViewRoles":   billingViewRoles,
+		"arapReadRoles":      arapReadRoles,
+		"reconReadRoles":     reconReadRoles,
+		"settle (FINANCE)":   {"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+		"opt-out (ATTORNEY)": {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+		"crmStaffRoles":      crmStaffRoles,
+	}
+	for name, gate := range allowed {
+		if !hasAnyRole(ta, gate...) {
+			t.Errorf("%s: TENANT_ADMIN must be allowed", name)
+		}
+	}
+	denied := map[string][]string{
+		"createTenant / federal admins": {"FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+		"worker-token only":             {serviceRole},
+		"is-a-TPA identity check":       {"TPA"},
+		"external roles only":           {"PARTY", "BULK_SUBMITTER", "STATE_AUDITOR"},
+	}
+	for name, gate := range denied {
+		if hasAnyRole(ta, gate...) {
+			t.Errorf("%s: TENANT_ADMIN must NOT be allowed", name)
+		}
+	}
+	// Other roles are unaffected by the rule.
+	if hasAnyRole(principal{Roles: []string{"CASE_MANAGER"}}, financialReadRoles...) {
+		t.Error("CASE_MANAGER must stay out of financialReadRoles")
 	}
 }

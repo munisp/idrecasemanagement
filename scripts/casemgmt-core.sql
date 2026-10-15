@@ -151,7 +151,43 @@ CREATE TABLE IF NOT EXISTS public.copilot_threads (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS copilot_threads_case ON public.copilot_threads (tenant, case_id, created_at);
+-- Per-user privacy: each case worker's conversation is their own by default
+-- (user_sub NULL = a pre-privacy legacy turn, grandfathered as visible to
+-- everyone on the case rather than orphaned/hidden). A worker can
+-- deliberately share their thread with specific colleagues via
+-- copilot_thread_shares below -- sharing is opt-in, not the default,
+-- because "part of the case record" and "visible to everyone with case
+-- access" turned out to be two different properties once more than one
+-- person works a case.
+ALTER TABLE public.copilot_threads ADD COLUMN IF NOT EXISTS user_sub text;
+CREATE INDEX IF NOT EXISTS copilot_threads_user ON public.copilot_threads (tenant, case_id, user_sub);
 
+CREATE TABLE IF NOT EXISTS public.copilot_thread_shares (
+    id              bigserial PRIMARY KEY,
+    tenant          text NOT NULL,
+    case_id         uuid NOT NULL,
+    owner_sub       text NOT NULL,     -- whose thread this grants access to
+    shared_with_sub text NOT NULL,     -- who can now read it
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (tenant, case_id, owner_sub, shared_with_sub)
+);
+CREATE INDEX IF NOT EXISTS copilot_thread_shares_lookup ON public.copilot_thread_shares (tenant, case_id, shared_with_sub);
+
+-- General (non-case-scoped) assistant threads: "my open cases", "my tasks",
+-- and casual chat that isn't grounded in any one case's record. Deliberately
+-- a separate table, not case_id=NULL on copilot_threads -- that table's own
+-- comment says "the thread is part of the case record", which a general
+-- thread categorically isn't; it's part of the USER's own assistant history.
+CREATE TABLE IF NOT EXISTS public.copilot_general_threads (
+    id         bigserial PRIMARY KEY,
+    tenant     text NOT NULL,
+    user_sub   text NOT NULL,          -- keycloak sub -- personal, not shared across staff
+    role       text NOT NULL,          -- user | assistant
+    body       text NOT NULL,
+    model      text,                   -- assistant turns only
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS copilot_general_threads_user ON public.copilot_general_threads (tenant, user_sub, created_at);
 
 -- Party voice (conversation-first step 4): counterparty chat turns on secure
 -- share links. token_fp is a sha256 prefix of the share token — correlation
@@ -449,4 +485,20 @@ CREATE TABLE IF NOT EXISTS public.bank_payout_batches (
   file_body      text NOT NULL,
   created_at     timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant, file_reference)
+);
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Tenant display names (program.go: setTenantLabel/listTenantLabels),
+-- e.g. "AHCA" shown in place of the bare "FL" code. Deliberately its own
+-- table, not a key in program_rules.config: a tenant with no custom
+-- program rules runs on Federal NSA defaults, and every "programmed vs
+-- federal" branch in this codebase keys off whether that row exists at
+-- all -- storing the label there would force creating one just to hold a
+-- name, silently flipping a tenant's program mode as a side effect.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.tenant_labels (
+  tenant     text PRIMARY KEY,
+  label      text NOT NULL,
+  updated_by text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL DEFAULT now()
 );

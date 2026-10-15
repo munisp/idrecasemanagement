@@ -120,9 +120,9 @@ func (s *server) logInquiry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch in.InquiryType {
-	case "GENERAL_QUESTION", "GENERAL_INQUIRY", "SUBMISSION_DOCUMENTS":
+	case "GENERAL_QUESTION", "GENERAL_INQUIRY", "SUBMISSION_DOCUMENTS", "CORRESPONDENCE_SENT":
 	default:
-		http.Error(w, `{"error":"inquiry_type must be GENERAL_QUESTION, GENERAL_INQUIRY, or SUBMISSION_DOCUMENTS"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"inquiry_type must be GENERAL_QUESTION, GENERAL_INQUIRY, SUBMISSION_DOCUMENTS, or CORRESPONDENCE_SENT"}`, http.StatusBadRequest)
 		return
 	}
 	var id int64
@@ -142,6 +142,19 @@ func (s *server) logInquiry(w http.ResponseWriter, r *http.Request) {
 		"by": p.Subject, "inquiry_id": id, "method": in.Method, "inquiry_type": in.InquiryType,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+// logCorrespondenceInquiry records every outbound email/letter send into the
+// informal inquiries log too, alongside the formal correspondence_log row --
+// so the inquiries tab is one place staff can see ALL contact with a case's
+// parties, not just the ones logged by hand via the /inquiries form.
+// Best-effort: a send that already succeeded must never fail because this
+// bookkeeping insert didn't.
+func (s *server) logCorrespondenceInquiry(r *http.Request, tenant, caseID, email, detail, actor string) {
+	_, _ = s.db.Exec(r.Context(), `
+		INSERT INTO public.inquiry_log (tenant, case_id, requester_email, method, inquiry_type, detail, logged_by)
+		VALUES ($1, $2, NULLIF($3,''), 'EMAIL', 'CORRESPONDENCE_SENT', $4, $5)`,
+		tenant, caseID, email, detail, actor)
 }
 
 // listInquiries: GET /v1/tenants/{tenant}/inquiries?case_id=|email=

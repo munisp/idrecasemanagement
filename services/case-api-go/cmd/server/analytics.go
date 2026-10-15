@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -130,22 +131,25 @@ func (s *server) fraudSignals(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden: oversight roles only"}`, http.StatusForbidden)
 		return
 	}
+	// The totals are computed in a subquery: Postgres does not let an
+	// ORDER BY expression use the SELECT list's column names.
 	rows, err := s.queryRows(r, fmt.Sprintf(`
-		SELECT provider_id,
-		       count(*) AS disputes,
-		       count(*) FILTER (WHERE details ? 'necessity_flags') AS necessity_flags,
-		       count(*) FILTER (WHERE details ? 'duplicate_claim_with') AS duplicate_claims,
-		       count(*) FILTER (WHERE coalesce(details->>'bundling_suspected','') = 'true') AS bundling_flags,
-		       round(avg(qpa_cents)) AS avg_qpa_cents
-		FROM tenant_%s.cases
-		WHERE provider_id IS NOT NULL AND provider_id <> ''
-		GROUP BY provider_id
-		HAVING count(*) FILTER (WHERE details ? 'necessity_flags')
-		     + count(*) FILTER (WHERE details ? 'duplicate_claim_with')
-		     + count(*) FILTER (WHERE coalesce(details->>'bundling_suspected','') = 'true') > 0
-		ORDER BY (necessity_flags + duplicate_claims + bundling_flags) DESC LIMIT 200`,
+		SELECT * FROM (
+		  SELECT provider_id,
+		         count(*) AS disputes,
+		         count(*) FILTER (WHERE details ? 'necessity_flags') AS necessity_flags,
+		         count(*) FILTER (WHERE details ? 'duplicate_claim_with') AS duplicate_claims,
+		         count(*) FILTER (WHERE coalesce(details->>'bundling_suspected','') = 'true') AS bundling_flags,
+		         round(avg(qpa_cents)) AS avg_qpa_cents
+		  FROM tenant_%s.cases
+		  WHERE provider_id IS NOT NULL AND provider_id <> ''
+		  GROUP BY provider_id
+		) t
+		WHERE necessity_flags + duplicate_claims + bundling_flags > 0
+		ORDER BY necessity_flags + duplicate_claims + bundling_flags DESC LIMIT 200`,
 		sanitizeTenant(tenant)))
 	if err != nil {
+		slog.Error("query failed", "handler", "fraudSignals", "err", err)
 		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 		return
 	}

@@ -11,7 +11,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -103,11 +105,11 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 	q := fmt.Sprintf(`
 		SELECT v.id, v.case_id, c.case_number, c.status, c.service_line,
 		       c.disputed_amount_cents, v.discipline, v.status AS review_status,
-		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at,
+		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at, v.completed_at,
 		       coalesce(c.details->>'diagnosis_codes','[]') AS diagnosis_codes,
 		       coalesce(c.details->>'bundling_suspected','') AS bundling_suspected
 		FROM public.specialty_reviews v
-		JOIN tenant_%s.cases c ON c.id = v.case_id
+		JOIN tenant_%s.cases c ON c.id::text = v.case_id
 		WHERE v.tenant=$1 AND v.discipline=$2`, sanitizeTenant(tenant))
 	args := []any{tenant, discipline}
 	if !showAll {
@@ -123,7 +125,12 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 		            OR c.details->>'issue' ILIKE '%bundl%')`
 	}
 	q += ` ORDER BY v.requested_at LIMIT 500`
-	rows, _ := s.queryRows(r, q, args...)
+	rows, err := s.queryRows(r, q, args...)
+	if err != nil {
+		slog.Error("query failed", "handler", "queues.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "discipline": discipline})
 }
 
@@ -150,6 +157,9 @@ func (s *server) transitionReview(w http.ResponseWriter, r *http.Request, target
 	reviewID := chi.URLParam(r, "reviewId")
 	var in struct {
 		Note string `json:"note"`
+		// Coding only, and required there: the same question the case's
+		// Steps panel asks -- does the case need clinical review?
+		ClinicalRequested *bool `json:"clinical_requested"`
 	}
 	// Body optional for claim.
 	if r.ContentLength > 0 {
@@ -170,31 +180,33 @@ func (s *server) transitionReview(w http.ResponseWriter, r *http.Request, target
 		http.Error(w, `{"error":"forbidden: not your discipline"}`, http.StatusForbidden)
 		return
 	}
-	if target == "COMPLETE" && curStatus == "COMPLETE" {
-		http.Error(w, `{"error":"review already complete"}`, http.StatusConflict)
+	if target == "COMPLETE" {
+		if curStatus == "COMPLETE" {
+			http.Error(w, `{"error":"review already complete"}`, http.StatusConflict)
+			return
+		}
+		data, msg := reviewCompletionData(discipline, reviewID, displayName(p), in.ClinicalRequested)
+		if msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+		// The same path the case's Steps panel takes: role floor, step order,
+		// workflow signal, the activity record Steps reads, audit -- and it
+		// closes this item with the reviewer's note.
+		if !s.deliverCaseSignal(w, r, tenant, caseID, meta.signal, data, in.Note) {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"review_id": reviewID, "status": target})
 		return
 	}
 	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.specialty_reviews
-		SET status=$3, reviewer=$4, note = CASE WHEN $5<>'' THEN $5 ELSE note END,
-		    claimed_at = CASE WHEN $3='IN_REVIEW' THEN now() ELSE claimed_at END,
-		    completed_at = CASE WHEN $3='COMPLETE' THEN now() ELSE NULL END
+		SET status=$3, reviewer=$4, note = CASE WHEN $5<>'' THEN $5 ELSE note END, claimed_at = now()
 		WHERE tenant=$1 AND id=$2 AND status <> 'COMPLETE'`,
-		tenant, reviewID, target, p.Subject, in.Note)
+		tenant, reviewID, target, displayName(p), in.Note)
 	if err != nil || res.RowsAffected() == 0 {
 		http.Error(w, `{"error":"transition not allowed"}`, http.StatusConflict)
 		return
-	}
-	if target == "COMPLETE" {
-		var caseNumber string
-		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-			`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
-		s.signalWorkflow(r, tenant, caseID, caseNumber, meta.signal, map[string]any{
-			"review_id": reviewID, "reviewer": p.Subject})
-		s.logActivity(r.Context(), tenant, caseID, meta.signal,
-			fmt.Sprintf("%s review completed by %s", discipline, p.Subject))
-		s.logAudit(r.Context(), tenant, caseID, meta.signal, map[string]any{
-			"by": p.Subject, "review_id": reviewID, "discipline": discipline})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"review_id": reviewID, "status": target})
 }
@@ -212,12 +224,85 @@ func (s *server) pmQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, _ := s.queryRows(r, fmt.Sprintf(`
+	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT e.id, e.case_id, c.case_number, c.status, c.service_line,
 		       c.disputed_amount_cents, e.clock, e.level, e.escalated_to, e.detail, e.created_at
 		FROM public.escalations e
-		JOIN tenant_%s.cases c ON c.id = e.case_id
+		JOIN tenant_%s.cases c ON c.id::text = e.case_id
 		WHERE e.tenant=$1 AND c.status NOT LIKE 'CLOSED%%'
 		ORDER BY e.created_at DESC LIMIT 200`, sanitizeTenant(tenant)), tenant)
-	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "discipline": "PM"})
+	if err != nil {
+		slog.Error("query failed", "handler", "queues.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	// The board's second table: the program's open cases, newest first.
+	open, err := s.queryRows(r, fmt.Sprintf(`
+		SELECT id, case_number, status, opened_at
+		FROM tenant_%s.cases
+		WHERE status NOT LIKE 'CLOSED%%'
+		ORDER BY opened_at DESC LIMIT 100`, sanitizeTenant(tenant)))
+	if err != nil {
+		slog.Error("query failed", "handler", "queues.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	// "queue" is kept for existing callers; the board reads the named lists.
+	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "escalations": rows, "open_cases": open, "discipline": "PM"})
+}
+
+// reviewDisciplineOf is the queue a review-complete workflow signal belongs to.
+func reviewDisciplineOf(signal string) string {
+	for d, m := range disciplineMeta {
+		if m.signal == signal {
+			return d
+		}
+	}
+	return ""
+}
+
+// reviewCompletionData is what a queue completion sends the workflow: what
+// the case's Steps panel would send for the same step. Coding must say
+// whether clinical review is needed. Returns an error message when not.
+func reviewCompletionData(discipline, reviewID, reviewer string, clinical *bool) (map[string]any, string) {
+	data := map[string]any{"review_id": reviewID, "reviewer": reviewer}
+	if discipline == "CODING" {
+		if clinical == nil {
+			return nil, `{"error":"say whether the case needs clinical review (clinical_requested)"}`
+		}
+		data["clinical_requested"] = *clinical
+	}
+	return data, ""
+}
+
+// closeOpenReview closes a case's open review in one discipline, whichever
+// way the step was done: from the queue (with the reviewer's note) or from
+// the case's Steps panel (noted as such).
+func (s *server) closeOpenReview(r *http.Request, tenant, caseID, discipline, by, note string) {
+	_, _ = s.db.Exec(r.Context(), `
+		UPDATE public.specialty_reviews
+		SET status='COMPLETE', completed_at=now(),
+		    reviewer = CASE WHEN $5<>'' OR reviewer='' THEN $4 ELSE reviewer END,
+		    note = CASE WHEN $5<>'' THEN $5 ELSE note || ' (completed from the case''s Steps)' END
+		WHERE tenant=$1 AND case_id=$2 AND discipline=$3 AND status <> 'COMPLETE'`,
+		tenant, caseID, discipline, by, note)
+}
+
+// openReview puts a case in a discipline's queue unless it is already there,
+// and tells that discipline.
+func (s *server) openReview(r *http.Request, tenant, caseID, caseNumber, discipline, note, by string) {
+	tag, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.specialty_reviews (tenant, case_id, discipline, note, requested_by)
+		VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, tenant, caseID, discipline, truncate(note, 4000), by)
+	if err != nil || tag.RowsAffected() == 0 {
+		return
+	}
+	s.logActivity(r.Context(), tenant, caseID, discipline+"_REVIEW_REQUESTED", note)
+	for _, role := range disciplineMeta[discipline].roles {
+		if role == "FEDERAL_ADMIN" || role == "PLATFORM_ADMIN" {
+			continue
+		}
+		s.notify(r, tenant, "role:"+role, "REVIEW_REQUESTED",
+			fmt.Sprintf("Case %s needs a %s review.", caseNumber, strings.ToLower(discipline)), "#/queues/"+discipline)
+	}
 }

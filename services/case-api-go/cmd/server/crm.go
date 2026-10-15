@@ -50,6 +50,12 @@ func nextOffset(offset, limit, total int) int {
 
 func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA excluded -- see listCases' comment (main.go): generic CRM lists
+	// are the whole tenant's data, not scoped to what a TPA filed.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden: TPA accounts see their own clients on the TPA page"}`, http.StatusForbidden)
+		return
+	}
 	typ := r.URL.Query().Get("type")
 	q := `SELECT id, tenant, type, legal_name, COALESCE(npi,''), COALESCE(phone,''),
 	             custom, created_at FROM public.accounts WHERE tenant=$1`
@@ -88,10 +94,21 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, crmStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
+	// CASE_MANAGER excluded from this one crmStaffRoles action per the
+	// "reviewer only reviews" follow-up: creating a new CRM account is a
+	// creation action, not a review one. Inline rather than removed from
+	// crmStaffRoles itself -- reviewer keeps every OTHER crmStaffRoles
+	// action (convertLead, completeTask, addNote, listNotes). The
+	// !hasRole(p,"TENANT_ADMIN") guard matters: hasRole("CASE_MANAGER")
+	// is also true for TENANT_ADMIN (the per-tenant super-admin's own
+	// hasRole quirk, onboarding.go) -- without it this would wrongly
+	// reject the tenant's own admin too, which is a different role from
+	// reviewer and keeps full access here.
 	var in struct {
 		Type      string         `json:"type"`
 		LegalName string         `json:"legal_name"`
@@ -189,10 +206,12 @@ func (s *server) account360(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, crmStaffRoles...) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, crmStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
+	// CASE_MANAGER excluded, TENANT_ADMIN exempted, same as createAccount.
 	var in struct {
 		AccountID string `json:"account_id"`
 		Name      string `json:"name"`
@@ -224,17 +243,41 @@ func (s *server) createContact(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// TPA excluded -- see listCases' comment (main.go).
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
 	limit, offset := pageParams(r, 100, 500)
+	// status=OPEN is a shorthand for "not yet converted" (any status other
+	// than CONVERTED), since that's the one distinction the UI's own
+	// Convert-button gate already cares about -- an exact status value
+	// still works for anyone filtering on something more specific.
+	status := r.URL.Query().Get("status")
+	statusClause, statusArg := "", any(nil)
+	switch status {
+	case "":
+	case "OPEN":
+		statusClause = " AND status<>$2"
+		statusArg = "CONVERTED"
+	default:
+		statusClause = " AND status=$2"
+		statusArg = status
+	}
+	queryArgs := []any{tenant}
+	if statusArg != nil {
+		queryArgs = append(queryArgs, statusArg)
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
-		`SELECT count(*) FROM public.leads WHERE tenant=$1`, tenant).Scan(&total); err != nil {
+		`SELECT count(*) FROM public.leads WHERE tenant=$1`+statusClause, queryArgs...).Scan(&total); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, source, COALESCE(name,''), COALESCE(organization,''),
 		       COALESCE(phone,''), COALESCE(summary,''), status, created_at
-		FROM public.leads WHERE tenant=$1 ORDER BY created_at DESC, id LIMIT %d OFFSET %d`, limit, offset), tenant)
+		FROM public.leads WHERE tenant=$1`+statusClause+` ORDER BY created_at DESC, id LIMIT %d OFFSET %d`, limit, offset), queryArgs...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -316,6 +359,11 @@ func (s *server) convertLead(w http.ResponseWriter, r *http.Request) {
 func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// TPA excluded -- see listCases' comment (main.go).
+	if hasRole(p, "TPA") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
 	mine := r.URL.Query().Get("mine") == "true"
 	q := `SELECT id, COALESCE(task_ref,''), subject, COALESCE(case_id,''), COALESCE(assignee,''),
 	             COALESCE(to_char(due_date,'YYYY-MM-DD'),''), status, created_at
@@ -324,6 +372,10 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	if mine {
 		q += ` AND assignee=$2`
 		args = append(args, p.Subject)
+	}
+	if status := r.URL.Query().Get("status"); status != "" {
+		args = append(args, status)
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
 	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int
@@ -362,6 +414,7 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
+	// CASE_MANAGER excluded, TENANT_ADMIN exempted, same as createAccount.
 	var in struct {
 		Subject  string `json:"subject"`
 		CaseID   string `json:"case_id"`
@@ -372,18 +425,30 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"subject required"}`, http.StatusBadRequest)
 		return
 	}
-	var id, ref string
-	err := s.db.QueryRow(r.Context(), `
-		WITH ins AS (
-			INSERT INTO public.tasks (tenant, subject, case_id, assignee, due_date, created_by)
-			VALUES ($1,$2,NULLIF($3,''),$4,NULLIF($5,'')::date,$6) RETURNING id
-		)
-		UPDATE public.tasks t
-		SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
+	if lock := s.caseLockedForRequest(r, tenant, in.CaseID); lock != "" {
+		writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+		return
+	}
+	// Two statements, not one writable-CTE combo: confirmed live on this
+	// Postgres (18.6) that "WITH ins AS (INSERT ... RETURNING id) UPDATE t
+	// ... FROM ins WHERE t.id = ins.id" reproducibly updates ZERO rows --
+	// reproduced even on a bare scratch table, so it's not specific to this
+	// table or query. The INSERT alone, and the UPDATE alone, both work; it's
+	// only the chained form that silently affects nothing (no error, no
+	// rows). Root cause not fully understood; this sidesteps it.
+	var id string
+	if err := s.db.QueryRow(r.Context(), `
+		INSERT INTO public.tasks (tenant, subject, case_id, assignee, due_date, created_by)
+		VALUES ($1,$2,NULLIF($3,''),$4,NULLIF($5,'')::date,$6) RETURNING id`,
+		tenant, in.Subject, in.CaseID, in.Assignee, in.DueDate, p.Subject).Scan(&id); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	var ref string
+	if err := s.db.QueryRow(r.Context(), `
+		UPDATE public.tasks SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
 		       lpad(nextval('public.task_ref_seq')::text, 5, '0')
-		FROM ins WHERE t.id = ins.id RETURNING t.id, t.task_ref`,
-		tenant, in.Subject, in.CaseID, in.Assignee, in.DueDate, p.Subject).Scan(&id, &ref)
-	if err != nil {
+		WHERE id = $1 RETURNING task_ref`, id).Scan(&ref); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
@@ -401,9 +466,18 @@ func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := chi.URLParam(r, "taskId")
+	// Anyone on staff could close anyone's task -- a Coder could mark the
+	// PM's escalation done. The Reviewer and the PM run the task list and
+	// may close any task; everyone else closes the ones that are theirs
+	// (assigned to them, or raised by them).
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	mine := `AND (assignee=$3 OR created_by=$3 OR created_by=$4)`
+	if hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		mine = `AND ($3::text IS NOT NULL OR $4::text IS NOT NULL)`
+	}
 	res, err := s.db.Exec(r.Context(), `
-		UPDATE public.tasks SET status='DONE', completed_at=now() WHERE tenant=$1 AND id=$2`,
-		tenant, taskID)
+		UPDATE public.tasks SET status='DONE', completed_at=now() WHERE tenant=$1 AND id::text=$2 `+mine,
+		tenant, taskID, p.Subject, displayName(p))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -414,6 +488,11 @@ func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 		s.logAudit(r.Context(), tenant, "", "TASK_COMPLETED", map[string]any{
 			"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "task_id": taskID,
 		})
+	}
+	if res.RowsAffected() == 0 {
+		// Unknown, or not the caller's to close: say so instead of "DONE".
+		http.Error(w, `{"error":"task not found, or not yours to complete"}`, http.StatusNotFound)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "DONE"})
 }
@@ -440,7 +519,9 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	if in.Stream == "" {
 		in.Stream = "internal"
 	}
-	if prog := s.loadProgram(r, tenant); prog != nil && len(prog.NotesStreams) > 0 {
+	prog := s.loadProgram(r, tenant)
+	streamRestricted := false
+	if prog != nil && len(prog.NotesStreams) > 0 {
 		ok := false
 		for _, st := range prog.NotesStreams {
 			if st == in.Stream {
@@ -452,6 +533,19 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"stream must be one of the program notes_streams"}`, http.StatusBadRequest)
 			return
 		}
+		// Per-stream role gate: a stream with no entry in notes_stream_roles
+		// stays unrestricted (same as a program that never configured this
+		// at all). Confirmed live: before this, any case-staff role could
+		// write any stream — coder.fl wrote a Legal note and the server
+		// accepted it, even though the field criteria document treats
+		// Coder/Clinical/Legal review notes as separate per-role fields.
+		if roles, ok := prog.NotesStreamRoles[in.Stream]; ok && len(roles) > 0 {
+			if !hasAnyRole(p, roles...) {
+				http.Error(w, `{"error":"forbidden: your role cannot write to the `+in.Stream+` notes stream"}`, http.StatusForbidden)
+				return
+			}
+			streamRestricted = true
+		}
 	}
 	_, err := s.db.Exec(r.Context(), `
 		INSERT INTO public.notes (tenant, record_type, record_id, stream, body, author)
@@ -460,8 +554,13 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	// Notes also appear on the case activity timeline.
-	if in.RecordType == "CASE" {
+	// Notes also appear on the case activity timeline — but that timeline
+	// has no stream column and nothing filters it by role, so a restricted
+	// stream's content leaking there defeats the whole point of
+	// restricting it. Confirmed live: coder.fl's Legal note was blocked by
+	// notes_stream_roles everywhere else, but still readable verbatim on
+	// the activity timeline. Only mirror notes from unrestricted streams.
+	if in.RecordType == "CASE" && !streamRestricted {
 		_, _ = s.db.Exec(r.Context(), `
 			INSERT INTO public.case_activities (tenant, case_id, type, body)
 			VALUES ($1,$2,'NOTE',$3)`, tenant, in.RecordID, in.Body)
@@ -484,6 +583,15 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 // program config.
 func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// This endpoint had NO authorization check at all (confirmed live: any
+	// authenticated caller could list every note stream for any record,
+	// including Legal/Clinical notes from roles that shouldn't see them —
+	// nurse.fl could read attorney.fl's Legal note and vice versa).
+	if !hasAnyRole(p, crmStaffRoles...) {
+		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
+		return
+	}
 	q := r.URL.Query()
 	recordType, recordID := q.Get("record_type"), q.Get("record_id")
 	if recordType == "" || recordID == "" {
@@ -497,6 +605,19 @@ func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	// Same per-stream role gate as addNote: a stream with no entry in
+	// notes_stream_roles stays visible to all case staff (unrestricted,
+	// same as a program that never configured this).
+	if prog := s.loadProgram(r, tenant); prog != nil && len(prog.NotesStreamRoles) > 0 {
+		visible := rows[:0]
+		for _, row := range rows {
+			stream := fmt.Sprint(row["stream"])
+			if roles, ok := prog.NotesStreamRoles[stream]; !ok || len(roles) == 0 || hasAnyRole(p, roles...) {
+				visible = append(visible, row)
+			}
+		}
+		rows = visible
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"notes": rows})
 }
@@ -515,7 +636,7 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		ID     string `json:"id"`
 		Label  string `json:"label"`
 		Detail string `json:"detail"`
-		CaseID string `json:"case_id,omitempty"` // document hits: parent case for linking
+		CaseID string `json:"case_id,omitempty"` // document/task/invoice hits: parent case for linking
 	}
 	out := []hit{}
 	queries := []struct {
@@ -525,16 +646,25 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		// provider or payer name returned "No matches" even when the case
 		// was right there, which read as "search is broken". Now matches
 		// the identifiers AND the party name fields (column + details bag).
-		{"case", fmt.Sprintf(`SELECT id, case_number, status FROM tenant_%s.cases
+		// 4th column is case_id for every kind, so the scan below is
+		// uniform; for a case hit it's just its own id again.
+		{"case", fmt.Sprintf(`SELECT id, case_number, status, id::text FROM tenant_%s.cases
 			WHERE case_number ILIKE $1 OR provider_id ILIKE $1 OR payer_id ILIKE $1
 			   OR details->>'provider_name' ILIKE $1 OR details->>'payer_name' ILIKE $1
 			   OR details->>'patient_name' ILIKE $1 LIMIT 10`, sanitizeTenant(tenant))},
-		{"account", `SELECT id::text, legal_name, type FROM public.accounts
+		{"account", `SELECT id::text, legal_name, type, '' FROM public.accounts
 			WHERE tenant=$1 AND legal_name ILIKE $2 LIMIT 10`},
-		{"contact", `SELECT id::text, name, COALESCE(role_title,'') FROM public.contacts
+		{"contact", `SELECT id::text, name, COALESCE(role_title,''), '' FROM public.contacts
 			WHERE tenant=$1 AND name ILIKE $2 LIMIT 10`},
-		{"lead", `SELECT id::text, COALESCE(name,organization,'(unnamed)'), status FROM public.leads
+		{"lead", `SELECT id::text, COALESCE(name,organization,'(unnamed)'), status, '' FROM public.leads
 			WHERE tenant=$1 AND (name ILIKE $2 OR organization ILIKE $2 OR summary ILIKE $2) LIMIT 10`},
+		// Tasks/invoices were previously unsearchable at all — "find the
+		// task about X" or "find invoice INV-..." both returned nothing,
+		// not even a "no matches" (the box just never queried them).
+		{"task", `SELECT id::text, subject, status, coalesce(case_id,'') FROM public.tasks
+			WHERE tenant=$1 AND subject ILIKE $2 LIMIT 10`},
+		{"invoice", `SELECT id::text, invoice_no, status, case_id FROM public.invoices
+			WHERE tenant=$1 AND invoice_no ILIKE $2 LIMIT 10`},
 	}
 	for _, qd := range queries {
 		var rows interface {
@@ -553,7 +683,7 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		for rows.Next() {
 			var h hit
-			if rows.Scan(&h.ID, &h.Label, &h.Detail) == nil {
+			if rows.Scan(&h.ID, &h.Label, &h.Detail, &h.CaseID) == nil {
 				h.Kind = qd.kind
 				out = append(out, h)
 			}

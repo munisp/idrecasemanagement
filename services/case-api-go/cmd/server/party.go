@@ -11,6 +11,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -115,13 +116,18 @@ func (s *server) partyCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, _ := s.queryRows(r, fmt.Sprintf(`
+	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT c.id, c.case_number, c.status, coalesce(c.status_reason,''),
 		       coalesce(c.service_line,''), c.offer_window_ends_at, a.party_id, a.created_at AS granted_at
 		FROM public.party_accounts a
-		JOIN tenant_%s.cases c ON c.id = a.case_id
+		JOIN tenant_%s.cases c ON c.id::text = a.case_id
 		WHERE a.tenant=$1 AND a.kc_subject=$2
 		ORDER BY c.opened_at DESC LIMIT 200`, sanitizeTenant(tenant)), tenant, p.Subject)
+	if err != nil {
+		slog.Error("query failed", "handler", "party.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"cases": rows})
 }
 
@@ -183,9 +189,14 @@ func (s *server) listPartyAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, _ := s.queryRows(r, `
+	rows, err := s.queryRows(r, `
 		SELECT id, party_id, email, invited_by, created_at
 		FROM public.party_accounts WHERE tenant=$1 AND case_id=$2 ORDER BY created_at`,
 		tenant, chi.URLParam(r, "caseId"))
+	if err != nil {
+		slog.Error("query failed", "handler", "party.go", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"party_accounts": rows})
 }

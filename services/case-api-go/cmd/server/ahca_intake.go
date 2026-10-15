@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	temporalclient "go.temporal.io/sdk/client"
+	"time"
 )
 
 func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +76,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"this tenant has no pre-case intake program configured"}`, http.StatusBadRequest)
 		return
 	}
-	caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.Contact, in.Org, fpt, in.DisputedAmountCents)
+	caseID, caseNumber, err := s.startAhcaCase(r, tenant, cfg, in.Email, in.Contact, in.Org, fpt, in.DisputedAmountCents, "")
 	if err != nil {
 		if isUniqueViolation(err) {
 			http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
@@ -110,8 +111,8 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 // the real Capitol Bridge process; AHCA's Filing Party has always reached
 // them by phone or email). Both produce the exact same real case, links,
 // invoice, and email -- only the trigger differs.
-func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64) (caseID, caseNumber string, err error) {
-	return s.startAhcaCaseOpt(r, tenant, cfg, email, contactName, org, filingPartyType, disputedAmountCents, false)
+func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, serviceLine string) (caseID, caseNumber string, err error) {
+	return s.startAhcaCaseOpt(r, tenant, cfg, email, contactName, org, filingPartyType, disputedAmountCents, serviceLine, false)
 }
 
 // startAhcaCaseOpt adds the bulk-invoicing-arrangement switch: when deferFee
@@ -120,7 +121,14 @@ func (s *server) startAhcaCase(r *http.Request, tenant string, cfg *ProgramConfi
 // initial fee is raised as an OPEN invoice to be collected later — the second
 // opening path in the AHCA 2026 "Payment before submission" rules. Every
 // other filer still pays before the dispute exists.
-func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, deferFee bool) (caseID, caseNumber string, err error) {
+func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, serviceLine string, deferFee bool) (caseID, caseNumber string, err error) {
+	return s.startAhcaCaseFull(r, tenant, cfg, email, contactName, org, filingPartyType, disputedAmountCents, serviceLine, deferFee, false)
+}
+
+// startAhcaCaseFull adds batchPay: the fee invoice is raised and the case
+// waits for payment, but no checkout or payment email of its own -- the
+// filer pays for a whole bulk batch with one checkout (tpa_bulk_payments.go).
+func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramConfig, email, contactName, org, filingPartyType string, disputedAmountCents int64, serviceLine string, deferFee, batchPay bool) (caseID, caseNumber string, err error) {
 	caseNumber = s.nextCaseNumber(r, tenant, cfg)
 	// requester_* lands in details so the pre-case intake list can show who
 	// asked and search by email/org -- previously nothing persisted this on
@@ -132,9 +140,9 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 		"filing_party_type": filingPartyType,
 	})
 	if err = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		INSERT INTO tenant_%s.cases (case_number, status, details, disputed_amount_cents)
-		VALUES ($1, 'PENDING_INTAKE', $2, nullif($3,0)) RETURNING id`, sanitizeTenant(tenant)),
-		caseNumber, detailsJSON, disputedAmountCents).Scan(&caseID); err != nil {
+		INSERT INTO tenant_%s.cases (case_number, status, details, disputed_amount_cents, service_line)
+		VALUES ($1, 'PENDING_INTAKE', $2, nullif($3,0), nullif($4,'')) RETURNING id`, sanitizeTenant(tenant)),
+		caseNumber, detailsJSON, disputedAmountCents, serviceLine).Scan(&caseID); err != nil {
 		return "", "", err
 	}
 	s.logAudit(r.Context(), tenant, caseID, "CASE_INTAKE_OPENED", map[string]any{
@@ -143,6 +151,16 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 	})
 
 	s.ensureChecklist(r, tenant, caseID)
+
+	// Program escalation trigger (G6): auto-route over-threshold disputes
+	// to F&WA screening. initiateCase (the staff-only endpoint) already
+	// calls this, but the public AHCA intake form -- the actual front door
+	// for real disputes -- had its own INSERT here and never called it at
+	// all: a $1M+ filing submitted through the real intake form never
+	// escalated. Fires before the branches below so it covers every intake
+	// path (bulk-invoiced, payment-gated, immediate) regardless of which
+	// one returns early.
+	s.escalationTrigger(r, tenant, caseID, disputedAmountCents)
 
 	// Backfill pre-case calls/inquiries logged against this email before the
 	// case existed -- PLUM CRM's own documented gap was that such contacts
@@ -193,7 +211,19 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 	// settles (Stripe webhook or offline settlement) — and the share-upload
 	// endpoint independently refuses AWAITING_PAYMENT cases, so documents
 	// cannot reach the docket before payment by any path.
-	if cfg.Fees.InitialFeeCents > 0 {
+	if cfg.Fees.InitialFeeCents > 0 && batchPay {
+		if _, ierr := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents); ierr == nil {
+			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
+				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
+				sanitizeTenant(tenant)), caseID); uerr == nil {
+				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
+					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents, "paid_with": "bulk batch checkout",
+				})
+				return caseID, caseNumber, nil
+			}
+		}
+	}
+	if cfg.Fees.InitialFeeCents > 0 && !batchPay {
 		checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
 		if cerr == nil {
 			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
@@ -242,6 +272,12 @@ func (s *server) startAhcaCaseOpt(r *http.Request, tenant string, cfg *ProgramCo
 // webhook replay a no-op. Called from the Stripe webhook and from
 // settleInvoice's offline PAY path (check/ACH).
 func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
+	s.activatePaidIntakeFor(r, tenant, caseID, true)
+}
+
+// activatePaidIntakeFor: tellFiler false when one payment opened many
+// disputes, and the filer gets one notice for all of them instead.
+func (s *server) activatePaidIntakeFor(r *http.Request, tenant, caseID string, tellFiler bool) {
 	tbl := sanitizeTenant(tenant)
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(
 		`UPDATE tenant_%s.cases SET status='PENDING_INTAKE', updated_at=now()
@@ -249,6 +285,11 @@ func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
 	if err != nil || res.RowsAffected() == 0 {
 		return // not payment-gated, or already activated
 	}
+	// "Date Received" is the date the dispute was opened by payment -- not
+	// the day someone asked how to file. The 60-day clock runs from it.
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
+		`UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object('received_at', $2::text) WHERE id=$1`, tbl),
+		caseID, time.Now().UTC().Format("2006-01-02"))
 	var caseNumber string
 	var details []byte
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
@@ -267,8 +308,13 @@ func (s *server) activatePaidIntake(r *http.Request, tenant, caseID string) {
 	if email != "" {
 		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
 	}
-	s.notify(r, tenant, "*", "AHCA_INTAKE",
-		fmt.Sprintf("Fee paid — intake activated: %s", caseNumber), "#/cases/"+caseID)
+	// The Reviewer is told the case now exists.
+	s.notify(r, tenant, "role:CASE_MANAGER", "AHCA_INTAKE",
+		fmt.Sprintf("Fee paid — case %s opened: confirm the filing packet", caseNumber), "#/cases/"+caseID)
+	if tellFiler {
+		s.tellFiler(r.Context(), tenant, caseID, "PAYMENT_RECEIVED", fmt.Sprintf("Fee received — %s is open", caseNumber))
+	}
+	s.tellRespondentOpened(r.Context(), tenant, caseID)
 }
 
 // sendIntakeLinks mints the filing-instructions download link and the
@@ -283,25 +329,15 @@ func (s *server) sendIntakeLinks(r *http.Request, tenant, caseID, caseNumber, em
 	// per draftCorrespondence's own semantics for a template with none) --
 	// there's no account/contact to resolve "requester" against yet, so the
 	// email just submitted is the recipient, directly.
-	var tpl *CorrTemplate
-	for _, t := range s.corrTemplates(r, tenant) {
-		if t.Key == "submission_instructions" {
-			cp := t
-			tpl = &cp
-			break
-		}
-	}
+	tpl := s.effectiveTemplate(r, tenant, caseID, "submission_instructions")
 	if tpl != nil {
 		subject := s.renderTemplate(r, tenant, caseID, tpl.Subject)
-		body := fmt.Sprintf(
-			"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
-				"Case number: %s\n\n"+
-				"Download the filing instructions and packet: https://idre.newfire.app/api/share/%s\n"+
-				"Upload your completed filing packet: https://idre.newfire.app/api/share/%s",
-			caseNumber, downloadToken, uploadToken,
-		)
+		shareBase := strings.TrimRight(s.cfg.PortalBaseURL, "/")
+		body := intakeLinksBody(s.renderTemplate(r, tenant, caseID, tpl.Body), caseNumber,
+			shareBase+"/api/share/"+downloadToken, shareBase+"/api/share/"+uploadToken)
 		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
+			s.logCorrespondenceInquiry(r, tenant, caseID, email, fmt.Sprintf("%s: %s", tpl.Key, subject), "system:ahca-intake")
 		} else {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake", merr.Error())
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
@@ -319,9 +355,9 @@ func (s *server) mintShareLink(r *http.Request, tenant, caseID, kind, objectKey 
 	_, _ = rand.Read(buf)
 	token := hex.EncodeToString(buf)
 	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, created_by)
-		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), 1, 'system:ahca-intake')`,
-		token, tenant, caseID, kind, objectKey, daysTTL)
+		INSERT INTO public.share_links (token, tenant, case_id, kind, object_key, expires_at, max_uses, max_files, created_by)
+		VALUES ($1,$2,$3,$4, nullif($5,''), now() + make_interval(days => $6), $7, $7, 'system:ahca-intake')`,
+		token, tenant, caseID, kind, objectKey, daysTTL, shareLinkUses(kind, 0))
 	return token
 }
 
@@ -330,7 +366,8 @@ func (s *server) mintShareLink(r *http.Request, tenant, caseID, kind, objectKey 
 // exists at public intake time). Mirrors both functions' SQL/Stripe calls
 // exactly so the invoice this produces is indistinguishable from one a
 // staffer issued through the ordinary endpoint.
-func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
+// issueInitialFeeInvoice raises (or re-opens) the case's INITIAL_FEE invoice.
+func (s *server) issueInitialFeeInvoice(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
 	var invID string
 	if err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
@@ -340,7 +377,14 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 		return "", err
 	}
 	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", amountCents, "PROVIDER", caseNumber, "system:ahca-intake")
+	return invID, nil
+}
 
+func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
+	invID, err := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, amountCents)
+	if err != nil {
+		return "", err
+	}
 	form := url.Values{}
 	form.Set("mode", "payment")
 	form.Set("success_url", s.cfg.PortalBaseURL+"/#/cases/"+caseID+"?paid=1")
@@ -353,6 +397,8 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 	form.Set("metadata[invoice_id]", invID)
 	form.Set("metadata[tenant]", tenant)
 	form.Set("metadata[case_id]", caseID)
+	form.Set("payment_intent_data[metadata][invoice_id]", invID)
+	form.Set("payment_intent_data[metadata][tenant]", tenant)
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		return "", err
@@ -366,4 +412,34 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 		tenant, caseID, invID, sessID, amountCents, raw)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amountCents, "PROVIDER", sessID, "system:ahca-intake")
 	return checkoutURL, nil
+}
+
+// intakeLinksBody is the email that opens a case for its filer: the
+// template's own wording with its two links put in. Whatever the template
+// says, the filer must end up with the case number and both links, so each
+// one the wording leaves out is added underneath. A template with no wording
+// at all gets the short standard text. Pure, so it is tested.
+func intakeLinksBody(text, caseNumber, downloadURL, uploadURL string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		text = "Thank you for contacting us regarding the claims dispute resolution program."
+	}
+	hasDownload := strings.Contains(text, "{download_link}")
+	hasUpload := strings.Contains(text, "{share_link}")
+	text = strings.ReplaceAll(text, "{download_link}", downloadURL)
+	text = strings.ReplaceAll(text, "{share_link}", uploadURL)
+	var extra []string
+	if caseNumber != "" && !strings.Contains(text, caseNumber) {
+		extra = append(extra, "Case number: "+caseNumber)
+	}
+	if !hasDownload {
+		extra = append(extra, "Download the filing instructions and packet: "+downloadURL)
+	}
+	if !hasUpload {
+		extra = append(extra, "Upload your completed filing packet: "+uploadURL)
+	}
+	if len(extra) > 0 {
+		text += "\n\n" + strings.Join(extra, "\n")
+	}
+	return text
 }

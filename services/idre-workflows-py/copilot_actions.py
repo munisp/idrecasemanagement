@@ -17,10 +17,17 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 
-import httpx
-import psycopg
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+
+# httpx/psycopg are imported inside each activity below, not here -- this
+# module also defines CopilotActionBatchWorkflow, and Temporal's workflow
+# sandbox reloads the whole containing module to validate the workflow
+# class. A top-level `import httpx` got swept into that validation and
+# tripped the sandbox's deterministic-stdlib guard (RestrictedWorkflow-
+# AccessError on urllib.request.Request.__mro_entries__), crashing every
+# worker on startup. workflows.py/ahca_workflow.py already keep I/O
+# imports out of their module scope for the same reason -- this matches.
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
@@ -38,30 +45,57 @@ class BatchInput:
 
 @activity.defn
 async def fetch_batch_action_count(tenant: str, batch_id: str) -> int:
-    """How many actions the approved batch carries (capped server-side)."""
+    """How many actions the approved batch carries (capped server-side).
+
+    Raises when the row isn't found in APPROVED state rather than returning
+    0 -- this runs immediately after the workflow received the DECISION
+    signal, so by definition a human already approved it; a 0 here doesn't
+    mean "empty batch", it means this read raced the case-api handler's
+    UPDATE and lost. Confirmed live: a batch with a real, non-empty actions
+    array got counted as 0, the workflow completed with "APPLIED: empty
+    batch" (its own return value, never written anywhere), and
+    persistCopilotActionResult was never called for any index -- the batch
+    sat at APPROVED permanently since nothing ever retried. Raising lets
+    Temporal's default retry policy (no override needed; the workflow
+    doesn't set one for this activity) try again shortly after, by which
+    point the race has resolved every time this was reproduced."""
+    import psycopg
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
             "SELECT jsonb_array_length(actions) FROM public.copilot_action_batches"
             " WHERE tenant=%s AND id=%s AND status='APPROVED'",
             (tenant, batch_id),
         ).fetchone()
-        return int(row[0]) if row else 0
+        if row is None:
+            raise RuntimeError(f"batch {batch_id} not found in APPROVED state yet")
+        return int(row[0])
 
 
 @activity.defn
 async def apply_copilot_action(tenant: str, batch_id: str, index: int) -> str:
     """Apply ONE action via case-api's worker-authenticated executor, which
-    re-validates batch state + params and records the per-action result."""
+    re-validates batch state + params and records the per-action result.
+
+    Raises on any non-2xx so Temporal's own RetryPolicy actually gets a
+    chance at transient failures (a 404 from a mid-rollout version-skew
+    window, a connection reset, a brief 502/503) -- previously this
+    swallowed every failure into a "successful" string result, so a
+    purely transient hiccup permanently stranded the batch at APPROVED
+    with nothing to ever retry it. Confirmed live: a batch that hit a
+    mid-deploy 404 sat stuck for 20+ minutes until replayed by hand;
+    case-api's own handler never even ran, so persistCopilotActionResult
+    was never called and the row was never touched.
+    The workflow (not this activity) decides what happens once retries
+    are exhausted -- see the try/except around execute_activity below."""
+    import httpx
     async with httpx.AsyncClient(base_url=CASE_API, timeout=30) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/internal/copilot/actions/apply",
             json={"batch_id": batch_id, "index": index},
             headers={"Authorization": f"Bearer {os.environ.get('WORKER_TOKEN','')}"},
         )
-        # A failed action is recorded on the batch row by case-api; keep
-        # going with the rest of the batch rather than faulting the workflow.
         if resp.status_code >= 400:
-            return f"action {index} failed: HTTP {resp.status_code}"
+            raise RuntimeError(f"action {index} failed: HTTP {resp.status_code}: {resp.text[:200]}")
         return f"action {index}: {resp.json().get('result', 'applied')}"
 
 
@@ -69,6 +103,7 @@ async def apply_copilot_action(tenant: str, batch_id: str, index: int) -> str:
 async def expire_copilot_batch(tenant: str, batch_id: str) -> None:
     """TTL elapsed with no human decision — mark EXPIRED (if still pending)
     and leave a timeline note on the case."""
+    import psycopg
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
             "UPDATE public.copilot_action_batches SET status='EXPIRED', updated_at=now()"
@@ -114,18 +149,28 @@ class CopilotActionBatchWorkflow:
         if decision != "APPROVE":
             return "REJECTED"
 
+        # Bounded retries: a few quick attempts cover the real race (the
+        # case-api UPDATE to APPROVED not yet visible to this activity's
+        # own fresh connection the instant the signal is processed) without
+        # retrying forever if the batch is genuinely gone/rejected/expired.
         n = await workflow.execute_activity(
             fetch_batch_action_count, args=[inp.tenant, inp.batch_id],
             start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=5),
         )
         results = []
         for i in range(min(n, MAX_ACTIONS)):
-            res = await workflow.execute_activity(
-                apply_copilot_action, args=[inp.tenant, inp.batch_id, i],
-                start_to_close_timeout=timedelta(minutes=2),
-                # Per-action retry: transient API/DB blips shouldn't fail the
-                # batch; the executor is idempotent per index.
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+            try:
+                res = await workflow.execute_activity(
+                    apply_copilot_action, args=[inp.tenant, inp.batch_id, i],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    # Per-action retry: transient API/DB blips shouldn't fail the
+                    # batch; the executor is idempotent per index. Now that the
+                    # activity actually raises on failure (see above), these 3
+                    # attempts are real retries, not a no-op.
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:  # retries exhausted — move on, don't fault the whole batch
+                res = f"action {i} failed after retries: {e}"
             results.append(res)
         return "APPLIED: " + "; ".join(results) if results else "APPLIED: empty batch"

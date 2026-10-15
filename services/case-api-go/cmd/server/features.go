@@ -34,23 +34,42 @@ var registeredFeatures = map[string]bool{
 	"letter_citation":       true,
 	"tpa_onboarding":        true,
 	"healthplan_onboarding": true,
+	// With onboarding on, every filing by a TPA or health plan must reference a
+	// READY package. Off: a client or party that never started onboarding
+	// files the old way (the behaviour before this flag existed).
+	"onboarding_required": true,
 }
 
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle
 // applies to the very next request). Absent flag or absent row = true.
+// featureFlags is a tenant's stored flags: any left in its program settings
+// (config->'features', where they were first kept) overlaid by
+// public.tenant_features, where they are written now. Absent = not stored.
+func (s *server) featureFlags(r *http.Request, tenant string) map[string]bool {
+	var legacy, own []byte
+	_ = s.db.QueryRow(r.Context(),
+		`SELECT coalesce(config->'features','{}'::jsonb) FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&legacy)
+	_ = s.db.QueryRow(r.Context(),
+		`SELECT features FROM public.tenant_features WHERE tenant=$1`, tenant).Scan(&own)
+	return mergeFlags(legacy, own)
+}
+
+// mergeFlags: the second set wins; unparseable input is ignored.
+func mergeFlags(sets ...[]byte) map[string]bool {
+	out := map[string]bool{}
+	for _, raw := range sets {
+		var m map[string]bool
+		if len(raw) > 0 && json.Unmarshal(raw, &m) == nil {
+			for k, v := range m {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
 func (s *server) featureEnabled(r *http.Request, tenant, name string) bool {
-	var raw []byte
-	err := s.db.QueryRow(r.Context(),
-		`SELECT coalesce(config->'features','{}'::jsonb) FROM public.program_rules WHERE tenant=$1`,
-		tenant).Scan(&raw)
-	if err != nil {
-		return true
-	}
-	var flags map[string]bool
-	if json.Unmarshal(raw, &flags) != nil {
-		return true
-	}
-	if v, ok := flags[name]; ok {
+	if v, ok := s.featureFlags(r, tenant)[name]; ok {
 		return v
 	}
 	return true
@@ -74,17 +93,9 @@ func (s *server) tenantFeatures(r *http.Request, tenant string) map[string]bool 
 	for k := range registeredFeatures {
 		out[k] = true
 	}
-	var raw []byte
-	if err := s.db.QueryRow(r.Context(),
-		`SELECT coalesce(config->'features','{}'::jsonb) FROM public.program_rules WHERE tenant=$1`,
-		tenant).Scan(&raw); err == nil {
-		var flags map[string]bool
-		if json.Unmarshal(raw, &flags) == nil {
-			for k, v := range flags {
-				if registeredFeatures[k] {
-					out[k] = v
-				}
-			}
+	for k, v := range s.featureFlags(r, tenant) {
+		if registeredFeatures[k] {
+			out[k] = v
 		}
 	}
 	return out
@@ -113,14 +124,15 @@ func (s *server) setTenantFeatures(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	raw, _ := json.Marshal(in.Features)
-	// Upsert: a federal-NSA tenant may have no program_rules row yet; the
-	// program column is NOT NULL so seed it explicitly on insert.
+	// Stored in public.tenant_features, never program_rules: creating a
+	// program_rules row would switch a federal tenant into custom-program
+	// mode (see scripts/features.sql). Flags not named keep their value.
 	if _, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.program_rules (tenant, program, config)
-		VALUES ($1, 'FEDERAL_NSA', jsonb_build_object('features', $2::jsonb))
+		INSERT INTO public.tenant_features (tenant, features, updated_by)
+		VALUES ($1, $2::jsonb, $3)
 		ON CONFLICT (tenant) DO UPDATE SET
-		  config = jsonb_set(coalesce(public.program_rules.config,'{}'::jsonb), '{features}', $2::jsonb, true),
-		  updated_at = now()`, tenant, string(raw)); err != nil {
+		  features = public.tenant_features.features || EXCLUDED.features,
+		  updated_by = EXCLUDED.updated_by, updated_at = now()`, tenant, string(raw), displayName(p)); err != nil {
 		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
 		return
 	}

@@ -45,7 +45,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
+import otel_setup
 import yaml
+from eobshape import as_money, as_text, fill_from_text, reconcile_totals, shape_extraction, split_codes
 from PIL import Image
 
 # ---------------------------------------------------------------------------
@@ -54,6 +56,12 @@ from PIL import Image
 
 _MODEL_CACHE: dict[tuple, Any] = {}
 _MODEL_LOCK = threading.Lock()
+# PDFium (pypdfium2, and docling's PDF backend on top of it) is not safe to
+# use from several threads at once. With three consumer workers, a bulk
+# upload's documents were opened concurrently and the process died with
+# "double free or corruption" (exit 139), over and over, stalling every
+# tenant's queue. Every PDFium use in this process holds this lock.
+PDFIUM_LOCK = threading.RLock()
 
 
 def _model(key: tuple, factory) -> Any:
@@ -164,7 +172,8 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
                         cfg.get("do_table_structure", True)), build)
     stream = DocumentStream(name=ctx.get("filename", "doc.pdf"),
                             stream=io.BytesIO(ctx["raw_bytes"]))
-    doc = converter.convert(stream).document
+    with PDFIUM_LOCK:
+        doc = converter.convert(stream).document
 
     ctx["text"] = doc.export_to_markdown()            # structure-aware reading order
     ctx["markdown"] = ctx["text"]
@@ -179,6 +188,13 @@ def stage_docling(ctx: dict, cfg: dict) -> dict:
     # Low text coverage => scanned document => conditionally dock PaddleOCR.
     n_pages = max(1, len(ctx.get("pages", [])) or 1)
     ctx["low_text_coverage"] = len(ctx["text"].strip()) < 40 * n_pages
+    # An uploaded IMAGE (photo, scan, fax) is all pixels: Docling's built-in
+    # OCR may return a little text from a faint page and so look "covered",
+    # which skipped the full OCR pass (quality assessment, enhancement,
+    # second-engine check). Sparse text on an image always gets that pass.
+    if sniff_doc_kind(ctx.get("raw_bytes", b""), ctx.get("content_type", "")) == "image" \
+            and len(ctx["text"].strip()) < 400 * n_pages:
+        ctx["low_text_coverage"] = True
     return ctx
 
 
@@ -232,6 +248,105 @@ def assess_page_quality(img: Image.Image) -> dict:
             "brightness": round(brightness, 1), "poor": poor}
 
 
+def _skew_angle(raw_angle: float) -> float:
+    """Fold a minAreaRect angle into (-45, 45]. OpenCV builds disagree on the
+    raw range ([-90, 0) before 4.5.1, (0, 90] after); handling only one of
+    them read a 5-degree skew as 85 degrees on the other, which is outside
+    the correctable range -- so deskew silently did nothing."""
+    return ((raw_angle + 45) % 90) - 45
+
+
+def upright(img: Image.Image) -> tuple[Image.Image, int]:
+    """Turn a page that was scanned or faxed sideways or upside down the right
+    way up. Returns (page, degrees turned clockwise). Uses Tesseract's
+    orientation detector; a page it is unsure about is left as it is."""
+    try:
+        import pytesseract
+        probe = img.convert("L")
+        if max(probe.size) > 2000:
+            probe.thumbnail((2000, 2000))
+        osd = pytesseract.image_to_osd(probe, output_type=pytesseract.Output.DICT, config="--psm 0")
+        turn, conf = int(osd.get("rotate", 0)) % 360, float(osd.get("orientation_conf", 0))
+    except Exception:  # noqa: BLE001 -- too little text to tell, or no tesseract: leave it
+        return img, 0
+    if turn not in (90, 180, 270) or conf < 3.0:
+        return img, 0
+    return img.rotate(-turn, expand=True), turn
+
+
+def image_bytes(pages: list[Image.Image], raw: bytes) -> bytes:
+    """The pages written back in the upload's own image format (so the text
+    reader sees the turned pages, not the original bytes)."""
+    try:
+        fmt = Image.open(io.BytesIO(raw)).format or "PNG"
+    except Exception:  # noqa: BLE001
+        fmt = "PNG"
+    if fmt not in ("PNG", "JPEG", "TIFF", "BMP", "WEBP"):
+        fmt = "PNG"
+    buf = io.BytesIO()
+    first = pages[0].convert("RGB") if fmt == "JPEG" else pages[0]
+    if len(pages) > 1 and fmt == "TIFF":
+        first.save(buf, format="TIFF", save_all=True, append_images=pages[1:])
+    else:
+        first.save(buf, format=fmt)
+    return buf.getvalue()
+
+
+def skew_degrees(img: Image.Image, span: float = 12.0) -> float:
+    """How far a page's text lines are tilted, in degrees (0 when straight or
+    when it cannot tell). Tries small rotations and keeps the one where the
+    rows of text line up sharpest (the variance of the row ink totals peaks).
+    A page is only called crooked when that beats leaving it as it is by a
+    clear margin, so a dark or speckled page is not turned on noise."""
+    import cv2
+    import numpy as np
+
+    g = np.asarray(img.convert("L"))
+    scale = 1000 / max(g.shape)
+    if scale < 1:
+        g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    ink = cv2.adaptiveThreshold(g, 1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 15).astype(np.float32)
+    if ink.sum() < 500 or ink.mean() > 0.4:
+        return 0.0
+    h, w = ink.shape
+
+    def score(a: float) -> float:
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), float(a), 1.0)
+        return float(np.var(cv2.warpAffine(ink, m, (w, h), flags=cv2.INTER_NEAREST, borderValue=0).sum(axis=1)))
+
+    coarse = max(np.arange(-span, span + 0.01, 0.5), key=score)
+    fine = max(np.arange(coarse - 0.5, coarse + 0.51, 0.1), key=score)
+    if score(fine) < 1.15 * score(0.0):
+        return 0.0
+    return round(float(fine), 1)
+
+
+def straighten_pages(pages: list[Image.Image]) -> tuple[list[Image.Image], list[tuple[int, float]]]:
+    """Straighten pages fed in crooked (1 degree or more): (pages, [(page number, degrees)]).
+    Read crooked, a form's labels and values drift onto other lines and a
+    model may not recognise it as a bill at all."""
+    out, done = [], []
+    for i, p in enumerate(pages):
+        a = skew_degrees(p)
+        if abs(a) >= 1.0:
+            fill = 255 if p.mode in ("L", "1") else (255, 255, 255)
+            p = (p if p.mode in ("L", "RGB") else p.convert("RGB")).rotate(a, resample=Image.BICUBIC, fillcolor=fill)
+            done.append((i + 1, a))
+        out.append(p)
+    return out, done
+
+
+def upright_pages(pages: list[Image.Image]) -> tuple[list[Image.Image], list[tuple[int, int]]]:
+    """upright() over every page: (pages, [(page number, degrees turned)])."""
+    out, turned = [], []
+    for i, p in enumerate(pages):
+        q, deg = upright(p)
+        out.append(q)
+        if deg:
+            turned.append((i + 1, deg))
+    return out, turned
+
+
 def deskew_image(img: Image.Image) -> Image.Image:
     """Estimate and correct page skew via the ink pixels' minimum-area
     rectangle. Scanners and phone photos routinely land 1-5 degrees off, and
@@ -247,9 +362,7 @@ def deskew_image(img: Image.Image) -> Image.Image:
     coords = np.column_stack(np.where(ink > 0))
     if len(coords) < 200:
         return img
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle >= 45:
-        angle -= 90
+    angle = _skew_angle(cv2.minAreaRect(coords)[-1])
     if abs(angle) < 0.3 or abs(angle) > 15:
         return img
     # minAreaRect's angle sign convention shifts with the rectangle's aspect
@@ -260,8 +373,7 @@ def deskew_image(img: Image.Image) -> Image.Image:
         c = np.column_stack(np.where(g < 128))
         if len(c) < 200:
             return 0.0
-        a = cv2.minAreaRect(c)[-1]
-        return a - 90 if a >= 45 else a
+        return _skew_angle(cv2.minAreaRect(c)[-1])
 
     h, w = gray.shape
     raw = np_from_pil(img)
@@ -421,6 +533,11 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
             use_doc_orientation_classify=cfg.get("use_doc_orientation_classify", True),
             use_doc_unwarping=cfg.get("use_doc_unwarping", True),
             use_textline_orientation=cfg.get("use_textline_orientation", True),
+            # Same oneDNN regression stage_layout already works around below
+            # (PaddlePaddle/Paddle#79749): without this, predict() raises
+            # NotImplementedError on CPU for EVERY image, so no scanned page,
+            # photo or fax was ever read -- only PDFs with a text layer were.
+            enable_mkldnn=False,
             # Detection resize MUST cap the LONG side ("max"). Paddle's
             # default for named det configs scales the SHORT side to the
             # limit, ballooning enhanced pages (e.g. 524x1600 -> 4885x1600),
@@ -450,9 +567,15 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
     except Exception:
         page_reads = [("", None)] * len(arrays)
         for i, arr in enumerate(arrays):
-            for res in ocr.predict(arr):
-                page_reads[i] = _unpack(res)
-                break
+            # A page Paddle cannot read at all stays empty here and is handed
+            # to the Tesseract pass below; one engine failing must never
+            # leave the whole document unread.
+            try:
+                for res in ocr.predict(arr):
+                    page_reads[i] = _unpack(res)
+                    break
+            except Exception as exc:  # noqa: BLE001
+                ctx.setdefault("ocr_engine_errors", []).append(f"page {i}: {type(exc).__name__}: {str(exc)[:160]}")
 
     # Low-yield retry: ink on the page but almost no text means the read —
     # not the page — failed. One 400dpi enhanced retry; keep the better read.
@@ -518,7 +641,12 @@ def stage_ocr(ctx: dict, cfg: dict) -> dict:
         ctx["ocr_low_confidence_pages"] = low_conf_pages
     ctx["ocr_pages"] = page_audit
 
-    ctx["text"] = "\n\n".join(t for t, _ in page_reads if t)
+    ocr_text = "\n\n".join(t for t, _ in page_reads if t)
+    # Keep whichever read is fuller: this pass now also runs on images Docling
+    # already got some text from, and a weaker OCR read must not replace it.
+    if len(ocr_text.strip()) < len(str(ctx.get("text") or "").strip()):
+        return ctx
+    ctx["text"] = ocr_text
     # OCR recovered text for a scanned doc: markdown has no structure, but
     # downstream stages read markdown first, so mirror it.
     ctx["markdown"] = ctx["text"]
@@ -561,7 +689,34 @@ def stage_layout(ctx: dict, cfg: dict) -> dict:
 # VLM extraction
 # ---------------------------------------------------------------------------
 
+class ModelUnavailable(Exception):
+    """The extraction model could not be reached or kept timing out. The
+    document is left unread so the unread-document sweep reads it again
+    later, rather than saved with only what could be read without the model."""
+
+
+# One model request at a time per reader process (VLM_MAX_CONCURRENT). The
+# local Ollama serves requests one by one; three workers each sending two
+# sections queued requests for minutes, past the client timeout, and the
+# documents were saved half-read. Waiting here does not count against it.
+_VLM_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get("VLM_MAX_CONCURRENT", "1"))))
+
+
+def _transient(exc: BaseException) -> bool:
+    """A timeout, a dropped connection or a server error from the model --
+    worth reading the document again later, unlike a bad answer."""
+    names = {type(e).__name__ for e in (exc, exc.__cause__, exc.__context__) if e is not None}
+    return bool(names & {"APITimeoutError", "APIConnectionError", "InternalServerError", "ReadTimeout",
+                         "ConnectTimeout", "ConnectError", "RemoteProtocolError", "TimeoutException"}) \
+        or "timed out" in str(exc).lower() or "connection error" in str(exc).lower()
+
+
 def _vlm_call(client: Any, model: str, content: list[dict], max_tokens: int) -> dict:
+    with _VLM_SLOTS:
+        return _vlm_call_unlocked(client, model, content, max_tokens)
+
+
+def _vlm_call_unlocked(client: Any, model: str, content: list[dict], max_tokens: int) -> dict:
     """One VLM round-trip with transport retries and JSON self-repair.
 
     Retries up to 3 times on transport/5xx errors with exponential backoff.
@@ -655,6 +810,23 @@ def _merge_extractions(parts: list[dict], fields: list[str]) -> dict:
     return merged
 
 
+def _in_domain_verdict(parsed: dict, pop: bool = False) -> bool:
+    """The model's related-to-billing verdict; True when it gave none.
+
+    The prompt asks for "_in_domain" but the deployed model answers with
+    "in_domain" (no underscore) -- reading only the prompted spelling meant a
+    rejection was never seen at all. Accept both, and string booleans."""
+    verdict = True
+    for key in ("_in_domain", "in_domain"):
+        if key in parsed:
+            v = parsed.pop(key) if pop else parsed[key]
+            if isinstance(v, str):
+                v = v.strip().lower() not in ("false", "no", "0")
+            if v is not None:
+                verdict = bool(v)
+    return verdict
+
+
 def _field_question(field: str) -> str:
     """One atomic typed question for a schema field (System One style:
     decompose the extraction into small, independently-judged questions
@@ -674,6 +846,13 @@ def _field_question(field: str) -> str:
     return (f"What is the {field.replace('_', ' ')} in this document? "
             'Answer {"value": "<exact value as it appears>", "probability": <0-1>} '
             "or {\"value\": null} if absent.")
+
+
+PROMPT_BUDGET_CHARS = 2000
+
+
+def _atomic_questions(fields: list[str]) -> str:
+    return "\n".join(f'- "{f}": {_field_question(f)}' for f in fields)
 
 
 def _merge_atomic(parts: list[dict], fields: list[str]) -> tuple[dict, dict]:
@@ -741,7 +920,32 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     pages = ensure_pages(ctx) if cfg.get("vision") else ctx.get("pages", [])
     max_pages = cfg.get("max_pages", 3)
 
+    # Confirmed live against this exact endpoint/model: a page thumbnailed to
+    # vlm_image_max_px (650px, sized for token cost -- see config comment
+    # above) shrinks a normal page of body text to a few px tall, illegible
+    # to the vision model. Given a prompt with BOTH clear transcribed text
+    # AND that illegible thumbnail, the model let the blurry image override
+    # its own correct reading of the text -- _in_domain:false and every
+    # field nulled, on a document whose text-only extraction (same prompt,
+    # no image) was perfect. The image-caveat line below is what fixes it;
+    # only added when vision is actually on (no image attached => nothing
+    # to caveat, and prompt budget is the one resource genuinely scarce
+    # here per MAX_PROMPT_CHARS below).
+    image_caveat = (
+        "A small page thumbnail is also attached for layout/seal/stamp cues "
+        "only -- it may be too low-resolution to read in full; never let a "
+        "blurry or hard-to-read image override what the transcribed text "
+        "below clearly states. "
+    ) if cfg.get("vision") else ""
     atomic = bool(cfg.get("atomic", True))
+    # The whole prompt is capped at 2000 chars (MAX_PROMPT_CHARS in
+    # run_chunk). One typed question per field costs ~150 chars, so for a
+    # schema of a dozen fields the questions alone fill the cap and the model
+    # is sent no document at all (seen live: an EOB read back with
+    # "Provider NPI" as the provider). Ask per field only when at least half
+    # the budget is left for the document.
+    if atomic and len(_atomic_questions(fields)) + 900 > PROMPT_BUDGET_CHARS // 2:
+        atomic = False
     if atomic:
         # System One decomposition: each field is an independently-judged
         # typed question carrying its own calibrated probability, instead of
@@ -749,12 +953,14 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         # ones. Same single call per chunk (the local Ollama serializes
         # anyway), but the ANSWER STRUCTURE forces per-field judgment and
         # yields the probability map verify() routes on.
-        questions = "\n".join(f'- "{f}": {_field_question(f)}' for f in fields)
+        questions = _atomic_questions(fields)
         instructions = (
             "You are an IDR (No Surprises Act dispute) document analyst. "
+            "The transcribed text below is the authoritative content of this document. "
+            f"{image_caveat}"
             "FIRST decide whether this document is related to medical billing, health "
             "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
-            'set "_in_domain" true or false. A resume, menu, tax form, legal contract, '
+            'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, legal contract, '
             "photograph with no document content, or any other unrelated material is "
             "false. When false, set every other field null and stop. "
             f"This document is believed to be of type '{doc_type}'.\n"
@@ -771,9 +977,11 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     else:
         instructions = (
             "You are an IDR (No Surprises Act dispute) document analyst. "
+            "The transcribed text below is the authoritative content of this document. "
+            f"{image_caveat}"
             "FIRST decide whether this document is related to medical billing, health "
             "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
-            'set "_in_domain" true or false. A resume, menu, tax form, legal contract, '
+            'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, legal contract, '
             "photograph with no document content, or any other unrelated material is "
             "false. When false, set every other field null and stop. "
             f"This document is believed to be of type '{doc_type}'. "
@@ -805,7 +1013,7 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         # no plausible density can overflow: 2000 chars would need under
         # 0.49 chars/token to still exceed 4096 -- not a real tokenizer
         # outcome for any text, JSON, or digit-heavy content.
-        MAX_PROMPT_CHARS = 2000
+        MAX_PROMPT_CHARS = PROMPT_BUDGET_CHARS
         if len(prompt) > MAX_PROMPT_CHARS:
             prompt = prompt[:MAX_PROMPT_CHARS]
         content: list[dict] = [{"type": "text", "text": prompt}]
@@ -831,13 +1039,31 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
         if cfg.get("vision"):
             max_px = cfg.get("vlm_image_max_px", 650)
             for page in pages[i * max_pages:(i + 1) * max_pages] or pages[:max_pages]:
-                thumb = page.copy()
-                thumb.thumbnail((max_px, max_px))
-                content.append({"type": "image_url",
-                                # upstream context fix (thumbnail) + JPEG encoding
-                                "image_url": {"url": f"data:image/jpeg;base64,{pil_to_b64(thumb)}"}})
+                # The thumbnail is a layout cue, not the source of the values
+                # (those come from the transcribed text). If the page image
+                # cannot be decoded, extract from the text alone -- a bad
+                # thumbnail used to abandon the whole extraction, which left
+                # every scanned image with its text read and nothing taken
+                # from it.
+                try:
+                    thumb = page.copy()
+                    thumb.thumbnail((max_px, max_px))
+                    content.append({"type": "image_url",
+                                    # upstream context fix (thumbnail) + JPEG encoding
+                                    "image_url": {"url": f"data:image/jpeg;base64,{pil_to_b64(thumb)}"}})
+                except Exception as exc:  # noqa: BLE001
+                    ctx.setdefault("findings", []).append(
+                        {"field": None, "issue": f"Page image could not be attached ({type(exc).__name__}); values were read from the transcribed text only"})
                 break  # one page image per chunk keeps token cost bounded
-        return _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+        parsed = _vlm_call(client, cfg["model"], content, cfg.get("max_tokens", 2048))
+        # A "not in domain" verdict reached WITH a page image attached is not
+        # trusted on its own: confirmed live, the low-resolution thumbnail made
+        # the model reject a plainly worded claim form that the same prompt
+        # without the image extracted perfectly. Re-ask text-only and take
+        # that answer -- one extra call, only on rejections.
+        if len(content) > 1 and not _in_domain_verdict(parsed):
+            parsed = _vlm_call(client, cfg["model"], content[:1], cfg.get("max_tokens", 2048))
+        return parsed
 
     # Chunk concurrency: the endpoint is the LOCAL in-cluster Ollama, NOT
     # OpenAI -- a shared platform instance with a known OOM history (see
@@ -857,13 +1083,30 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
     parts: list[dict] = []
     in_domain_votes: list[bool] = []
     for parsed in raw_parts:
-        in_domain_votes.append(bool(parsed.pop("_in_domain", True)))
-        parts.append(parsed)
+        in_domain_votes.append(_in_domain_verdict(parsed, pop=True))
+        # The model does not always answer in the flat shape it was asked
+        # for (a wrapper object, other names for the same field, a provider
+        # as an object). Read its answer onto the schema whatever the shape.
+        # A per-field answer ({"value": .., "probability": ..}) is unwrapped
+        # first, so the shape reader sees the values and the probabilities
+        # survive for _merge_atomic.
+        typed = {f: parsed[f] for f in fields
+                 if isinstance(parsed, dict) and isinstance(parsed.get(f), dict) and "value" in parsed[f]}
+        if typed:
+            values = {k: (v["value"] if k in typed else v) for k, v in parsed.items()}
+            shaped = shape_extraction(values, fields)
+            parts.append({f: ({"value": shaped.get(f), "probability": typed[f].get("probability")}
+                              if f in typed else shaped.get(f)) for f in fields})
+        else:
+            parts.append(shape_extraction(parsed, fields))
 
     ctx["in_domain"] = any(in_domain_votes) if in_domain_votes else True
     # Strict schema: only declared fields survive, all present (null-filled) —
     # the VLM can't smuggle invented keys into the record.
-    if atomic and any(isinstance(p.get(f), dict) for p in parts for f in fields):
+    # Whichever prompt was sent, a per-field answer keeps its probabilities.
+    if any(isinstance(p.get(f), dict) and "value" in p[f] for p in parts for f in fields):
+        parts = [{f: (p.get(f) if isinstance(p.get(f), dict) and "value" in p[f] else {"value": p.get(f)})
+                  for f in fields} for p in parts]
         merged, probs = _merge_atomic(parts, fields)
         ctx["extracted"] = merged
         ctx["vlm_field_probability"] = probs
@@ -894,28 +1137,52 @@ _RE_DATE = re.compile(
 _MONTHS = {m.lower(): i + 1 for i, m in enumerate(
     ["January", "February", "March", "April", "May", "June", "July",
      "August", "September", "October", "November", "December"])}
+_RE_DATE_ANYWHERE = re.compile(
+    r"\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}")
+_MONTH_ABBR = {name[:3]: name for name in _MONTHS}   # "mar" -> "march"
+# Claim adjustment reason / remark codes as EOBs print them: CO-45, PR-1,
+# OA-23, N130, MA01, or the bare number.
+_RE_DENIAL_CODE = re.compile(r"^(?:(?:CO|PR|OA|PI|CR)-?\d{1,3}|(?:MA|M|N)\d{1,4}|\d{1,3})$")
 _RE_CODE = re.compile(r"^[A-Z]?\d{4}[A-Z0-9]?$")       # CPT/HCPCS/DRG-ish
 _RE_NPI = re.compile(r"^\d{10}$")
 
 
 def _norm_amount(v: Any) -> float | None:
+    if isinstance(v, bool):
+        return None
     if isinstance(v, (int, float)):
         return round(float(v), 2)
     if isinstance(v, str):
         m = _RE_AMOUNT.match(v.strip())
         if m:
             return round(float(m.group(1).replace(",", "")), 2)
-    return None
+    # "1,850.00 USD", "(82.40)", {"amount": 1850}, [1850] -- one amount in
+    # another wrapping. Still None for anything holding several amounts.
+    return as_money(v)
 
 
 def _norm_date(v: Any) -> str | None:
-    """Canonicalize a date-ish value to ISO YYYY-MM-DD; None when unparseable."""
+    """Canonicalize a date-ish value to ISO YYYY-MM-DD; None when unparseable.
+    A value that wraps one date -- a range ("03/12/2026 - 03/14/2026": its
+    first day), a timestamp, "Mar. 12, 2026", a one-item list or an object --
+    is read for that date."""
+    if isinstance(v, (list, tuple, dict)):
+        v = as_text(v)
     if not isinstance(v, str):
         return None
     s = v.strip()
     m = _RE_DATE.match(s)
     if not m:
-        return None
+        inner = _RE_DATE_ANYWHERE.search(s)
+        if not inner:
+            return None
+        s = re.sub(r"\.", "", inner.group(0)).strip()
+        mon = re.match(r"([A-Za-z]+)(.*)", s)
+        if mon and mon.group(1).lower()[:3] in _MONTH_ABBR:
+            s = _MONTH_ABBR[mon.group(1).lower()[:3]] + mon.group(2)
+        m = _RE_DATE.match(s)
+        if not m:
+            return None
     if m.group(1):
         mm, dd = int(m.group(2)), int(m.group(3))
         if 1 <= mm <= 12 and 1 <= dd <= 31:
@@ -954,11 +1221,31 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
     copies live under ctx['normalized']; originals are never overwritten.
     Values that fail their shape check are recorded as normalize_warnings so
     verify()/validate() can weigh them."""
-    ex = ctx.get("extracted", {})
+    # Before anything is canonicalized: a field the model left empty, but
+    # which the page prints next to its own label, is read from the page.
+    # This also covers a document whose model extraction failed outright.
+    try:
+        ex, filled, summed = fill_from_text(ctx.get("extracted") or {},
+                                            ctx.get("markdown") or ctx.get("text") or "", ctx.get("doc_type"))
+    except Exception:  # noqa: BLE001 -- a fallback must never cost the extraction it backs up
+        ex, filled, summed = ctx.get("extracted") or {}, [], []
+    if not isinstance(ex, dict):
+        ex = {}
+    # A claim total is checked against the service lines it sums: a line's
+    # own figure taken for the total is corrected (only to a sum the page
+    # prints), any other disagreement is reported.
+    ex, total_notes = reconcile_totals(ex, ctx.get("markdown") or ctx.get("text") or "")
+    if total_notes:
+        ctx["total_notes"] = total_notes
+    ctx["extracted"] = ex
+    if filled:
+        ctx["text_filled_fields"] = filled
+    if summed:
+        ctx["summed_fields"] = summed
     norm: dict[str, Any] = {}
     warnings: list[dict] = []
     for field, value in ex.items():
-        if value in (None, "", [], {}):
+        if _is_blank(value):
             continue
         if field.endswith("_usd") or "amount" in field or field.startswith(("qpa", "billed", "allowed", "awarded", "patient_responsibility")):
             n = _norm_amount(value)
@@ -978,8 +1265,15 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
                 norm[field] = digits
             else:
                 warnings.append({"field": field, "issue": "NPI is not 10 digits"})
-        elif field in ("cpt_hcpcs_codes", "denial_codes") and isinstance(value, list):
-            cleaned = [str(c).strip().upper() for c in value]
+        elif field == "denial_codes":
+            cleaned = [c.upper() for c in split_codes(value)]
+            bad = [c for c in cleaned if not _RE_DENIAL_CODE.match(c) and not _RE_CODE.match(c)]
+            norm[field] = cleaned
+            if bad:
+                warnings.append({"field": field, "issue": f"implausible code(s): {', '.join(bad[:5])}"})
+        elif field == "cpt_hcpcs_codes" and isinstance(value, (list, str)):
+            cleaned = [as_text(c).upper() for c in value] if isinstance(value, list) \
+                else [c for c in re.split(r"[\s,;/]+", value.strip().upper()) if c]
             bad = [c for c in cleaned if not _RE_CODE.match(c)]
             norm[field] = cleaned
             if bad:
@@ -989,13 +1283,29 @@ def stage_normalize(ctx: dict, cfg: dict) -> dict:
     return ctx
 
 
+def _is_blank(v: Any) -> bool:
+    """None, "", [], {} -- written out because `v in (None, "", [], {})`
+    compares with ==, and 0 == False == "" surprises live there."""
+    return v is None or (isinstance(v, (str, list, dict, tuple)) and len(v) == 0)
+
+
 def _flatten_values(v: Any) -> list[str]:
-    """Scalar string forms of an extracted value (lists flattened one level)."""
-    if isinstance(v, list):
+    """Scalar string forms of an extracted value. Lists are flattened, and a
+    row ({"service": ..., "billed_amount_usd": ...}) contributes its VALUES:
+    its printed form, braces and column names and all, is on no document."""
+    if isinstance(v, (list, tuple)):
         out: list[str] = []
         for x in v:
             out.extend(_flatten_values(x))
         return out
+    if isinstance(v, dict):
+        out = []
+        for x in v.values():
+            if not _is_blank(x):
+                out.extend(_flatten_values(x))
+        return out
+    if isinstance(v, bool):
+        return []
     if isinstance(v, (int, float)):
         return [str(v), f"{float(v):,.2f}", f"${float(v):,.2f}"]
     return [str(v)]
@@ -1080,11 +1390,29 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # all-null extraction each independently mean a human should look before
     # this document is treated as case evidence.
     ex_fields = {k: v for k, v in ex.items() if v not in (None, "", [], {})}
-    if ctx.get("in_domain") is False:
+    unreadable = bool(ctx.get("scan_quality_poor") or ctx.get("ocr_low_confidence"))
+    if unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
+        # The model saw too little legible text to recognise the page. That is
+        # a page nobody could read, not a page about something else -- and
+        # "unrelated, possible mis-upload" sends a person looking for the
+        # wrong problem.
+        findings.append({"field": None, "issue": "This page could not be read well enough to tell what it is — it is too faint, blurred or skewed. Nothing was taken from it: read it by hand, or ask the sender for a clearer copy"})
+        ctx["doc_type"] = "unreadable"
+    elif ctx.get("in_domain") is False:
         findings.append({"field": None, "issue": "Document is not related to medical billing or IDR — possible mis-upload; routed for manual review"})
         ctx["doc_type"] = "unrelated"
     elif ctx.get("classify_score", 1) == 0 and not ex_fields and not ctx.get("scan_quality_poor"):
         findings.append({"field": None, "issue": "No IDR-relevant content detected — possible mis-upload; routed for manual review"})
+    elif not ex_fields and ex and not ctx.get("scan_quality_poor"):
+        # The comment above promises this as an INDEPENDENT trigger, but it
+        # was only ever reachable as a sub-condition of the classify_score==0
+        # branch above -- a document whose type classified fine (score > 0)
+        # but whose field extraction still came back null for every field
+        # never hit either branch, so field_confidence ended up {} (nothing
+        # to grade) and no finding ever fired. Confirmed live: an all-null
+        # extraction silently looked identical to a clean, fully-verified
+        # document with zero fields to flag.
+        findings.append({"field": None, "issue": "Extraction returned no usable field values for this document type — verify manually before relying on it as case evidence"})
     # Degraded scan: extraction ran on enhanced images but confidence in the
     # underlying text is inherently limited — say so plainly. A barely legible
     # VALID document must not be misdiagnosed as a mis-upload.
@@ -1100,14 +1428,39 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # Periodic watermark removed before OCR: extraction ran on the recovered
     # text layer — informational for the audit trail, values still verified
     # by grounding like any other.
+    for page, deg in ctx.get("pages_turned", []):
+        how = "upside down" if deg == 180 else "sideways"
+        findings.append({"field": None, "issue": f"Page {page} was {how} and was turned the right way up before reading"})
+    for page, deg in ctx.get("pages_straightened", []):
+        findings.append({"field": None, "issue": f"Page {page} was fed in crooked ({abs(deg):.1f}°) and was straightened before reading"})
     if ctx.get("watermark_removed"):
         findings.append({"field": None, "issue": "Periodic watermark/stamp background detected and removed before OCR — extraction used the recovered text layer"})
     # Ambiguous classification: the winning type barely beat the runner-up.
-    if ctx.get("classify_ambiguous") and ctx.get("doc_type") != "unrelated":
+    if ctx.get("classify_ambiguous") and ctx.get("doc_type") not in ("unrelated", "unreadable"):
         findings.append({"field": None, "issue": f"Document type '{ctx['doc_type']}' is a low-margin classification — confirm type on review"})
     # Hallucination guard from verify().
+    money = lambda v: f"${v:,.2f}"  # noqa: E731
+    labels = {"billed_amount_usd": "billed total", "allowed_amount_usd": "allowed total",
+              "patient_responsibility_usd": "patient responsibility total"}
+    for n in ctx.get("total_notes", []):
+        what = labels.get(n["field"], n["field"])
+        if n["field"] == "service_lines":
+            findings.append({"field": "service_lines", "issue": f"Service line {n['line']} ({n['what'][:60]}) does not add up: allowed {money(n['allowed'])} is not plan paid {money(n['paid'])} plus patient {money(n['patient'])} — one of the three was misread; verify against the document"})
+            continue
+        if n.get("now") is not None:
+            findings.append({"field": n["field"], "issue": f"The {what} was first read as {money(n['was'])}, which is one service line's figure. The lines add up to {money(n['lines_sum'])}, which the page also prints, so that is used — verify"})
+        else:
+            findings.append({"field": n["field"], "issue": f"The {what} reads {money(n['was'])} but the service lines add up to {money(n['lines_sum'])} — one of them was misread; verify against the document"})
+    summed = ctx.get("summed_fields", [])
     for field in ctx.get("ungrounded_fields", []):
+        if field in summed:
+            continue  # said below, in its own words
         findings.append({"field": field, "issue": "Extracted value not found in document text — possible extraction error; verify before use"})
+    for field in summed:
+        findings.append({"field": field, "issue": "The document prints no total: this is the sum of its service lines — verify before use"})
+    if ctx.get("text_filled_fields"):
+        findings.append({"field": None, "issue": "Read directly from the page next to its label (the extraction model did not return it): "
+                         + ", ".join(ctx["text_filled_fields"]) + " — verify before use"})
     # Calibrated-uncertainty routing: grounded but the model itself reported
     # low probability — human glance warranted, hallucination language not.
     for field, tier in ctx.get("field_confidence", {}).items():
@@ -1126,6 +1479,30 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     return ctx
 
 
+def _index_safe_extracted(extracted: dict, normalized: dict) -> dict:
+    """Copy of `extracted` safe for the search index. OpenSearch maps the
+    date fields as `date`, and a raw value as printed on the document
+    ("06/15/2026") is rejected there -- which failed the WHOLE document's
+    indexing, so it never became searchable. Dates go in as their normalized
+    ISO form, or are left out when they could not be parsed; the raw string
+    is still stored with the analysis itself."""
+    out = {}
+    for k, v in (extracted or {}).items():
+        if "date" in k:
+            if normalized.get(k):
+                out[k] = normalized[k]
+            continue
+        # The index maps these fields as text. A row or an object is refused
+        # there (and took the whole document's indexing with it), so anything
+        # that is not a plain value goes in as its text.
+        if isinstance(v, dict):
+            v = as_text(v)
+        elif isinstance(v, (list, tuple)):
+            v = [x if isinstance(x, (str, int, float)) and not isinstance(x, bool) else as_text(x) for x in v]
+        out[k] = v
+    return out
+
+
 def stage_index(ctx: dict, cfg: dict) -> dict:
     """Build the OpenSearch document body. main.persist() performs the actual
     index call (it owns the client); this stage decides WHAT is searchable:
@@ -1133,7 +1510,7 @@ def stage_index(ctx: dict, cfg: dict) -> dict:
     ctx["index_body"] = {
         "doc_type": ctx.get("doc_type"),
         "text": ctx.get("text", "")[:100000],
-        "extracted": ctx.get("extracted", {}),
+        "extracted": _index_safe_extracted(ctx.get("extracted", {}), ctx.get("normalized", {})),
         "extracted_fields": ctx.get("extracted_fields", {}),
         "normalized": ctx.get("normalized", {}),
         "field_confidence": ctx.get("field_confidence", {}),
@@ -1196,15 +1573,17 @@ def run_pipeline(ctx: dict, case: dict | None = None, schema_overrides: dict | N
             continue
         name, cfg = st["name"], st.get("config", {})
         try:
-            if name == "vlm_extract":
-                ctx = stage_vlm_extract(ctx, cfg, schemas)
-            elif name == "validate":
-                ctx = stage_validate(ctx, cfg, case)
-            else:
-                fn = globals().get(f"stage_{name}")
-                if fn is None:
-                    raise RuntimeError(f"pipeline stage not implemented: {name}")
-                ctx = fn(ctx, cfg)
+            with otel_setup.span(f"stage {name}") as _sp:
+                if name == "vlm_extract":
+                    ctx = stage_vlm_extract(ctx, cfg, schemas)
+                elif name == "validate":
+                    ctx = stage_validate(ctx, cfg, case)
+                else:
+                    fn = globals().get(f"stage_{name}")
+                    if fn is None:
+                        raise RuntimeError(f"pipeline stage not implemented: {name}")
+                    ctx = fn(ctx, cfg)
+                _sp.set_attribute("idre.doc_type", str(ctx.get("doc_type") or ""))
         except Exception as exc:
             # docling is the primary parser -- if it fails there is no usable
             # text/markdown/tables at all, so that failure stays fatal (same
@@ -1218,6 +1597,8 @@ def run_pipeline(ctx: dict, case: dict | None = None, schema_overrides: dict | N
             # not just the one that happened to trigger it first.
             if name == "docling":
                 raise
+            if name == "vlm_extract" and _transient(exc):
+                raise ModelUnavailable(str(exc)) from exc
             ctx.setdefault("findings", []).append(
                 {"stage": name, "issue": f"stage failed, skipped: {exc}"}
             )
@@ -1255,14 +1636,15 @@ def pdf_to_pages(data: bytes, dpi: int = 200,
     import pypdfium2 as pdfium
 
     cap = max_pages or int(os.environ.get("DOC_INTEL_MAX_PAGES", "150"))
-    pdf = pdfium.PdfDocument(data)
     pages = []
     truncated = False
-    for i, page in enumerate(pdf):
-        if i >= cap:
-            truncated = True
-            break
-        pages.append(page.render(scale=dpi / 72).to_pil())
+    with PDFIUM_LOCK:
+        pdf = pdfium.PdfDocument(data)
+        for i, page in enumerate(pdf):
+            if i >= cap:
+                truncated = True
+                break
+            pages.append(page.render(scale=dpi / 72).to_pil())
     return pages, truncated
 
 
@@ -1333,5 +1715,18 @@ def bytes_to_pages(data: bytes, content_type: str,
     if k == "pdf":
         return pdf_to_pages(data)
     if k == "image":
-        return [Image.open(io.BytesIO(data))], False
+        # Decode NOW and keep a plain RGB copy. Image.open() is lazy: it only
+        # reads the header, and the pixels were decoded later from the same
+        # stream by whichever stage touched the page first -- which failed
+        # mid-pipeline ("unrecognized data stream contents"). A file that is
+        # slightly truncated still loads what it has.
+        try:
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        except Exception:
+            from PIL import ImageFile
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            img = Image.open(io.BytesIO(data))
+            img.load()
+        return [img.convert("RGB")], False
     return [], False  # office/text: Docling reads raw bytes; no raster pages

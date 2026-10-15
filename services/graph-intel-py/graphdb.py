@@ -62,6 +62,10 @@ def q(tenant: str, cypher: str, params: dict[str, Any] | None = None):
 
 def upsert_case(tenant: str, c: dict) -> None:
     """Idempotent case + parties upsert. Safe to replay from any source."""
+    # A case's parties can change between syncs (a provider known only by an
+    # internal id gets its name once a document is read). MERGE would add the
+    # new party and keep the old link, so the old links go first.
+    q(tenant, "MATCH (c:Case {id: $id})-[r:FILED_BY|AGAINST]->(:Party) DELETE r", {"id": c["id"]})
     q(
         tenant,
         """
@@ -86,11 +90,19 @@ def upsert_case(tenant: str, c: dict) -> None:
             "plan_type": c.get("plan_type") or "",
             "qpa_cents": int(c.get("qpa_cents") or 0),
             "opened_at": str(c.get("opened_at") or ""),
-            "provider": c.get("provider_id") or "unknown-provider",
-            "payer": c.get("payer_id") or "unknown-payer",
+            "provider": c.get("provider_name") or c.get("provider_id") or "unknown-provider",
+            "payer": c.get("payer_name") or c.get("payer_id") or "unknown-payer",
             "ts": int(time.time()),
         },
     )
+
+
+def drop_orphan_parties(tenant: str) -> None:
+    """Parties no case points at any more (see upsert_case)."""
+    try:
+        q(tenant, "MATCH (p:Party) WHERE NOT (p)<-[:FILED_BY|AGAINST]-(:Case) DELETE p")
+    except Exception:
+        pass  # tidiness only; a leftover party answers no question wrongly
 
 
 def write_related(tenant: str, src: str, dst: str, score: float, source: str) -> None:

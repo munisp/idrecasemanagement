@@ -341,6 +341,38 @@ def test_ocr_falls_back_to_serial_when_batch_rejected(monkeypatch):
     assert ctx["text"].count("serial-line") == 3
 
 
+# --- validate (all-null extraction) ------------------------------------------
+
+def test_validate_flags_all_null_extraction_even_when_classified_confidently():
+    # classify_score > 0 (type classification succeeded) but every extracted
+    # field came back null -- previously only reachable as a sub-condition
+    # of classify_score == 0, so this exact combination never flagged at all
+    # and field_confidence ended up {} (nothing to grade), identical to a
+    # clean document with nothing to flag.
+    ctx = {
+        "extracted": {"qpa_usd": None, "claim_number": "", "service_date": None},
+        "normalized": {},
+        "classify_score": 0.9,
+        "doc_type": "eob",
+    }
+    out = pl.stage_validate(ctx, {}, None)
+    assert any(f["issue"].startswith("Extraction returned no usable field values")
+               for f in out["findings"])
+    assert out["status"] == "ANALYZED_WITH_FINDINGS"
+
+
+def test_validate_does_not_flag_when_some_fields_extracted():
+    ctx = {
+        "extracted": {"qpa_usd": 123.45, "claim_number": None},
+        "normalized": {"qpa_usd": 123.45},
+        "classify_score": 0.9,
+        "doc_type": "eob",
+    }
+    out = pl.stage_validate(ctx, {}, None)
+    assert not any(f["issue"].startswith("Extraction returned no usable field values")
+                   for f in out["findings"])
+
+
 # --- OCR accuracy hardening ---------------------------------------------------
 
 def test_ocr_records_recognizer_confidence(monkeypatch):
@@ -427,9 +459,7 @@ def test_deskew_corrects_small_rotation():
     fixed = pl.deskew_image(Image.fromarray(rotated))
     gray = cv2.cvtColor(np.array(fixed), cv2.COLOR_RGB2GRAY)
     coords = np.column_stack(np.where(gray < 128))
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle >= 45:
-        angle -= 90
+    angle = pl._skew_angle(cv2.minAreaRect(coords)[-1])
     assert abs(angle) < 1.5  # 5 degrees in, sub-1.5 out
 
 
@@ -443,6 +473,232 @@ def test_word_overlap():
     assert pl._word_overlap("allowed amount $120", "allowed amount $120") == 1.0
     assert pl._word_overlap("cat dog", "sun moon") == 0.0
     assert 0 < pl._word_overlap("allowed amount claim", "allowed amount number") < 1
+
+
+def test_vlm_out_of_domain_read_without_underscore(monkeypatch):
+    # The deployed model answers "in_domain", not the prompted "_in_domain".
+    _stub_openai(monkeypatch)
+    pl._MODEL_CACHE.clear()
+    monkeypatch.setattr(pl, "_vlm_call",
+                        lambda *a, **k: {"in_domain": False, "billed_amount_usd": None})
+    ctx = pl.stage_vlm_extract(_long_ctx(monkeypatch, n_chunks=1),
+                               {"endpoint": "http://x/v1", "model": "m", "chunk_chars": 10}, _SCHEMAS)
+    assert ctx["in_domain"] is False
+    assert "in_domain" not in ctx["extracted"]
+
+
+def test_vlm_rejection_with_image_is_rechecked_text_only(monkeypatch):
+    from PIL import Image
+    _stub_openai(monkeypatch)
+    pl._MODEL_CACHE.clear()
+    calls = []
+
+    def fake_call(client, model, content, max_tokens):
+        calls.append(len(content))
+        if len(content) > 1:  # image attached: the blurry-thumbnail rejection
+            return {"in_domain": False, "billed_amount_usd": None}
+        return {"in_domain": True, "billed_amount_usd": 1850.0}
+
+    monkeypatch.setattr(pl, "_vlm_call", fake_call)
+    ctx = _long_ctx(monkeypatch, n_chunks=1)
+    ctx["pages"] = [Image.new("RGB", (800, 1000), "white")]
+    ctx = pl.stage_vlm_extract(ctx, {"endpoint": "http://x/v1", "model": "m", "chunk_chars": 10,
+                                     "vision": True}, _SCHEMAS)
+    assert calls == [2, 1]
+    assert ctx["in_domain"] is True
+    assert ctx["extracted"]["billed_amount_usd"] == 1850.0
+
+
+def test_index_body_dates_are_iso_or_omitted():
+    body = pl._index_safe_extracted(
+        {"determination_date": "06/15/2026", "service_date": "sometime", "claim_number": "C-1"},
+        {"determination_date": "2026-06-15"})
+    assert body == {"determination_date": "2026-06-15", "claim_number": "C-1"}
+
+
+def test_skew_angle_folds_both_opencv_conventions():
+    assert abs(pl._skew_angle(-85.0) - 5.0) < 1e-9   # pre-4.5.1 range [-90, 0)
+    assert abs(pl._skew_angle(5.0) - 5.0) < 1e-9     # post-4.5.1 range (0, 90]
+    assert abs(pl._skew_angle(90.0)) < 1e-9
+    assert abs(pl._skew_angle(-90.0)) < 1e-9
+
+
+def test_eligibility_conflicts_reports_disagreement_once():
+    from main import eligibility_conflicts
+    current = {"disputed_amount_cents": 185000, "provider_type": "physician_dentist", "contracted": False}
+    # same values, or nothing read: no conflict
+    assert eligibility_conflicts(current, {"disputed_amount_cents": 185000, "provider_type": None, "contracted": False}, "a.pdf") == []
+    found = {"disputed_amount_cents": 3140000, "provider_type": "hospital_inpatient", "contracted": True}
+    got = eligibility_conflicts(current, found, "VALID-05.pdf")
+    assert [c["field"] for c in got] == ["disputed_amount_cents", "provider_type", "contracted"]
+    assert got[0] == {"field": "disputed_amount_cents", "case_value": 185000, "document_value": 3140000, "document": "VALID-05.pdf"}
+    # the same disagreement from a re-analysis is not recorded twice
+    assert eligibility_conflicts(current, found, "VALID-05.pdf", known=got) == []
+    # a case with no value yet has nothing to disagree with (the backfill fills it)
+    assert eligibility_conflicts({"disputed_amount_cents": None, "provider_type": "", "contracted": None}, found, "x") == []
+
+
+def test_provider_type_from_text_reads_only_explicit_codes():
+    from main import provider_type_from_text as f
+    assert f("Service Date: 03/12/2026 Place of Service: 11 (Office) Network Status: Out-of-network") == "physician_dentist"
+    assert f("| Place of Service | 21 (Inpatient Hospital) |") == "hospital_inpatient"
+    assert f("24B PLACE OF SERVICE 22") == "hospital_outpatient"
+    assert f("POS: 19") == "hospital_outpatient"
+    assert f("4 TYPE OF BILL 0111") == "hospital_inpatient"
+    assert f("Type of Bill: 131") == "hospital_outpatient"
+    # codes that do not state a provider type, and forms with none, stay unknown
+    assert f("Place of Service: 41 (Ambulance - Land)") is None
+    assert f("Type of Bill 0721") is None   # a dialysis clinic, not a hospital
+    assert f("HEALTH INSURANCE CLAIM FORM CMS-1500") is None
+    assert f("Explanation of Benefits — physician services") is None
+    # labels first, values after (how a form is often read)
+    assert f("Service Date:\n\n03/12/2026\n\nPlace of Service:\n\nNetwork Status:\n\nCPT / HCPCS Codes:\n\n11 (Office)\n\nOut-of-network") == "physician_dentist"
+    assert f("Place of Service:\n\nDischarge Date:\n\n21 (Inpatient Hospital)") == "hospital_inpatient"
+    assert f("Units: 11 (Office visits)") is None   # no place-of-service field on the page
+    assert f("") is None and f(None) is None
+
+
+def test_report_fields_from_documents():
+    from main import line_of_business_from as lob, disputed_issue_from as issue, provider_address_from as addr
+    assert lob("Florida Medicaid MMA") == "Medicaid"
+    assert lob("Medicare Advantage HMO") == "Medicare Advantage"
+    assert lob("Medicare Part B") == "Medicare"
+    assert lob("Health Insurance Marketplace") == "Marketplace"
+    assert lob("Employer group PPO") == "Commercial"
+    assert lob("") is None and lob(None) is None and lob("Sunshine Plan") is None
+    assert issue(1850.0, 412.0, []) == "Underpayment"
+    assert issue(500.0, 0.0, ["CO-29"]) == "Denial"
+    assert issue(100.0, 150.0, []) == "Overpayment"
+    assert issue(100.0, 100.0, []) is None      # paid in full: nothing to name
+    assert issue(None, 412.0, []) is None and issue(1850.0, None, []) is None
+    a = addr({"provider_street": "1200 Bayshore Blvd", "provider_city": "Tampa", "provider_state": "fl", "provider_zip": "33606-1234"})
+    assert a == {"provider_street": "1200 Bayshore Blvd", "provider_city": "Tampa", "provider_state": "FL", "provider_postal": "33606-1234"}
+    # parts that do not fit the report's formats are left out, not stored wrong
+    assert addr({"provider_state": "Florida", "provider_zip": "3360", "provider_city": "Tampa"}) == {"provider_city": "Tampa"}
+    assert addr({}) == {}
+
+
+def test_infer_provider_type_from_an_eob():
+    from main import infer_provider_type as f
+    assert f("Northgate Health, P.C.", "Explanation of Benefits ... Office visit, established patient (99215)")[0] == "physician_dentist"
+    assert f("Bayside Dental Associates", "")[0] == "physician_dentist"
+    assert f("Jane Roe, M.D.", "")[0] == "physician_dentist"
+    assert f("St. Luke's Regional Hospital", "Inpatient admission 02/03/2026, room and board, DRG 470")[0] == "hospital_inpatient"
+    assert f("Gulf Coast Medical Center", "Emergency department visit, outpatient")[0] == "hospital_outpatient"
+    assert f("St. Luke's Regional Hospital", "claim processed")[0] is None       # a hospital, setting not stated
+    assert f("Acme Ambulance Transport", "ground transport A0429")[0] is None
+    assert f("", "Office visit 99213")[0] == "physician_dentist"                 # by procedure code alone
+    assert f(None, None)[0] is None
+    typ, basis = f("Northgate Health, P.C.", "")
+    assert "Northgate Health, P.C." in basis
+    # an EOB's service lines are rows, not strings (this crashed the read)
+    rows = [{"service": "Office visit, established patient (99215)", "billed_amount_usd": 1450.0},
+            {"service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0}]
+    assert f("Northgate Health, P.C.", "", rows)[0] == "physician_dentist"
+    assert f("", "", rows) == ("physician_dentist", "office-visit procedure codes (99202-99215) are billed")
+
+
+# ---- an EOB in any shape (see also test_eobshape.py) ------------------------
+
+ROWS = [{"date": "03/12/2026", "service": "Office visit, established patient (99215)", "billed_amount_usd": 1450.0},
+        {"date": "03/12/2026", "service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0}]
+
+
+def test_provider_type_and_service_line_for_every_service_line_shape():
+    from main import _service_line_from_text, infer_provider_type as f
+    for lines in (ROWS, [r["service"] for r in ROWS], "Office visit (99215)\nECG (93000)", ROWS[0],
+                  {"service": ["Office visit (99215)", "ECG (93000)"], "billed": [1450, 400]},
+                  [None, ROWS], [[ROWS[0]]], {"1": ROWS[0]}):
+        assert f("", "", lines)[0] == "physician_dentist", lines
+        assert f("", "", [None, lines])[0] == "physician_dentist", lines
+    for junk in (None, 5, {}, [], [[]], [{}], {"a": None}, object()):
+        assert f(None, None, junk) == (None, "")
+        assert f({"name": "Northgate Health, P.C."}, ["x"], junk)[0] == "physician_dentist"
+        assert _service_line_from_text(junk) is None
+    assert _service_line_from_text(ROWS[0]) is None                      # an office visit is not the ER
+    assert _service_line_from_text({"description": "Emergency dept visit", "cpt": "99284"}) == "ER"
+    assert _service_line_from_text({"x": "Lab panel", "y": "90.00"}) == "LAB"
+
+
+def test_network_status_in_every_wording():
+    from main import _contracted_from_network_status as f
+    for v in ("Out-of-network", "OUT OF NETWORK", "out_of_network", "OON", "Non-Participating", "nonparticipating",
+              "Non-Par", "Not contracted", "non-contracted provider", {"status": "Out of Network"}, ["out-of-network"]):
+        assert f(v) is False, v
+    for v in ("In-network", "IN NETWORK", "INN", "Participating", "PAR", "Contracted", {"value": "in-network"}):
+        assert f(v) is True, v
+    for v in (None, "", "unknown", True, False, 5, {}, []):
+        assert f(v) is None, v
+
+
+def test_normalize_reads_amounts_dates_and_codes_in_other_wrappings():
+    ctx = pl.stage_normalize({"doc_type": "eob", "text": "", "extracted": {
+        "billed_amount_usd": "1,850.00 USD", "allowed_amount_usd": {"amount": 412}, "patient_responsibility_usd": [82.4],
+        "service_date": "03/12/2026 - 03/14/2026", "determination_date": "Mar. 20, 2026",
+        "denial_codes": "CO-45, PR-1", "service_lines": ROWS}}, {})
+    n = ctx["normalized"]
+    assert (n["billed_amount_usd"], n["allowed_amount_usd"], n["patient_responsibility_usd"]) == (1850.0, 412.0, 82.4)
+    assert n["service_date"] == "2026-03-12" and n["determination_date"] == "2026-03-20"
+    assert n["denial_codes"] == ["CO-45", "PR-1"]
+    assert not ctx["normalize_warnings"]                                  # CO-45 is a real code, not an implausible one
+
+
+def test_normalize_fills_from_the_page_when_the_model_returned_nothing():
+    text = "EXPLANATION OF BENEFITS\nProvider: Northgate Health, P.C.\nTotal Billed: $1,850.00\nTotal Allowed: $412.00\n"
+    for extracted in ({}, None, {"billed_amount_usd": None}):               # incl. the extraction stage having failed
+        ctx = pl.stage_normalize({"doc_type": "eob", "text": text, "extracted": extracted}, {})
+        assert ctx["extracted"]["billed_amount_usd"] == 1850.0 and ctx["normalized"]["billed_amount_usd"] == 1850.0
+        assert ctx["extracted"]["provider_name"] == "Northgate Health, P.C."
+        assert "billed_amount_usd" in ctx["text_filled_fields"]
+    ctx = pl.stage_validate(pl.stage_verify(ctx, {}), {}, None)
+    assert any("Read directly from the page" in f["issue"] for f in ctx["findings"])
+    assert ctx["field_confidence"]["billed_amount_usd"] == "high"
+
+
+def test_service_line_rows_are_grounded_by_their_values_and_indexed_as_text():
+    text = "03/12/2026 Office visit, established patient (99215) 1,450.00\n03/12/2026 Electrocardiogram (93000) 400.00"
+    ctx = pl.stage_verify({"text": text, "extracted": {"service_lines": ROWS}, "normalized": {}}, {})
+    assert ctx["field_confidence"]["service_lines"] == "high"
+    safe = pl._index_safe_extracted({"service_lines": ROWS, "provider_name": {"name": "X"}, "n": 3}, {})
+    assert all(isinstance(x, str) for x in safe["service_lines"]) and safe["provider_name"] == "X" and safe["n"] == 3
+
+
+def test_vlm_answer_in_another_shape_is_read_onto_the_schema(monkeypatch):
+    answer = {"eob": {"claimNumber": "A-1", "totals": {"billed": "$1,850.00"}, "provider": {"name": "Northgate Health, P.C."},
+                      "lineItems": ROWS, "in_network": False}}
+    monkeypatch.setattr(pl, "_vlm_call", lambda *a, **k: dict(answer))
+    monkeypatch.setattr(pl, "_model", lambda key, factory: object())
+    ctx = pl.stage_vlm_extract({"doc_type": "eob", "text": "x", "markdown": "x"},
+                               {"endpoint": "http://x", "model": "m"},
+                               {"eob": {"fields": ["claim_number", "billed_amount_usd", "provider_name",
+                                                   "service_lines", "network_status"]}})
+    ex = ctx["extracted"]
+    assert ex["claim_number"] == "A-1" and ex["billed_amount_usd"] == "$1,850.00"
+    assert ex["provider_name"] == "Northgate Health, P.C." and len(ex["service_lines"]) == 2
+    assert ex["network_status"] == "Out-of-network"
+
+
+def test_a_faint_page_with_a_line_taken_for_the_total_is_corrected_and_says_so():
+    page = "Office visit, established patient (99215) 1,450.00 330.00 66.00\nElectrocardiogram (93000) 400.00 82.00 16.40\nTotal 1,850.00 412.00 82.40"
+    lines = [{"service": "Office visit, established patient (99215)", "billed_amount_usd": 1450.0, "allowed_amount_usd": 330.0, "patient_responsibility_usd": 66.0},
+             {"service": "Electrocardiogram (93000)", "billed_amount_usd": 400.0, "allowed_amount_usd": 82.0, "patient_responsibility_usd": 16.4}]
+    ctx = {"doc_type": "eob", "text": page, "extracted": {"billed_amount_usd": 1850.0, "allowed_amount_usd": 330.0,
+                                                          "patient_responsibility_usd": 66.0, "service_lines": lines}}
+    ctx = pl.stage_validate(pl.stage_verify(pl.stage_normalize(ctx, {}), {}), {}, None)
+    assert ctx["extracted"]["allowed_amount_usd"] == 412.0 and ctx["normalized"]["allowed_amount_usd"] == 412.0
+    assert ctx["normalized"]["patient_responsibility_usd"] == 82.4
+    said = " ".join(f["issue"] for f in ctx["findings"])
+    assert "first read as $330.00" in said and "$412.00" in said and ctx["status"] == "ANALYZED_WITH_FINDINGS"
+
+
+def test_an_unreadable_page_is_called_unreadable_not_unrelated():
+    base = {"extracted": {"billed_amount_usd": None}, "in_domain": False, "text": "~~ .. ,,"}
+    faint = pl.stage_validate(dict(base, scan_quality_poor=True, ocr_low_confidence=True, ocr_confidence=0.28), {}, None)
+    assert faint["doc_type"] == "unreadable"
+    assert any("could not be read well enough" in f["issue"] for f in faint["findings"])
+    assert not any("not related to medical billing" in f["issue"] for f in faint["findings"])
+    clear = pl.stage_validate(dict(base), {}, None)                    # a legible page about something else
+    assert clear["doc_type"] == "unrelated" and any("not related to medical billing" in f["issue"] for f in clear["findings"])
 
 
 # --- deterministic field extraction (stage_fields) --------------------------
@@ -522,3 +778,106 @@ def test_validate_surfaces_field_check_issues():
     out = pl.stage_validate(ctx, {}, None)
     assert any("Luhn" in f["issue"] for f in out["findings"])
     assert out["status"] == "ANALYZED_WITH_FINDINGS"
+
+
+def test_a_per_field_answer_keeps_its_probabilities_and_is_shaped(monkeypatch):
+    answer = {"_in_domain": True, "billed_amount_usd": {"value": "$1,850.00", "probability": 0.9},
+              "service_lines": {"value": ROWS, "probability": 0.7}, "provider_name": "Northgate Health, P.C."}
+    monkeypatch.setattr(pl, "_vlm_call", lambda *a, **k: dict(answer))
+    monkeypatch.setattr(pl, "_model", lambda key, factory: object())
+    ctx = pl.stage_vlm_extract({"doc_type": "eob", "text": "x", "markdown": "x"}, {"endpoint": "http://x", "model": "m"},
+                               {"eob": {"fields": ["billed_amount_usd", "service_lines", "provider_name"]}})
+    ex = ctx["extracted"]
+    assert ex["billed_amount_usd"] in ("$1,850.00", 1850.0) and len(ex["service_lines"]) == 2
+    assert ex["provider_name"] == "Northgate Health, P.C."
+    assert ctx["vlm_field_probability"]["billed_amount_usd"] == 0.9
+
+
+def test_per_field_questions_never_crowd_out_the_document(monkeypatch):
+    sent = []
+    monkeypatch.setattr(pl, "_vlm_call", lambda client, model, content, mt: sent.append(content[0]["text"]) or {})
+    monkeypatch.setattr(pl, "_model", lambda key, factory: object())
+    many = ["claim_number", "billed_amount_usd", "allowed_amount_usd", "patient_responsibility_usd", "provider_name",
+            "payer_name", "service_date", "determination_date", "denial_codes", "service_lines", "network_status",
+            "cms_case_number", "plan_paid_usd"]
+    pl.stage_vlm_extract({"doc_type": "eob", "text": "DOCUMENT-BODY-MARKER", "markdown": "DOCUMENT-BODY-MARKER"},
+                         {"endpoint": "http://x", "model": "m"}, {"eob": {"fields": many}})
+    assert "DOCUMENT-BODY-MARKER" in sent[0]
+    few = ["claim_number", "billed_amount_usd"]
+    sent.clear()
+    pl.stage_vlm_extract({"doc_type": "eob", "text": "DOCUMENT-BODY-MARKER", "markdown": "DOCUMENT-BODY-MARKER"},
+                         {"endpoint": "http://x", "model": "m"}, {"eob": {"fields": few}})
+    assert "DOCUMENT-BODY-MARKER" in sent[0]
+
+
+# ---- faint-fax fixes ---------------------------------------------------------
+
+def test_an_upside_down_page_is_turned_the_right_way_up():
+    from PIL import Image, ImageDraw, ImageFont
+    pytest = __import__("pytest")
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 34)
+    except OSError:
+        pytest.skip("no TrueType font to draw a test page")
+    page = Image.new("L", (1700, 2200), 255)
+    d = ImageDraw.Draw(page)
+    for i, line in enumerate(["EXPLANATION OF BENEFITS", "Claim Number: LOA-2026-007731",
+                              "Provider: Lakeview Orthopedic Associates", "Service Date: 04/22/2026",
+                              "This is not a bill. Keep this statement for your records."] * 6):
+        d.text((120, 120 + i * 60), line, fill=0, font=font)
+    fixed, turned = pl.upright(page.rotate(180))
+    if turned == 0 and pl.upright(page)[1] == 0:
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+        except Exception:
+            pytest.skip("tesseract not installed")
+    assert turned == 180
+    assert pl.upright(page)[1] == 0                                  # an upright page is left alone
+    assert pl.upright(page.rotate(90, expand=True))[1] == 90         # turned a quarter: turned back
+
+
+def test_a_model_timeout_leaves_the_document_for_re_reading(monkeypatch):
+    class APITimeoutError(Exception):
+        pass
+    def boom(ctx, cfg, schemas):
+        raise APITimeoutError("Request timed out.")
+    monkeypatch.setattr(pl, "stage_vlm_extract", boom)
+    spec = {"stages": [{"name": "vlm_extract"}], "schemas": {}}
+    monkeypatch.setattr(pl, "load_pipeline", lambda *a, **k: spec)
+    with pytest.raises(pl.ModelUnavailable):
+        pl.run_pipeline({"text": "x"})
+    # a bad answer (not a transport failure) is still just a skipped stage
+    monkeypatch.setattr(pl, "stage_vlm_extract", lambda *a: (_ for _ in ()).throw(ValueError("not JSON")))
+    ctx = pl.run_pipeline({"text": "x"})
+    assert any("stage failed" in f["issue"] for f in ctx["findings"])
+
+
+def test_a_badly_scanned_page_with_nothing_found_is_unreadable_not_unrelated():
+    ctx = pl.stage_validate({"extracted": {}, "classify_score": 0, "ocr_low_confidence": True, "text": "~~"}, {}, None)
+    assert ctx["doc_type"] == "unreadable"
+    assert not any("mis-upload" in f["issue"] for f in ctx["findings"])
+
+
+def test_turned_pages_are_reported():
+    ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 10.0}, "pages_turned": [(1, 180)], "text": "Billed 10.00"}, {}, None)
+    assert any("upside down and was turned" in f["issue"] for f in ctx["findings"])
+
+
+def test_a_crooked_page_is_straightened_and_a_straight_one_left_alone():
+    from PIL import Image, ImageDraw, ImageFont
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 30)
+    except OSError:
+        pytest.skip("no TrueType font to draw a test page")
+    page = Image.new("L", (1700, 2200), 255)
+    d = ImageDraw.Draw(page)
+    for i in range(28):
+        d.text((120, 120 + i * 70), f"Line {i}: Office visit 99215 billed $1,450.00 allowed $330.00", fill=0, font=font)
+    assert pl.skew_degrees(page) == 0.0
+    crooked = page.rotate(-5, resample=Image.BICUBIC, fillcolor=255)
+    assert abs(abs(pl.skew_degrees(crooked)) - 5) <= 0.5
+    fixed, done = pl.straighten_pages([crooked, page])
+    assert [p for p, _ in done] == [1] and abs(pl.skew_degrees(fixed[0])) <= 0.5
+    ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 1.0}, "pages_straightened": [(1, -5.0)], "text": "1.00"}, {}, None)
+    assert any("crooked (5.0°)" in f["issue"] for f in ctx["findings"])

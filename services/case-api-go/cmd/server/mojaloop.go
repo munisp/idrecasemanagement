@@ -76,15 +76,11 @@ func (s *server) checkoutMojaloop(w http.ResponseWriter, r *http.Request, tenant
 		return
 	}
 	if s.tb != nil {
-		res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-			ID:              transferID,
-			DebitAccountID:  acctID(tenant, acctStripeClearing, ""),
-			CreditAccountID: acctID(tenant, acctEscrowTrustHeld, party),
-			Amount:          tb_types.ToUint128(uint64(amount)),
-			Ledger:          tenantLedgerID(tenant),
-			Code:            ledgerCodeIDRE,
-			Flags:           tb_types.TransferFlags{Pending: true}.ToUint16(),
-		}})
+		res, err := s.postLedger(tenant, ledgerAcct{acctStripeClearing, ""}, ledgerAcct{acctEscrowTrustHeld, party}, tb_types.Transfer{
+			ID:     transferID,
+			Amount: tb_types.ToUint128(uint64(amount)),
+			Flags:  tb_types.TransferFlags{Pending: true}.ToUint16(),
+		})
 		if err != nil {
 			http.Error(w, `{"error":"ledger unavailable"}`, http.StatusBadGateway)
 			return
@@ -164,16 +160,14 @@ func (s *server) mojaloopWebhook(w http.ResponseWriter, r *http.Request) {
 	if s.tb != nil {
 		flags := tb_types.TransferFlags{PostPendingTransfer: evt.State == "COMMITTED",
 			VoidPendingTransfer: evt.State != "COMMITTED"}.ToUint16()
-		res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-			ID:              hash16("mojaloop-finalize", evt.TransferID, evt.State),
-			PendingID:       transferID,
-			DebitAccountID:  acctID(tenant, acctStripeClearing, ""),
-			CreditAccountID: acctID(tenant, acctEscrowTrustHeld, ""),
-			Amount:          tb_types.ToUint128(uint64(amount)),
-			Ledger:          tenantLedgerID(tenant),
-			Code:            ledgerCodeIDRE,
-			Flags:           flags,
-		}})
+		// Post/void of the pending prepare: the accounts come from it (the
+		// escrow account is the payer's, which this event doesn't carry).
+		res, err := s.postLedger(tenant, ledgerAcct{}, ledgerAcct{}, tb_types.Transfer{
+			ID:        hash16("mojaloop-finalize", evt.TransferID, evt.State),
+			PendingID: transferID,
+			Amount:    tb_types.ToUint128(uint64(amount)),
+			Flags:     flags,
+		})
 		if err == nil {
 			for _, rr := range res {
 				if rr.Result != tb_types.TransferOK && rr.Result != tb_types.TransferExists {

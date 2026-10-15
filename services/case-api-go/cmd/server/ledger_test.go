@@ -1,48 +1,42 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"testing"
 
 	tb_types "github.com/tigerbeetle/tigerbeetle-go/pkg/types"
 )
 
-// Reproduces the live finding (sibling deployment, main branch, same code):
-// before this fix, a PENDING transfer and its later POST/VOID reused the
-// exact same TigerBeetle transfer id (and PendingID was never set), which
-// TigerBeetle correctly rejects as an id collision -- every two-phase
-// transfer got stuck pending forever. The fix must produce a DIFFERENT id
-// for POST/VOID than PENDING used, and that id's PendingID must equal the
-// PENDING call's own id.
-func TestTransferIDsPostHasDistinctIDReferencingPending(t *testing.T) {
-	pendingID, zero := transferIDs("case-1", "ADMIN_FEE", "p1", 5000, "PENDING")
-	if zero != (tb_types.Uint128{}) {
-		t.Fatalf("a PENDING transfer must not set PendingID, got %v", zero)
-	}
+func oldID(s string) tb_types.Uint128 {
+	h := sha256.Sum256([]byte(s))
+	var b [16]byte
+	copy(b[:], h[:16])
+	return tb_types.BytesToUint128(b)
+}
 
-	postID, postPendingID := transferIDs("case-1", "ADMIN_FEE", "p1", 5000, "POST")
-	if postID == pendingID {
-		t.Fatal("POST must get its own id, distinct from the PENDING transfer's id -- " +
-			"reusing it is exactly the id collision TigerBeetle rejected live")
+// With no namespace (idre) every id is what it was before namespacing, so the
+// ledger idre already posted to keeps lining up.
+func TestLedgerIDsUnchangedWithoutNamespace(t *testing.T) {
+	ledgerNamespace = ""
+	if acctID("fl", acctEscrowTrustHeld, "p1") != oldID(fmt.Sprintf("%s:%d:%s", "fl", acctEscrowTrustHeld, "p1")) {
+		t.Fatal("account id changed")
 	}
-	if postPendingID != pendingID {
-		t.Fatalf("POST's PendingID must equal the original PENDING transfer's id: got %v, want %v",
-			postPendingID, pendingID)
+	if hash16("mojaloop", "inv1", "p1") != oldID("mojaloop:inv1:p1") {
+		t.Fatal("hash16 changed")
 	}
-
-	voidID, voidPendingID := transferIDs("case-1", "ADMIN_FEE", "p1", 5000, "VOID")
-	if voidID == pendingID || voidID == postID {
-		t.Fatal("VOID must also get its own id, distinct from both PENDING and POST")
-	}
-	if voidPendingID != pendingID {
-		t.Fatal("VOID's PendingID must also reference the original PENDING transfer's id")
+	if ledgerTransferID("svc:k") != oldID("svc:k") {
+		t.Fatal("transfer id changed")
 	}
 }
 
-func TestTransferIDsDeterministic(t *testing.T) {
-	a1, _ := transferIDs("case-1", "ADMIN_FEE", "p1", 5000, "PENDING")
-	a2, _ := transferIDs("case-1", "ADMIN_FEE", "p1", 5000, "PENDING")
-	if a1 != a2 {
-		t.Fatal("the same request must hash to the same id every time -- " +
-			"it's the API's own idempotency mechanism for duplicate client retries")
+// With a namespace (idre-prod) none of the ids collide with idre's.
+func TestLedgerIDsSeparatedByNamespace(t *testing.T) {
+	defer func() { ledgerNamespace = "" }()
+	ledgerNamespace = ""
+	a, h, x := acctID("fl", acctEscrowTrustHeld, "p1"), hash16("a", "b"), ledgerTransferID("ap:k")
+	ledgerNamespace = "idre-prod"
+	if acctID("fl", acctEscrowTrustHeld, "p1") == a || hash16("a", "b") == h || ledgerTransferID("ap:k") == x {
+		t.Fatal("namespace did not change the ids")
 	}
 }

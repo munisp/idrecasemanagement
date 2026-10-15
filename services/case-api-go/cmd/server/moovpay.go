@@ -87,6 +87,10 @@ func routingLookup(routing string) (valid bool, bankName string) {
 }
 
 func (s *server) lookupRoutingNumber(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, paymentReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, or admin"}`, http.StatusForbidden)
+		return
+	}
 	rt := r.PathValue("routing")
 	ok, name := routingLookup(rt)
 	if !ok {
@@ -99,6 +103,10 @@ func (s *server) lookupRoutingNumber(w http.ResponseWriter, r *http.Request) {
 // ---------- payment accounts (vault-sealed) ----------
 
 var paymentAccountRoles = []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+
+// paymentReadRoles may look at the Payments screen: bank accounts, payment
+// files, screening. The Reviewer has no money screens, so it is not here.
+var paymentReadRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 func (s *server) createPaymentAccount(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -181,7 +189,7 @@ func (s *server) createPaymentAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listPaymentAccounts(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, paymentReadRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -517,7 +525,7 @@ func (s *server) settleACHWindow(r *http.Request, tenant string) {
 // ingested payment files (bodies gated to FINANCE/admin).
 func (s *server) listPaymentFiles(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, paymentReadRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -539,7 +547,7 @@ func (s *server) listPaymentFiles(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) paymentFileItems(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, paymentReadRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}

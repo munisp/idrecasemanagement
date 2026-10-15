@@ -361,7 +361,10 @@ func autoMatch(items []reconItem, events []finEvent, tolCents int64, windowDays 
 // ---------- HTTP handlers ----------
 
 var reconWriteRoles = []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
-var reconReadRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+
+// CASE_MANAGER deliberately excluded -- Reconciliation is a standalone
+// finance screen, not case-detail info; see arapReadRoles' comment.
+var reconReadRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // reconImport ingests an external feed into a recon batch.
 // multipart: file (CSV) + source (adapter) + mapping (mapping name for CSV)
@@ -453,10 +456,12 @@ func (s *server) reconImport(w http.ResponseWriter, r *http.Request) {
 	}
 	end, _ := time.Parse("2006-01-02", maxD)
 	var batchID int64
+	// displayName(p), not p.Subject -- imported_by is shown directly in the
+	// Reconciliation batches table; confirmed live it rendered a bare UUID.
 	err = s.db.QueryRow(r.Context(), `
 		INSERT INTO public.recon_batches (tenant, source, period_start, period_end, status, total_items, imported_by)
 		VALUES ($1,$2,$3::date,$4::date,'IMPORTED',$5,$6) RETURNING id`,
-		tenant, label, minD, end.AddDate(0, 0, 1).Format("2006-01-02"), len(items), p.Subject).Scan(&batchID)
+		tenant, label, minD, end.AddDate(0, 0, 1).Format("2006-01-02"), len(items), displayName(p)).Scan(&batchID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

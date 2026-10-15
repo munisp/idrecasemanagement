@@ -4,27 +4,21 @@ const CrmViews = (() => {
   const afterRender = (fn) => setTimeout(fn, 0);
   const $ = (sel) => document.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-US", { dateStyle: "medium" }) : "—");
+  const fmtDate = (d) => (d ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(d) ? d + "T12:00:00Z" : d).toLocaleDateString("en-US", { dateStyle: "medium", ...(/^\d{4}-\d{2}-\d{2}$/.test(d) ? { timeZone: "UTC" } : {}) }) : "—");
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<p class="error">${esc(e.message)}</p>`;
-  const CRM_PAGE = 100;
-  // Offset pager shared by accounts/leads/tasks: footer markup + a binder that
-  // appends the next page's rows in place (busy state on the button).
-  const pagerHtml = (id, shown, total, nextOffset) =>
-    `<p class="pager" id="${id}-pg"><span class="muted">Showing ${shown} of ${total}</span>
-      ${nextOffset >= 0 ? `<button class="mini" id="${id}-more">Load more (${Math.min(CRM_PAGE, total - shown)} remaining)</button>` : ""}</p>`;
+  const role = (r) => (Auth.claims()?.roles || []).includes(r);
+  const can = (...rs) => Auth.can(...rs);
+  // Server pager shared by accounts/leads/tasks: Pager (ui.js) draws the
+  // rows-per-page choice and Previous / Next; each page replaces the rows.
+  const pagerHtml = (id) => `<div id="${id}-pg"></div>`;
   function bindPager(id, tbodySel, state, fetchPage, rowsHtml) {
-    document.getElementById(id + "-more")?.addEventListener("click", async (ev) => {
-      await UI.run(ev.currentTarget, async () => {
-        try {
-          const r = await fetchPage(state.next);
-          state.loaded = state.loaded.concat(r.rows);
-          state.next = r.next;
-          document.querySelector(tbodySel).insertAdjacentHTML("beforeend", rowsHtml(r.rows));
-          document.getElementById(id + "-pg").outerHTML = pagerHtml(id, state.loaded.length, state.total, state.next);
-          bindPager(id, tbodySel, state, fetchPage, rowsHtml);
-        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
-      }, "Loading…");
+    Pager.server(document.getElementById(id + "-pg"), { total: state.total, shown: state.loaded.length }, async (limit, offset) => {
+      const r = await fetchPage(offset, limit);
+      state.loaded = r.rows;
+      state.total = r.total ?? state.total;
+      document.querySelector(tbodySel).innerHTML = rowsHtml(r.rows);
+      return { total: state.total, shown: r.rows.length };
     });
   }
 
@@ -39,7 +33,7 @@ const CrmViews = (() => {
     ["CLOSED_PAID", "Closed (paid)"], ["CLOSED_DISMISSED", "Closed (dismissed)"],
     // FL AHCA vocabulary (2026): completed cases REST at Decided - Invoice
     // Paid; only these four states are true closures.
-    ["Decided - Invoice Paid", "Decided — invoice paid"],
+    ["Decided - Invoice Paid", "Decided — invoice paid"], ["Invoice Paid", "Invoice paid — closed"],
     ["Plan Opt-Out", "Plan opt-out"], ["Ineligible", "Ineligible"],
     ["Dismissed", "Dismissed"], ["Withdrawn", "Withdrawn"],
     ["Plan Notification Packet Issued", "Plan notified"],
@@ -49,7 +43,7 @@ const CrmViews = (() => {
   // soon" assumption (a closed stage being empty is normal, not a gap).
   const TERMINAL_STAGES = new Set([
     "CLOSED_PAID", "CLOSED_DISMISSED",
-    "Decided - Invoice Paid", "Plan Opt-Out", "Ineligible", "Dismissed",
+    "Decided - Invoice Paid", "Invoice Paid", "Plan Opt-Out", "Ineligible", "Dismissed",
     "Withdrawn", "Provider Closure Letter Issued", "Provider - Withdrawal",
   ]);
   async function pipeline() {
@@ -112,23 +106,35 @@ const CrmViews = (() => {
   }
 
   // ---- Accounts ---------------------------------------------------------------
-  async function accounts() {
+  function accounts() {
+    afterRender(() => accountsBox(""));
+    const typeFilter = `<select id="acc-type" onchange="CrmViews.accountsFilter(this.value)"><option value="">All types</option>
+      ${["PROVIDER", "PAYER", "IDRE", "AUDITOR", "OTHER"].map((t) => `<option value="${t}">${t}</option>`).join("")}</select>`;
+    return `<div class="view-head"><h1>Accounts</h1><a class="button" href="#/crm/accounts/new">New account</a>${typeFilter}</div>
+      <div id="acc-box"><p class="muted">Loading…</p></div>`;
+  }
+
+  async function accountsBox(type) {
+    const box = $("#acc-box");
+    if (!box) return;
+    box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.accounts(null, { limit: CRM_PAGE });
+      const page = await Api.crm.accounts(type || null, { limit: Pager.size() });
       const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
             <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
-      if (!state.loaded.length)
-        return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>
-          <p class="muted">No accounts yet — convert leads or create one.</p>`;
-      afterRender(() => bindPager("acc", "#acc-tb tbody", state,
-        (off) => Api.crm.accounts(null, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.accounts, next: r.next_offset })),
-        rowsHtml));
-      return `<h1>Accounts</h1><p><a class="button" href="#/crm/accounts/new">New account</a></p>
-        <table id="acc-tb"><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
-        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc", state.loaded.length, state.total, state.next);
-    } catch (e) { return `<h1>Accounts</h1>` + err(e); }
+      if (!state.loaded.length) {
+        box.innerHTML = `<p class="muted">${type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
+        return;
+      }
+      box.innerHTML = `<table id="acc-tb" data-serverpaged><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc");
+      bindPager("acc", "#acc-tb tbody", state,
+        (off, limit) => Api.crm.accounts(type || null, { limit, offset: off }).then((r) => ({ rows: r.accounts, total: r.total })),
+        rowsHtml);
+    } catch (e) { box.innerHTML = err(e); }
   }
+  function accountsFilter(type) { accountsBox(type); }
 
   async function account360(id) {
     try {
@@ -144,11 +150,11 @@ const CrmViews = (() => {
         (d.contacts.length ? `<table><tbody>` + d.contacts.map((c) =>
           `<tr><td>${esc(c.name)}</td><td>${esc(c.role_title)}</td><td>${esc(c.email)}</td><td>${esc(c.phone)}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No contacts.</p>`) +
-        `<form id="nc" class="form"><b>Add contact</b>
+        (!can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? "" : `<form id="nc" class="form"><b>Add contact</b>
            <input name="name" placeholder="Name" required />
            <input name="role_title" placeholder="Role (e.g. Billing lead)" />
            <input name="email" type="email" placeholder="Email" />
-           <input name="phone" placeholder="Phone" /><button>Add</button></form>`;
+           <input name="phone" placeholder="Phone" /><button>Add</button></form>`);
       html += `<h2>Disputes (${d.cases.length})</h2>` +
         (d.cases.length ? `<table><tbody>` + d.cases.map((c) =>
           `<tr class="click" onclick="location.hash='#/cases/${c.id}'"><td>${esc(c.case_number)}</td>
@@ -193,23 +199,39 @@ const CrmViews = (() => {
   }
 
   // ---- Leads ---------------------------------------------------------------------
-  async function leads() {
+  function leads() {
+    afterRender(() => leadsBox("OPEN"));
+    const statusFilter = `<select id="lead-status" onchange="CrmViews.leadsFilter(this.value)">
+      <option value="OPEN" selected>Not converted</option>
+      <option value="">All</option>
+      <option value="CONVERTED">Converted</option></select>`;
+    return `<div class="view-head"><h1>Leads</h1>${statusFilter}</div>
+      <p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
+      <div id="lead-box"><p class="muted">Loading…</p></div>`;
+  }
+
+  async function leadsBox(status) {
+    const box = $("#lead-box");
+    if (!box) return;
+    box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.leads({ limit: CRM_PAGE });
+      const page = await Api.crm.leads({ limit: Pager.size(), status });
       const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
             <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
             <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
-      if (!state.loaded.length)
-        return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p><p class="muted">No leads.</p>`;
-      afterRender(() => bindPager("lead", "#lead-tb tbody", state,
-        (off) => Api.crm.leads({ limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.leads, next: r.next_offset })),
-        rowsHtml));
-      return `<h1>Leads</h1><p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
-        <table id="lead-tb"><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead", state.loaded.length, state.total, state.next);
-    } catch (e) { return `<h1>Leads</h1>` + err(e); }
+      if (!state.loaded.length) {
+        box.innerHTML = `<p class="muted">No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.</p>`;
+        return;
+      }
+      box.innerHTML = `<table id="lead-tb" data-serverpaged><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead");
+      bindPager("lead", "#lead-tb tbody", state,
+        (off, limit) => Api.crm.leads({ limit, offset: off, status }).then((r) => ({ rows: r.leads, total: r.total })),
+        rowsHtml);
+    } catch (e) { box.innerHTML = err(e); }
   }
+  function leadsFilter(status) { leadsBox(status); }
 
   async function convert(id) {
     const v = await UI.modal({ title: "Convert lead to account", submitLabel: "Convert",
@@ -228,21 +250,39 @@ const CrmViews = (() => {
   // hash query string (same pattern cases() already uses for ?view=/?sort=)
   // so the toggle is a real navigation, not just a DOM patch, and survives
   // refresh/back-button.
-  async function tasks() {
+  function tasks() {
     const mine = new URLSearchParams(location.hash.split("?")[1] || "").get("all") !== "1";
     const title = mine ? "My tasks" : "All tasks";
+    afterRender(() => {
+      tasksBox(mine, "OPEN");
+      document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const f = Object.fromEntries(new FormData(ev.target));
+        try { const r = await Api.crm.createTask(f); UI.toast(`Task ${r.task_ref || ""} created`.trim()); App.rerender(); }
+        catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      });
+    });
+    const statusFilter = `<select id="task-status" onchange="CrmViews.tasksFilter(${mine}, this.value)">
+      <option value="OPEN" selected>Open</option><option value="">All</option><option value="DONE">Done</option></select>`;
+    return `<div class="view-head"><h1>${title}</h1>${statusFilter}</div>
+      <div class="tabs">
+        <a class="tab ${mine ? "active" : ""}" href="#/crm/tasks">My tasks</a>
+        <a class="tab ${!mine ? "active" : ""}" href="#/crm/tasks?all=1">All tasks</a>
+      </div>
+      ${!can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? "" : `<form id="nt" class="form"><b>New task</b>
+        <input name="subject" placeholder="Subject" required />
+        <input name="case_id" placeholder="Case ID (optional)" />
+        <input name="due_date" type="date" /><button>Create</button></form>`}
+      <div id="task-box"><p class="muted">Loading…</p></div>`;
+  }
+
+  async function tasksBox(mine, status) {
+    const box = $("#task-box");
+    if (!box) return;
+    box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.tasks(mine, { limit: CRM_PAGE });
+      const page = await Api.crm.tasks(mine, { limit: Pager.size(), status });
       const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
-      let html = `<div class="view-head"><h1>${title}</h1></div>
-        <div class="tabs">
-          <a class="tab ${mine ? "active" : ""}" href="#/crm/tasks">My tasks</a>
-          <a class="tab ${!mine ? "active" : ""}" href="#/crm/tasks?all=1">All tasks</a>
-        </div>
-        <form id="nt" class="form"><b>New task</b>
-          <input name="subject" placeholder="Subject" required />
-          <input name="case_id" placeholder="Case ID (optional)" />
-          <input name="due_date" type="date" /><button>Create</button></form>`;
       const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
           <td>${esc(t.subject)}</td>
           ${mine ? "" : `<td>${esc(t.assignee || "—")}</td>`}
@@ -250,22 +290,19 @@ const CrmViews = (() => {
           <td>${esc(t.due_date)}</td>
           <td>${badge(t.status)}</td>
           <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
-      html += state.loaded.length ? `<table id="task-tb"><thead><tr><th>Ref</th><th>Subject</th>
+      if (!state.loaded.length) {
+        box.innerHTML = `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
+        return;
+      }
+      box.innerHTML = `<table id="task-tb" data-serverpaged><thead><tr><th>Ref</th><th>Subject</th>
           ${mine ? "" : "<th>Assignee</th>"}<th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task", state.loaded.length, state.total, state.next)
-        : `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
-      afterRender(() => bindPager("task", "#task-tb tbody", state,
-        (off) => Api.crm.tasks(mine, { limit: CRM_PAGE, offset: off }).then((r) => ({ rows: r.tasks, next: r.next_offset })),
-        rowsHtml));
-      afterRender(() => document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const f = Object.fromEntries(new FormData(ev.target));
-        try { const r = await Api.crm.createTask(f); UI.toast(`Task ${r.task_ref || ""} created`.trim()); App.rerender(); }
-        catch (e) { UI.toast(e.message, { kind: "warn" }); }
-      }));
-      return html;
-    } catch (e) { return `<h1>${title}</h1>` + err(e); }
+        <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task");
+      bindPager("task", "#task-tb tbody", state,
+        (off, limit) => Api.crm.tasks(mine, { limit, offset: off, status }).then((r) => ({ rows: r.tasks, total: r.total })),
+        rowsHtml);
+    } catch (e) { box.innerHTML = err(e); }
   }
+  function tasksFilter(mine, status) { tasksBox(mine, status); }
 
   async function done(id) {
     try { await Api.crm.completeTask(id); UI.toast("Task completed"); App.rerender(); }
@@ -279,6 +316,8 @@ const CrmViews = (() => {
       const hits = await Api.crm.search(q);
       const link = (h) => h.kind === "case" ? `#/cases/${h.id}`
         : h.kind === "document" ? `#/cases/${h.case_id || ""}`
+        : h.kind === "task" ? (h.case_id ? `#/cases/${h.case_id}` : "#/crm/tasks")
+        : h.kind === "invoice" ? (h.case_id ? `#/cases/${h.case_id}` : "#/finance")
         : h.kind === "account" ? `#/crm/accounts/${h.id}` : h.kind === "lead" ? "#/crm/leads" : "#/crm/accounts";
       return `<h1>Search: “${esc(q)}”</h1>` +
         (hits.length ? `<table><tbody>` + hits.map((h) =>
@@ -306,7 +345,7 @@ const CrmViews = (() => {
       const d = String(i.due || "").slice(0, 10);
       if (d) (byDay[d] ||= []).push(i);
     });
-    const chipCls = (k) => k === "OFFER_WINDOW" ? "cal-chip-stat" : "cal-chip-task";
+    const chipCls = (k) => "cal-chip-" + calKind(k)[0];
     let cells = "";
     for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty"></div>`;
     for (let d = 1; d <= daysInMonth; d++) {
@@ -325,9 +364,32 @@ const CrmViews = (() => {
       ${cells}</div>`;
   }
 
+  // What each calendar item is: [colour group, icon, words]. A TPA's items are
+  // the deadlines on its own disputes and its team's tasks (tpa_calendar.go).
+  const CAL_KIND = {
+    OFFER_WINDOW: ["stat", "⏱", "Offer window"], PERMISSION_DUE: ["stat", "⏱", "Permission due"],
+    FEE_DUE: ["pay", "$", "Fee due"], INVOICE_DUE: ["pay", "$", "Invoice due"],
+    DOCS_DUE: ["docs", "⇪", "Documents due"],
+    PLAN_RESPONSE: ["watch", "◷", "Plan's response due"], DECISION_DUE: ["watch", "§", "Recommendation due"],
+    TASK: ["task", "✓", "Task"],
+  };
+  const calKind = (k) => CAL_KIND[k] || ["task", "•", k];
+  async function calTaskDone(id) {
+    try {
+      await (Auth.can("TPA") ? Api.program.tpaTaskDone(id) : Api.crm.completeTask(id));
+      UI.toast("Task done"); App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function calTaskAdd(form) {
+    try {
+      await Api.program.tpaTaskCreate({ subject: form.subject.value, due_date: form.due.value, case_id: form.case_id.value });
+      UI.toast("Task added"); App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   async function calendar() {
     try {
       const items = await Api.cm.calendar();
+      const isTPA = Auth.can("TPA");
       items.sort((a, b) => String(a.due).localeCompare(String(b.due)));
       const now = new Date();
       const state = { y: now.getFullYear(), m: now.getMonth() };
@@ -363,9 +425,9 @@ const CrmViews = (() => {
             <div class="cal-rows">${groups[d].map((i) => {
               const linkable = !!i.case_id;
               return `<div class="cal-item ${linkable ? "link" : ""}" ${linkable ? `onclick="location.hash='#/cases/${esc(i.case_id)}'"` : ""}>
-                <span class="cal-kind ${i.kind === "OFFER_WINDOW" ? "k-offer" : "k-task"}" title="${esc(i.kind)}">${i.kind === "OFFER_WINDOW" ? "⏱" : "✓"}</span>
-                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}</span>
-                ${i.kind === "TASK" ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.done('${i.ref}')">Done</button>` : ""}
+                <span class="cal-kind k-${calKind(i.kind)[0]}" title="${esc(calKind(i.kind)[2])}">${calKind(i.kind)[1]}</span>
+                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}${i.detail ? `<span class="cal-detail">${esc(i.detail)}</span>` : ""}</span>
+                ${i.kind === "TASK" ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.calTaskDone('${esc(i.ref)}')">Done</button>` : ""}
               </div>`;
             }).join("")}</div>
           </div>
@@ -380,18 +442,25 @@ const CrmViews = (() => {
           state.m++; if (state.m > 11) { state.m = 0; state.y++; } render();
         });
       });
+      const caseOpts = [...new Map(items.filter((i) => i.case_id && i.case_number).map((i) => [i.case_id, i.case_number])).entries()];
+      const taskForm = isTPA ? `<form class="inline-form cal-add" onsubmit="event.preventDefault(); CrmViews.calTaskAdd(this)">
+          <input name="subject" placeholder="Add a task for your team, e.g. Call the clinic about the EOB" required maxlength="300" style="flex:1;min-width:260px" />
+          <input name="due" type="date" required aria-label="Due date" />
+          <select name="case_id" aria-label="Dispute"><option value="">no dispute</option>${caseOpts.map(([id, n]) => `<option value="${esc(id)}">${esc(n)}</option>`).join("")}</select>
+          <button class="mini">Add task</button></form>` : "";
       return `<div class="view-head"><h1>Calendar</h1>
-        <span class="muted">statutory clocks, offer windows, and task due dates</span></div>
+        <span class="muted">${isTPA ? "fees, documents and deadlines on your disputes, and your team's tasks" : "statutory clocks, offer windows, and task due dates"}</span></div>${taskForm}
         <div class="cal-nav">
           <button class="mini" id="cal-prev">‹ prev</button>
           <b id="cal-month-label"></b>
           <button class="mini" id="cal-next">next ›</button>
-          <span class="cal-legend"><span class="cal-chip cal-chip-stat">statutory / offer window</span>
-            <span class="cal-chip cal-chip-task">task</span></span></div>
+          <span class="cal-legend">${isTPA
+            ? `<span class="cal-chip cal-chip-pay">payment due</span><span class="cal-chip cal-chip-docs">documents due</span><span class="cal-chip cal-chip-stat">deadline</span><span class="cal-chip cal-chip-watch">to watch</span><span class="cal-chip cal-chip-task">task</span>`
+            : `<span class="cal-chip cal-chip-stat">statutory / offer window</span><span class="cal-chip cal-chip-task">task</span>`}</span></div>
         <div id="cal-grid-box"></div>
-        <h2>Agenda</h2>` + (agenda || `<p class="muted">No upcoming deadlines or tasks.</p>`);
+        <h2>Agenda</h2>` + (agenda || `<p class="muted">${isTPA ? "Nothing due on your disputes right now. Fees, document requests, deadlines and your tasks appear here as they arise." : "No upcoming deadlines or tasks."}</p>`);
     } catch (e) { return `<h1>Calendar</h1>` + err(e); }
   }
 
-  return { pipeline, accounts, account360, accountNew, leads, convert, tasks, done, search, calendar };
+  return { pipeline, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, done, search, calendar, calTaskDone, calTaskAdd };
 })();

@@ -2,7 +2,7 @@
   "name": "idre-portal",
   "version": "1.0.0",
   "private": true,
-  "description": "Federal IDRE Portal — PWA + native shells (Capacitor)",
+  "description": "Capitol Bridge Portal — PWA + native shells (Capacitor)",
   "scripts": {
     "serve": "npx serve . -l 3000",
     "native:add": "cap add ios && cap add android",

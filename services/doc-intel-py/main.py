@@ -17,13 +17,16 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+import otel_setup
 import psycopg
 from confluent_kafka import Consumer
 from minio import Minio
 from opensearchpy import OpenSearch
 
-from pipeline import bytes_to_pages, classify_text, ooxml_safe, run_pipeline, sniff_doc_kind
+from eobshape import as_lines, as_money, as_text, line_text, lines_text
 from fields import extract_fields
+from pipeline import (ModelUnavailable, bytes_to_pages, classify_text, image_bytes, ooxml_safe, run_pipeline,
+                      sniff_doc_kind, straighten_pages, upright_pages)
 import tpa_docs
 from rules_engine import expand_template, fire_rules, load_rules
 from check_processor import extract_check
@@ -110,6 +113,10 @@ def fire_doc_rules(evt: dict, kind: str, subj_id: str, ctx: dict) -> None:
                   file=sys.stderr, flush=True)
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
+# Per deployment: idre and idre-prod share one MinIO and one OpenSearch on
+# the dev cluster, so each reads its own bucket and indexes into its own names.
+DOC_BUCKET = os.environ.get("DOC_BUCKET", "idre-docs")
+DOC_INDEX_PREFIX = os.environ.get("DOC_INDEX_PREFIX", "idre-docs")
 VAULT = os.environ.get("VAULT_URL", "http://localhost:8081")
 # Vault enforces X-Internal-Auth on every route when VAULT_INTERNAL_TOKEN is
 # set on its side — both sides must agree (compose wires one shared value).
@@ -145,7 +152,7 @@ search = OpenSearch(
 
 def fetch_and_decrypt(tenant: str, object_key: str) -> bytes:
     import base64
-    ct = minio.get_object("idre-docs", object_key).read()
+    ct = minio.get_object(DOC_BUCKET, object_key).read()
     resp = httpx.post(f"{VAULT}/docs/open", timeout=60, headers=VAULT_HEADERS, json={
         "tenant": tenant, "key": object_key, "data_b64": base64.b64encode(ct).decode(),
     })
@@ -192,23 +199,444 @@ def subject(evt: dict) -> tuple[str, str]:
     return "application", evt["application_id"]
 
 
+_SERVICE_LINE_KEYWORDS = (
+    ("AIR AMBULANCE", "AIR_AMBULANCE"), ("ANESTHESIA", "ANESTHESIA"),
+    ("RADIOLOGY", "RADIOLOGY"), ("LAB", "LAB"), ("EMERGENCY", "ER"), ("ER", "ER"),
+)
+
+# CPT/HCPCS code ranges are the AMA/CMS's own standard category boundaries
+# (Anesthesia 00100-01999, Radiology 70010-79999, Pathology & Lab 80047-
+# 89398, Emergency Dept E/M 99281-99285) -- not a guess, same standing as
+# the POS-code -> provider_type map above. This is idr_claim's own field
+# (cpt_hcpcs_codes); EOB's service_lines free-text field never has it, which
+# is why idr_claim documents -- the common case -- never got a service_line
+# backfill before even though EOB's keyword match existed.
+_CPT_AIR_AMBULANCE = {"A0430", "A0431", "A0435", "A0436"}
+
+
+def _service_line_from_cpt(codes_raw: str | None) -> str | None:
+    m = re.search(r"\b([A-Z]\d{4}|\d{5})\b", as_text(codes_raw).upper())
+    if not m:
+        return None
+    code = m.group(1)
+    if code in _CPT_AIR_AMBULANCE:
+        return "AIR_AMBULANCE"
+    if not code.isdigit():
+        return None
+    n = int(code)
+    if 99281 <= n <= 99285:
+        return "ER"
+    if 100 <= n <= 1999:
+        return "ANESTHESIA"
+    if 70010 <= n <= 79999:
+        return "RADIOLOGY"
+    if 80047 <= n <= 89398:
+        return "LAB"
+    return None
+
+def _service_line_from_text(line) -> str | None:
+    """Category of one EOB service line, or None. The line arrives either as
+    free text or as a row ({"service": ..., "billed_amount_usd": ...}); only
+    the description is read, never the column names. Keywords match whole
+    words: a bare substring test found "ER" inside "SERVICE" and "LAB" inside
+    "AVAILABLE", and filed an office visit under the emergency room. A
+    procedure code written into the description is the better evidence, so
+    it is tried first -- and when it names a category the keywords do not get
+    a vote (99215, an office visit, is not an ER line whatever the text says)."""
+    text = line_text(line).upper()
+    if re.search(r"\b([A-Z]\d{4}|\d{5})\b", text):
+        return _service_line_from_cpt(text)
+    for kw, canon in _SERVICE_LINE_KEYWORDS:
+        if re.search(rf"\b{re.escape(kw)}\b", text):
+            return canon
+    return None
+
+
+# CMS place-of-service codes unambiguous enough to map to an eligibility
+# provider_type without guessing: 21 (Inpatient Hospital) and 22/19 (on/off
+# -campus Outpatient Hospital) are explicit facility-type statements; 11
+# (Office) is the standard code for a physician/dentist practice. Anything
+# else -- including "rural hospital", which isn't a POS code at all -- is
+# left for a human, same miss-don't-guess rule as the dollar fields below.
+_POS_PROVIDER_TYPE = {
+    "21": "hospital_inpatient",
+    "22": "hospital_outpatient",
+    "19": "hospital_outpatient",
+    "11": "physician_dentist",
+}
+
+
+# Type-of-bill (UB-04 form locator 4): the first digit after the leading zero
+# is the facility type (1 = hospital), the second the care setting (1 or 2 =
+# inpatient, 3 = outpatient). Only the hospital combinations are mapped.
+_TOB_PROVIDER_TYPE = {"11": "hospital_inpatient", "12": "hospital_inpatient", "13": "hospital_outpatient"}
+
+
+def provider_type_from_text(text: str | None) -> str | None:
+    """Read the provider type off the form's own printed codes when the
+    model did not extract a place of service: "Place of Service: 11" on a
+    claim form, or a UB-04's type of bill. Only the codes that state a
+    provider type outright are used -- a form with neither stays unknown
+    rather than being guessed from its layout. Pure, so it is tested."""
+    t = str(text or "").upper()
+    m = re.search(r"(?:PLACE\s+OF\s+SERVICE|\bPOS\b)[\s:|.#(A-Z]{0,24}?\b(\d{2})\b", t)
+    if m and m.group(1) in _POS_PROVIDER_TYPE:
+        return _POS_PROVIDER_TYPE[m.group(1)]
+    # Forms are often read with every label first and the values after, so
+    # the code is not next to its label. A place-of-service code printed with
+    # its standard description ("11 (Office)") is just as explicit -- accepted
+    # when the form has a place-of-service field at all.
+    if re.search(r"PLACE\s+OF\s+SERVICE|\bPOS\b", t):
+        m = re.search(r"\b(11|19|21|22)\s*[(\-–:]\s*(OFFICE|INPATIENT\s+HOSPITAL|(?:ON|OFF)[\s-]*CAMPUS|OUTPATIENT\s+HOSPITAL)", t)
+        if m:
+            return _POS_PROVIDER_TYPE[m.group(1)]
+    m = re.search(r"TYPE\s+OF\s+BILL[\s:|.#]{0,12}0?(\d{2})\d\b", t)
+    if m and m.group(1) in _TOB_PROVIDER_TYPE:
+        return _TOB_PROVIDER_TYPE[m.group(1)]
+    return None
+
+
+_HOSPITAL_NAME = re.compile(r"\b(HOSPITAL|MEDICAL CENTER|HEALTH SYSTEM|REGIONAL MEDICAL)\b")
+_PRACTICE_NAME = re.compile(
+    r"\b(P\.?C\.?|P\.?A\.?|M\.?D\.?|D\.?O\.?|D\.?D\.?S\.?|D\.?M\.?D\.?|PHYSICIANS?|DENTAL|DENTISTRY|"
+    r"MEDICAL GROUP|ASSOCIATES|FAMILY (?:MEDICINE|PRACTICE)|CLINIC)(?=$|[\s,.])")
+_INPATIENT = re.compile(r"\b(INPATIENT|ROOM (?:AND|&) BOARD|ADMISSION|ADMITTED|DISCHARGE|DRG)\b")
+_OUTPATIENT = re.compile(r"\b(OUTPATIENT|EMERGENCY (?:ROOM|DEPARTMENT)|OBSERVATION|AMBULATORY SURGERY)\b")
+
+
+def infer_provider_type(provider_name: str | None, text: str | None, cpt_codes=None) -> tuple[str | None, str]:
+    """Provider type for a document that prints no place-of-service code --
+    an EOB. Returns (type, basis). It is an INFERENCE and is stored as one:
+    the eligibility review shows the basis and sends the result for a second
+    look, because the provider type picks the dollar threshold.
+
+      a hospital by name + inpatient wording   -> hospital_inpatient
+      a hospital by name + outpatient wording  -> hospital_outpatient
+      a practice by name (P.C., M.D., D.D.S., Physicians, Dental...) or
+      office-visit / dental procedure codes    -> physician_dentist
+
+    A hospital with neither wording, a rural hospital, and anything else stay
+    unknown: None, for a person to decide.
+    """
+    name = as_text(provider_name).upper()
+    t = as_text(text).upper()
+    # Codes and service lines arrive as strings, lists, or rows
+    # ({"service": "Office visit (99215)", ...}): lines_text reads the
+    # describing cells of whatever it is given (joining rows blind crashed).
+    codes = lines_text(cpt_codes)
+    if _HOSPITAL_NAME.search(name):
+        if _INPATIENT.search(t):
+            return "hospital_inpatient", f"provider is a hospital ({provider_name}) and the document describes inpatient services"
+        if _OUTPATIENT.search(t):
+            return "hospital_outpatient", f"provider is a hospital ({provider_name}) and the document describes outpatient services"
+        return None, ""
+    if name and _PRACTICE_NAME.search(name):
+        return "physician_dentist", f"provider is a professional practice ({provider_name})"
+    hay = codes.upper() + " " + t
+    if re.search(r"\b992(0[2-9]|1[0-5])\b", hay):
+        return "physician_dentist", "office-visit procedure codes (99202-99215) are billed"
+    if re.search(r"\bD\d{4}\b", hay) and "DENTAL" in t:
+        return "physician_dentist", "dental procedure codes are billed"
+    return None, ""
+
+
+def line_of_business_from(value: str | None) -> str | None:
+    """Map what a document calls the coverage ("Medicaid MMA", "Medicare
+    Advantage HMO", "Employer group PPO") onto the program's Line of Business
+    list. Order matters: Medicare Advantage before Medicare. None when the
+    document's wording matches nothing -- never a default."""
+    t = as_text(value).lower()
+    if not t.strip():
+        return None
+    if "medicaid" in t:
+        return "Medicaid"
+    if "medicare advantage" in t or "medicare part c" in t or re.search(r"\bma\b", t):
+        return "Medicare Advantage"
+    if "medicare" in t:
+        return "Medicare"
+    if "marketplace" in t or "exchange" in t or "aca" in t.split():
+        return "Marketplace"
+    if any(k in t for k in ("commercial", "employer", "group", "ppo", "hmo", "epo", "pos plan")):
+        return "Commercial"
+    return None
+
+
+def disputed_issue_from(billed: float | None, allowed: float | None, denial_codes) -> str | None:
+    """What kind of dispute an EOB describes, from its own numbers: nothing
+    allowed on a billed claim is a Denial; less allowed than billed is an
+    Underpayment; more is an Overpayment. None when the EOB does not carry
+    both figures -- the Reviewer decides then."""
+    if billed is None or allowed is None or billed <= 0 or allowed < 0:
+        return None
+    if allowed == 0:
+        return "Denial"
+    if allowed < billed:
+        return "Underpayment"
+    if allowed > billed:
+        return "Overpayment"
+    return None
+
+
+def provider_address_from(extracted: dict) -> dict:
+    """The provider's address parts in the report's formats: the state as a
+    2-letter code and a US ZIP. A part that does not fit its format is left
+    out rather than stored wrong."""
+    out = {}
+    street = as_text(extracted.get("provider_street"))
+    city = as_text(extracted.get("provider_city"))
+    state = as_text(extracted.get("provider_state")).upper()
+    zipc = as_text(extracted.get("provider_zip"))
+    if street and len(street) <= 200:
+        out["provider_street"] = street
+    if city and len(city) <= 100:
+        out["provider_city"] = city
+    if re.fullmatch(r"[A-Z]{2}", state):
+        out["provider_state"] = state
+    if re.fullmatch(r"\d{5}(-\d{4})?", zipc):
+        out["provider_postal"] = zipc
+    return out
+
+
+def _contracted_from_network_status(text: str | None) -> bool | None:
+    """True/False only on an explicit in-/out-of-network statement in the
+    document; None (don't guess) for anything else, including silence."""
+    if isinstance(text, bool):
+        return None  # a bare true/false does not say which way the question was asked
+    t = re.sub(r"[\s_\-]+", " ", as_text(text).lower()).strip()
+    if not t:
+        return None
+    # The "out" wordings first: "non participating" contains "participating".
+    if re.search(r"\b(out of network|oon|non ?participating|not participating|non ?par|non ?contracted|"
+                 r"not contracted|non ?network|not in network|out of plan)\b", t):
+        return False
+    if re.search(r"\b(in network|inn|participating|par|contracted|in plan)\b", t):
+        return True
+    return None
+
+
+def eligibility_conflicts(current: dict, found: dict, source: str, known: list | None = None) -> list[dict]:
+    """Where a document disagrees with a value the case already carries.
+
+    `current` and `found` map field -> value for the eligibility inputs
+    (disputed_amount_cents, provider_type, contracted). The case keeps the
+    value it has -- the first one read, or what staff entered -- so a later
+    document that says otherwise would vanish without this. Each disagreement
+    is returned once: one already in `known` for the same field and document
+    value is not repeated. Pure, so it is tested without a database.
+    """
+    seen = {(k.get("field"), json.dumps(k.get("document_value"), sort_keys=True)) for k in (known or [])}
+    out = []
+    for field, doc_val in found.items():
+        cur = current.get(field)
+        if doc_val is None or cur is None or cur == "" or cur == doc_val:
+            continue
+        key = (field, json.dumps(doc_val, sort_keys=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"field": field, "case_value": cur, "document_value": doc_val, "document": source})
+    return out
+
+
+def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "", text: str = "") -> list[str]:
+    """Fill a couple of case fields from analyzed-document facts so staff
+    don't have to re-type what the document already states -- but only
+    fields with an unambiguous semantic match, and only where the case
+    doesn't already carry a value (never overwrites staff-entered data).
+
+    qpa_usd (idr_claim schema) IS the case's qpa_cents -- same concept,
+    direct match. service_line is inferred from the EOB schema's
+    service_lines[0] leading keyword -- a coarse category guess, safe to
+    get wrong (falls through to manual, never silently wrong in a way that
+    matters). disputed_amount_cents (the figure programmed tenants' own
+    eligibility thresholds actually check -- qpa_cents is a federal-NSA-only
+    concept) comes from idr_claim's billed_amount_usd: the provider's own
+    stated claim amount, literally printed on the same document, same kind
+    of direct match as qpa_usd. Deliberately still NOT sourcing it from
+    EOB's allowed_amount_usd/patient_responsibility_usd -- those are the
+    INSURER's determination and the patient's share, neither of which IS
+    the amount a provider is disputing, and unlike billed_amount_usd they'd
+    require guessing which side of the payer's math the provider is even
+    contesting.
+
+    provider_type/contracted (eligibility-review inputs) land in details
+    jsonb, the same bag deriveEligibilityInput (case-api triage.go) already
+    reads -- so a case that's had a document analyzed can go straight to
+    autoEligibility with no manual form entry, which today NEVER happens any
+    other way: nothing else in the platform persists these two fields.
+    """
+    changed: list[str] = []
+    if not isinstance(extracted, dict):
+        extracted = {}
+
+    def reading(what: str, fn, default=None):
+        """One field's reading. A value in a shape nobody expected costs that
+        field, logged -- never the other fields, never the document."""
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            print(f"doc-intel: could not read {what} from {source or 'a document'}: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return default
+
+    # Every value is coerced first: an amount may be 1850, "$1,850.00" or
+    # {"amount": 1850}; service lines may be rows, strings or one string.
+    qpa_usd = reading("the QPA", lambda: as_money(extracted.get("qpa_usd")))
+    billed_amount_usd = reading("the billed amount", lambda: as_money(extracted.get("billed_amount_usd")))
+    allowed_amount_usd = reading("the allowed amount", lambda: as_money(extracted.get("allowed_amount_usd")))
+    service_lines = reading("the service lines", lambda: as_lines(extracted.get("service_lines")), [])
+    codes = extracted.get("cpt_hcpcs_codes")
+
+    def read_provider_type():
+        pos_match = re.match(r"\s*(\d{1,2})", as_text(extracted.get("place_of_service")))
+        ptype = _POS_PROVIDER_TYPE.get(pos_match.group(1).zfill(2)) if pos_match else None
+        if not ptype:
+            ptype = provider_type_from_text(text)
+        if ptype:
+            return ptype, ""
+        return infer_provider_type(extracted.get("provider_name"), text, [codes, service_lines])
+    provider_type, provider_type_basis = reading("the provider type", read_provider_type, (None, ""))
+    contracted = reading("the network status",
+                         lambda: _contracted_from_network_status(extracted.get("network_status")))
+
+    with psycopg.connect(DSN, autocommit=True) as c:
+        row = c.execute(
+            f"SELECT qpa_cents, service_line, details, disputed_amount_cents "
+            f"FROM tenant_{tenant}.cases WHERE id=%s",
+            (case_id,),
+        ).fetchone()
+        if not row:
+            return changed
+        cur_qpa, cur_service_line, details, cur_disputed = row
+        if not isinstance(details, dict):
+            details = {}
+
+        def set_details(values: dict) -> None:
+            c.execute(f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+                      (json.dumps(values), case_id))
+
+        def fill_qpa():
+            cents = round(qpa_usd * 100) if qpa_usd and not cur_qpa else 0
+            if cents > 0:
+                c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))
+                changed.append(f"QPA ${cents / 100:,.2f}")
+
+        # billed_amount_usd is the provider's own charge. A claim form prints
+        # it; so does an EOB ("billed" / "charges"), which is now read too --
+        # so a dispute filed with only an EOB still gets its amount. The
+        # plan's allowed amount and the patient's share are never used.
+        def fill_disputed():
+            cents = round(billed_amount_usd * 100) if billed_amount_usd and not cur_disputed else 0
+            if cents > 0:
+                c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s", (cents, case_id))
+                changed.append(f"disputed amount ${cents / 100:,.2f}")
+
+        def fill_service_line():
+            if cur_service_line:
+                return
+            service_line = _service_line_from_cpt(codes)
+            if not service_line and service_lines:
+                service_line = _service_line_from_text(service_lines[0])
+            if service_line:
+                c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (service_line, case_id))
+                changed.append(f"service line {service_line}")
+
+        def fill_provider_type():
+            if provider_type and "provider_type" not in details:
+                set_details({"provider_type": provider_type,
+                             **({"provider_type_basis": "inferred: " + provider_type_basis} if provider_type_basis else {})})
+                changed.append(f"provider type {provider_type}" + (f" (INFERRED — {provider_type_basis}; confirm)" if provider_type_basis else ""))
+
+        def fill_contracted():
+            if contracted is not None and "contracted" not in details:
+                set_details({"contracted": contracted})
+                changed.append(f"contracted={contracted}")
+
+        # Report fields the documents already state, so nobody re-types them:
+        # out-of-network (the same network-status reading as "contracted"),
+        # and the provider's and the plan's names as printed on the claim.
+        # Like everything here: only where the case has no value yet.
+        def fill_report_fields():
+            extra = {}
+            if contracted is not None and "out_of_network" not in details:
+                extra["out_of_network"] = "No" if contracted else "Yes"
+            for key, field in (("provider_org", "provider_name"), ("health_plan", "payer_name")):
+                val = reading(field, lambda field=field: as_text(extracted.get(field)), "")
+                if val and len(val) <= 200 and key not in details:
+                    extra[key] = val
+            for key, val in reading("the provider address", lambda: provider_address_from(extracted), {}).items():
+                if key not in details:
+                    extra[key] = val
+            lob = reading("the line of business", lambda: line_of_business_from(extracted.get("line_of_business")))
+            if lob and "line_of_business" not in details:
+                extra["line_of_business"] = lob
+            issue = disputed_issue_from(billed_amount_usd, allowed_amount_usd, extracted.get("denial_codes"))
+            if issue and "disputed_issue" not in details:
+                extra["disputed_issue"] = issue
+            if extra:
+                set_details(extra)
+                labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan",
+                          "provider_street": "street", "provider_city": "city", "provider_state": "state",
+                          "provider_postal": "postal code", "line_of_business": "line of business",
+                          "disputed_issue": "disputed issue"}
+                changed.extend(f"{labels[k]} {v}" for k, v in extra.items())
+
+        # How many distinct claims the analyzed documents carry. Kept under
+        # its own key and refreshed on every document: it is what the reader
+        # FOUND, offered to the Reviewer, who records the filing packet's count.
+        def count_claims():
+            n_claims = c.execute(
+                "SELECT count(DISTINCT nullif(trim(result->'extracted'->>'claim_number'),'')) FROM public.doc_analysis "
+                "WHERE tenant=%s AND case_id=%s AND status LIKE 'ANALYZED%%'", (tenant, case_id)).fetchone()[0]
+            if n_claims and details.get("claims_detected") != n_claims:
+                set_details({"claims_detected": n_claims})
+
+        # A document that contradicts what the case already has is recorded,
+        # never applied: the eligibility review reads this list and sends the
+        # result for a second look.
+        def record_conflicts():
+            billed_cents = round(billed_amount_usd * 100) if billed_amount_usd else None
+            known = details.get("eligibility_conflicts")
+            known = known if isinstance(known, list) else []
+            new_conflicts = eligibility_conflicts(
+                {"disputed_amount_cents": cur_disputed, "provider_type": details.get("provider_type"),
+                 "contracted": details.get("contracted")},
+                {"disputed_amount_cents": billed_cents or None, "provider_type": provider_type, "contracted": contracted},
+                source or "a document", known,
+            )
+            if new_conflicts:
+                set_details({"eligibility_conflicts": known + new_conflicts})
+                for cf in new_conflicts:
+                    changed.append(
+                        f"CONFLICT on {cf['field'].replace('_', ' ')}: case has {cf['case_value']}, "
+                        f"{cf['document']} says {cf['document_value']} (case value kept)")
+
+        # Each field is its own step: one that fails is logged and skipped,
+        # and the rest are still filled.
+        for what, step in (("QPA", fill_qpa), ("disputed amount", fill_disputed), ("service line", fill_service_line),
+                           ("provider type", fill_provider_type), ("network status", fill_contracted),
+                           ("report fields", fill_report_fields), ("claim count", count_claims),
+                           ("conflicts", record_conflicts)):
+            reading(what, step)
+    return changed
+
+
 def features_for(tenant: str) -> dict:
-    """Per-tenant feature toggles, read fresh per document. Orig platform
-    stores them at program_rules.config->'features'; NG inside the manifest
-    (config->'manifest'->'features'). Absent flag = ON, matching the case-api
-    gate semantics — a deploy with no flags configured changes nothing."""
+    """Per-tenant feature toggles: any kept in the program settings
+    (config->'features', or the NG manifest) overlaid by public.tenant_features,
+    where case-api writes them. Absent = ON, matching case-api's gate."""
+    flags: dict = {}
     try:
         with psycopg.connect(DSN) as c:
-            row = c.execute(
-                "SELECT config FROM public.program_rules WHERE tenant=%s", (tenant,),
-            ).fetchone()
+            row = c.execute("SELECT config FROM public.program_rules WHERE tenant=%s", (tenant,)).fetchone()
+            cfg = (row[0] if row else None) or {}
+            flags.update((cfg.get("manifest") or {}).get("features") or {})
+            flags.update(cfg.get("features") or {})
+            own = c.execute("SELECT features FROM public.tenant_features WHERE tenant=%s", (tenant,)).fetchone()
+            if own and own[0]:
+                flags.update(own[0])
     except Exception:
-        return {}
-    if not row:
-        return {}
-    cfg = row[0] or {}
-    flags = dict((cfg.get("manifest") or {}).get("features") or {})
-    flags.update(cfg.get("features") or {})
+        pass
     return flags
 
 
@@ -399,7 +827,10 @@ def persist(evt: dict, ctx: dict) -> None:
     # queue's bundling filter and downstream reviews actually read.
     if kind == "case":
         ex = ctx.get("extracted_fields") or {}
-        merge_case_codes(evt["tenant"], case_id, ex)
+        try:
+            merge_case_codes(evt["tenant"], case_id, ex)
+        except Exception as exc:  # noqa: BLE001 -- the read is saved; the rest of persist must still run
+            print(f"doc-intel: merge_case_codes failed (non-fatal): {exc}", file=sys.stderr, flush=True)
         # Downstream screens (each independently feature-toggled per tenant).
         # Each is fail-open: a screen error must never block doc persistence.
         fl = features_for(evt["tenant"])
@@ -419,7 +850,7 @@ def persist(evt: dict, ctx: dict) -> None:
     # (confirmed live: it did, before this was guarded).
     try:
         search.index(
-            index=f"idre-docs-{evt['tenant']}",
+            index=f"{DOC_INDEX_PREFIX}-{evt['tenant']}",
             id=evt["doc_id"],
             # stage_index builds the searchable body; fall back to raw fields if
             # the pipeline stopped before indexing (e.g. early ERROR paths).
@@ -453,10 +884,80 @@ def persist(evt: dict, ctx: dict) -> None:
                VALUES (%s,%s,'ANALYSIS_COMPLETE',%s)""",
             (evt["tenant"], case_id, summary[:2000]),
         )
+    source = ""
+    try:
+        with psycopg.connect(DSN, autocommit=True) as c:
+            row = c.execute(f"SELECT filename FROM tenant_{evt['tenant']}.documents WHERE id=%s", (evt["doc_id"],)).fetchone()
+            source = (row[0] if row and row[0] else "") or ""
+    except Exception:
+        source = ""  # the name only labels a conflict; never worth failing the analysis for
+    # The analysis is already stored. Filling the case from it is a second
+    # step: if it fails, the document stays analyzed and the failure is put
+    # on the case timeline for a person, instead of marking the document ERROR.
+    try:
+        changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source,
+                                      str(ctx.get("text") or ctx.get("markdown") or ""))
+    except Exception as exc:  # noqa: BLE001
+        print(f"doc-intel: case fields not filled from {evt.get('doc_id')}: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        changed = []
+        try:
+            with psycopg.connect(DSN, autocommit=True) as c:
+                c.execute(
+                    """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                       VALUES (%s,%s,'AUTO_FILL_FAILED',%s)""",
+                    (evt["tenant"], case_id,
+                     f"The document{' ' + source if source else ''} was read, but its values could not be copied "
+                     f"onto the case ({type(exc).__name__}). Enter them from the document's analysis."))
+        except Exception:  # noqa: BLE001
+            pass
+    if changed:
+        with psycopg.connect(DSN, autocommit=True) as c:
+            c.execute(
+                """INSERT INTO public.case_activities (tenant, case_id, type, body)
+                   VALUES (%s,%s,'AUTO_FILLED',%s)""",
+                (evt["tenant"], case_id,
+                 f"Auto-filled from document analysis: {', '.join(changed)} — review before relying on it"),
+            )
+
+
+def read_event(evt: dict, outcome: str, started: float, ctx: dict | None = None) -> None:
+    """One JSON line per document read, for the idre activity dashboard
+    (Loki). Ids, outcome and timings only -- never document content."""
+    ctx = ctx or {}
+    print(json.dumps({
+        "kind": "document_read", "tenant": evt.get("tenant"), "case_id": evt.get("case_id"),
+        "doc_id": evt.get("doc_id"), "outcome": outcome, "status": ctx.get("status"),
+        "doc_type": ctx.get("doc_type"), "ms": int((time.time() - started) * 1000),
+        "findings": len(ctx.get("findings") or []),
+        "pages_turned": len(ctx.get("pages_turned") or []), "pages_straightened": len(ctx.get("pages_straightened") or []),
+    }), flush=True)
+
+
+def package_checked(evt: dict) -> bool:
+    """True when the document came from a TPA / health plan package and was
+    already read and accepted there (case-api records that as its analysis).
+    Re-reading it is wasted work -- and docling crashed on these one-page
+    segments, taking the whole consumer down and stalling every queue."""
+    doc_id = evt.get("doc_id")
+    if not doc_id:
+        return False
+    try:
+        with psycopg.connect(DSN) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM public.doc_analysis WHERE doc_id=%s AND result->>'source'='onboarding_package'",
+                (doc_id,)).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001 -- on doubt, read the document as usual
+        return False
 
 
 def process(evt: dict) -> None:
+    started = time.time()
     kind, subj_id = subject(evt)
+    if package_checked(evt):
+        print(f"doc-intel: {evt.get('doc_id')} already checked in its onboarding package, skipped", flush=True)
+        return
     if evt.get("sealed"):
         # Sealed offer documents: skip analysis until lawful reveal.
         mark(evt, "SEALED_PENDING_REVEAL")
@@ -487,13 +988,37 @@ def process(evt: dict) -> None:
     # pipeline (ensure_pages) — a born-digital PDF never pays for bitmaps.
     pages, truncated = (bytes_to_pages(raw, evt.get("content_type", ""), kind=kind_of)
                         if kind_of == "image" else ([], False))
+    # A page faxed upside down or sideways is turned the right way up before
+    # anything reads it: read as it came, its values landed in the wrong
+    # fields (a claim number as the provider).
+    # Crooked pages are straightened the same way.
+    turned, straightened = [], []
+    if pages:
+        try:
+            pages, turned = upright_pages(pages)
+            pages, straightened = straighten_pages(pages)
+            if turned or straightened:
+                raw = image_bytes(pages, raw)
+        except Exception as exc:  # noqa: BLE001 -- turning is an aid; reading goes on without it
+            print(f"doc-intel: could not check page orientation: {exc}", file=sys.stderr, flush=True)
+            turned, straightened = [], []
     ctx = {
+        "pages_turned": turned,
+        "pages_straightened": straightened,
         "filename": evt.get("object_key", ""),
         "raw_bytes": raw,                                   # Docling parses bytes directly
         "content_type": evt.get("content_type", ""),
         "pages": pages,                                     # for OCR fallback + VLM image
     }
-    ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
+    try:
+        ctx = run_pipeline(ctx, case=load_case(evt["tenant"], subj_id) if kind == "case" else None)
+    except ModelUnavailable as exc:
+        # Not saved half-read: the document stays unread, and the unread-
+        # document sweep in case-api sends it again (and tells people if it
+        # still cannot be read after several tries).
+        print(f"doc-intel: model unavailable for {evt.get('doc_id')}, left for re-reading: {exc}", flush=True)
+        read_event(evt, "model_unavailable", started)
+        return
     truncated = truncated or ctx.get("pages_truncated", False)
     if truncated:
         # Page-capped render: analysis covers the first DOC_INTEL_MAX_PAGES
@@ -503,6 +1028,7 @@ def process(evt: dict) -> None:
         ctx["status"] = "ANALYZED_WITH_FINDINGS"
         ctx["result_truncated"] = True
     persist(evt, ctx)
+    read_event(evt, "read", started, ctx)
     # doc.analyzed program rules (notify/flag/detail side effects, audited).
     try:
         fire_doc_rules(evt, kind, subj_id, ctx)
@@ -569,14 +1095,25 @@ def process_check(evt: dict) -> None:
             pass
 
 
+# Two deployments sharing one Kafka broker must not share topics or a consumer
+# group, or each consumes the other's events. TOPIC_PREFIX namespaces both; the
+# default keeps the original names.
+TOPIC_PREFIX = os.environ.get("TOPIC_PREFIX", "idre")
+CONSUMER_GROUP = "doc-intel" if TOPIC_PREFIX == "idre" else f"doc-intel-{TOPIC_PREFIX}"
+
+
 def main() -> None:
+    otel_setup.init("idre-doc-intel")
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BROKERS", "localhost:9092"),
-        "group.id": "doc-intel",
+        "group.id": CONSUMER_GROUP,
+        # Regex subscriptions only see a newly created topic on a metadata
+        # refresh; the 5-minute default delays a tenant's first event that long.
+        "topic.metadata.refresh.interval.ms": 30000,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
     })
-    consumer.subscribe(["^idre\\..*\\.documents"], on_assign=lambda c, ps: None)
+    consumer.subscribe([f"^{re.escape(TOPIC_PREFIX)}\\..*\\.documents"], on_assign=lambda c, ps: None)
 
     running = True
     def stop(*_):
@@ -606,23 +1143,29 @@ def main() -> None:
             n = learning.load_active(c)
             if n:
                 print(f"doc-intel learning: {n} active label synonyms loaded", flush=True)
-        learning.start_learning_loop(lambda: psycopg.connect(DSN), search)
+        learning.start_learning_loop(lambda: psycopg.connect(DSN), search, f"{DOC_INDEX_PREFIX}-*")
     except Exception as exc:  # noqa: BLE001
         print(f"doc-intel learning: startup skipped: {exc}", flush=True)
 
     def run(evt: dict) -> None:
-        if evt.get("type") == "doc.uploaded":
-            process(evt)
-        elif evt.get("type") == "check.uploaded":
-            process_check(evt)
-        elif evt.get("type") == "tpa_doc.uploaded":
-            tpa_docs.handle_tpa_doc(evt, {
-                "dsn": DSN, "vault": VAULT, "vault_headers": VAULT_HEADERS,
-                "minio": minio, "classify_text": classify_text,
-                "extract_fields": extract_fields,
-                "fetch_and_decrypt": fetch_and_decrypt,
-                "features_for": features_for,
-            })
+        kind = evt.get("type")
+        if kind not in ("doc.uploaded", "check.uploaded", "tpa_doc.uploaded"):
+            return
+        with otel_setup.span(f"{kind} process", traceparent=evt.get("traceparent"), consumer=True,
+                             **{"idre.tenant": evt.get("tenant"), "idre.doc_id": evt.get("doc_id"),
+                                "idre.case_id": evt.get("case_id"), "messaging.system": "kafka"}):
+            if kind == "doc.uploaded":
+                process(evt)
+            elif kind == "check.uploaded":
+                process_check(evt)
+            else:
+                tpa_docs.handle_tpa_doc(evt, {
+                    "dsn": DSN, "vault": VAULT, "vault_headers": VAULT_HEADERS,
+                    "minio": minio, "doc_bucket": DOC_BUCKET, "classify_text": classify_text,
+                    "extract_fields": extract_fields,
+                    "fetch_and_decrypt": fetch_and_decrypt,
+                    "features_for": features_for,
+                })
 
     def drain(block: bool = False) -> None:
         while pending and (block or pending[0][1].done()):
@@ -638,17 +1181,33 @@ def main() -> None:
                 except Exception as mark_exc:  # noqa: BLE001
                     print(f"doc-intel error (while marking a previous error): {mark_exc}",
                           file=sys.stderr, flush=True)
-            consumer.commit(msg)
+            try:
+                consumer.commit(msg)
+            except Exception as exc:  # noqa: BLE001
+                # The partition moved to another consumer while this document
+                # was being read. It will be delivered again; the work is
+                # idempotent, so losing the commit costs time, not correctness.
+                print(f"doc-intel: commit skipped ({exc})", file=sys.stderr, flush=True)
             pending.popleft()
             block = False
 
-    print(f"doc-intel consuming idre.*.documents (workers={workers}) ...", flush=True)
+    print(f"doc-intel consuming {TOPIC_PREFIX}.*.documents as group {CONSUMER_GROUP} (workers={workers}) ...", flush=True)
+    paused = False
     while running:
         drain()
-        if len(pending) >= workers * 2:
-            time.sleep(0.05)  # backpressure: don't outrun the pool
-            continue
-        msg = consumer.poll(0.5)
+        # Backpressure: don't outrun the pool. The consumer must keep polling
+        # while it waits -- a scanned fax takes minutes, and a consumer silent
+        # for max.poll.interval.ms is thrown out of the group and its
+        # documents handed out again. So pause the partitions and poll on.
+        # Re-pause every pass: a rebalance hands back unpaused partitions.
+        full = len(pending) >= workers * 2
+        if full:
+            consumer.pause(consumer.assignment())
+            paused = True
+        elif paused:
+            consumer.resume(consumer.assignment())
+            paused = False
+        msg = consumer.poll(0.2 if full else 0.5)
         if msg is None or msg.error():
             continue
         try:

@@ -36,5 +36,15 @@ BEGIN
         EXECUTE format('ALTER TABLE %I.documents ADD COLUMN IF NOT EXISTS scan_detail text', 'tenant_'||s);
         EXECUTE format('ALTER TABLE %I.documents ADD COLUMN IF NOT EXISTS filename text', 'tenant_'||s);
         EXECUTE format('ALTER TABLE %I.documents ADD COLUMN IF NOT EXISTS folder text NOT NULL DEFAULT ''GENERAL''', 'tenant_'||s);
+        -- Quarantine/review status for case-scoped documents (QUEUED|BLOCKED|
+        -- NEEDS_REVIEW|...). rules.go (flag_review/set_status) and
+        -- documents.go's upload-quarantine path, plus doc-intel-py's
+        -- is_blocked()/fire_doc_rules(), have always assumed this column
+        -- exists on tenant_X.documents -- it only ever got added to the
+        -- separate public.application_documents table (program-rules.sql),
+        -- so every doc.analyzed rule firing on a real case document has been
+        -- failing with "column analysis_status does not exist" since those
+        -- rule actions were written.
+        EXECUTE format('ALTER TABLE %I.documents ADD COLUMN IF NOT EXISTS analysis_status text NOT NULL DEFAULT ''QUEUED''', 'tenant_'||s);
     END LOOP;
 END $$;

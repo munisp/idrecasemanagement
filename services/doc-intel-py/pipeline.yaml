@@ -22,7 +22,12 @@ stages:
     config:
       lang: en
       use_doc_orientation_classify: true
-      use_doc_unwarping: true
+      # Off: the unwarping model (UVDoc) straightens photographed, curled
+      # pages, and is the largest of the OCR models. With OCR now actually
+      # running on images it pushed the pod past its memory limit. Flat
+      # scans and faxes -- what filers send -- do not need it; deskew and
+      # orientation correction still run.
+      use_doc_unwarping: false
       use_textline_orientation: true
       # Accuracy hardening (2026): every poor page is individually enhanced
       # (deskew + CLAHE + denoise + upscale); per-page recognizer confidence
@@ -121,12 +126,22 @@ stages:
 # Extraction schemas the VLM is asked to fill (JSON Schema-ish, enforced loosely).
 schemas:
   idr_claim:
+    # provider_street/city/state/zip and line_of_business feed the monthly
+    # report's Provider & Health Plan Info, so the Reviewer does not re-type
+    # what the claim form prints.
     fields: [claim_number, cpt_hcpcs_codes, service_date, billed_amount_usd,
              qpa_usd, provider_name, provider_tin, provider_npi, payer_name,
-             member_id, place_of_service]
+             member_id, place_of_service, network_status,
+             provider_street, provider_city, provider_state, provider_zip,
+             line_of_business]
   determination_letter:
     fields: [case_number, idre_entity, prevailing_party, awarded_amount_usd,
              rationale_summary, signature_present, determination_date]
   eob:
+    # service_date/determination_date: the eligibility filing window runs
+    # from the last EOB/determination date, and without these an EOB could
+    # never supply it (only a determination letter could).
     fields: [claim_number, allowed_amount_usd, patient_responsibility_usd,
-             denial_codes, service_lines]
+             denial_codes, service_lines, network_status, service_date,
+             determination_date, place_of_service,
+             billed_amount_usd, provider_name, payer_name, line_of_business]

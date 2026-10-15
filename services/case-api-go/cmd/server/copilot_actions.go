@@ -187,7 +187,13 @@ func (s *server) copilotProposeActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	system, user := copilotActionsPrompt(facts)
-	reply, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 1200)
+	// Strict JSON, ≤5 actions, one short rationale paragraph -- genuinely
+	// needs well under this. 1200 was an unused ceiling shared with the
+	// prose endpoints; at this model's observed ~3.3 tok/s a model that
+	// rambled instead of complying could still run minutes long and
+	// 504/502 at every proxy layer in front of it (confirmed live on the
+	// sibling /copilot/brief endpoint).
+	reply, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel, system, user, 400)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error":  "copilot model unreachable — no batch proposed; the facts below are still authoritative",
@@ -209,7 +215,7 @@ func (s *server) copilotProposeActions(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.copilot_action_batches (tenant, case_id, proposed_by, model, actions, rationale)
 		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		tenant, caseID, p.Subject, s.cfg.CopilotModel, actionsJ, rationale).Scan(&batchID); err != nil {
+		tenant, caseID, displayName(p), s.cfg.CopilotModel, actionsJ, rationale).Scan(&batchID); err != nil {
 		http.Error(w, `{"error":"batch insert failed (copilot_action_batches migrated?)"}`, http.StatusInternalServerError)
 		return
 	}
@@ -301,17 +307,25 @@ func (s *server) copilotDecideActions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"decision must be APPROVE or REJECT"}`, http.StatusBadRequest)
 		return
 	}
-	var status, wfID string
+	var status, wfID, proposedBy string
 	var actionsJ []byte
 	if err := s.db.QueryRow(r.Context(), `
-		SELECT status, coalesce(workflow_id,''), actions
+		SELECT status, coalesce(workflow_id,''), actions, proposed_by
 		FROM public.copilot_action_batches WHERE tenant=$1 AND id=$2 AND case_id=$3`,
-		tenant, batchID, caseID).Scan(&status, &wfID, &actionsJ); err != nil {
+		tenant, batchID, caseID).Scan(&status, &wfID, &actionsJ, &proposedBy); err != nil {
 		http.Error(w, `{"error":"batch not found"}`, http.StatusNotFound)
 		return
 	}
 	if status != "PENDING_APPROVAL" {
 		http.Error(w, `{"error":"batch already decided (`+status+`)"}`, http.StatusConflict)
+		return
+	}
+	// Maker-checker: whoever proposed the batch cannot also be the one who
+	// approves it, regardless of role — otherwise the human-gate on an
+	// AI-proposed action is theater. REJECT is exempt: killing your own
+	// bad proposal isn't a privilege-escalation risk.
+	if in.Decision == "APPROVE" && proposedBy == displayName(p) {
+		http.Error(w, `{"error":"forbidden: the proposer cannot approve their own batch — a different staff member must review it"}`, http.StatusForbidden)
 		return
 	}
 	newStatus := map[string]string{"APPROVE": "APPROVED", "REJECT": "REJECTED"}[in.Decision]
@@ -321,7 +335,7 @@ func (s *server) copilotDecideActions(w http.ResponseWriter, r *http.Request) {
 		UPDATE public.copilot_action_batches
 		SET status=$3, decided_by=$4, decided_at=now(), updated_at=now()
 		WHERE tenant=$1 AND id=$2 AND status='PENDING_APPROVAL'`,
-		tenant, batchID, newStatus, p.Subject); err != nil {
+		tenant, batchID, newStatus, displayName(p)); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
@@ -457,21 +471,27 @@ func (s *server) executeCopilotAction(r *http.Request, tenant, caseID, approvedB
 		if d, ok := a.Params["due_days"].(float64); ok && a.Type == "create_task" {
 			dueDays = int(d)
 		}
-		var id, ref string
-		err := s.db.QueryRow(r.Context(), `
-			WITH ins AS (
-				INSERT INTO public.tasks (tenant, subject, case_id, due_date, created_by)
-				VALUES ($1,$2,$3,$4,$5) RETURNING id
-			)
-			UPDATE public.tasks t
-			SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
-			       lpad(nextval('public.task_ref_seq')::text, 5, '0')
-			FROM ins WHERE t.id = ins.id RETURNING t.id, t.task_ref`,
+		// Two statements, not one writable-CTE combo -- confirmed live
+		// (createTask, crm.go) that the chained "WITH ins AS (INSERT ...
+		// RETURNING id) UPDATE t ... FROM ins WHERE t.id = ins.id" form
+		// silently updates zero rows on this Postgres (18.6), no error, so
+		// this task-creation action has likely never actually stamped a
+		// task_ref before now.
+		var id string
+		if err := s.db.QueryRow(r.Context(), `
+			INSERT INTO public.tasks (tenant, subject, case_id, due_date, created_by)
+			VALUES ($1,$2,$3,$4,$5) RETURNING id`,
 			tenant, "[copilot] "+subject, caseID,
 			time.Now().Add(time.Duration(dueDays)*24*time.Hour).Format("2006-01-02"),
-			"copilot (approved by "+approvedBy+")").Scan(&id, &ref)
-		if err != nil {
+			"copilot (approved by "+approvedBy+")").Scan(&id); err != nil {
 			return "", fmt.Errorf("task insert: %w", err)
+		}
+		var ref string
+		if err := s.db.QueryRow(r.Context(), `
+			UPDATE public.tasks SET task_ref = 'TASK-' || to_char(now(),'YYYY') || '-' ||
+			       lpad(nextval('public.task_ref_seq')::text, 5, '0')
+			WHERE id = $1 RETURNING task_ref`, id).Scan(&ref); err != nil {
+			return "", fmt.Errorf("task ref: %w", err)
 		}
 		return fmt.Sprintf("task %s created (due in %dd)", ref, dueDays), nil
 

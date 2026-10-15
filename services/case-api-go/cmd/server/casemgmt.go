@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,8 +42,11 @@ var crmStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "
 // enforced nothing), which meant a narrow specialist role with no financial
 // remit at all -- ARBITRATOR, CODER, NURSE_PHYSICIAN, ATTORNEY -- could read
 // check images' bank routing/account numbers just by typing the address.
-// Matches the portal's own Financials nav gate exactly.
-var financialReadRoles = []string{"FINANCE", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole}
+// Matches the portal's own Financials nav gate exactly. CASE_MANAGER
+// removed per the access-control follow-up: Financials is a standalone
+// dashboard, not case-detail info, so reviewer loses it entirely rather
+// than just the write actions the original audit restricted.
+var financialReadRoles = []string{"FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole}
 
 // qaReadRoles: the QA review queue/detail (correspondence drafts awaiting
 // approval) -- same gap as financialReadRoles, same fix. Matches the
@@ -52,7 +56,15 @@ var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDE
 // reportsReadRoles: the Reports page's summary/SLA endpoints. Matches the
 // portal's own Reports nav gate (notably FINANCE and ARBITRATOR are NOT
 // here, unlike financialReadRoles -- Reports nav never included them).
-var reportsReadRoles = []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", serviceRole}
+// CASE_MANAGER removed per the same access-control follow-up as
+// financialReadRoles: reviewer loses Reports entirely, not just a subset.
+// TENANT_ADMIN added back explicitly: it used to ride in on CASE_MANAGER's
+// hasRole quirk, and removing CASE_MANAGER from this list silently took
+// TENANT_ADMIN down with it -- confirmed live, not intended. Reviewer and
+// tenant admin are different roles with different scopes going forward;
+// every "CASE_MANAGER removed" change from the reviewer-only-reviews work
+// gets this same explicit TENANT_ADMIN restoration.
+var reportsReadRoles = []string{"PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole}
 
 // ---- Notifications -----------------------------------------------------------
 
@@ -66,6 +78,7 @@ func (s *server) notify(r *http.Request, tenant, userSub, typ, body, link string
 // account 360 and voice. Every subsystem (intake, documents, signals, notes,
 // email, voice) writes through here so there is ONE activity stream per case.
 func (s *server) logActivity(ctx context.Context, tenant, caseID, typ, body string) {
+	logEvent(ctx, "activity", tenant, caseID, typ, nil)
 	_, _ = s.db.Exec(ctx, `
 		INSERT INTO public.case_activities (tenant, case_id, type, body)
 		VALUES ($1,$2,$3,$4)`, tenant, caseID, typ, truncate(body, 2000))
@@ -91,21 +104,62 @@ func (s *server) logActivity(ctx context.Context, tenant, caseID, typ, body stri
 // producers have the same gap. A SELECT ... FOR UPDATE would close it if
 // write volume ever makes that race likely in practice.
 func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, payload map[string]any) {
+	logEvent(ctx, "audit", tenant, caseID, action, eventDetail(payload))
 	body, err := json.Marshal(payload) // Go sorts map keys on marshal -- matches Python's sort_keys=True
 	if err != nil {
 		return
 	}
+	// One writer at a time per tenant: two entries written at once both read
+	// the same last hash, and the chain forked. Every outside organization's
+	// action is audited now (orgaudit.go), so "at once" is common.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		slog.Error("audit", "action", action, "err", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	_, _ = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('audit_log:' || $1))`, tenant)
 	var prevHash string
-	if err := s.db.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT hash FROM public.audit_log WHERE tenant=$1 ORDER BY id DESC LIMIT 1`, tenant).
 		Scan(&prevHash); err != nil {
 		prevHash = "GENESIS"
 	}
 	sum := sha256.Sum256([]byte(prevHash + string(body)))
 	hash := hex.EncodeToString(sum[:])
-	_, _ = s.db.Exec(ctx, `
-		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash)
-		VALUES ($1,$2,$3,$4,$5,$6)`, tenant, caseID, action, string(body), prevHash, hash)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org, actor)
+		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''))`, tenant, caseID, action, string(body), prevHash, hash, auditOrg(payload), auditActor(payload)); err != nil {
+		slog.Error("audit", "action", action, "err", err)
+		return
+	}
+	_ = tx.Commit(ctx)
+}
+
+// auditActor: the person an entry records ("by"), for their own trail
+// (My activity); "" for the system, Stripe and other machine actors.
+func auditActor(payload map[string]any) string {
+	by, _ := payload["by"].(string)
+	if by == "" || strings.HasPrefix(by, "system") || strings.HasPrefix(by, "stripe") {
+		return ""
+	}
+	return by
+}
+
+// auditOrg: the outside organization an entry is about, so its own audit
+// log (orgaudit.go) can show it -- "org" when the writer says so, else the
+// tpa_id / plan_id the entry already names.
+func auditOrg(payload map[string]any) string {
+	if o, _ := payload["org"].(string); o != "" {
+		return o
+	}
+	if id := fmt.Sprint(payload["tpa_id"]); payload["tpa_id"] != nil && id != "" {
+		return "tpa:" + id
+	}
+	if id := fmt.Sprint(payload["plan_id"]); payload["plan_id"] != nil && id != "" {
+		return "plan:" + id
+	}
+	return ""
 }
 
 // listAuditLog: GET /v1/tenants/{tenant}/audit-log — the hash-chained,
@@ -118,8 +172,11 @@ func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, pa
 // their own tenant's rows.
 func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CASE_MANAGER", "PM") {
-		http.Error(w, `{"error":"forbidden: requires admin, auditor, or case-staff role"}`, http.StatusForbidden)
+	// The whole program's trail: admins and the state auditor. Everyone else
+	// reads their own (GET /audit/mine) and, for a TPA or plan, its
+	// organization's; a case's own history stays on the case page.
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN") {
+		http.Error(w, `{"error":"forbidden: the program audit log is for admins and the state auditor — your Audit log shows your own actions"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -162,6 +219,44 @@ func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	// payload.by is a raw Keycloak subject on every logAudit call, by
+	// design -- an audit trail should key on the stable subject, not a
+	// mutable display name, so the write-time convention stays as-is.
+	// Resolve it to a username for DISPLAY only, same as the Team/Time
+	// fix (resolveSubjectNames), without touching what's actually stored.
+	// pgx returns this jsonb column as raw JSON text (string/[]byte), not
+	// a decoded map, via queryRows' generic .Values() path -- confirmed
+	// live, so it needs its own json.Unmarshal here rather than a type
+	// assertion straight to map[string]any.
+	payloadBy := func(row map[string]any) string {
+		var raw []byte
+		switch v := row["payload"].(type) {
+		case string:
+			raw = []byte(v)
+		case []byte:
+			raw = v
+		default:
+			return ""
+		}
+		var payload map[string]any
+		if json.Unmarshal(raw, &payload) != nil {
+			return ""
+		}
+		by, _ := payload["by"].(string)
+		return by
+	}
+	var subjects []string
+	for _, row := range rows {
+		if by := payloadBy(row); by != "" {
+			subjects = append(subjects, by)
+		}
+	}
+	names := s.resolveSubjectNames(r.Context(), subjects)
+	for _, row := range rows {
+		if by := payloadBy(row); by != "" {
+			row["by_name"] = names[by]
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows})
 }
 
@@ -172,8 +267,8 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 		SELECT id, type, body, COALESCE(link,''), created_at
 		FROM public.notifications
-		WHERE tenant=$1 AND (user_sub=$2 OR user_sub='*') AND read_at IS NULL
-		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, p.Subject)
+		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL
+		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, s.notifTargetsFor(r.Context(), tenant, p))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -195,9 +290,27 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// Scoped the same way listNotifications reads: own notifications plus
+	// tenant-wide broadcasts (user_sub='*') -- previously any authenticated
+	// tenant member could mark ANY other user's notification read by id.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.notifications SET read_at=now()
-		WHERE tenant=$1 AND id=$2`, tenant, chi.URLParam(r, "notifId"))
+		WHERE tenant=$1 AND id=$2 AND user_sub = ANY($3)`,
+		tenant, chi.URLParam(r, "notifId"), s.notifTargetsFor(r.Context(), tenant, p))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
+}
+
+// readAllNotifications: POST /notifications/read-all — clears every unread
+// notification visible to the caller (own + tenant-wide broadcasts), same
+// scope as listNotifications.
+func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	_, _ = s.db.Exec(r.Context(), `
+		UPDATE public.notifications SET read_at=now()
+		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL`,
+		tenant, s.notifTargetsFor(r.Context(), tenant, p))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
 }
 
@@ -206,8 +319,10 @@ func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 // fewest open assignments wins. Manual override via {"assignee": "<sub>"}.
 
 func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	// The PM assigns reviewers (SOP). A Reviewer still takes work with
+	// "Grab next"; it cannot route cases to other people.
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -350,6 +465,12 @@ func (s *server) relateCases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rel_type must be BATCH | PARENT_CHILD | DUPLICATE"}`, http.StatusBadRequest)
 		return
 	}
+	for _, id := range []string{in.CaseID, in.RelatedID} {
+		if lock := s.caseLockedForRequest(r, tenant, id); lock != "" {
+			writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+			return
+		}
+	}
 	_, err := s.db.Exec(r.Context(), `
 		INSERT INTO public.case_relationships (tenant, case_id, related_case_id, rel_type)
 		VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
@@ -476,6 +597,20 @@ func (s *server) getChecklist(w http.ResponseWriter, r *http.Request) {
 		SELECT id, stage, item, required, done, COALESCE(done_by,'') AS done_by, done_at
 		FROM public.case_checklists WHERE tenant=$1 AND case_id=$2
 		ORDER BY stage, id`, tenant, id)
+	// Each item belongs to one role: say whose it is, and whether the
+	// caller is that role (or an admin) so the page offers the tick only
+	// to them.
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	var owners map[string]string
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		owners = cfg.ChecklistOwners
+	}
+	for _, row := range out {
+		role := owners[fmt.Sprint(row["item"])]
+		row["owner_role"] = role
+		row["owner"] = wfOwnerLabels[role]
+		row["can_check"] = mayCheckItem(p, role)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -486,11 +621,26 @@ func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 	// (views.js) has always shown the check button to ARBITRATOR -- a real,
 	// actively-used federal NSA role -- so the gate matches what's already
 	// exposed rather than silently 403ing a working interaction.
-	if !hasAnyRole(p, "ARBITRATOR") && !hasAnyRole(p, caseStaffRoles...) {
+	if !hasAnyRole(p, "ARBITRATOR", "FINANCE") && !hasAnyRole(p, caseStaffRoles...) {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}
 	itemID := chi.URLParam(r, "itemId")
+	// Role-based: an item with an owner in the program's checklist_owners
+	// is ticked by that role (or an admin) and nobody else.
+	if cfg := s.loadProgram(r, tenant); cfg != nil && len(cfg.ChecklistOwners) > 0 {
+		var item string
+		if err := s.db.QueryRow(r.Context(),
+			`SELECT item FROM public.case_checklists WHERE tenant=$1 AND id=$2`, tenant, itemID).Scan(&item); err != nil {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		if role := cfg.ChecklistOwners[item]; !mayCheckItem(p, role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("forbidden: this checklist item is ticked by the %s", wfOwnerLabels[role])})
+			return
+		}
+	}
 	res, err := s.db.Exec(r.Context(), `
 		UPDATE public.case_checklists SET done=true, done_by=$3, done_at=now()
 		WHERE tenant=$1 AND id=$2`, tenant, itemID, p.Subject)
@@ -516,6 +666,17 @@ func (s *server) checkItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// A TPA sees only its own disputes' deadlines and its own tasks.
+	if hasRole(r.Context().Value(ctxPrincipal{}).(principal), "TPA") {
+		org, err := s.tpaForPrincipal(r, tenant)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
+			return
+		}
+		// The deadlines on its own disputes and its own tasks (tpa_calendar.go).
+		writeJSON(w, http.StatusOK, s.tpaCalendarItems(r, tenant, org.ID))
+		return
+	}
 	deadlines, _ := s.queryRows(r, fmt.Sprintf(`
 		SELECT id::text AS ref, 'OFFER_WINDOW' AS kind, case_number AS label,
 		       to_char(offer_window_ends_at,'YYYY-MM-DD"T"HH24:MI') AS due, id::text AS case_id
@@ -723,4 +884,13 @@ func truncate(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
+}
+
+// mayCheckItem: the item's owner role, or an admin. An item with no owner
+// keeps the old rule (any case staff, already checked by the caller).
+func mayCheckItem(p principal, ownerRole string) bool {
+	if ownerRole == "" {
+		return true
+	}
+	return hasAnyRole(p, ownerRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 }

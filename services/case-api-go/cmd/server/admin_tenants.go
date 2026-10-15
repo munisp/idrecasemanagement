@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -62,7 +63,7 @@ func generateTempPassword() (string, error) {
 var validTenantRoles = map[string]bool{
 	"CASE_MANAGER": true, "ARBITRATOR": true, "PM": true, "CODER": true,
 	"NURSE_PHYSICIAN": true, "DOCTOR": true, "NURSE": true, "ATTORNEY": true, "FINANCE": true,
-	"STATE_AUDITOR": true, "PARTY": true, "TPA": true,
+	"STATE_AUDITOR": true, "PARTY": true, "TPA": true, "TENANT_ADMIN": true,
 }
 
 type createTenantRequest struct {
@@ -148,10 +149,31 @@ func (s *server) kcEnsureGroup(ctx context.Context, tok, tenant string) (already
 // kcAssignRealmRole assigns one realm role to a user by name. Keycloak's
 // POST .../users/{id}/role-mappings/realm needs the role's id (not just its
 // name), so this looks the role up first via GET .../roles/{roleName}.
+// selfServeRoles are the outside roles the public registration pages hand
+// out. One missing from the realm (HEALTH_PLAN was never in the realm
+// import) is created on first use: without it every plan login was created
+// with no role at all.
+var selfServeRoles = map[string]bool{"TPA": true, "HEALTH_PLAN": true, "PARTY": true}
+
 func (s *server) kcAssignRealmRole(ctx context.Context, tok, userID, roleName string) error {
 	roleResp, err := s.kcDo(ctx, http.MethodGet, "/admin/realms/idre/roles/"+roleName, tok, nil)
 	if err != nil {
 		return err
+	}
+	if roleResp.StatusCode == http.StatusNotFound && selfServeRoles[roleName] {
+		roleResp.Body.Close()
+		body, _ := json.Marshal(map[string]string{"name": roleName, "description": "outside organization account (created by case-api)"})
+		cr, err := s.kcDo(ctx, http.MethodPost, "/admin/realms/idre/roles", tok, body)
+		if err != nil {
+			return err
+		}
+		cr.Body.Close()
+		if cr.StatusCode != http.StatusCreated && cr.StatusCode != http.StatusConflict {
+			return fmt.Errorf("role create: status %d", cr.StatusCode)
+		}
+		if roleResp, err = s.kcDo(ctx, http.MethodGet, "/admin/realms/idre/roles/"+roleName, tok, nil); err != nil {
+			return err
+		}
 	}
 	defer roleResp.Body.Close()
 	if roleResp.StatusCode != http.StatusOK {
@@ -228,8 +250,14 @@ func (s *server) kcCreateUser(ctx context.Context, tok, username, email, role st
 			out["role_assignment_error"] = "user created but could not determine its id from the Location header -- role was not assigned"
 			return out
 		}
+		out["user_id"] = userID // == the JWT "sub" this account will present once it logs in
 		if err := s.kcAssignRealmRole(ctx, tok, userID, role); err != nil {
-			out["role_assignment_error"] = "user created but role assignment failed: " + err.Error()
+			// A login without its role is not a smaller account, it is an
+			// unknown one: take it back rather than hand it out.
+			if derr := s.kcDeleteUser(ctx, tok, userID); derr != nil {
+				slog.Error("keycloak user left without its role", "user_id", userID, "role", role, "err", derr)
+			}
+			return map[string]any{"error": "the account could not be given its role (" + role + "): " + err.Error()}
 		}
 		return out
 	case http.StatusConflict:
@@ -417,14 +445,30 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 	// from the JWT's group claim (principal.Tenants) directly, same source
 	// tenancy() itself reads from, not a URL-derived ctxTenant that
 	// doesn't exist on this route.
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		if !hasRole(p, "CASE_MANAGER") || !contains(p.Tenants, in.Tenant) {
-			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or CASE_MANAGER adding staff to their own tenant"}`, http.StatusForbidden)
+	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+	if !isAdmin {
+		// CASE_MANAGER removed from Team per the access-control follow-up:
+		// reviewer loses tenant staff admin entirely. TENANT_ADMIN added
+		// back explicitly: it's a genuinely different role from reviewer
+		// (the tenant's own super-admin) that had been riding in on
+		// CASE_MANAGER's hasRole quirk and got silently taken down with
+		// it -- confirmed live, not intended.
+		if !hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, in.Tenant) {
+			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN adding staff to their own tenant"}`, http.StatusForbidden)
 			return
 		}
 	}
 	if !validTenantRoles[in.Role] {
-		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY, TENANT_ADMIN"}`, http.StatusBadRequest)
+		return
+	}
+	// TENANT_ADMIN is deliberately the one role in validTenantRoles that
+	// still requires FEDERAL_ADMIN/PLATFORM_ADMIN specifically: a tenant
+	// admin can mint ordinary staff for their own tenant via the branch
+	// above, but minting ANOTHER tenant admin stays centralized -- avoids
+	// a self-escalating admin chain within one state.
+	if in.Role == "TENANT_ADMIN" && !isAdmin {
+		http.Error(w, `{"error":"forbidden: only FEDERAL_ADMIN/PLATFORM_ADMIN may create a TENANT_ADMIN account"}`, http.StatusForbidden)
 		return
 	}
 	var exists bool
@@ -461,6 +505,7 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 }
 
 type staffMember struct {
+	ID       string   `json:"id"` // Keycloak user id -- the same value as a JWT's sub claim
 	Username string   `json:"username"`
 	Email    string   `json:"email"`
 	Enabled  bool     `json:"enabled"`
@@ -520,6 +565,52 @@ func (s *server) kcFindUserByUsername(ctx context.Context, tok, username string)
 		return "", nil // not found -- caller treats as 404, not a transport error
 	}
 	return users[0].ID, nil
+}
+
+// kcGetUserByID resolves a Keycloak subject (the JWT "sub" claim, a UUID)
+// to its username, for display purposes only. Returns "" (no error) on any
+// non-200 -- a deleted account, a malformed id (e.g. the worker-token
+// principal's literal "service:idre-workflows"), or anything else -- so
+// callers can fall back to the raw subject without special-casing input.
+func (s *server) kcGetUserByID(ctx context.Context, tok, userID string) (string, error) {
+	resp, err := s.kcDo(ctx, http.MethodGet, "/admin/realms/idre/users/"+url.PathEscape(userID), tok, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", nil
+	}
+	var u struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+		return "", err
+	}
+	return u.Username, nil
+}
+
+// resolveSubjectNames maps raw Keycloak subject ids (as stored in
+// time_entries.subject, audit logs, etc.) to display usernames, for
+// reports/reviews where staff need to know WHO did something rather than
+// a bare UUID. Falls back to the raw subject per-id on any lookup failure
+// (deleted user, malformed id, or Keycloak admin auth itself failing) --
+// a report that can't resolve names should still render, just with ids.
+func (s *server) resolveSubjectNames(ctx context.Context, subjects []string) map[string]string {
+	out := map[string]string{}
+	for _, sub := range subjects {
+		out[sub] = sub // default/fallback
+	}
+	tok, err := s.kcAdminToken(ctx)
+	if err != nil {
+		return out
+	}
+	for sub := range out {
+		if name, err := s.kcGetUserByID(ctx, tok, sub); err == nil && name != "" {
+			out[sub] = name
+		}
+	}
+	return out
 }
 
 // kcUserInTenantGroup checks the target user's OWN group membership against
@@ -631,9 +722,10 @@ func (s *server) updateTenantStaffStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	in.Tenant = strings.ToLower(strings.TrimSpace(in.Tenant))
+	// TENANT_ADMIN added back -- see createTenantStaff for why.
 	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
-	if !isAdmin && (!hasRole(p, "CASE_MANAGER") || !contains(p.Tenants, in.Tenant)) {
-		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or CASE_MANAGER acting on their own tenant"}`, http.StatusForbidden)
+	if !isAdmin && (!hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, in.Tenant)) {
+		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN acting on their own tenant"}`, http.StatusForbidden)
 		return
 	}
 	tok, userID, ok := s.resolveStaffTarget(w, r, p, username)
@@ -675,9 +767,10 @@ func (s *server) deleteTenantStaff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"tenant query param required"}`, http.StatusBadRequest)
 		return
 	}
+	// TENANT_ADMIN added back -- see createTenantStaff for why.
 	isAdmin := hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN")
-	if !isAdmin && (!hasRole(p, "CASE_MANAGER") || !contains(p.Tenants, tenant)) {
-		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or CASE_MANAGER acting on their own tenant"}`, http.StatusForbidden)
+	if !isAdmin && (!hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, tenant)) {
+		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN acting on their own tenant"}`, http.StatusForbidden)
 		return
 	}
 	tok, userID, ok := s.resolveStaffTarget(w, r, p, username)
@@ -776,10 +869,18 @@ func (s *server) listTenantStaff(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"tenant query param required"}`, http.StatusBadRequest)
 		return
 	}
+	// TENANT_ADMIN added back -- see createTenantStaff for why.
+	// brief=1 is the colleague picker (sharing an Assistant thread): any case
+	// staff of the tenant may ask, and gets names only -- no emails, no
+	// roles, no disabled accounts. The full list stays with PM and admins.
+	brief := false
 	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		if !hasRole(p, "CASE_MANAGER") || !contains(p.Tenants, tenant) {
-			http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or CASE_MANAGER viewing their own tenant"}`, http.StatusForbidden)
-			return
+		if !hasAnyRole(p, "PM", "TENANT_ADMIN") || !contains(p.Tenants, tenant) {
+			brief = r.URL.Query().Get("brief") == "1" && hasAnyRole(p, caseStaffRoles...) && contains(p.Tenants, tenant)
+			if !brief {
+				http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN/PLATFORM_ADMIN, or PM/TENANT_ADMIN viewing their own tenant"}`, http.StatusForbidden)
+				return
+			}
 		}
 	}
 	tok, err := s.kcAdminToken(r.Context())
@@ -824,8 +925,14 @@ func (s *server) listTenantStaff(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(membersResp.Body).Decode(&kcUsers)
 	out := make([]staffMember, 0, len(kcUsers))
 	for _, u := range kcUsers {
+		if brief {
+			if u.Enabled {
+				out = append(out, staffMember{ID: u.ID, Username: u.Username, Enabled: true, Roles: []string{}})
+			}
+			continue
+		}
 		out = append(out, staffMember{
-			Username: u.Username, Email: u.Email, Enabled: u.Enabled,
+			ID: u.ID, Username: u.Username, Email: u.Email, Enabled: u.Enabled,
 			Roles: s.kcUserRoles(r.Context(), tok, u.ID),
 		})
 	}
@@ -857,13 +964,14 @@ func (s *server) listFederalAdmins(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var users []struct {
+			ID       string `json:"id"`
 			Username string `json:"username"`
 			Email    string `json:"email"`
 			Enabled  bool   `json:"enabled"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&users)
 		for _, u := range users {
-			out = append(out, staffMember{Username: u.Username, Email: u.Email, Enabled: u.Enabled, Roles: []string{role}})
+			out = append(out, staffMember{ID: u.ID, Username: u.Username, Email: u.Email, Enabled: u.Enabled, Roles: []string{role}})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)

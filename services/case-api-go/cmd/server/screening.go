@@ -15,8 +15,8 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -214,6 +214,10 @@ func screenName(query string) (matched bool, top float64, matches []screeningMat
 // ---------- HTTP surface ----------
 
 func (s *server) screeningStatus(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, paymentReadRoles...) {
+		http.Error(w, `{"error":"forbidden: requires PM, FINANCE, or admin"}`, http.StatusForbidden)
+		return
+	}
 	sdnList.RLock()
 	defer sdnList.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -225,7 +229,7 @@ func (s *server) screeningStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) screenSubject(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, paymentReadRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -260,7 +264,7 @@ func (s *server) screenSubject(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO public.screening_checks
 		  (tenant, subject_type, subject_ref, query_name, matched, top_score, matches, list_entity_count, list_refreshed_at, screened_by)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-		tenant, strings.ToUpper(in.SubjectType), in.SubjectRef, in.Name, matched, top, mj, loaded, refreshed, p.Subject).Scan(&id)
+		tenant, strings.ToUpper(in.SubjectType), in.SubjectRef, in.Name, matched, top, mj, loaded, refreshed, displayName(p)).Scan(&id)
 	if matched {
 		s.logAudit(r.Context(), tenant, "", "SCREENING_MATCH", map[string]any{
 			"by": p.Subject, "query": in.Name, "subject_type": in.SubjectType,
@@ -272,6 +276,56 @@ func (s *server) screenSubject(w http.ResponseWriter, r *http.Request) {
 		"screening_id": id, "matched": matched, "top_score": top,
 		"matches": matches, "list_entity_count": loaded, "list_refreshed_at": refreshed,
 	})
+}
+
+// screeningChecks: GET /screening/checks -- the record of past screenings,
+// newest first. ?q= matches the name checked, ?result=match|clear,
+// ?type= the subject type; limit/offset page it. Read by the same roles that
+// may screen.
+func (s *server) screeningChecks(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, paymentReadRoles...) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	where, args := screeningFilter(tenant, r.URL.Query().Get("q"), r.URL.Query().Get("result"), r.URL.Query().Get("type"))
+	limit, offset := pageParams(r, 50, 200)
+	var total, matches int
+	_ = s.db.QueryRow(r.Context(), `SELECT count(*), count(*) FILTER (WHERE matched) FROM public.screening_checks WHERE `+where, args...).Scan(&total, &matches)
+	rows, err := s.queryRows(r, fmt.Sprintf(`
+		SELECT id, created_at, query_name, subject_type, subject_ref, matched, top_score::float8 AS top_score,
+		       CASE WHEN jsonb_typeof(matches)='array' THEN matches->0->>'name' END AS top_match,
+		       CASE WHEN jsonb_typeof(matches)='array' THEN jsonb_array_length(matches) ELSE 0 END AS match_count,
+		       screened_by
+		FROM public.screening_checks WHERE %s
+		ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d`, where, limit, offset), args...)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"checks": rows, "total": total, "matches": matches})
+}
+
+// screeningFilter builds the WHERE clause for screeningChecks; pure, so the
+// filters are tested without a database.
+func screeningFilter(tenant, q, result, typ string) (string, []any) {
+	where, args := "tenant=$1", []any{tenant}
+	if q = strings.TrimSpace(q); q != "" {
+		args = append(args, "%"+strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(q)+"%")
+		where += fmt.Sprintf(" AND query_name ILIKE $%d", len(args))
+	}
+	switch result {
+	case "match":
+		where += " AND matched"
+	case "clear":
+		where += " AND NOT matched"
+	}
+	if typ = strings.ToUpper(strings.TrimSpace(typ)); typ != "" {
+		args = append(args, typ)
+		where += fmt.Sprintf(" AND subject_type=$%d", len(args))
+	}
+	return where, args
 }
 
 // screenOnboardingSubject: hooked from decideApplication on APPROVE — the
@@ -315,6 +369,7 @@ func (s *server) screenOnboardingSubject(r *http.Request, tenant, subjectType, s
 //     against no sanctions list is worse than a temporary halt.
 //   - match >= threshold      -> block (422); the screening_checks row, staff
 //     notification and (non-NG) audit event make the block examinable.
+//
 // Returns (blocked, topScore, statusCode, clientMessage).
 func (s *server) screenPaymentParty(r *http.Request, tenant, subjectType, subjectRef, name string) (bool, float64, int, string) {
 	if strings.EqualFold(os.Getenv("WATCHMAN_ENABLED"), "false") {

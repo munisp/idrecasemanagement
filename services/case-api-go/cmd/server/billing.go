@@ -16,7 +16,6 @@ package main
 // invoice amount, default bill-to, and memo template.
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -145,7 +144,12 @@ func allocatePayment(total int64, weights []int64) []int64 {
 	return out
 }
 
-var billingViewRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+// CASE_MANAGER deliberately excluded -- the Billing screen's bulk
+// service-fee invoice generate/list/export is a standalone finance screen,
+// not case-detail info; see arapReadRoles' comment. issueInvoice (a single
+// case's own fee invoice, in programops.go) is a separate, still-permitted
+// endpoint.
+var billingViewRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // postSvcLedger posts the double-entry leg of a service-invoice event to the
 // tenant's TigerBeetle ledger:
@@ -158,17 +162,10 @@ func (s *server) postSvcLedger(tenant, key string, debitCode, creditCode uint32,
 	if s.tb == nil || amount <= 0 {
 		return
 	}
-	ih := sha256.Sum256([]byte("svc:" + key))
-	var idb [16]byte
-	copy(idb[:], ih[:16])
-	res, err := s.tb.CreateTransfers([]tb_types.Transfer{{
-		ID:              tb_types.BytesToUint128(idb),
-		DebitAccountID:  acctID(tenant, debitCode, ""),
-		CreditAccountID: acctID(tenant, creditCode, ""),
-		Amount:          tb_types.ToUint128(uint64(amount)),
-		Ledger:          tenantLedgerID(tenant),
-		Code:            ledgerCodeIDRE,
-	}})
+	res, err := s.postLedger(tenant, ledgerAcct{debitCode, ""}, ledgerAcct{creditCode, ""}, tb_types.Transfer{
+		ID:     ledgerTransferID("svc:" + key),
+		Amount: tb_types.ToUint128(uint64(amount)),
+	})
 	if err != nil {
 		slog.Error("ledger leg failed for service invoice", "key", key, "err", err)
 		return
@@ -482,8 +479,12 @@ func (s *server) transitionInvoice(w http.ResponseWriter, r *http.Request) {
 		to    string
 		roles []string
 	}
+	// "approve" excludes CASE_MANAGER deliberately (access-control audit,
+	// AC-5 separation of duties): approving converts a draft service
+	// invoice into a payable obligation, and the role that manages/decides
+	// the underlying dispute shouldn't also authorize that step.
 	rules := map[string]rule{
-		"approve": {[]string{"DRAFT"}, "APPROVED", []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
+		"approve": {[]string{"DRAFT"}, "APPROVED", []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
 		"issue":   {[]string{"APPROVED"}, "ISSUED", []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
 		"void":    {[]string{"DRAFT", "APPROVED", "ISSUED"}, "VOID", []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}},
 	}

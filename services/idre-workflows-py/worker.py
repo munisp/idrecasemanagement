@@ -15,14 +15,15 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from temporalio.client import Client
+import otel_setup
 from temporalio.worker import Worker
 
 from activities import (
     set_case_status, post_ledger_transfer, request_lawful_reveal,
     notify_party, flag_cms_breach, run_cms_monthly_report,
+    export_ledger_snapshot, reconcile_ledger,
 )
 from onboarding_activities import (
-    export_ledger_snapshot, reconcile_ledger,
     set_application_status, check_ein_npi, check_idre_certification,
     check_state_requirements, provision_keycloak_account,
     provision_idre_ledger_accounts, send_portal_invite, record_onboarding_audit,
@@ -37,9 +38,12 @@ from copilot_actions import (
 from onboarding import StakeholderOnboardingWorkflow, TenantOnboardingWorkflow
 from ahca_activities import (
     set_dual_status, set_program_date, record_followup_action,
-    send_correspondence, set_case_outcome,
+    send_correspondence, set_case_outcome, notify_roles, recommendation_days_left,
 )
 from ahca_workflow import AhcaDisputeWorkflow
+from fee_payments import (
+    FeePaymentWorkflow, charge_fee_group, check_fee_group, give_up_fee_group, summarize_fee_run,
+)
 
 
 async def run_workers(client: Client) -> None:
@@ -78,11 +82,18 @@ async def run_workers(client: Client) -> None:
         workflows=[AhcaDisputeWorkflow],
         activities=[
             set_dual_status, set_program_date, record_followup_action,
-            send_correspondence, set_case_outcome,
+            send_correspondence, set_case_outcome, notify_roles, recommendation_days_left,
             flag_cms_breach,  # reused as-is from activities.py -- generic, not CMS-specific at the DB/HTTP layer
         ],
     )
-    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run())
+    # Fee payments charged to saved cards / bank accounts (fee_payments.py).
+    payments_worker = Worker(
+        client,
+        task_queue="idre-payments",
+        workflows=[FeePaymentWorkflow],
+        activities=[charge_fee_group, check_fee_group, give_up_fee_group, summarize_fee_run],
+    )
+    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run(), payments_worker.run())
 
 
 # ---- Dapr binding listener ---------------------------------------------------
@@ -159,9 +170,11 @@ _MAIN_LOOP: asyncio.AbstractEventLoop | None = None
 async def main() -> None:
     global _MAIN_LOOP
     _MAIN_LOOP = asyncio.get_running_loop()
+    otel_setup.init("idre-workflows")
     client = await Client.connect(
         os.environ.get("TEMPORAL_HOST", "localhost:7233"),
         namespace=os.environ.get("TEMPORAL_NAMESPACE", "idre"),
+        interceptors=otel_setup.temporal_interceptors(),
     )
     start_dapr_listener(client)
     await run_workers(client)

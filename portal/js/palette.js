@@ -9,22 +9,27 @@ const Palette = (() => {
     else localStorage.setItem("idre.recents", JSON.stringify(recents));
   }
 
-  const ACTIONS = () => ([
-    { s: "Go", icon: "▤", label: "Home", run: () => go("#/dashboard") },
-    { s: "Go", icon: "▦", label: "Disputes", run: () => go("#/cases") },
-    { s: "Go", icon: "▥", label: "Pipeline", run: () => go("#/pipeline") },
-    { s: "Go", icon: "◈", label: "Accounts", run: () => go("#/crm/accounts") },
-    { s: "Go", icon: "◎", label: "Leads", run: () => go("#/crm/leads") },
-    { s: "Go", icon: "☑", label: "My tasks", run: () => go("#/crm/tasks") },
-    { s: "Go", icon: "▨", label: "Calendar", run: () => go("#/calendar") },
-    { s: "Go", icon: "◫", label: "Reports", run: () => go("#/reports") },
-    { s: "Action", icon: "＋", label: "New dispute", kbd: "C", run: () => go("#/new") },
-    { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext },
-    { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", run: () => go("#/ask") },
-    { s: "Action", icon: "⟳", label: "Sync dispute graph (Postgres → FalkorDB → lakehouse)", run: graphSync },
-    { s: "Action", icon: "⌘", label: "Train GNN link predictor", run: graphTrain },
-    { s: "Action", icon: "◐", label: "Toggle dark mode", run: () => document.getElementById("theme-toggle").click() },
-  ]);
+  // The palette offers only pages this account's menu offers (App.canOpen).
+  const mayOpen = (h) => !window.App?.canOpen || App.canOpen(h);
+  const ACTIONS = () => {
+    return [
+      { s: "Go", icon: "▤", label: "Home", page: "#/dashboard" },
+      { s: "Go", icon: "▦", label: "Disputes", page: "#/cases" },
+      { s: "Go", icon: "▥", label: "Pipeline", page: "#/pipeline" },
+      { s: "Go", icon: "◈", label: "Accounts", page: "#/crm/accounts" },
+      { s: "Go", icon: "◎", label: "Leads", page: "#/crm/leads" },
+      { s: "Go", icon: "☑", label: "My tasks", page: "#/crm/tasks" },
+      { s: "Go", icon: "▨", label: "Calendar", page: "#/calendar" },
+      { s: "Go", icon: "◫", label: "Reports", page: "#/reports" },
+      { s: "Action", icon: "＋", label: "New dispute", kbd: "C", page: "#/new" },
+      { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext, needs: "#/cases" },
+      { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", page: "#/ask" },
+      { s: "Action", icon: "⟳", label: "Sync dispute graph (Postgres → FalkorDB → lakehouse)", run: graphSync, needs: "#/ask" },
+      { s: "Action", icon: "⌘", label: "Train GNN link predictor", run: graphTrain, needs: "#/ask" },
+      { s: "Action", icon: "◐", label: "Toggle dark mode", run: () => document.getElementById("theme-toggle").click() },
+    ].filter((a) => mayOpen(a.page || a.needs || "#/dashboard"))
+      .map((a) => (a.run ? a : { ...a, run: () => go(a.page) }));
+  };
   async function graphSync() {
     try { const r = await Api.graph.sync(); UI.toast(`Graph synced — ${r.cases} cases mirrored to FalkorDB + lakehouse`); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
@@ -124,7 +129,7 @@ const Palette = (() => {
     // Confirmed live: copying any text navigated the whole app to #/new
     // mid-selection, every time.
     if (key === "c" && !e.metaKey && !e.ctrlKey && !e.altKey &&
-        !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !open) go("#/new");
+        !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !open && mayOpen("#/new")) go("#/new");
   });
   return { show, remember };
 })();

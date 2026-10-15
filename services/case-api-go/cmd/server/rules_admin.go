@@ -64,8 +64,13 @@ func validateRules(rules []Rule) error {
 
 func (s *server) rulesAdminGuard(w http.ResponseWriter, r *http.Request) (principal, bool) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		http.Error(w, `{"error":"rules are admin-managed (FEDERAL_ADMIN or PLATFORM_ADMIN required)"}`, http.StatusForbidden)
+	// TENANT_ADMIN included deliberately: tenancy() already confines it to
+	// tenants in its own group claim, so this only ever lets a tenant admin
+	// edit their OWN tenant's rules -- cross-tenant editing stays
+	// FEDERAL_ADMIN/PLATFORM_ADMIN only, same as every other tenant-scoped
+	// role on this platform.
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
+		http.Error(w, `{"error":"rules are admin-managed (FEDERAL_ADMIN, PLATFORM_ADMIN, or TENANT_ADMIN required)"}`, http.StatusForbidden)
 		return p, false
 	}
 	// Second layer: Permify object-level permission (program_rules.edit on the
@@ -149,7 +154,7 @@ func (s *server) putRules(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := tx.Exec(r.Context(), `
 		INSERT INTO public.rule_changes (tenant, changed_by, note, before, after)
-		VALUES ($1,$2,$3,$4,$5)`, tenant, p.Subject, in.Note, string(before), string(after)); err != nil {
+		VALUES ($1,$2,$3,$4,$5)`, tenant, displayName(p), in.Note, string(before), string(after)); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
@@ -158,7 +163,7 @@ func (s *server) putRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logActivity(r.Context(), tenant, "", "RULES_UPDATED",
-		fmt.Sprintf("Program rules updated by %s (%d rules)%s", p.Subject, len(in.Rules), orDash(" — "+in.Note)))
+		fmt.Sprintf("Program rules updated by %s (%d rules)%s", displayName(p), len(in.Rules), orDash(" — "+in.Note)))
 	// Full before/after diff lives in public.rule_changes; the chained entry
 	// records that the change happened, by whom, and why.
 	s.logAudit(r.Context(), tenant, "", "RULES_UPDATED", map[string]any{

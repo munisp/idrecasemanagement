@@ -10,9 +10,10 @@ package main
 // G6 (escalation auto-trigger), G11 (numbering).
 
 import (
-	"io"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -27,10 +28,14 @@ type FollowUp struct {
 }
 
 type ClockRule struct {
-	Name     string     `json:"name"`
-	Label    string     `json:"label"`
-	Basis    string     `json:"basis"` // key into program_dates (received_at, plan_notified_at, …)
-	Days     int        `json:"days"`
+	Name  string `json:"name"`
+	Label string `json:"label"`
+	Basis string `json:"basis"` // key into program_dates (received_at, plan_notified_at, …)
+	Days  int    `json:"days"`
+	// MaxDays: the contract's hard limit when it is longer than the target
+	// ("60 days, never more than 90"; "10 days, +3 for notification").
+	// Past Days the clock is late; past MaxDays it is in breach.
+	MaxDays  int        `json:"max_days"`
 	DayType  string     `json:"day_type"` // calendar|business
 	Cite     string     `json:"cite"`
 	Breach   string     `json:"breach"`
@@ -58,6 +63,12 @@ type ProgramConfig struct {
 		FilingWindowMonths int             `json:"filing_window_months"`
 		ProofOfTimeliness  []string        `json:"proof_of_timeliness"`
 		Reasons            []string        `json:"ineligibility_reasons"`
+		// ServicesAfter (YYYY-MM-DD): the program covers services rendered
+		// strictly after this date. Empty = no floor.
+		ServicesAfter string `json:"services_after"`
+		// DisputeTypes: the kinds of claim dispute the program accepts
+		// (denied in full/part, underpaid, overpaid). Empty = not checked.
+		DisputeTypes []string `json:"dispute_types"`
 	} `json:"eligibility"`
 	Time struct {
 		QuarterHours bool `json:"quarter_hours"` // FL: time recorded in decimal quarter hours only
@@ -66,6 +77,9 @@ type ProgramConfig struct {
 		InitialFeeCents  int64 `json:"initial_fee_cents"`
 		RefundWindowDays int   `json:"refund_window_days"`
 		InvoiceDueDays   *int  `json:"invoice_due_days"`
+		// ReminderLeadDays: how many days before an invoice's due date the
+		// Payment Reminder is drafted (default 7).
+		ReminderLeadDays *int `json:"reminder_lead_days"`
 		// InvoicedFilerOrgs are filing organizations accepted under a bulk
 		// invoicing arrangement (AHCA 2026 workflow, "Payment before
 		// submission"): their disputes open immediately on bulk acceptance
@@ -79,9 +93,13 @@ type ProgramConfig struct {
 		RouteRole          string   `json:"route_role"`
 		Reasons            []string `json:"reasons"`
 	} `json:"escalation"`
-	NotesStreams []string            `json:"notes_streams"`
-	FieldSchema  map[string][]string `json:"field_schema"`
-	Checklist    map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
+	NotesStreams     []string            `json:"notes_streams"`
+	NotesStreamRoles map[string][]string `json:"notes_stream_roles"`
+	FieldSchema      map[string][]string `json:"field_schema"`
+	Checklist        map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
+	// ChecklistOwners: checklist item -> the role that ticks it. An item
+	// with no owner here can be ticked by any case staff, as before.
+	ChecklistOwners map[string]string `json:"checklist_owners"`
 	// Correspondence was never on this struct, so getProgram's response
 	// (what the portal's template dropdown reads) never carried it --
 	// corrTemplates() below did its own separate raw DB read instead,
@@ -114,14 +132,114 @@ func (s *server) loadProgram(r *http.Request, tenant string) *ProgramConfig {
 
 // getProgram exposes the tenant's program config so the portal can render
 // program-specific labels, statuses, and rules without hard-coding a state.
+// tenant_label is looked up separately (public.tenant_labels, not the
+// program config) and included either way -- it applies to every tenant,
+// configured-program or Federal-NSA-default alike.
 func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	cfg := s.loadProgram(r, tenant)
+	var label string
+	_ = s.db.QueryRow(r.Context(), `SELECT label FROM public.tenant_labels WHERE tenant=$1`, tenant).Scan(&label)
+	brand := s.tenantBrand(r.Context(), tenant)
 	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "features": s.tenantFeatures(r, tenant)})
+		writeJSON(w, http.StatusOK, map[string]any{"program": "FEDERAL_NSA", "config": nil, "tenant_label": label, "brand_name": brand, "features": s.tenantFeatures(r, tenant)})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "features": s.tenantFeatures(r, tenant)})
+	// The templates the portal offers: the standard ones as edited on the
+	// Templates screen, plus the ones added there, minus the retired.
+	offered := []CorrTemplate{}
+	for _, t := range s.corrTemplates(r, tenant) {
+		if !t.Inactive {
+			offered = append(offered, t)
+		}
+	}
+	cfg.Correspondence.Templates = offered
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isExternalOnly(p) {
+		cfg = publicProgram(cfg)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label, "brand_name": brand, "features": s.tenantFeatures(r, tenant)})
+}
+
+// publicProgram is what an outside filer may know about the program: how
+// cases are numbered, the public eligibility rules, the fee, and the status
+// names. The rest -- banking, billing, reconciliation, letter wording and
+// recipients, internal checklists and their owners -- is the office's own.
+func publicProgram(cfg *ProgramConfig) *ProgramConfig {
+	out := &ProgramConfig{}
+	out.CaseNumber = cfg.CaseNumber
+	out.Statuses = cfg.Statuses
+	out.Eligibility = cfg.Eligibility
+	out.Fees = cfg.Fees
+	return out
+}
+
+// setTenantLabel: PUT /v1/tenants/{tenant}/program/label {"label":"AHCA"} --
+// FEDERAL_ADMIN/PLATFORM_ADMIN only (same guard as program rules). Lives in
+// its own table, not program_rules.config: a tenant with no custom program
+// rules runs on Federal NSA defaults, and every "programmed vs federal"
+// branch in this codebase (summaryReport, the dashboard's amount field,
+// clock projection, ...) keys off whether that row exists at all --
+// storing the label there would force creating one just to hold a name,
+// silently flipping a tenant's program mode as a side effect. This way
+// works for every tenant regardless of program status.
+func (s *server) setTenantLabel(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.rulesAdminGuard(w, r)
+	if !ok {
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var in struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	label := strings.TrimSpace(in.Label)
+	if label == "" {
+		http.Error(w, `{"error":"label required"}`, http.StatusBadRequest)
+		return
+	}
+	_, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.tenant_labels (tenant, label, updated_by, updated_at)
+		VALUES ($1,$2,$3,now())
+		ON CONFLICT (tenant) DO UPDATE SET label=$2, updated_by=$3, updated_at=now()`,
+		tenant, label, displayName(p))
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	s.logActivity(r.Context(), tenant, "", "TENANT_LABEL_UPDATED",
+		fmt.Sprintf("Tenant display label set to %q by %s", label, displayName(p)))
+	s.logAudit(r.Context(), tenant, "", "TENANT_LABEL_UPDATED", map[string]any{"by": p.Subject, "label": label})
+	writeJSON(w, http.StatusOK, map[string]string{"tenant_label": label})
+}
+
+// listTenantLabels: GET /v1/tenants/{tenant}/admin/tenant-labels -- powers
+// the cross-tenant switcher (PLATFORM_ADMIN/FEDERAL_ADMIN/STATE_AUDITOR,
+// the same roles that see it at all) so it can show "AHCA" instead of a
+// generic "FL IDRE" for any tenant that has a label configured. The
+// {tenant} segment in the URL is unused -- this spans every tenant, same
+// convention as adminListTPAs.
+func (s *server) listTenantLabels(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PLATFORM_ADMIN", "FEDERAL_ADMIN", "STATE_AUDITOR") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	rows, err := s.db.Query(r.Context(), `SELECT tenant, label FROM public.tenant_labels`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var tenant, label string
+		if rows.Scan(&tenant, &label) == nil {
+			out[tenant] = label
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // programDates reads the case's program-specific date bag.
@@ -167,6 +285,18 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 			Cite:      rl.Cite,
 			BasisNote: fmt.Sprintf("from %s %s", rl.Basis, raw[:minI(10, len(raw))]),
 		}
+		// Past the target but inside the contract's hard limit is "late",
+		// not yet a breach.
+		if rl.MaxDays > rl.Days {
+			hard := basis.AddDate(0, 0, rl.MaxDays)
+			if rl.DayType == "business" {
+				hard = addBusinessDays(basis, rl.MaxDays)
+			}
+			cv.HardDue = hard.Format("2006-01-02")
+			if remaining < 0 && !today.After(hard) {
+				cv.State = "late"
+			}
+		}
 		out = append(out, cv)
 	}
 	return out
@@ -185,7 +315,15 @@ func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenan
 			dates["received_at"] = opened.Format("2006-01-02")
 		}
 	}
-	writeJSON(w, http.StatusOK, projectProgramClocks(cfg.Clocks, dates, time.Now()))
+	// Truncate to midnight -- due dates are always midnight (parsed from
+	// date-only strings / computed via AddDate on a midnight basis), so an
+	// untruncated time.Now() carrying the live time-of-day under-counts
+	// "remaining" by close to a full day depending on when the clock is
+	// checked (confirmed live: FL's 60-day AGENCY_RECOMMENDATION clock was
+	// off by one). engines.go's federal-default clock path already
+	// truncates the same way (casesClocks/caseClocks) -- this path never
+	// matched it.
+	writeJSON(w, http.StatusOK, projectProgramClocks(cfg.Clocks, dates, time.Now().Truncate(24*time.Hour)))
 	return true
 }
 
@@ -252,13 +390,22 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg := s.loadProgram(r, tenant); cfg != nil {
-		if in.Internal != "" && !contains(cfg.Statuses.Internal, in.Internal) {
-			http.Error(w, `{"error":"unknown internal status for this program"}`, http.StatusBadRequest)
-			return
+		// Matched without regard to case and stored as the program spells
+		// it: the workflow sent "Determination sent to FL" against a list
+		// that says "Determination Sent to FL", was refused, and retried
+		// forever -- no case could reach that status.
+		var ok bool
+		if in.Internal != "" {
+			if in.Internal, ok = canonStatus(cfg.Statuses.Internal, in.Internal); !ok {
+				http.Error(w, `{"error":"unknown internal status for this program"}`, http.StatusBadRequest)
+				return
+			}
 		}
-		if in.Agency != "" && !contains(cfg.Statuses.Agency, in.Agency) {
-			http.Error(w, `{"error":"unknown agency status for this program"}`, http.StatusBadRequest)
-			return
+		if in.Agency != "" {
+			if in.Agency, ok = canonStatus(cfg.Statuses.Agency, in.Agency); !ok {
+				http.Error(w, `{"error":"unknown agency status for this program"}`, http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	var matched int64
@@ -307,12 +454,15 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 // and stores the review with its evidence.
 func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ATTORNEY, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
+		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Reviewer"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
+	if !s.stepGuard(w, r, tenant, id, "eligibility") {
+		return
+	}
 	cfg := s.loadProgram(r, tenant)
 	if cfg == nil {
 		http.Error(w, `{"error":"no program rules for tenant"}`, http.StatusBadRequest)
@@ -342,16 +492,56 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.Unmarshal(raw, &override)
+	// A human-submitted date that does not parse must be rejected, not
+	// ignored: evalEligibility skips a rule whose date is unusable, which
+	// would turn a typo into a silent pass on the filing window.
+	if msg := invalidEligibilityInput(in); msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
+		return
+	}
+
+	// A provider type the program does not list is a data-entry error, not
+	// a finding. Recording it would close the dispute as INELIGIBLE on a
+	// typo, so it is refused with the list of types that exist.
+	if types := eligibilityProviderTypes(cfg); len(types) > 0 && !contains(types, in.ProviderType) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":          fmt.Sprintf("unknown provider_type %q: must be one of %s", in.ProviderType, strings.Join(types, ", ")),
+			"provider_types": types,
+		})
+		return
+	}
 
 	// Decision + persistence both live in triage.go, shared with the
 	// auto-adjudication endpoint — one implementation, so the auto path
 	// can never drift from what a human reviewer would compute.
 	result, reason, evidence := evalEligibility(cfg, in)
 	opts := eligibilityPersistOpts{ruleVersion: eligibilityRuleVersion(cfg)}
-	if bl := eligibilityBorderline(cfg, in, evidence); len(bl) > 0 {
+	bl := eligibilityBorderline(cfg, in, evidence)
+	// Documents that disagree with what the case carries make any result
+	// one a second person should look at.
+	if conflicts := s.eligibilityConflicts(r, tenant, id); len(conflicts) > 0 {
+		evidence["document_conflicts"] = conflicts
+		bl = append(bl, conflicts...)
+	}
+	if len(bl) > 0 {
 		opts.borderline, opts.borderlineReasons = true, bl
 		evidence["borderline"] = true
 		evidence["borderline_reasons"] = bl
+	}
+	// The filing window can only be tested against a date. Without one the
+	// rule is skipped, so a result other than INELIGIBLE would rest on an
+	// unchecked window -- refuse rather than record an ELIGIBLE that was
+	// never tested for timeliness.
+	if result != "INELIGIBLE" && cfg.Eligibility.FilingWindowMonths > 0 && in.FinalDeterminationAt == "" {
+		http.Error(w, fmt.Sprintf(`{"error":"final determination date required: the %d-month filing window cannot be checked without it (the last EOB date, the service date or appeal documents are accepted as proof)"}`,
+			cfg.Eligibility.FilingWindowMonths), http.StatusUnprocessableEntity)
+		return
+	}
+	// No extensions: a dispute filed outside the window cannot be overridden
+	// to ELIGIBLE. If the date was entered wrongly, correct the date.
+	if override.Override && result == "INELIGIBLE" && noOverrideReasons[reason] {
+		http.Error(w, `{"error":"this result cannot be overridden: the filing window is not extendable (AHCA no longer grants extensions). If the final determination date is wrong, correct it and recompute."}`, http.StatusUnprocessableEntity)
+		return
 	}
 	// Override: INELIGIBLE → ELIGIBLE only, with a mandatory written reason.
 	// The computed result is preserved in evidence so the record shows both
@@ -370,7 +560,11 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 			"computed_reason": evidence["computed_reason"], "override_reason": opts.overrideReason,
 		})
 	}
-	reviewID := s.persistEligibilityOutcome(r, tenant, id, p.Subject, result, reason, evidence, opts)
+	// displayName(p), not p.Subject -- eligibility_reviews.decided_by is
+	// shown directly to staff in the review-history table (unlike
+	// logAudit's "by" above, which is an intentionally stable-identity
+	// audit key).
+	reviewID := s.persistEligibilityOutcome(r, tenant, id, displayName(p), result, reason, evidence, opts)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence,
 		"rule_version": opts.ruleVersion, "borderline": opts.borderline, "override": opts.override,
@@ -383,7 +577,9 @@ func (s *server) eligibilityHistory(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
 	rows, err := s.queryRows(r, `
-		SELECT id, result, COALESCE(reason,'') AS reason, evidence, decided_by, created_at
+		SELECT id, result, COALESCE(reason,'') AS reason, evidence, decided_by, created_at,
+		       COALESCE(rule_version,'') AS rule_version, COALESCE(borderline,false) AS borderline,
+		       COALESCE(override,false) AS override, COALESCE(override_reason,'') AS override_reason
 		FROM public.eligibility_reviews WHERE tenant=$1 AND case_id=$2
 		ORDER BY created_at DESC LIMIT 10`, tenant, id)
 	if err != nil {
@@ -395,11 +591,24 @@ func (s *server) eligibilityHistory(w http.ResponseWriter, r *http.Request) {
 
 // nextCaseNumber generates per-program case numbers (G11): "FL26-042" etc.
 func (s *server) nextCaseNumber(r *http.Request, tenant string, cfg *ProgramConfig) string {
-	var n int
-	_ = s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT count(*) FROM tenant_%s.cases`, sanitizeTenant(tenant))).Scan(&n)
-	seq := fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, n+1)
+	// A counter that only moves forward. The number used to be "how many
+	// cases exist, plus one", so deleting a case handed its number to the
+	// next one -- and with it the old case's workflow id, audit trail and
+	// invoice number. The counter starts above every number already issued.
 	yy := time.Now().Format("06")
+	var n int64
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		INSERT INTO public.case_sequences (tenant, yy, last)
+		SELECT $1::text, $2::text, greatest(count(*), coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0)) + 1
+		FROM tenant_%s.cases
+		ON CONFLICT (tenant, yy) DO UPDATE SET last = public.case_sequences.last + 1
+		RETURNING last`, sanitizeTenant(tenant)), tenant, yy).Scan(&n)
+	if err != nil {
+		// No counter table yet (older database): fall back to the count.
+		_ = s.db.QueryRow(r.Context(),
+			fmt.Sprintf(`SELECT count(*) + 1 FROM tenant_%s.cases`, sanitizeTenant(tenant))).Scan(&n)
+	}
+	seq := fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, n)
 	out := strings.ReplaceAll(cfg.CaseNumber.Pattern, "{yy}", yy)
 	out = strings.ReplaceAll(out, "{seq}", seq)
 	return out
@@ -417,7 +626,24 @@ func (s *server) escalationTrigger(r *http.Request, tenant, caseID string, dispu
 		INSERT INTO public.escalations (tenant, case_id, clock, level, escalated_to, detail)
 		VALUES ($1,$2,'PROGRAM_TRIGGER',2,$3,$4)`, tenant, caseID, cfg.Escalation.RouteRole, detail)
 	s.logActivity(r.Context(), tenant, caseID, "ESCALATION_AUTO", detail)
+	// The same review the SOP prescribes for suspected fraud, waste or
+	// abuse: the PM assigns an independent reviewer (sopdeadlines.go).
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET details = jsonb_build_object('fwa', jsonb_build_object(
+		  'status','REPORTED','reason',$2::text,'reported_by','system','reported_at',$3::text)) || details
+		WHERE id::text=$1 AND NOT (details ? 'fwa')`, sanitizeTenant(tenant)), caseID, detail, time.Now().UTC().Format(time.RFC3339))
 	s.notify(r, tenant, "*", "ESCALATION", detail, "#/cases/"+caseID)
+}
+
+// canonStatus finds v in the program's status list ignoring case and returns
+// the list's own spelling.
+func canonStatus(list []string, v string) (string, bool) {
+	for _, x := range list {
+		if strings.EqualFold(x, strings.TrimSpace(v)) {
+			return x, true
+		}
+	}
+	return v, false
 }
 
 func contains(xs []string, v string) bool {
@@ -441,4 +667,64 @@ func minI(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// defaultBrand is the platform's name where a tenant has not set its own.
+const defaultBrand = "Capitol Bridge"
+
+// tenantBrand: the name the portal shows for a tenant (tenant_labels.brand_name).
+func (s *server) tenantBrand(ctx context.Context, tenant string) string {
+	var brand string
+	_ = s.db.QueryRow(ctx, `SELECT coalesce(brand_name,'') FROM public.tenant_labels WHERE tenant=$1`, tenant).Scan(&brand)
+	if brand == "" {
+		return defaultBrand
+	}
+	return brand
+}
+
+// setTenantBrand: PUT /v1/tenants/{tenant}/program/brand {"brand_name":"Capitol Bridge"}
+// -- the program's admins (same guard as the rules). Empty resets to the default.
+func (s *server) setTenantBrand(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.rulesAdminGuard(w, r)
+	if !ok {
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	var in struct {
+		Brand string `json:"brand_name"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in) != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	brand := strings.TrimSpace(in.Brand)
+	if len([]rune(brand)) > 60 {
+		http.Error(w, `{"error":"keep the brand name to 60 characters"}`, http.StatusBadRequest)
+		return
+	}
+	// The label row may not exist yet: keep the label the portal shows today.
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.tenant_labels (tenant, label, brand_name, updated_by, updated_at)
+		VALUES ($1, upper($1) || ' IDRE', NULLIF($2,''), $3, now())
+		ON CONFLICT (tenant) DO UPDATE SET brand_name=NULLIF($2,''), updated_by=$3, updated_at=now()`,
+		tenant, brand, displayName(p)); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	shown := s.tenantBrand(r.Context(), tenant)
+	s.logActivity(r.Context(), tenant, "", "TENANT_BRAND_UPDATED", fmt.Sprintf("Portal brand set to %q by %s", shown, displayName(p)))
+	s.logAudit(r.Context(), tenant, "", "TENANT_BRAND_UPDATED", map[string]any{"by": p.Subject, "brand_name": shown})
+	writeJSON(w, http.StatusOK, map[string]string{"brand_name": shown})
+}
+
+// publicBrand: GET /api/public/brand?tenant=fl -- for the public pages
+// (home, file a dispute, registration), before anyone signs in.
+func (s *server) publicBrand(w http.ResponseWriter, r *http.Request) {
+	tenant := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tenant")))
+	brand := defaultBrand
+	if tenantCodeRe.MatchString(tenant) {
+		brand = s.tenantBrand(r.Context(), tenant)
+	}
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	writeJSON(w, http.StatusOK, map[string]string{"brand_name": brand})
 }

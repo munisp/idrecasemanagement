@@ -58,6 +58,19 @@ func (s *server) createApplication(r *http.Request, tenant string, in Onboarding
 // Creates the application row and starts the durable onboarding workflow.
 func (s *server) submitApplication(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// CASE_MANAGER excluded per the "reviewer only reviews" follow-up:
+	// starting a new onboarding application is a creation action; reviewer
+	// keeps decideApplication (deciding a pending one) but not this. Every
+	// other authenticated tenant role keeps the open self-service access
+	// this route has always had (no gate otherwise). TENANT_ADMIN exempted
+	// from the exclusion -- it's a different role from reviewer and keeps
+	// full access (hasRole("CASE_MANAGER") is also true for TENANT_ADMIN
+	// via its own hasRole quirk below, so this must be checked explicitly).
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if hasRole(p, "CASE_MANAGER") && !hasRole(p, "TENANT_ADMIN") {
+		http.Error(w, `{"error":"forbidden: reviewer cannot submit new onboarding applications"}`, http.StatusForbidden)
+		return
+	}
 	var in OnboardingApplication
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.LegalName == "" || in.Type == "" {
 		http.Error(w, `{"error":"legal_name and type required"}`, http.StatusBadRequest)
@@ -140,10 +153,19 @@ func (s *server) publicApply(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) listApplications(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	rows, err := s.db.Query(r.Context(), `
-		SELECT id, tenant, type, legal_name, npi, status, coalesce(status_reason,''), submitted_at
-		FROM public.stakeholder_applications
-		WHERE tenant=$1 ORDER BY submitted_at DESC LIMIT 200`, tenant)
+	q := `SELECT id, tenant, type, legal_name, npi, status, coalesce(status_reason,''), submitted_at
+		FROM public.stakeholder_applications WHERE tenant=$1`
+	args := []any{tenant}
+	if status := r.URL.Query().Get("status"); status != "" {
+		args = append(args, status)
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
+	}
+	if typ := r.URL.Query().Get("type"); typ != "" {
+		args = append(args, typ)
+		q += fmt.Sprintf(` AND type=$%d`, len(args))
+	}
+	q += ` ORDER BY submitted_at DESC LIMIT 200`
+	rows, err := s.db.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -230,6 +252,20 @@ func hasRole(p principal, role string) bool {
 		// RBAC check (24 call sites) keeps working while new staff are
 		// granted DOCTOR or NURSE separately.
 		if role == "NURSE_PHYSICIAN" && (rr == "DOCTOR" || rr == "NURSE") {
+			return true
+		}
+		// Per-tenant super admin: every check for CASE_MANAGER also admits
+		// TENANT_ADMIN, so a tenant's own admin gets full CASE_MANAGER-
+		// equivalent operational access (cases, CRM, financial, QA, copilot,
+		// reporting, own-tenant staff admin, ...) without touching every one
+		// of the ~50 existing hasAnyRole call sites that name CASE_MANAGER
+		// individually. This never grants cross-tenant access: TENANT_ADMIN
+		// isn't PLATFORM_ADMIN/FEDERAL_ADMIN/SERVICE_WORKER, so tenancy()
+		// still confines it to tenants in its own group claim, same as any
+		// other non-federal role. The extra admin powers (program rules,
+		// tenant label, graph admin) are wired in separately, each already
+		// scoped by the same tenant-of-record.
+		if role == "CASE_MANAGER" && rr == "TENANT_ADMIN" {
 			return true
 		}
 	}

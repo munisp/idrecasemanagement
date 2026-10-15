@@ -72,12 +72,34 @@ const Auth = (() => {
     const tok = sessionStorage.getItem(K.token);
     if (!tok) return null;
     const p = JSON.parse(atob(tok.split(".")[1]));
+    const roles = (p.realm_access && p.realm_access.roles) || [];
+    // Per-tenant super admin: mirrors the backend's hasRole quirk
+    // (cmd/server/onboarding.go) where every check for CASE_MANAGER also
+    // admits TENANT_ADMIN. Every frontend role check reads from this one
+    // function (app.js's sidebar `has()`, views.js's `can()`), so
+    // synthesizing CASE_MANAGER here once is equivalent to adding
+    // TENANT_ADMIN to every one of those call sites individually.
+    if (roles.includes("TENANT_ADMIN") && !roles.includes("CASE_MANAGER")) roles.push("CASE_MANAGER");
     return {
       sub: p.sub,
       name: p.preferred_username || p.sub,
-      roles: (p.realm_access && p.realm_access.roles) || [],
+      roles,
       tenants: (p.groups || []).filter((g) => g.startsWith("/tenant/")).map((g) => g.slice(8)),
     };
+  }
+
+  // The one role check every screen uses. TENANT_ADMIN is the tenant's own
+  // super-admin: it passes any check that admits a tenant staff role. It
+  // does not pass platform-only checks (FEDERAL_ADMIN/PLATFORM_ADMIN alone)
+  // or identity checks on external roles like can("TPA"). Mirrors the
+  // backend's hasAnyRole (cmd/server/documents.go) exactly.
+  const STAFF_ROLES = ["CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "CODER",
+    "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "TENANT_ADMIN"];
+  function can(...rs) {
+    // Auth.claims, not the local claims(): demo mode swaps Auth.claims out.
+    const roles = Auth.claims()?.roles || [];
+    return rs.some((r) => roles.includes(r)) ||
+      (roles.includes("TENANT_ADMIN") && rs.some((r) => STAFF_ROLES.includes(r)));
   }
 
   function logout() {
@@ -85,5 +107,5 @@ const Auth = (() => {
     location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`;
   }
 
-  return { login, logout, handleCallback, token, claims };
+  return { login, logout, handleCallback, token, claims, can };
 })();

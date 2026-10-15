@@ -30,6 +30,7 @@ type ClockView struct {
 	State     string `json:"state"`      // ok | watch | risk | breach | closed | paused
 	Cite      string `json:"cite"`       // 45 CFR citation
 	BasisNote string `json:"basis_note"` // provenance of the start timestamp
+	HardDue   string `json:"hard_due,omitempty"` // contract hard limit, when later than Due (state "late" in between)
 }
 
 // addBusinessDays returns the date n business days after start (weekend-aware;
@@ -195,6 +196,11 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 	results := []map[string]any{}
 	for _, id := range in.CaseIDs {
 		res := map[string]any{"case_id": id}
+		if lock := s.caseLockedForRequest(r, tenant, id); lock != "" {
+			res["ok"], res["error"] = false, caseLockMessage(lock)
+			results = append(results, res)
+			continue
+		}
 		var err error
 		switch in.Action {
 		case "assign":

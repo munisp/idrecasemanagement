@@ -136,7 +136,7 @@ func (s *server) gatherBriefingDigest(ctx context.Context, tenant, worker string
 		SELECT c.id::text, c.case_number, c.status, %s AS lane, %s AS sla
 		FROM tenant_%s.cases c
 		LEFT JOIN (SELECT DISTINCT case_id FROM public.escalations WHERE tenant=$1) esc
-		  ON esc.case_id = c.id
+		  ON esc.case_id = c.id::text
 		WHERE c.assigned_to=$2
 		  AND c.status NOT IN ('CLOSED','DETERMINED','PAID','WITHDRAWN')
 		ORDER BY sla ASC, c.opened_at ASC LIMIT %d`,
@@ -204,6 +204,14 @@ func (s *server) briefing(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"db (tenant migrated?)"}`, http.StatusInternalServerError)
 		return
+	}
+	// The tenant-wide queue counts follow the screens they come from: the
+	// check-review count is the finance screen's, the pending count the QA gate's.
+	if !hasAnyRole(p, financialReadRoles...) {
+		d.ChecksReview = 0
+	}
+	if !hasAnyRole(p, qaReadRoles...) {
+		d.PendingQA = 0
 	}
 	narration, model := "", ""
 	if s.cfg.CopilotEndpoint != "" {

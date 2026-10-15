@@ -1,36 +1,75 @@
 # Dapr control-plane / sidecar configuration (performance posture).
 # Apply: kubectl apply -f configuration.yaml — then reference via pod
 # annotation `dapr.io/config: idre-config` on every injected workload.
+#
+# Dapr resolves a Configuration CR in the SAME namespace as the pod
+# referencing it -- this previously said `idre-core`, a namespace that was
+# never created (confirmed live: every idre workload actually runs in
+# `idre`), so even if this file had been applied, no sidecar could ever
+# have found it. The otel endpoint previously pointed at
+# `otel-collector.idre-obs:4317`, a namespace+collector that also never
+# existed -- confirmed live, this cluster already runs a full shared
+# observability stack in namespace `otel` (Prometheus, Grafana, Loki,
+# Jaeger, and a real otel-collector), one otel-collector per cluster, not
+# one per app. Pointing at it directly means idre's traces land in the
+# same Jaeger/Grafana every other app on this cluster already uses.
 apiVersion: dapr.io/v1alpha1
 kind: Configuration
 metadata:
   name: idre-config
-  namespace: idre-core
+  namespace: idre
 spec:
   tracing:
-    samplingRate: "0.01"        # 1% — head-based sampling; full traces are
-                                # a measurable tax on every sidecar hop
+    # 100% in dev: this cluster's request volume is low enough that full
+    # sampling costs nothing meaningful, and a 1% rate (the right call at
+    # production scale, which the cost comment below was written for)
+    # would mean almost nothing gets traced during actual debugging --
+    # revisit before this config is ever reused for a production tenant.
+    samplingRate: "1"
     otel:
-      endpointAddress: "otel-collector.idre-obs:4317"
+      # http on 4318, not grpc on 4317 -- confirmed live, this cluster's two
+      # OTHER working Dapr Configurations (dapr-system's own `daprsystem`
+      # control-plane config, and 54link-dev's) both use http/4318. grpc/4317
+      # passed CRD validation (the schema only checks it's a string) and
+      # Dapr's trace SAMPLER initialized normally, but the actual OTLP
+      # EXPORTER never logged a single construction/connection line at any
+      # level including debug, and zero case-api spans ever reached Jaeger
+      # despite confirmed TCP connectivity, a correct collector pipeline,
+      # and real spans being generated (visible via tracing.stdout) -- the
+      # grpc exporter path appears to silently never construct on this
+      # Dapr 1.14.5 build. http is the one proven to actually work here.
+      endpointAddress: "otel-collector.otel.svc.cluster.local:4318"
       isSecure: false
-      protocol: grpc
+      protocol: http
+  # metric (Dapr <=1.12) and metrics (1.13+) are the same spec under two
+  # names, kept for version compatibility; neither has a `port` field --
+  # confirmed against this cluster's installed CRD schema (the file
+  # previously set metrics.port: 9090, which the apiserver rejects with a
+  # strict-decoding error, so this Configuration could never be applied at
+  # all). The sidecar's metrics port is a pod annotation
+  # (dapr.io/metrics-port), not a Configuration field.
   metric:
     enabled: true
     rules: []                   # default low-cardinality Dapr metrics only
   metrics:
     enabled: true
-    port: 9090
   mtls:
     enabled: true               # sidecar-to-sidecar encryption stays ON
     workloadCertTTL: "24h"
     allowedClockSkew: "15m"
-  features:
-    - name: ProxySupport        # WASM/proxy passthrough off unless needed
+  # ProxySupport dropped entirely rather than declared with enabled: false
+  # -- the CRD requires both name AND enabled per entry (strict-decoding
+  # error otherwise), and "off unless needed" means not declaring it at
+  # all, same practical effect as the Dapr default.
   accessControl:
     defaultAction: deny         # app allowlists (see app-policies)
     trustDomain: "idre.local"
+  # version/configuration are required by the CRD even for the built-in
+  # kubernetes resolver, which takes no component-specific config.
   nameResolution:
     component: "kubernetes"
+    version: "v1"
+    configuration: {}
 # Sidecar resource + throughput annotations belong on each app's Deployment:
 #   dapr.io/sidecar-cpu-request: "100m"
 #   dapr.io/sidecar-cpu-limit: "1"
