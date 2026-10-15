@@ -419,14 +419,104 @@ const Views = (() => {
     } catch { return {}; }
   }
 
+  // ---- Home for a TPA or a health plan: a summary of its own data in cards --
+  // Every card opens the tab of the organization page it summarizes.
+  function orgGo(kind, tab) {
+    try { localStorage.setItem(kind === "tpa" ? "idre.tpaTab" : "idre.hpTab", tab); } catch { /* private window */ }
+    location.hash = kind === "tpa" ? "#/tpa" : "#/healthplan";
+  }
+  const homeCard = (title, big, lines, go, extra = "", tone = "") => `<div class="home-card ${tone}" ${go ? `role="link" tabindex="0" onclick="${go}" onkeydown="if(event.key==='Enter'){${go}}"` : ""}>
+      <div class="hc-title">${title}</div><div class="hc-big">${big}</div>
+      ${lines.filter(Boolean).map((l) => `<div class="hc-line">${l}</div>`).join("")}${extra}</div>`;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const CLOSED_ST = ["CLOSED", "WITHDRAWN", "INELIGIBLE", "CLOSED_PAID"];
+  async function orgHome(kind) {
+    const tpa = kind === "tpa";
+    const safe = (p, d) => p.catch(() => d);
+    const [me, fees, onb, dash, reqs, notifs, cal, batches, rsp] = await Promise.all([
+      safe(tpa ? Api.program.tpaMe() : Api.program.hpMe(), {}),
+      safe(tpa ? Api.program.tpaFees() : Api.program.hpFees(), { unpaid: 0, amount_cents: 0 }),
+      safe(tpa ? Api.program.tpaOnboarding() : Api.program.hpOnboarding(), {}),
+      tpa ? safe(Api.program.tpaDashboard(), { cases: [] }) : Promise.resolve({ cases: [] }),
+      safe(Api.program.orgDocRequests(kind), { requests: [] }),
+      safe(Api.cm.notifications(), []),
+      tpa ? safe(Api.cm.calendar(), []) : Promise.resolve([]),
+      tpa ? safe(Api.program.tpaBulkDisputeBatches(), { batches: [] }) : Promise.resolve({ batches: [] }),
+      tpa ? Promise.resolve({ cases: [] }) : safe(Api.program.respondList("hp"), { cases: [] }),
+    ]);
+    const org = tpa ? (me.tpa || {}) : (me.health_plan || {});
+    const g = (tab) => `Views.orgGo('${kind}','${tab}')`;
+    const cards = [];
+    // Money owed now
+    cards.push(homeCard("Fees owed", fees.unpaid ? usdC(fees.amount_cents) : "Nothing owed",
+      [fees.unpaid ? `${plural(fees.unpaid, "dispute")} waiting for the initial fee` : "Every filed dispute is paid"],
+      fees.unpaid ? "" : g("disputes"),
+      fees.unpaid ? `<button class="mini hc-btn" onclick="event.stopPropagation(); ${tpa ? "Views.tpaFeesPay(this)" : "Views.hpFeesPay(this)"}">Pay ${usdC(fees.amount_cents)}</button>` : "",
+      fees.unpaid ? "tone-pay" : ""));
+    if (tpa) {
+      const cs = dash.cases || [];
+      const open = cs.filter((c) => !CLOSED_ST.includes(c.status) && c.status !== "AWAITING_PAYMENT").length;
+      const waitPay = cs.filter((c) => c.status === "AWAITING_PAYMENT").length;
+      const closed = cs.filter((c) => CLOSED_ST.includes(c.status)).length;
+      cards.unshift(homeCard("Disputes", String(cs.length), [`${open} open`, waitPay ? `${waitPay} awaiting payment` : "", closed ? `${closed} closed` : ""], g("disputes")));
+      const clients = onb.clients || [];
+      const ready = clients.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length;
+      const needProfile = clients.filter((c) => c.onboarding_status === "PROFILE_INCOMPLETE").length;
+      const needPay = clients.filter((c) => c.onboarding_status === "PAYMENT_PENDING").length;
+      cards.push(homeCard("Clients ready to file", `${ready} of ${clients.length}`,
+        [needProfile ? `${needProfile} need a profile` : "", needPay ? `${needPay} need a payment method` : "", !clients.length ? "Add your first client" : ""], g("clients"),
+        "", clients.length && ready < clients.length ? "tone-warn" : ""));
+      const plan = cal.filter((i) => i.kind === "PLAN_RESPONSE").sort((a, b) => a.due.localeCompare(b.due));
+      cards.push(homeCard("Waiting on health plans", String(plan.length),
+        [plan.length ? `soonest due ${fmtDate(plan[0].due)} — ${plan[0].case_number}` : "No plan is due to respond", plan.length ? countdown(plan[0].due) : ""], "location.hash='#/calendar'"));
+      const today = new Date().toISOString().slice(0, 10), week = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
+      const soon = cal.filter((i) => i.due <= week).sort((a, b) => a.due.localeCompare(b.due));
+      const overdue = soon.filter((i) => i.due < today).length;
+      cards.push(homeCard("Due in the next 7 days", String(soon.length - overdue),
+        [overdue ? `<span class="error">${overdue} overdue</span>` : "",
+         ...soon.slice(0, 3).map((i) => `${fmtDate(i.due)} · ${esc(i.label)}`), !soon.length ? "Nothing due this week" : ""],
+        "location.hash='#/calendar'", "", overdue ? "tone-bad" : ""));
+      const bs = batches.batches || [];
+      cards.push(homeCard("Bulk filings", String(bs.length), [bs[0] ? `latest: ${esc(bs[0].batch_ref || "")} · ${fmtDate(bs[0].created_at)}` : "File many disputes from one ZIP"], g("bulk")));
+      const paid = cs.reduce((n, c) => n + Number(c.paid_cents || 0), 0);
+      cards.push(homeCard("Paid to date", usdC(paid), [`across ${plural(cs.filter((c) => Number(c.paid_cents) > 0).length, "dispute")}`], g("disputes")));
+    } else {
+      const rows = rsp.cases || [];
+      const wait = rows.filter((x) => x.response_status === "AWAITING").sort((a, b) => String(a.response_due_at || a.response_due).localeCompare(String(b.response_due_at || b.response_due)));
+      const late = wait.filter((x) => x.response_due_at && new Date(x.response_due_at) < new Date()).length;
+      cards.unshift(homeCard("Waiting for your response", String(wait.length),
+        [wait.length ? `soonest due ${fmtDate(wait[0].response_due)} — ${esc(wait[0].case_number)}` : "No dispute is waiting for your response",
+         wait.length ? countdown(wait[0].response_due_at || wait[0].response_due) : "", late ? `<span class="error">${late} past the deadline</span>` : ""],
+        g("against"), "", late ? "tone-bad" : wait.length ? "tone-warn" : ""));
+      cards.splice(1, 0, homeCard("Responded", String(rows.filter((x) => x.response_status === "SUBMITTED").length),
+        [`${rows.filter((x) => x.response_status === "OPT_OUT_REQUESTED").length} opt-out requests`, `${rows.length} disputes against your plan in all`], g("against")));
+      const ps = onb.parties || [];
+      const ready = ps.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length;
+      cards.push(homeCard("Parties ready to file", `${ready} of ${ps.length}`, [!ps.length ? "Add the groups, networks and facilities you file for" : `${ps.length - ready} still onboarding`], g("parties")));
+    }
+    const rq = (reqs.requests || []).filter((x) => x.status === "OPEN");
+    const od = rq.filter((x) => x.overdue).length;
+    cards.push(homeCard("Document requests", String(rq.length),
+      [rq.length ? "waiting for your documents" : "Nothing requested", od ? `<span class="error">${od} overdue</span>` : ""], "location.hash='#/document-requests'", "", od ? "tone-bad" : rq.length ? "tone-warn" : ""));
+    const recent = (notifs || []).slice(0, 4);
+    const activity = `<div class="home-activity"><h2>Recent activity</h2>${recent.length ? `<ul>${recent.map((n) =>
+      `<li class="${n.read_at ? "" : "unread"}"><b>${esc(String(n.type || "").replace(/_/g, " ").toLowerCase())}</b> — ${esc(n.body)} <span class="muted">${fmtDate(n.at)}</span></li>`).join("")}</ul>`
+      : '<p class="muted">Nothing yet.</p>'}</div>`;
+    return `<div class="view-head"><h1>${esc(org.name || (tpa ? "Your TPA" : "Your health plan"))}</h1>
+        <span class="muted">${tpa ? "a summary of your clients' disputes" : "a summary of your plan's disputes"} · ${badge(org.status || "ACTIVE")}</span></div>
+      <div class="home-cards">${cards.join("")}</div>
+      ${activity}
+      <p><a class="button" href="${tpa ? "#/tpa" : "#/healthplan"}">${tpa ? "Open the TPA page" : "Open the health plan page"} →</a></p>`;
+  }
+
   // ---- Dashboard -----------------------------------------------------------
   async function dashboard() {
     // TPA's home IS the TPA dashboard -- the generic rollup below is built
     // entirely on Api.cases.list(), the whole tenant's cases, which TPA is
     // deliberately blocked from (access-control follow-up); it has its own
     // correctly-scoped "Tracking" card on this same page instead.
-    if (can("TPA")) return tpaView();
-    if (outsideOnly() && can("HEALTH_PLAN")) return hpView(); // a health plan's home is its own page
+    if (can("TPA")) return orgHome("tpa"); // a summary of its own data; the full page is under TPA
+    if (outsideOnly() && can("HEALTH_PLAN")) return orgHome("hp");
     if (outsideOnly()) return partyCases(); // an invited party's home is its own disputes
     const me = Auth.claims();
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
@@ -8551,5 +8641,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgDocsDownload };
+  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();
