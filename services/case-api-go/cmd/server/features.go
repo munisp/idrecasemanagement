@@ -38,6 +38,9 @@ var registeredFeatures = map[string]bool{
 	// READY package. Off: a client or party that never started onboarding
 	// files the old way (the behaviour before this flag existed).
 	"onboarding_required": true,
+	// Cross-rail organization aggregate (TPA 360 / provider 360 / health
+	// plan 360): entities registry + resolver + six-panel endpoint.
+	"entity360": true,
 }
 
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle

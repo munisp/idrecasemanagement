@@ -1304,6 +1304,7 @@ const Views = (() => {
     tpa_onboarding: "TPA onboarding (profile + payment + 6-doc packages)",
     healthplan_onboarding: "Health plan onboarding (parties + payment + 6-doc packages)",
     onboarding_required: "TPA / health plan filings need a READY package (off: clients that never started onboarding file the old way)",
+    entity360: "Entity 360 (cross-rail organization aggregate: TPA / provider / health plan)",
   };
 
   async function featuresAdmin() {

@@ -135,6 +135,13 @@ func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "account_id": id,
 		"type": in.Type, "legal_name": in.LegalName, "npi": in.NPI,
 	})
+	// Entity 360: link the new account to its entity right away (identity-key
+	// match or a fresh registry row). Best-effort — a resolver hiccup must
+	// never fail account creation, and lookup re-resolves lazily later.
+	if s.featureEnabled(r, tenant, "entity360") {
+		_, _ = s.ensureEntity(r.Context(), tenant, "accounts", id, in.Type, in.LegalName,
+			in.NPI, regexpDigits(in.EIN), "", "", "")
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
