@@ -345,7 +345,7 @@ const CrmViews = (() => {
       const d = String(i.due || "").slice(0, 10);
       if (d) (byDay[d] ||= []).push(i);
     });
-    const chipCls = (k) => k === "OFFER_WINDOW" ? "cal-chip-stat" : "cal-chip-task";
+    const chipCls = (k) => "cal-chip-" + calKind(k)[0];
     let cells = "";
     for (let i = 0; i < first.getDay(); i++) cells += `<div class="cal-cell empty"></div>`;
     for (let d = 1; d <= daysInMonth; d++) {
@@ -364,9 +364,32 @@ const CrmViews = (() => {
       ${cells}</div>`;
   }
 
+  // What each calendar item is: [colour group, icon, words]. A TPA's items are
+  // the deadlines on its own disputes and its team's tasks (tpa_calendar.go).
+  const CAL_KIND = {
+    OFFER_WINDOW: ["stat", "⏱", "Offer window"], PERMISSION_DUE: ["stat", "⏱", "Permission due"],
+    FEE_DUE: ["pay", "$", "Fee due"], INVOICE_DUE: ["pay", "$", "Invoice due"],
+    DOCS_DUE: ["docs", "⇪", "Documents due"],
+    PLAN_RESPONSE: ["watch", "◷", "Plan's response due"], DECISION_DUE: ["watch", "§", "Recommendation due"],
+    TASK: ["task", "✓", "Task"],
+  };
+  const calKind = (k) => CAL_KIND[k] || ["task", "•", k];
+  async function calTaskDone(id) {
+    try {
+      await (Auth.can("TPA") ? Api.program.tpaTaskDone(id) : Api.crm.completeTask(id));
+      UI.toast("Task done"); App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function calTaskAdd(form) {
+    try {
+      await Api.program.tpaTaskCreate({ subject: form.subject.value, due_date: form.due.value, case_id: form.case_id.value });
+      UI.toast("Task added"); App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   async function calendar() {
     try {
       const items = await Api.cm.calendar();
+      const isTPA = Auth.can("TPA");
       items.sort((a, b) => String(a.due).localeCompare(String(b.due)));
       const now = new Date();
       const state = { y: now.getFullYear(), m: now.getMonth() };
@@ -402,9 +425,9 @@ const CrmViews = (() => {
             <div class="cal-rows">${groups[d].map((i) => {
               const linkable = !!i.case_id;
               return `<div class="cal-item ${linkable ? "link" : ""}" ${linkable ? `onclick="location.hash='#/cases/${esc(i.case_id)}'"` : ""}>
-                <span class="cal-kind ${i.kind === "OFFER_WINDOW" ? "k-offer" : "k-task"}" title="${esc(i.kind)}">${i.kind === "OFFER_WINDOW" ? "⏱" : "✓"}</span>
-                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}</span>
-                ${i.kind === "TASK" ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.done('${i.ref}')">Done</button>` : ""}
+                <span class="cal-kind k-${calKind(i.kind)[0]}" title="${esc(calKind(i.kind)[2])}">${calKind(i.kind)[1]}</span>
+                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}${i.detail ? `<span class="cal-detail">${esc(i.detail)}</span>` : ""}</span>
+                ${i.kind === "TASK" ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.calTaskDone('${esc(i.ref)}')">Done</button>` : ""}
               </div>`;
             }).join("")}</div>
           </div>
@@ -419,18 +442,25 @@ const CrmViews = (() => {
           state.m++; if (state.m > 11) { state.m = 0; state.y++; } render();
         });
       });
+      const caseOpts = [...new Map(items.filter((i) => i.case_id && i.case_number).map((i) => [i.case_id, i.case_number])).entries()];
+      const taskForm = isTPA ? `<form class="inline-form cal-add" onsubmit="event.preventDefault(); CrmViews.calTaskAdd(this)">
+          <input name="subject" placeholder="Add a task for your team, e.g. Call the clinic about the EOB" required maxlength="300" style="flex:1;min-width:260px" />
+          <input name="due" type="date" required aria-label="Due date" />
+          <select name="case_id" aria-label="Dispute"><option value="">no dispute</option>${caseOpts.map(([id, n]) => `<option value="${esc(id)}">${esc(n)}</option>`).join("")}</select>
+          <button class="mini">Add task</button></form>` : "";
       return `<div class="view-head"><h1>Calendar</h1>
-        <span class="muted">statutory clocks, offer windows, and task due dates</span></div>
+        <span class="muted">${isTPA ? "fees, documents and deadlines on your disputes, and your team's tasks" : "statutory clocks, offer windows, and task due dates"}</span></div>${taskForm}
         <div class="cal-nav">
           <button class="mini" id="cal-prev">‹ prev</button>
           <b id="cal-month-label"></b>
           <button class="mini" id="cal-next">next ›</button>
-          <span class="cal-legend"><span class="cal-chip cal-chip-stat">statutory / offer window</span>
-            <span class="cal-chip cal-chip-task">task</span></span></div>
+          <span class="cal-legend">${isTPA
+            ? `<span class="cal-chip cal-chip-pay">payment due</span><span class="cal-chip cal-chip-docs">documents due</span><span class="cal-chip cal-chip-stat">deadline</span><span class="cal-chip cal-chip-watch">to watch</span><span class="cal-chip cal-chip-task">task</span>`
+            : `<span class="cal-chip cal-chip-stat">statutory / offer window</span><span class="cal-chip cal-chip-task">task</span>`}</span></div>
         <div id="cal-grid-box"></div>
-        <h2>Agenda</h2>` + (agenda || `<p class="muted">No upcoming deadlines or tasks.</p>`);
+        <h2>Agenda</h2>` + (agenda || `<p class="muted">${isTPA ? "Nothing due on your disputes right now. Fees, document requests, deadlines and your tasks appear here as they arise." : "No upcoming deadlines or tasks."}</p>`);
     } catch (e) { return `<h1>Calendar</h1>` + err(e); }
   }
 
-  return { pipeline, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, done, search, calendar };
+  return { pipeline, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, done, search, calendar, calTaskDone, calTaskAdd };
 })();

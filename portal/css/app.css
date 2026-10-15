@@ -865,3 +865,14 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 .pm-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: 6px; }
 .pay-opt input[type=radio] { width: auto; min-height: 0; height: auto; flex: none; box-shadow: none; }
 .pay-sub table { width: 100%; }
+
+/* Calendar: the kinds of item a TPA sees (crm-views.js CAL_KIND) */
+.cal-chip-pay{background:#9C2B1F18;color:var(--danger-fg);border-left:3px solid var(--danger-fg)}
+.cal-chip-docs{background:#1D4E7E18;color:var(--info-fg);border-left:3px solid var(--info-fg)}
+.cal-chip-watch{background:#5B3E8C18;color:var(--attention-fg);border-left:3px solid var(--attention-fg)}
+.cal-kind.k-stat{background:var(--attention-bg);color:var(--attention-fg)}
+.cal-kind.k-pay{background:var(--danger-bg);color:var(--danger-fg)}
+.cal-kind.k-docs{background:var(--info-bg);color:var(--info-fg)}
+.cal-kind.k-watch{background:var(--sunken, var(--surface-sunken));color:var(--attention-fg)}
+.cal-detail{display:block;font-size:12px;color:var(--text-tertiary);white-space:normal}
+.cal-add{margin:0 0 12px}

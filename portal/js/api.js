@@ -512,6 +512,8 @@ const Api = (() => {
       // Saved cards and bank accounts (ACH): the TPA's own (no client_id) or a client's.
       tpaFeeOptions: (scope) => req("POST", `${t()}/tpa/fees/options`, scope || {}),
       tpaFeeRun: (runId) => req("GET", `${t()}/tpa/fees/runs/${runId}`),
+      tpaTaskCreate: (body) => req("POST", `${t()}/tpa/tasks`, body),
+      tpaTaskDone: (id) => req("POST", `${t()}/tpa/tasks/${id}/done`),
       tpaSavedMethods: (clientId) => req("GET", `${t()}/tpa/payment-methods` + (clientId ? `?client_id=${encodeURIComponent(clientId)}` : "")),
       tpaMethodSetup: (clientId, label) => req("POST", `${t()}/tpa/payment-methods/setup`, { client_id: clientId || "", label: label || "" }),
       tpaMethodSetupConfirm: (sessionId) => req("POST", `${t()}/tpa/payment-methods/setup/${encodeURIComponent(sessionId)}/confirm`),

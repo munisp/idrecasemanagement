@@ -743,6 +743,8 @@ func main() {
 		r.Get("/tpa/payment-methods", s.tpaSavedMethodsList)
 		r.Delete("/tpa/payment-methods/{methodId}", s.tpaSavedMethodRemove)
 		r.Post("/tpa/fees/options", s.tpaFeeOptions)
+		r.Post("/tpa/tasks", s.tpaTaskCreate)
+		r.Post("/tpa/tasks/{taskId}/done", s.tpaTaskDone)
 		r.Get("/tpa/fees/runs/{runId}", s.tpaFeeRun)
 		r.Get("/tpa/audit", s.orgAuditLog("tpa"))       // the TPA's own audit trail (orgaudit.go)
 		r.Get("/hp/audit", s.orgAuditLog("hp"))         // the plan's own audit trail
