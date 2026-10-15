@@ -16,6 +16,7 @@ package main
 // QPA-substantiation expectation for plan-uploaded OFFER_SUBSTANTIATION.
 
 import (
+	"context"
 	"archive/zip"
 	"bytes"
 	"crypto/rand"
@@ -391,10 +392,10 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.NPI, in.TIN, in.Address = strings.TrimSpace(in.NPI), strings.TrimSpace(in.TIN), strings.TrimSpace(in.Address)
-	var ptype string
+	var ptype, partyName, oldNPI, oldStatus string
 	if err := s.db.QueryRow(r.Context(), `
-		SELECT party_type FROM public.hp_parties WHERE tenant=$1 AND plan_id=$2 AND id=$3`,
-		tenant, org.ID, partyID).Scan(&ptype); err != nil {
+		SELECT party_type, party_name, coalesce(npi,''), coalesce(npi_status,'') FROM public.hp_parties WHERE tenant=$1 AND plan_id=$2 AND id=$3`,
+		tenant, org.ID, partyID).Scan(&ptype, &partyName, &oldNPI, &oldStatus); err != nil {
 		http.Error(w, `{"error":"party not found"}`, http.StatusNotFound)
 		return
 	}
@@ -415,6 +416,15 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"address required"}`, http.StatusBadRequest)
 		return
 	}
+	// The registry decides a new NPI; an unchanged one keeps its decision.
+	var chk npiCheck
+	if in.NPI != "" && (in.NPI != oldNPI || oldStatus == "" || oldStatus == "UNVERIFIED") {
+		chk = s.checkClientNPI(r.Context(), in.NPI, partyName, npiCacheFresh)
+		if chk.Refuse != "" {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, chk.Refuse), http.StatusUnprocessableEntity)
+			return
+		}
+	}
 	if _, err := s.db.Exec(r.Context(), `
 		UPDATE public.hp_parties SET npi=NULLIF($4,''), tin=$5, address=$6
 		WHERE tenant=$1 AND plan_id=$2 AND id=$3`,
@@ -422,53 +432,74 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	switch {
+	case chk.Status != "":
+		s.saveNPICheck(r.Context(), "hp", tenant, partyID, chk)
+	case in.NPI == "": // an employer group without one: nothing to decide
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.hp_parties SET npi_status=NULL, npi_registry_name=NULL WHERE tenant=$1 AND id::text=$2`, tenant, partyID)
+	}
 	st := s.recomputeHpPartyStatus(r, tenant, partyID)
-	s.logAudit(r.Context(), tenant, "", "HP_PARTY_PROFILE", map[string]any{"party_id": partyID, "onboarding_status": st})
-	writeJSON(w, http.StatusOK, map[string]any{"party_id": partyID, "onboarding_status": st})
+	var npiStatus, registry string
+	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(npi_status,''), coalesce(npi_registry_name,'') FROM public.hp_parties WHERE tenant=$1 AND id::text=$2`,
+		tenant, partyID).Scan(&npiStatus, &registry)
+	s.logAudit(r.Context(), tenant, "", "HP_PARTY_PROFILE", map[string]any{"party_id": partyID, "onboarding_status": st, "npi_status": npiStatus})
+	writeJSON(w, http.StatusOK, map[string]any{"party_id": partyID, "onboarding_status": st, "npi_status": npiStatus, "npi_registry_name": registry})
 }
 
 // recomputeHpPartyStatus derives PROFILE_INCOMPLETE -> PAYMENT_PENDING ->
 // DOCS_PENDING -> READY. Employer groups skip the NPI requirement.
 func (s *server) recomputeHpPartyStatus(r *http.Request, tenant, partyID string) string {
+	return s.recomputeHpPartyStatusCtx(r.Context(), tenant, partyID)
+}
+
+func (s *server) recomputeHpPartyStatusCtx(ctx context.Context, tenant, partyID string) string {
 	status := "PROFILE_INCOMPLETE"
 	var npi, tin, addr *string
-	var ptype string
-	if err := s.db.QueryRow(r.Context(), `
-		SELECT npi, tin, address, party_type FROM public.hp_parties WHERE tenant=$1 AND id=$2`,
-		tenant, partyID).Scan(&npi, &tin, &addr, &ptype); err != nil {
+	var ptype, npiStatus string
+	if err := s.db.QueryRow(ctx, `
+		SELECT npi, tin, address, party_type, coalesce(npi_status,'') FROM public.hp_parties WHERE tenant=$1 AND id::text=$2`,
+		tenant, partyID).Scan(&npi, &tin, &addr, &ptype, &npiStatus); err != nil {
 		return status
 	}
 	profileOK := tin != nil && *tin != "" && addr != nil && *addr != "" &&
 		(ptype == "EMPLOYER_GROUP" || (npi != nil && *npi != ""))
 	if !profileOK {
-		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id=$2`,
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
+			tenant, partyID, status)
+		return status
+	}
+	// An NPI the registry holds under another name waits for staff.
+	if npiStatus == "NEEDS_REVIEW" || npiStatus == "REJECTED" {
+		status = map[string]string{"NEEDS_REVIEW": "NPI_REVIEW", "REJECTED": "NPI_REJECTED"}[npiStatus]
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 			tenant, partyID, status)
 		return status
 	}
 	status = "PAYMENT_PENDING"
 	var payments int
-	_ = s.db.QueryRow(r.Context(), `
+	_ = s.db.QueryRow(ctx, `
 		SELECT count(*) FROM public.hp_payment_methods
-		WHERE tenant=$1 AND party_id=$2 AND verified AND status='ACTIVE'`,
+		WHERE tenant=$1 AND party_id::text=$2 AND verified AND status='ACTIVE'`,
 		tenant, partyID).Scan(&payments)
 	if payments == 0 {
-		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id=$2`,
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 			tenant, partyID, status)
 		return status
 	}
 	status = "DOCS_PENDING"
 	var ready int
-	_ = s.db.QueryRow(r.Context(), `
+	_ = s.db.QueryRow(ctx, `
 		SELECT count(*) FROM public.hp_packages
-		WHERE tenant=$1 AND party_id=$2 AND status='READY'`,
+		WHERE tenant=$1 AND party_id::text=$2 AND status='READY'`,
 		tenant, partyID).Scan(&ready)
 	if ready > 0 {
 		status = "READY"
 	}
-	_, _ = s.db.Exec(r.Context(), `
-		UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id=$2`,
+	_, _ = s.db.Exec(ctx, `
+		UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 		tenant, partyID, status)
 	return status
 }
@@ -510,6 +541,7 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 		PartyName string `json:"party_name"`
 		OK        bool   `json:"ok"`
 		PartyID   string `json:"party_id,omitempty"`
+		NPIStatus string `json:"npi_status,omitempty"`
 		Error     string `json:"error,omitempty"`
 	}
 	report := make([]rowResult, 0, len(rows)-start)
@@ -540,6 +572,13 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 		case tin != "" && !tinValid(tin):
 			res.Error = "TIN must be 9 digits"
 		default:
+			var chk npiCheck
+			if npi != "" {
+				if chk = s.checkClientNPI(r.Context(), npi, name, npiCacheFresh); chk.Refuse != "" {
+					res.Error = chk.Refuse
+					break
+				}
+			}
 			var id string
 			err := s.db.QueryRow(r.Context(), `
 				INSERT INTO public.hp_parties (tenant, plan_id, party_name, party_type, contact_email, npi, tin, address)
@@ -551,8 +590,11 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				res.Error = "insert failed"
 			} else {
-				res.OK, res.PartyID = true, id
+				res.OK, res.PartyID, res.NPIStatus = true, id, chk.Status
 				imported++
+				if chk.Status != "" {
+					s.saveNPICheck(r.Context(), "hp", tenant, id, chk)
+				}
 				s.recomputeHpPartyStatus(r, tenant, id)
 			}
 		}
@@ -972,7 +1014,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(r.Context(), `
 		SELECT c.id, c.party_name, c.party_type, c.onboarding_status, c.status,
-		       coalesce(c.npi,''), coalesce(c.tin,''),
+		       coalesce(c.npi,''), coalesce(c.tin,''), coalesce(c.npi_status,''), coalesce(c.npi_registry_name,''), coalesce(c.npi_review_note,''),
 		       (SELECT count(*) FROM public.hp_payment_methods m
 		         WHERE m.tenant=c.tenant AND m.party_id=c.id AND m.verified AND m.status='ACTIVE'),
 		       (SELECT count(*) FROM public.hp_packages pk
@@ -988,10 +1030,10 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	parties := []map[string]any{}
 	for rows.Next() {
-		var id, name, ptype, ost, cst, npi, tin string
+		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote string
 		var npay, nready int
 		var pkgs *string
-		if rows.Scan(&id, &name, &ptype, &ost, &cst, &npi, &tin, &npay, &nready, &pkgs) != nil {
+		if rows.Scan(&id, &name, &ptype, &ost, &cst, &npi, &tin, &npiSt, &npiReg, &npiNote, &npay, &nready, &pkgs) != nil {
 			continue
 		}
 		var packages json.RawMessage
@@ -1004,6 +1046,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"party_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": tin != "" && (ptype == "EMPLOYER_GROUP" || npi != ""),
+			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote,
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})
@@ -1199,6 +1242,10 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
+	if msg := s.respondentNPIProblem(r.Context(), rsp.NPI); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+		return
+	}
 	if msg := emailReachMsg(r.Context(), "the provider's email", rsp.Email); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
@@ -1214,6 +1261,10 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	if partyStatus != "ACTIVE" {
 		http.Error(w, `{"error":"party relationship is SUSPENDED"}`, http.StatusConflict)
+		return
+	}
+	if why := s.npiBlock(r.Context(), "hp", tenant, in.PartyID); why != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, "this dispute can't be filed yet: "+why), http.StatusConflict)
 		return
 	}
 	// Onboarding gate: once a party has started onboarding, filings must

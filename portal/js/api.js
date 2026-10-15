@@ -557,6 +557,8 @@ const Api = (() => {
       onboardingReviews: () => req("GET", `${t()}/onboarding/reviews`),
       onboardingReviewFile: (kind, docId) => blobURL(`${t()}/onboarding/reviews/${kind}/${docId}/file`),
       onboardingReviewDecide: (kind, docId, decision, note) => req("POST", `${t()}/onboarding/reviews/${kind}/${docId}`, { decision, note }),
+      npiReviews: () => req("GET", `${t()}/onboarding/npi-reviews`),
+      npiReviewDecide: (kind, id, decision, note) => req("POST", `${t()}/onboarding/npi-reviews/${kind}/${id}`, { decision, note }),
       hpMe: () => req("GET", `${t()}/hp/me`),
       hpOnboarding: () => req("GET", `${t()}/hp/onboarding`),
       hpAddParty: (body) => req("POST", `${t()}/hp/parties`, body),

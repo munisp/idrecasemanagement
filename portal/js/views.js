@@ -6566,7 +6566,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       ${onb ? `<section data-tpa-panel="reviews" style="display:none">
         <div class="card"><h2>Documents waiting for review</h2>
           <p class="muted">Documents the reader could not decide on. Open each one, then accept it or say why it is rejected — the filer sees the note.</p>
-          <div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}` : ""}`;
+          <div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>NPIs waiting for review</h2>
+          <p class="muted">The national NPI registry holds these NPIs under a different name than the client's. Confirm when it is the same provider (a former or trading name); reject with a note when it is not — the TPA sees the note and must enter the right NPI. The client can't file until then.</p>
+          <div id="tpa-npi-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}` : ""}`;
   }
 
   // TPA page tabs. The workspace tabs show once the account is linked to a
@@ -6587,7 +6590,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       disputes: () => { tpaFeesBox(); tpaDashBox(); },
       clients: () => { tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox(); },
       bulk: () => tpaBdBatchesBox(),
-      reviews: () => onboardingReviewsBox("tpa-reviews", "tpa"),
+      reviews: () => { onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); },
       oversight: () => tpaAdminBox(),
       audit: () => orgAuditBox("tpa-audit", "tpa"),
       docreq: () => orgDocReqBox("tpa-docreq", "tpa"),
@@ -6602,7 +6605,19 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     const el = document.getElementById("tpa-tc-" + k);
     if (el) el.textContent = text ? String(text) : "";
   }
-  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
+  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", NPI_REVIEW: "NPI under review", NPI_REJECTED: "NPI rejected", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
+  // The national NPI registry's answer on a client's NPI.
+  function npiLine(c) {
+    if (!c.npi) return "";
+    const reg = c.npi_registry_name && c.npi_registry_name !== "(test NPI)" ? ` — registry: ${esc(c.npi_registry_name)}` : "";
+    const st = { VERIFIED: ["npi-verified", "NPI verified"], NEEDS_REVIEW: ["npi-review", "NPI under review"], REJECTED: ["npi-rejected", "NPI rejected"],
+      UNVERIFIED: ["npi-unverified", "NPI not checked yet"] }[c.npi_status] || ["", "NPI " + esc(c.npi)];
+    const why = c.npi_status === "NEEDS_REVIEW" ? `<div class="muted">The registry holds NPI ${esc(c.npi)} under another name${reg}. The review team confirms it before filing can go ahead.</div>`
+      : c.npi_status === "REJECTED" ? `<div class="error">${esc(c.npi_review_note || "Rejected by the review team")}. Enter the correct NPI under Profile.</div>`
+      : c.npi_status === "UNVERIFIED" ? `<div class="muted">The registry could not be reached; it is checked again automatically.</div>`
+      : `<div class="muted">${esc(c.npi)}${reg}</div>`;
+    return `<div><span class="badge s-${st[0]}">${st[1]}</span>${why}</div>`;
+  }
   const PKG_STATUS = { ASSEMBLING: "started", VALIDATING: "checking", REJECTED: "needs a fix", READY: "ready to file", FILED: "filed" };
   const onbStatus = (st) => `<span class="badge s-${esc(String(st || "")).toLowerCase().replace(/_/g, "-")}">${esc(ONB_STATUS[st] || st || "—")}</span>`;
   function tpaPkgClose() {
@@ -6653,7 +6668,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa");
+      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox();
       if (document.getElementById("tpa-body")?.style.display === "none") tpaTab("oversight", true);  // not acting for a TPA
     }
   }
@@ -6678,7 +6693,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         ${cs.map((c) => {
           (c.open_packages || []).forEach((p) => { if (p.status === "READY") readyPkgs.push({ client: c.client_id, id: p.id, name: c.party_name }); });
           return `<tr><td>${esc(c.party_name)}<br><span class="muted">${badge(c.party_type)}</span></td>
-          <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}</td>
+          <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}${npiLine(c)}</td>
           <td>${c.verified_payments > 0 ? badge(c.verified_payments + " VERIFIED") : badge("NONE")}</td>
           <td>${c.ready_packages > 0 ? c.ready_packages : '<span class="muted">—</span>'}</td>
           <td>${onbStatus(c.onboarding_status)}</td>
@@ -6708,14 +6723,14 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       out.innerHTML = `<p class="ok">Imported ${r.imported} of ${r.total} rows.</p>
         <table class="tbl"><thead><tr><th>Row</th><th>Party</th><th>Result</th></tr></thead><tbody>
         ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.party_name || "—")}</td>
-          <td>${x.ok ? badge("IMPORTED") : `<span class="error">${esc(x.error || "failed")}</span>`}</td></tr>`).join("")}</tbody></table>`;
+          <td>${x.ok ? badge("IMPORTED") + (x.npi_status === "NEEDS_REVIEW" ? ' <span class="badge s-npi-review">NPI under review</span>' : x.npi_status === "UNVERIFIED" ? ' <span class="badge s-npi-unverified">NPI not checked yet</span>' : "") : `<span class="error">${esc(x.error || "failed")}</span>`}</td></tr>`).join("")}</tbody></table>`;
       form.reset(); tpaOnboardingBox(); tpaClientsBox();
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
   async function tpaProfileForm(clientId) {
     const v = await UI.modal({ title: "Client profile", submitLabel: "Save profile", fields: [
-      { name: "npi", label: "NPI (10 digits, Luhn-checked)", required: true, placeholder: "1234567893" },
+      { name: "npi", label: "NPI (10 digits, checked against the national NPI registry)", required: true, placeholder: "1234567893" },
       { name: "tin", label: "TIN (9 digits)", required: true, placeholder: "123456789" },
       { name: "address", label: "Address", type: "textarea", required: true },
     ]});
@@ -6723,8 +6738,11 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     try {
       const r = await Api.program.tpaClientProfile(clientId, {
         npi: v.npi.trim(), tin: v.tin.trim(), address: v.address.trim() });
-      tpaOnboardingBox();
-      UI.toast("Profile saved — onboarding: " + r.onboarding_status);
+      tpaOnboardingBox(); tpaClientsBox();
+      const npiMsg = { VERIFIED: "NPI verified in the national registry.",
+        NEEDS_REVIEW: `The registry holds this NPI under another name${r.npi_registry_name ? ` (${r.npi_registry_name})` : ""}. The review team will confirm it; until then this client can't file.`,
+        UNVERIFIED: "The NPI registry could not be reached; the NPI is checked again automatically." }[r.npi_status] || "";
+      UI.toast(`Profile saved. ${npiMsg}`, r.npi_status === "NEEDS_REVIEW" ? { kind: "warn" } : undefined);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -6885,7 +6903,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       <section data-hp-panel="oversight" style="display:none">
         <div class="card"><h2>All health plans in this program</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div></section>
       <section data-hp-panel="reviews" style="display:none">
-        <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}`;
+        <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>NPIs waiting for review</h2>
+          <p class="muted">The national NPI registry holds these networks' and facilities' NPIs under a different name. Confirm when it is the same provider; reject with a note when it is not — the health plan sees the note. The party can't file until then.</p>
+          <div id="hp-npi-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}`;
   }
 
   function hpTab(k, auto) {
@@ -6898,7 +6919,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       against: () => respondListBox("hp"),
       parties: () => hpOnboardingBox(),
       file: () => hpOnboardingBox(),
-      reviews: () => onboardingReviewsBox("hp-reviews", "hp"),
+      reviews: () => { onboardingReviewsBox("hp-reviews", "hp"); npiReviewsBox("hp-npi-reviews", "hp"); },
       oversight: () => hpAdminBox(),
       audit: () => orgAuditBox("hp-audit", "hp"),
       docreq: () => orgDocReqBox("hp-docreq", "hp"),
@@ -6964,7 +6985,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         ${ps.map((c) => {
           (c.open_packages || []).forEach((p) => { if (p.status === "READY") readyPkgs.push({ party: c.party_id, id: p.id, name: c.party_name }); });
           return `<tr><td>${esc(c.party_name)}<br><span class="muted">${badge(c.party_type)}</span></td>
-          <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}</td>
+          <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}${npiLine(c)}</td>
           <td>${c.verified_payments > 0 ? badge(c.verified_payments + " VERIFIED") : badge("NONE")}</td>
           <td>${c.ready_packages > 0 ? badge(c.ready_packages + " READY") : badge("NONE")}</td>
           <td>${badge(c.onboarding_status)}</td>
@@ -6993,7 +7014,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       out.innerHTML = `<p class="ok">Imported ${r.imported} of ${r.total} rows.</p>
         <table class="tbl"><thead><tr><th>Row</th><th>Party</th><th>Result</th></tr></thead><tbody>
         ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.party_name || "—")}</td>
-          <td>${x.ok ? badge("IMPORTED") : `<span class="error">${esc(x.error || "failed")}</span>`}</td></tr>`).join("")}</tbody></table>`;
+          <td>${x.ok ? badge("IMPORTED") + (x.npi_status === "NEEDS_REVIEW" ? ' <span class="badge s-npi-review">NPI under review</span>' : x.npi_status === "UNVERIFIED" ? ' <span class="badge s-npi-unverified">NPI not checked yet</span>' : "") : `<span class="error">${esc(x.error || "failed")}</span>`}</td></tr>`).join("")}</tbody></table>`;
       form.reset(); hpOnboardingBox();
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -7004,14 +7025,17 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       { name: "address", label: "Address", type: "textarea", required: true },
     ];
     if (partyType !== "EMPLOYER_GROUP")
-      fields.unshift({ name: "npi", label: "NPI (10 digits, Luhn-checked)", required: true, placeholder: "1234567893" });
+      fields.unshift({ name: "npi", label: "NPI (10 digits, checked against the national NPI registry)", required: true, placeholder: "1234567893" });
     const v = await UI.modal({ title: "Party profile", submitLabel: "Save profile", fields });
     if (!v) return;
     try {
       const r = await Api.program.hpPartyProfile(partyId, {
         npi: (v.npi || "").trim(), tin: v.tin.trim(), address: v.address.trim() });
       hpOnboardingBox();
-      UI.toast("Profile saved — onboarding: " + r.onboarding_status);
+      const npiMsg = { VERIFIED: "NPI verified in the national registry.",
+        NEEDS_REVIEW: `The registry holds this NPI under another name${r.npi_registry_name ? ` (${r.npi_registry_name})` : ""}. The review team will confirm it; until then this party can't file.`,
+        UNVERIFIED: "The NPI registry could not be reached; the NPI is checked again automatically." }[r.npi_status] || "";
+      UI.toast(`Profile saved. ${npiMsg}`, r.npi_status === "NEEDS_REVIEW" ? { kind: "warn" } : undefined);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -8057,6 +8081,35 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
             <button class="mini danger" onclick="Views.onbReviewDecide('${boxId}','${kind}','${x.doc_id}','REJECT')">Reject</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
+  async function npiReviewsBox(boxId = "tpa-npi-reviews", kind = "tpa") {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const decides = can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    try {
+      const rows = ((await Api.program.npiReviews()).reviews || []).filter((x) => (x.kind || "tpa") === kind);
+      if (!rows.length) { box.innerHTML = `<p class="muted">Nothing waiting — every ${kind === "hp" ? "party" : "client"} NPI matches the registry or has a decision.</p>`; return; }
+      box.innerHTML = `<table class="tbl"><thead><tr><th>${kind === "hp" ? "Health plan · party" : "TPA · client"}</th><th>NPI</th><th>The registry holds it as</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td>${esc(x.organization)}<br><span class="muted">${esc(x.party_name)}</span></td>
+          <td>${esc(x.npi)}<br><a class="muted" href="https://npiregistry.cms.hhs.gov/provider-view/${esc(x.npi)}" target="_blank" rel="noopener">open in NPPES</a></td>
+          <td>${x.registry_found ? `<b>${esc(x.registry_name)}</b>${(x.other_names || []).length ? `<br><span class="muted">also: ${x.other_names.map(esc).join("; ")}</span>` : ""}
+            <br><span class="muted">${esc([x.enumeration_type === "NPI-1" ? "an individual" : x.enumeration_type === "NPI-2" ? "an organization" : "", x.taxonomy, x.state].filter(Boolean).join(" · "))}</span>`
+            : '<span class="error">Not in the registry any more (deactivated since it was entered)</span>'}</td>
+          <td style="white-space:nowrap">${decides ? `<button class="mini" onclick="Views.npiReviewDecideFn('${kind}','${x.id}','CONFIRM','${boxId}')">Confirm</button>
+            <button class="mini danger" onclick="Views.npiReviewDecideFn('${kind}','${x.id}','REJECT','${boxId}')">Reject</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function npiReviewDecideFn(kind, id, decision, boxId) {
+    let note = "";
+    if (decision === "REJECT") {
+      note = (prompt("Why is this NPI rejected? The TPA sees this note.") || "").trim();
+      if (!note) return;
+    } else if (!(await UI.confirm("Confirm this NPI?", "It belongs to this provider under the name the registry shows. Filing can then go ahead.", "Confirm"))) return;
+    try {
+      await Api.program.npiReviewDecide(kind, id, decision, note);
+      UI.toast(decision === "CONFIRM" ? "NPI confirmed — filing can go ahead" : `NPI rejected — the ${kind === "hp" ? "health plan" : "TPA"} is shown your note`);
+      npiReviewsBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   // Only the chosen client's (or party's) READY packages can be filed with it.
   function filingPackagesFilter(ownerSelId, pkgSelId, attr) {
     const owner = document.getElementById(ownerSelId), sel = document.getElementById(pkgSelId);
@@ -8641,5 +8694,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

@@ -21,6 +21,7 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -145,42 +146,55 @@ func routingValid(rt string) bool {
 // recomputeClientStatus derives PROFILE_INCOMPLETE -> PAYMENT_PENDING ->
 // DOCS_PENDING -> READY from the three gates. Never trusts caller input.
 func (s *server) recomputeClientStatus(r *http.Request, tenant, clientID string) string {
+	return s.recomputeClientStatusCtx(r.Context(), tenant, clientID)
+}
+
+func (s *server) recomputeClientStatusCtx(ctx context.Context, tenant, clientID string) string {
 	status := "PROFILE_INCOMPLETE"
 	var npi, tin, addr *string
-	if err := s.db.QueryRow(r.Context(), `
-		SELECT npi, tin, address FROM public.tpa_clients WHERE tenant=$1 AND id=$2`,
-		tenant, clientID).Scan(&npi, &tin, &addr); err != nil {
+	var npiStatus string
+	if err := s.db.QueryRow(ctx, `
+		SELECT npi, tin, address, coalesce(npi_status,'') FROM public.tpa_clients WHERE tenant=$1 AND id::text=$2`,
+		tenant, clientID).Scan(&npi, &tin, &addr, &npiStatus); err != nil {
 		return status
 	}
 	if npi == nil || *npi == "" || tin == nil || *tin == "" || addr == nil || *addr == "" {
-		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id=$2`,
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
+			tenant, clientID, status)
+		return status
+	}
+	// An NPI the registry holds under another name waits for staff.
+	if npiStatus == "NEEDS_REVIEW" || npiStatus == "REJECTED" {
+		status = "NPI_" + map[string]string{"NEEDS_REVIEW": "REVIEW", "REJECTED": "REJECTED"}[npiStatus]
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 			tenant, clientID, status)
 		return status
 	}
 	status = "PAYMENT_PENDING"
 	var payments int
-	_ = s.db.QueryRow(r.Context(), `
+	_ = s.db.QueryRow(ctx, `
 		SELECT count(*) FROM public.tpa_payment_methods
-		WHERE tenant=$1 AND client_id=$2 AND verified AND status='ACTIVE'`,
+		WHERE tenant=$1 AND client_id::text=$2 AND verified AND status='ACTIVE'`,
 		tenant, clientID).Scan(&payments)
 	if payments == 0 {
-		_, _ = s.db.Exec(r.Context(), `
-			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id=$2`,
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 			tenant, clientID, status)
 		return status
 	}
 	status = "DOCS_PENDING"
 	var ready int
-	_ = s.db.QueryRow(r.Context(), `
+	_ = s.db.QueryRow(ctx, `
 		SELECT count(*) FROM public.tpa_packages
-		WHERE tenant=$1 AND client_id=$2 AND status='READY'`,
+		WHERE tenant=$1 AND client_id::text=$2 AND status='READY'`,
 		tenant, clientID).Scan(&ready)
 	if ready > 0 {
 		status = "READY"
 	}
-	_, _ = s.db.Exec(r.Context(), `
-		UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id=$2`,
+	_, _ = s.db.Exec(ctx, `
+		UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 		tenant, clientID, status)
 	return status
 }
@@ -223,6 +237,23 @@ func (s *server) tpaUpdateClientProfile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"address required"}`, http.StatusBadRequest)
 		return
 	}
+	var partyName, oldNPI, oldStatus string
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT party_name, coalesce(npi,''), coalesce(npi_status,'') FROM public.tpa_clients WHERE tenant=$1 AND tpa_id=$2 AND id::text=$3`,
+		tenant, org.ID, clientID).Scan(&partyName, &oldNPI, &oldStatus); err != nil {
+		http.Error(w, `{"error":"client not found"}`, http.StatusNotFound)
+		return
+	}
+	// The registry decides a new NPI; an unchanged one keeps its decision
+	// (a staff confirmation is not undone by fixing the address).
+	var chk npiCheck
+	if in.NPI != oldNPI || oldStatus == "" || oldStatus == "UNVERIFIED" {
+		chk = s.checkClientNPI(r.Context(), in.NPI, partyName, npiCacheFresh)
+		if chk.Refuse != "" {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, chk.Refuse), http.StatusUnprocessableEntity)
+			return
+		}
+	}
 	tag, err := s.db.Exec(r.Context(), `
 		UPDATE public.tpa_clients SET npi=$3, tin=$4, address=$5
 		WHERE tenant=$1 AND tpa_id=$2 AND id=$6`,
@@ -231,9 +262,15 @@ func (s *server) tpaUpdateClientProfile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"client not found"}`, http.StatusNotFound)
 		return
 	}
+	if chk.Status != "" {
+		s.saveClientNPICheck(r.Context(), tenant, clientID, chk)
+	}
 	st := s.recomputeClientStatus(r, tenant, clientID)
-	s.logAudit(r.Context(), tenant, "", "TPA_CLIENT_PROFILE", map[string]any{"client_id": clientID, "onboarding_status": st})
-	writeJSON(w, http.StatusOK, map[string]any{"client_id": clientID, "onboarding_status": st})
+	var npiStatus, registry string
+	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(npi_status,''), coalesce(npi_registry_name,'') FROM public.tpa_clients WHERE tenant=$1 AND id::text=$2`,
+		tenant, clientID).Scan(&npiStatus, &registry)
+	s.logAudit(r.Context(), tenant, "", "TPA_CLIENT_PROFILE", map[string]any{"client_id": clientID, "onboarding_status": st, "npi_status": npiStatus})
+	writeJSON(w, http.StatusOK, map[string]any{"client_id": clientID, "onboarding_status": st, "npi_status": npiStatus, "npi_registry_name": registry})
 }
 
 // --- bulk roster import -----------------------------------------------------
@@ -277,6 +314,7 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 		PartyName string `json:"party_name"`
 		OK        bool   `json:"ok"`
 		ClientID  string `json:"client_id,omitempty"`
+		NPIStatus string `json:"npi_status,omitempty"`
 		Error     string `json:"error,omitempty"`
 	}
 	report := make([]rowResult, 0, len(rows)-start)
@@ -305,6 +343,13 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 		case tin != "" && !tinValid(tin):
 			res.Error = "TIN must be 9 digits"
 		default:
+			var chk npiCheck
+			if npi != "" {
+				if chk = s.checkClientNPI(r.Context(), npi, name, npiCacheFresh); chk.Refuse != "" {
+					res.Error = chk.Refuse
+					break
+				}
+			}
 			var id string
 			err := s.db.QueryRow(r.Context(), `
 				INSERT INTO public.tpa_clients (tenant, tpa_id, party_name, party_type, contact_email, npi, tin, address)
@@ -316,8 +361,11 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				res.Error = "insert failed"
 			} else {
-				res.OK, res.ClientID = true, id
+				res.OK, res.ClientID, res.NPIStatus = true, id, chk.Status
 				imported++
+				if chk.Status != "" {
+					s.saveClientNPICheck(r.Context(), tenant, id, chk)
+				}
 				s.recomputeClientStatus(r, tenant, id)
 			}
 		}
@@ -738,7 +786,7 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query(r.Context(), `
 		SELECT c.id, c.party_name, c.party_type, c.onboarding_status, c.status,
-		       coalesce(c.npi,''), coalesce(c.tin,''),
+		       coalesce(c.npi,''), coalesce(c.tin,''), coalesce(c.npi_status,''), coalesce(c.npi_registry_name,''), coalesce(c.npi_review_note,''),
 		       (SELECT count(*) FROM public.tpa_payment_methods m
 		         WHERE m.tenant=c.tenant AND m.client_id=c.id AND m.verified AND m.status='ACTIVE'),
 		       (SELECT count(*) FROM public.tpa_packages pk
@@ -754,10 +802,10 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	clients := []map[string]any{}
 	for rows.Next() {
-		var id, name, ptype, ost, cst, npi, tin string
+		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote string
 		var npay, nready int
 		var pkgs *string
-		if rows.Scan(&id, &name, &ptype, &ost, &cst, &npi, &tin, &npay, &nready, &pkgs) != nil {
+		if rows.Scan(&id, &name, &ptype, &ost, &cst, &npi, &tin, &npiSt, &npiReg, &npiNote, &npay, &nready, &pkgs) != nil {
 			continue
 		}
 		var packages json.RawMessage
@@ -770,6 +818,7 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"client_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": npi != "" && tin != "",
+			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote,
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})

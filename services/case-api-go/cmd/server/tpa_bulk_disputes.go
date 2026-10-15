@@ -440,6 +440,10 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail("the client's profile (NPI, TIN, address) is not complete")
 			continue
 		}
+		if why := s.clientNPIBlock(r.Context(), tenant, clientID); why != "" {
+			fail(why)
+			continue
+		}
 		var rails int
 		_ = s.db.QueryRow(r.Context(), `SELECT count(*) FROM public.tpa_payment_methods
 			WHERE tenant=$1 AND client_id=$2 AND verified AND status='ACTIVE'`, tenant, clientID).Scan(&rails)
@@ -603,6 +607,7 @@ func (s *server) fileReadyBulkDisputes() int {
 	s.sweepExpiredUploads(ctx)
 	s.reconcileOpenFeeCheckouts(ctx)
 	s.reconcilePendingSetups(ctx)
+	s.recheckClientNPIs(ctx)
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id::text FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_packages pk ON pk.id=i.package_id
@@ -677,6 +682,9 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	}
 	if cstatus != "ACTIVE" {
 		return "", fmt.Errorf("the client was suspended before filing")
+	}
+	if why := s.clientNPIBlock(ctx, tenant, clientID); why != "" {
+		return "", fmt.Errorf("%s", why)
 	}
 	var rails int
 	_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.tpa_payment_methods WHERE tenant=$1 AND client_id::text=$2 AND verified AND status='ACTIVE'`,

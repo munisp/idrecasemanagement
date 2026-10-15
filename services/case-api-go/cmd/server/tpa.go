@@ -505,6 +505,10 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"client relationship is SUSPENDED"}`, http.StatusConflict)
 		return
 	}
+	if why := s.clientNPIBlock(r.Context(), tenant, in.ClientID); why != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, "this dispute can't be filed yet: "+why), http.StatusConflict)
+		return
+	}
 	// Onboarding gate (tpa_onboarding): when the client has completed
 	// onboarding the filing must reference its READY package — six ACCEPTED
 	// slots + a verified payment rail. Clients that never started onboarding
