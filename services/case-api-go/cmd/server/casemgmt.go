@@ -176,7 +176,7 @@ func (s *server) listAuditLog(w http.ResponseWriter, r *http.Request) {
 	// reads their own (GET /audit/mine) and, for a TPA or plan, its
 	// organization's; a case's own history stays on the case page.
 	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN") {
-		http.Error(w, `{"error":"forbidden: the program audit log is for admins and the state auditor — see My activity for your own"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the program audit log is for admins and the state auditor — your Audit log shows your own actions"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

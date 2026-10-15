@@ -239,9 +239,12 @@
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
   // Audit trails, isolated: the whole program's for admins and the state
   // auditor; an organization's own for a TPA or plan; and everyone's own actions.
-  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/audit", "⌘", "Program audit log"]);
+  // One Audit log per person, at the widest scope they may see, with an
+  // "Only my actions" switch: the whole program for admins and the state
+  // auditor, the organization for a TPA or plan, and otherwise your own.
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/audit", "⌘", "Audit log"]);
   else if (outside && has("TPA", "HEALTH_PLAN")) links.push(["#/org-audit", "⌘", "Audit log"]);
-  links.push(["#/my-activity", "◷", "My activity"]);
+  else links.push(["#/my-activity", "⌘", "Audit log"]);
   if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);
   nav.innerHTML = links.map(([h, i, l]) =>
     `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
@@ -451,6 +454,8 @@
     if (menu.has(page)) return true;
     // Pages reached from another page rather than from the menu.
     if (page === "search") return menu.has("cases");
+    // Your own actions: always yours to see (bookmarks of the old "My activity").
+    if (page === "my-activity") return true;
     // A TPA has no Disputes list, but opens the disputes it filed from its own page.
     if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return outside;
     return false;
