@@ -321,6 +321,18 @@ const Api = (() => {
       },
       createAccount: (p) => req("POST", `${t()}/accounts`, p),
       account360: (id) => req("GET", `${t()}/accounts/${id}/360`),
+      // Entity 360: cross-rail organization aggregate (TPA / provider / health plan).
+      entitySearch: (q) => req("GET", `${t()}/entities?q=${encodeURIComponent(q)}`),
+      entityCreate: (body) => req("POST", `${t()}/entities`, body),
+      entityLookup: (source_table, source_id) => req("GET", `${t()}/entity360/lookup?source_table=${encodeURIComponent(source_table)}&source_id=${encodeURIComponent(source_id)}`),
+      entity360: (id) => req("GET", `${t()}/entity360/${id}`),
+      entityLink: (id, body) => req("POST", `${t()}/entities/${id}/links`, body),
+      entityUnlink: (id, linkId) => req("DELETE", `${t()}/entities/${id}/links/${linkId}`),
+      entitySourceSearch: (q) => req("GET", `${t()}/entities/sources/search?q=${encodeURIComponent(q)}`),
+      entityMerge: (id, intoId) => req("POST", `${t()}/entities/${id}/merge`, { into_id: intoId }),
+      entityOutreach: (minCases, quietDays) => req("GET", `${t()}/entity360/outreach?min_cases=${minCases || 3}&quiet_days=${quietDays || 90}`),
+      entityGraph: (id) => req("GET", `${t()}/entity360/${id}/graph`),
+      createLead: (body) => req("POST", `${t()}/leads`, body),
       createContact: (p) => req("POST", `${t()}/contacts`, p),
       leads: (params = {}) => {
         const qs = new URLSearchParams(params).toString();

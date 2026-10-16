@@ -361,6 +361,10 @@ type server struct {
 	docs    *docStore
 	rds     *redisClient // cache + idempotency (fail-open)
 	permify string       // Permify base URL ("" = ReBAC check disabled, dev mode)
+	// graphBackends: the Entity 360 relationship-graph provider chain
+	// (GRAPH_BACKENDS — sql | age | falkordb; sql always last). See
+	// graph_provider.go.
+	graphBackends []graphProvider
 }
 
 func envOr(k, d string) string {
@@ -509,6 +513,7 @@ func main() {
 
 	s := &server{cfg: cfg, db: pool, tc: tc, tb: tbc, docs: docs, rds: rds,
 		permify: envOr("PERMIFY_URL", "")}
+	s.graphBackends = buildGraphBackends(pool, s)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer)
@@ -555,8 +560,20 @@ func main() {
 		r.Get("/accounts", s.listAccounts)
 		r.Post("/accounts", s.createAccount)
 		r.Get("/accounts/{accountId}/360", s.account360)
+		// Entity 360: cross-rail organization aggregate (entity360.go).
+		r.Get("/entities", s.entitySearch)
+		r.Post("/entities", s.entityCreate)
+		r.Post("/entities/{entityId}/links", s.entityConfirmLink)
+		r.Delete("/entities/{entityId}/links/{linkId}", s.entityUnlink)
+		r.Get("/entities/sources/search", s.entitySourceSearch)
+		r.Post("/entities/{entityId}/merge", s.entityMerge)
+		r.Get("/entity360/lookup", s.entityLookupRef)
+		r.Get("/entity360/outreach", s.entityOutreach)
+		r.Get("/entity360/{entityId}/graph", s.entityGraph)
+		r.Get("/entity360/{entityId}", s.entity360View)
 		r.Post("/contacts", s.createContact)
 		r.Get("/leads", s.listLeads)
+		r.Post("/leads", s.createLead)
 		r.Post("/leads/{leadId}/convert", s.convertLead)
 		r.Get("/tasks", s.listTasks)
 		r.Post("/tasks", s.createTask)
@@ -571,6 +588,8 @@ func main() {
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)
+		r.Post("/internal/entities/backfill", s.entityBackfill)         // link historical CRM records to entities
+		r.Post("/internal/entities/graph/sync", s.entityGraphSync)      // rebuild AGE/FalkorDB entity-graph projections
 		r.Post("/checks", s.uploadCheck)                                // physical check photo/scan intake
 		r.Get("/checks", s.listChecks)                                  // review queue
 		r.Get("/checks/{checkId}/image", s.checkImage)                  // vault-unsealed scan for portal preview

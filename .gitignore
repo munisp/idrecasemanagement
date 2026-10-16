@@ -8,3 +8,4 @@ __pycache__/
 __pycache__/
 *.pyc
 /services/*/cmd/server/server
+/services/vault-rs/target

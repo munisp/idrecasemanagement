@@ -135,6 +135,13 @@ func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "account_id": id,
 		"type": in.Type, "legal_name": in.LegalName, "npi": in.NPI,
 	})
+	// Entity 360: link the new account to its entity right away (identity-key
+	// match or a fresh registry row). Best-effort — a resolver hiccup must
+	// never fail account creation, and lookup re-resolves lazily later.
+	if s.featureEnabled(r, tenant, "entity360") {
+		_, _ = s.ensureEntity(r.Context(), tenant, "accounts", id, in.Type, in.LegalName,
+			in.NPI, regexpDigits(in.EIN), "", "", "")
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -665,6 +672,15 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 			WHERE tenant=$1 AND subject ILIKE $2 LIMIT 10`},
 		{"invoice", `SELECT id::text, invoice_no, status, case_id FROM public.invoices
 			WHERE tenant=$1 AND invoice_no ILIKE $2 LIMIT 10`},
+	}
+	// Entity 360 hits (#3): typing an organization name in global search
+	// surfaces its entity so staff land on the cross-rail view, not one
+	// rail's row. Gated on the feature and guarded like every other kind —
+	// a missing entities table just means no entity hits.
+	if s.featureEnabled(r, tenant, "entity360") {
+		queries = append(queries, struct{ kind, sql string }{
+			"entity", `SELECT id::text, canonical_name, entity_type, '' FROM public.entities
+			WHERE tenant=$1 AND status='ACTIVE' AND canonical_name ILIKE $2 LIMIT 10`})
 	}
 	for _, qd := range queries {
 		var rows interface {

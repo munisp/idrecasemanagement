@@ -173,6 +173,7 @@
   if (!outside) {
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
       ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
+    if (feature("entity360")) links.push(["#/crm/360", "◉", "Entities 360"]);
   }
   if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
@@ -326,10 +327,12 @@
       : h.kind === "task" ? (h.case_id ? `#/cases/${h.case_id}` : "#/crm/tasks")
       : h.kind === "invoice" ? (h.case_id ? `#/cases/${h.case_id}` : "#/finance")
       : h.kind === "account" ? `#/crm/accounts/${h.id}`
+      : h.kind === "entity" ? `#/crm/360/${h.id}`
       : h.kind === "lead" ? "#/crm/leads" : "#/crm/accounts";
     const iconFor = (h) => h.kind === "page" ? h.icon
       : h.kind === "case" ? "▦" : h.kind === "document" ? "🗎"
-      : h.kind === "task" ? "☑" : h.kind === "invoice" ? "🧾" : "◈";
+      : h.kind === "task" ? "☑" : h.kind === "invoice" ? "🧾"
+      : h.kind === "entity" ? "◉" : "◈";
     let timer = 0, items = [], sel = -1;
     const closeDrop = () => { drop.hidden = true; items = []; sel = -1; };
     async function refresh() {
@@ -404,6 +407,8 @@
     [/^#\/crm\/accounts$/, CrmViews.accounts],
     [/^#\/crm\/accounts\/new$/, CrmViews.accountNew],
     [/^#\/crm\/accounts\/([\w-]+)$/, (m) => CrmViews.account360(m[1])],
+    [/^#\/crm\/360$/, CrmViews.entitySearchPage],
+    [/^#\/crm\/360\/([\w-]+)$/, (m) => CrmViews.entity360(m[1])],
     [/^#\/crm\/leads$/, CrmViews.leads],
     [/^#\/crm\/tasks(\?.*)?$/, CrmViews.tasks],
     [/^#\/search\/(.+)$/, (m) => CrmViews.search(decodeURIComponent(m[1]))],
@@ -461,6 +466,8 @@
     if (page === "qa") return has("CODER");
     // A TPA has no Disputes list, but opens the disputes it filed from its own page.
     if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return outside;
+    // Entity 360 rides on the Accounts permission and its own flag.
+    if (page === "crm/360") return menu.has("crm/accounts") && feature("entity360");
     return false;
   }
   const noAccess = () => `<div class="view-head"><h1>No access</h1></div>
