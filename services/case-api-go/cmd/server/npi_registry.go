@@ -297,7 +297,7 @@ func (s *server) npiBlock(ctx context.Context, kind, tenant, id string) string {
 		}
 		return "the review team rejected the " + o.noun + "'s NPI — enter the correct NPI in the " + o.noun + "'s profile"
 	}
-	return ""
+	return s.verificationBlock(ctx, kind, tenant, id)
 }
 
 func (s *server) clientNPIBlock(ctx context.Context, tenant, clientID string) string {

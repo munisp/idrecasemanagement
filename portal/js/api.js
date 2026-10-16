@@ -570,6 +570,8 @@ const Api = (() => {
       onboardingReviewFile: (kind, docId) => blobURL(`${t()}/onboarding/reviews/${kind}/${docId}/file`),
       onboardingReviewDecide: (kind, docId, decision, note) => req("POST", `${t()}/onboarding/reviews/${kind}/${docId}`, { decision, note }),
       npiReviews: () => req("GET", `${t()}/onboarding/npi-reviews`),
+      verificationReviews: () => req("GET", `${t()}/onboarding/verification-reviews`),
+      verificationReviewDecide: (id, decision, note) => req("POST", `${t()}/onboarding/verification-reviews/${id}`, { decision, note }),
       npiReviewDecide: (kind, id, decision, note) => req("POST", `${t()}/onboarding/npi-reviews/${kind}/${id}`, { decision, note }),
       hpMe: () => req("GET", `${t()}/hp/me`),
       hpOnboarding: () => req("GET", `${t()}/hp/onboarding`),

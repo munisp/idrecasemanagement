@@ -172,6 +172,12 @@ func (s *server) recomputeClientStatusCtx(ctx context.Context, tenant, clientID 
 			tenant, clientID, status)
 		return status
 	}
+	if hold := s.exclusionOnboardingStatus(ctx, "tpa", tenant, clientID); hold != "" {
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
+			tenant, clientID, hold)
+		return hold
+	}
 	status = "PAYMENT_PENDING"
 	var payments int
 	_ = s.db.QueryRow(ctx, `
@@ -229,8 +235,8 @@ func (s *server) tpaUpdateClientProfile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"NPI failed the 10-digit Luhn check (80840 prefix)"}`, http.StatusBadRequest)
 		return
 	}
-	if !tinValid(in.TIN) {
-		http.Error(w, `{"error":"TIN must be exactly 9 digits"}`, http.StatusBadRequest)
+	if msg := tinProblem(in.TIN); msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
 		return
 	}
 	if in.Address == "" {
@@ -265,6 +271,7 @@ func (s *server) tpaUpdateClientProfile(w http.ResponseWriter, r *http.Request) 
 	if chk.Status != "" {
 		s.saveClientNPICheck(r.Context(), tenant, clientID, chk)
 	}
+	s.runVerifications(r.Context(), "tpa", tenant, clientID, in.NPI, partyName, in.TIN)
 	st := s.recomputeClientStatus(r, tenant, clientID)
 	var npiStatus, registry string
 	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(npi_status,''), coalesce(npi_registry_name,'') FROM public.tpa_clients WHERE tenant=$1 AND id::text=$2`,
@@ -340,8 +347,8 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 			res.Error = "party_type must be PROVIDER or HEALTH_PLAN"
 		case npi != "" && !npiValid(npi):
 			res.Error = "NPI failed Luhn check"
-		case tin != "" && !tinValid(tin):
-			res.Error = "TIN must be 9 digits"
+		case tin != "" && tinProblem(tin) != "":
+			res.Error = tinProblem(tin)
 		default:
 			var chk npiCheck
 			if npi != "" {
@@ -366,6 +373,7 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 				if chk.Status != "" {
 					s.saveClientNPICheck(r.Context(), tenant, id, chk)
 				}
+				s.runVerifications(r.Context(), "tpa", tenant, id, npi, name, tin)
 				s.recomputeClientStatus(r, tenant, id)
 				if s.featureEnabled(r, tenant, "entity360") {
 					s.ensureEntityQuiet(r.Context(), tenant, "tpa_clients", id, ptype, name, npi, tin, "", "")
@@ -803,6 +811,7 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
+	checks := s.verificationsSummary(r.Context(), "tpa", tenant)
 	clients := []map[string]any{}
 	for rows.Next() {
 		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote string
@@ -821,7 +830,7 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"client_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": npi != "" && tin != "",
-			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote,
+			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})

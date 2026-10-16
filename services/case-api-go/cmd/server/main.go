@@ -801,6 +801,8 @@ func main() {
 		r.Post("/hp/responding/{caseId}/documents", s.respondingUpload("plan"))
 		r.Post("/hp/responding/{caseId}/submit", s.respondingSubmit("plan"))
 		r.Post("/hp/responding/{caseId}/opt-out", s.respondingOptOut)
+		r.Get("/onboarding/verification-reviews", s.verificationReviews) // exclusion-list (HHS-OIG) matches
+		r.Post("/onboarding/verification-reviews/{reviewId}", s.verificationReviewDecide)
 		r.Get("/onboarding/npi-reviews", s.npiReviews)                  // client NPIs the registry holds under another name
 		r.Post("/onboarding/npi-reviews/{kind}/{id}", s.npiReviewDecide)
 		r.Get("/onboarding/reviews", s.onboardingReviews)               // documents doc-intel left for a person (both rails)
