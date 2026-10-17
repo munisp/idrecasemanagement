@@ -69,11 +69,11 @@ const Letters = (() => {
     });
     const tpls = (cfg && cfg.letter_templates) || [];
     const label = (t) => (t.filename || t.key).replace(/\s*\{case_number\}|\s*\{invoice_number\}/g, "").replace(/\.pdf$/i, "").replace(/\s+-\s*$/, "");
-    return `<details class="prog-sec" id="p-dr-details"><summary>Decision report</summary>
+    return `<details class="prog-sec" id="p-dr-details" data-tab="review"><summary>Decision report</summary>
       <p class="muted">What the Review Rationale and Letter, the cover letter and the invoices say. Each part is written by
         the reviewer who owns it; the Reviewer and the PM may edit all of it. Generated letters go to the QA queue.</p>
       <div id="dr-body"><p class="muted">Loading…</p></div></details>
-      ${tpls.length ? `<details class="prog-sec" id="p-letters-details"><summary>Letters</summary>
+      ${tpls.length ? `<details class="prog-sec" id="p-letters-details" data-tab="mail"><summary>Generate a letter <span class="muted">— most are drafted by their step; use this for anything else</span></summary>
       <p class="muted">Each letter is built from the case in the program’s layout (unless your office uploaded its own
         template for it), filed under Documents and sent to the QA queue before it goes anywhere.</p>
       <table class="tbl" data-nosearch><thead><tr><th>Letter</th><th>Filed under</th><th></th></tr></thead><tbody>

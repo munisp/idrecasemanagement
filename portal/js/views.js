@@ -269,16 +269,16 @@ const Views = (() => {
     const steps = r.steps || [];
     const next = steps.find((x) => x.state === "next");
     window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin };
-    box.innerHTML = `<h3>Steps</h3>
-      <p class="muted">${next ? `Only the next step can be acted on, by the ${esc(next.owner)} (or an admin). Everything else is greyed out until its turn.`
-        : "No open step — nothing further is due on this case."}</p>
+    CaseLayout.nextStep(steps, next, next && next.can_act ? WF_BUTTON(next.action) : "");
+    box.innerHTML = `<details class="wf-all"${box.classList.contains("wf-open") ? " open" : ""}><summary><b>All steps</b>
+      <span class="muted">— ${steps.filter((x) => x.state === "done" || x.state === "skipped").length} of ${steps.length} done. Only the next step can be acted on, by its owner (or an admin).</span></summary>
       <ol class="wf">${steps.map((x) => `<li class="wf-${x.state}">
         <span class="wf-mark" aria-hidden="true">${WF_MARK[x.state] || ""}</span>
         <span class="wf-label">${esc(x.label)}</span> <span class="chip">${esc(x.owner)}</span>
         ${x.state === "next" ? (x.can_act
           ? `<button type="button" class="mini" onclick="Views.wfAct('${esc(x.key)}')">${WF_BUTTON(x.action)}</button>`
           : `<span class="muted">waiting on the ${esc(x.owner)}</span>`) : ""}
-        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol>`;
+        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol></details>`;
     wfApplyLocks();
   }
   function wfApplyLocks() {
@@ -299,6 +299,7 @@ const Views = (() => {
         else el.open = true;
       }
     });
+    CaseLayout.markTabs();
     // Stage letters can only be drafted on their own step.
     const sel = document.querySelector('#p-send select[name="template"]');
     if (sel) {
@@ -323,7 +324,7 @@ const Views = (() => {
     const st = (steps || []).find((x) => x.key === key);
     if (!st || st.state !== "next" || !st.can_act) return;
     const a = st.action;
-    const open = (sel) => { const el = document.querySelector(sel); if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+    const open = (sel) => { const el = document.querySelector(sel); if (el) { CaseLayout.reveal(el); el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
     if (a.startsWith("letter:")) {
       const tpl = a.slice(7), sel = document.querySelector('#p-send select[name="template"]');
       if (sel) { sel.value = tpl; corrTemplateBody(sel); }
@@ -1476,233 +1477,154 @@ const Views = (() => {
         Api.program.get().catch(() => null),
       ]);
       Palette.remember("case", c.id, c.case_number);
-      let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>
-        ${badge(c.status)}</div>
-        <p class="muted">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
+      // The case page: a header that says what this dispute is and where it stands, one "next step" banner, and
+      // the rest in tabs by what people come to do (read the documents, review, write to the parties, bill,
+      // look back). Every section keeps its own id, so the step buttons still find and open it (CaseLayout.reveal).
+      const programmed = !!(prog && prog.config);
+      const det = c.details || {};
+      const P = { overview: "", documents: "", review: "", mail: "", billing: "", activity: "" };
+      let html = CaseLayout.header(c, prog, clocks);
       if (c.lock) {
         html += `<div class="case-lock" role="status"><b>${c.lock === "AWAITING_PAYMENT" ? "Awaiting payment" : "Ineligible"} — this case is frozen.</b>
           ${c.lock === "AWAITING_PAYMENT"
-            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Correspondence, letters, call and inquiry log) to send payment reminders."
-            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Correspondence, letters, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
+            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Letters &amp; email, call and inquiry log) to send payment reminders."
+            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Letters &amp; email, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
         afterRender(() => freezeCasePage(c.lock));
       }
+      html += programmed ? `<div id="case-next" class="case-next"><p class="muted">Loading the next step…</p></div>` : "";
 
-      // Statutory clock cluster (server-projected)
-      if (clocks.length)
-        html += `<div class="sla-cluster">` + clocks.map((cl) => `
-          <div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
-            <span class="lbl">${esc(cl.label)}</span>
-            <span class="cite">${esc(cl.cite)} · due ${esc(cl.due)} · ${esc(cl.basis_note)}</span></div>`).join("") + `</div>`;
-
-      // Workflow actions by role + status
+      // Occasional actions live in one "More" menu. The federal IDR actions (offers, IDRE selection, party
+      // invites, batching, the federal letters) only exist on federal cases.
       const acts = [];
-      if (can("PARTY") && c.status === "INITIATED")
-        acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
-      if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN")
-        if (App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
-      if (can("PARTY"))
-        acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
-      if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
-      if (can("ARBITRATOR"))
-        acts.push(["Issue determination", () => determinationForm(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
-      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
+      if (!programmed) {
+        if (can("PARTY") && c.status === "INITIATED") acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
+        if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN" && App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
+        if (can("PARTY")) acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
+        if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
+        if (can("ARBITRATOR")) acts.push(["Issue determination", () => determinationForm(id)]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
+        if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
+        if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status)) acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
+          acts.push(["Generate offer-window notice", () => Views.letter(id, "offer_window_notice")]);
+          acts.push(["Generate determination letter", () => Views.letter(id, "determination_letter")]);
+        }
+      }
+      const isAssigner = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      if (isAssigner) acts.push([c.assigned_to ? "Reassign" : "Assign", () => Views.assign(id)]);
+      if (programmed && can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        acts.push(["Provider asked to withdraw", () => Views.wfAnytime(id, "PROVIDER_WITHDRAW")]);
+        acts.push(["RFI response received", () => Views.wfAnytime(id, "RFI_RESPONSE_RECEIVED")]);
+        acts.push(["Outreach done (paid, no packet)", () => Views.wfAnytime(id, "OUTREACH_DONE")]);
+      }
+      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
         acts.push(["Escalate", () => Views.escalate(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Link related case", () => Views.relate(id)]);
-      if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
-      if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status))
-        acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
-      if (can("FINANCE"))
-        acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
-      if (acts.length)
-        html += `<div class="actions">` + acts.map((a, i) =>
-          `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
+        acts.push(["Link a related case", () => Views.relate(id)]);
+      }
+      if (can("FINANCE")) acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
+      html = html.replace("<!--case-more-->", CaseLayout.moreMenu(acts));
 
-      // Copilot (Phases 1-3): grounded brief; QA-gated drafts; bounded,
-      // human-approved action batches via Temporal. Everything the model
-      // produces is advisory until a person approves it.
+      // ---- Overview: steps (filled by wfLoad), deadlines (program panel), notes ----
+      P.overview += `<div id="case-overview-prog"></div>`;
+      const notes = notesRes.notes || [];
+      const streamOpts = [["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"], ["legal", "Legal"], ["external_agency", "External agency"]];
+      const streamRoles = prog?.config?.notes_stream_roles || {};
+      const allowedStreams = streamOpts.filter(([key]) => { const roles = streamRoles[key]; return !roles || !roles.length || can(...roles); });
+      P.overview += `<section class="case-card" id="case-notes"><h3>Notes <span class="muted">${notes.length || ""}</span></h3>
+        <form id="note-form" class="note-form">
+          <textarea name="body" rows="2" placeholder="Add a note for the team…" required></textarea>
+          <div class="note-form-row"><select name="stream" aria-label="Who can read it">
+            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) => `<option value="${v}">${label}</option>`).join("")}</select>
+            <button class="mini">Add note</button></div></form>` +
+        (notes.length ? `<ul class="note-list">` + notes.map((n) => `<li><div>${esc(n.body)}</div>
+            <div class="muted">${badge(n.stream)} ${esc(n.author || "")} · ${fmtDate(n.created_at)}</div></li>`).join("") + `</ul>`
+          : `<p class="muted">No notes yet.</p>`) + `</section>`;
+
+      // ---- Documents: requests, then the documents by folder ----
+      P.documents += `<section class="case-card"><h3>Document requests</h3><div id="docreq-box"><p class="muted">Loading…</p></div></section>`;
+      caseDocReqBox(id);
+      P.documents += CaseLayout.documents(id, docs);
+      P.documents += `<div id="analysis"></div>`;
+
+      // ---- Review: the Copilot's advisory drafts and the SOP checklist (the program's sections join here) ----
       if (can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Copilot <span class="badge s-review">DRAFT · advisory</span></h2>
+        P.review += `<details class="prog-sec" id="case-copilot"><summary>Copilot drafts <span class="muted">— advisory; nothing goes out without approval</span></summary>
           <div id="copilot"><p class="muted">Loading…</p></div>
           <div class="actions">
             <button class="mini" onclick="Views.copilotDraftQA('${id}','determination_rationale',this)">✍ Draft determination rationale</button>
             <button class="mini" onclick="Views.copilotDraftQA('${id}','correspondence',this)">✉ Draft correspondence</button>
             <button class="mini" onclick="Views.copilotPropose('${id}',this)">⚙ Propose action batch</button>
-          </div>
-          <div id="copilot-batches"></div>`;
-        Api.program.copilotBriefLatest(id).then((r) => {
-          const b = document.getElementById("copilot");
-          if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id);
-        }).catch(() => {
-          const b = document.getElementById("copilot");
-          if (b) b.innerHTML = copilotCard(null, null, id);
-        });
+          </div><div id="copilot-batches"></div></details>`;
+        Api.program.copilotBriefLatest(id).then((r) => { const b = document.getElementById("copilot"); if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id); })
+          .catch(() => { const b = document.getElementById("copilot"); if (b) b.innerHTML = copilotCard(null, null, id); });
         copilotLoadBatches(id);
       }
+      const stages = {};
+      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
+      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
+      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
+      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
+      if (checklist.length) {
+        const done = checklist.filter((i) => i.done).length;
+        P.review += `<details class="prog-sec" id="case-checklist"><summary>SOP checklist <span class="muted">— ${done} of ${checklist.length} done</span></summary>` +
+          Object.entries(stages).sort((x, y) => stageRank(x[0]) - stageRank(y[0])).map(([stage, items]) =>
+            `<h4>${esc(stage.charAt(0) + stage.slice(1).toLowerCase().replace(/_/g, " "))}</h4><ul class="checklist">` + items.map((i) =>
+              `<li>${i.done ? "✅" : (mayTick(i) ? `<button class="mini" onclick="Views.check('${i.id}')">Done</button>` : "⬜")}
+                ${esc(i.item)}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") + `</ul>`).join("") + `</details>`;
+      }
 
-      // Document requests — what the review team asked a side for, and what came back.
-      html += `<h2>Document requests</h2><div id="docreq-box"><p class="muted">Loading…</p></div>`;
-      caseDocReqBox(id);
-
-      // Documents — docket grouped by folder with full metadata + RBAC controls
-      const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
-      html += `<h2>Docket</h2>
-        <p><a class="button" href="javascript:void(0)" onclick="Views.downloadZip('${id}')">⬇ Download all as zip (plan-notification bundle)</a></p>
-        <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
-        <select name="folder" aria-label="Folder">${FOLDERS.map((f) => `<option>${f}</option>`).join("")}</select>
-        <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
-        <button>Upload</button></form>`;
-      if (docs.length) {
-        const byFolder = {};
-        docs.forEach((d) => { (byFolder[d.folder || "GENERAL"] = byFolder[d.folder || "GENERAL"] || []).push(d); });
-        html += Object.entries(byFolder).map(([folder, items]) => `
-          <h3 class="doc-folder">📁 ${esc(folder)} <span class="muted">(${items.length})</span></h3>
-          <table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Scan</th><th>Sealed</th><th>Uploaded</th><th>Analysis</th><th></th></tr></thead><tbody>` +
-          items.map((d) => `<tr>
-            <td class="mono">${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</td>
-            <td>${esc(d.content_type || "—")}</td>
-            <td>${d.size_bytes > 1048576 ? (d.size_bytes / 1048576).toFixed(1) + " MB" : (d.size_bytes / 1024).toFixed(0) + " KB"}</td>
-            <td>${d.scan_status === "CLEAN" ? '<span class="badge s-paid">✓ clean</span>' : badge(d.scan_status || "PENDING")}</td>
-            <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
-            <td class="muted">${esc(d.uploaded_by || "")} · ${fmtDate(d.uploaded_at)}</td>
-            <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
-            <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')">download</a>
-            ${/\.(txt|835|edi|x12)$/i.test(d.filename || "") ? ` · <a href="javascript:void(0)" title="If this is an 835 remittance (ERA), download it as a spreadsheet table" onclick="Views.era835Fn('${id}','${d.doc_id}')">835 → table</a>` : ""}
-            ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
-            ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
-              ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">move…</option>
-                ${FOLDERS.filter((f) => f !== d.folder).map((f) => `<option>${f}</option>`).join("")}</select>` : ""}</td></tr>`).join("") +
-          `</tbody></table>`).join("");
-      } else html += `<p class="muted">No documents yet.</p>`;
-      html += `<div id="analysis"></div>`;
-
-      // Time — per-role effort ledger on this dispute. Append-only; the
-      // role stamped is the logger's real role. Eligibility decides whether
-      // the work is billable; this records that it happened.
+      // ---- Billing: money on this dispute and the time spent on it ----
+      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        P.billing += `<section class="case-card"><h3>Money on this dispute</h3><div id="fin-box"><p class="muted">Loading…</p></div></section>`;
+        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
+      }
       if (can("CASE_MANAGER", "PM", "CODER", "DOCTOR", "NURSE", "NURSE_PHYSICIAN", "ARBITRATOR", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
+        P.billing += `<section class="case-card" id="case-time"><h3>Time on this dispute</h3><div id="time-box"><p class="muted">Loading…</p></div>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
             <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
             ${timeRoleSelect()}
             <input name="entry_date" type="date" aria-label="Date worked" />
             <input name="note" placeholder="what was done" maxlength="500" />
             <label><input type="checkbox" name="billable" checked /> billable</label>
-            <button class="mini">Log time</button>
-            <span class="muted">recorded under your name and role — corrections are compensating entries, never edits</span></form>`;
+            <button class="mini">Log time</button></form>
+          <p class="muted">Recorded under your name and role. A correction is a new entry, never an edit.</p></section>`;
         timeCaseBox(id).then((h) => { const b = document.getElementById("time-box"); if (b) b.innerHTML = h; });
       }
 
-      // Financials — every dollar tied to this dispute: fee invoices and
-      // payments, service-fee lines and allocated payments, payables
-      // (awards), and the raw event stream.
-      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Financials</h2><div id="fin-box"><p class="muted">Loading…</p></div>`;
-        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
-      }
-
-      // Program panels (per-state rules: eligibility, correspondence/QA,
-      // invoices, claims, dual status, program dates, opt-out) — rendered
-      // only when the tenant runs a custom program.
-      html += `<div id="prog"></div>`;
-      programPanel(id).then((h) => {
-        const b = document.getElementById("prog");
-        if (b) b.innerHTML = h;
-      });
-
+      // ---- Activity: what happened, related disputes ----
+      P.activity += CaseLayout.timeline(activities);
       if (rels.length)
-        html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
-          `<tr><td>${badge(r.rel_type)}</td><td class="mono">${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
-
-      // GNN link-prediction panel (graph-intel; degrades gracefully offline)
-      html += `<div id="gnn-rel"></div>`;
+        P.activity += `<section class="case-card"><h3>Related disputes</h3><ul class="plain">` + rels.map((r) =>
+          `<li>${badge(r.rel_type)} <a href="#/cases/${esc(r.related_case_id)}" class="mono">${esc(r.related_case_number || r.related_case_id.slice(0, 8) + "…")}</a></li>`).join("") + `</ul></section>`;
+      P.activity += `<div id="gnn-rel"></div>`;
       Api.graph.related(id).then((g) => {
         const box = document.getElementById("gnn-rel");
-        if (!box) return;
-        const preds = (g && g.predictions) || [];
-        box.innerHTML = `<h2>Suggested related disputes <span class="muted">· GraphSAGE ${esc(g.model_version || "")}</span></h2>` +
-          (preds.length ? `<table><thead><tr><th>Case</th><th>Link score</th><th></th></tr></thead><tbody>` +
-            preds.map((p) => `<tr><td class="mono">${esc(p.case_id.slice(0, 8))}…</td>
-              <td><span class="gnn-score" style="--s:${p.score}">${(p.score * 100).toFixed(0)}%</span></td>
-              <td><a href="#/cases/${esc(p.case_id)}">open</a> ·
-                  <a href="javascript:void(0)" onclick="Views.relate('${id}')">confirm link</a></td></tr>`).join("") +
-            `</tbody></table>` :
-            `<p class="muted">${esc(g.reason || "No link predictions yet — train the model (POST /graph/train) after a few cases exist.")}</p>`);
+        const preds = ((g && g.predictions) || []).filter((x) => x.score >= 0.5);
+        if (!box || !preds.length) { if (box) box.innerHTML = ""; return; }
+        box.innerHTML = `<details class="prog-sec"><summary>Possibly related disputes <span class="muted">— suggested from shared parties and claims</span></summary>
+          <ul class="plain">${preds.map((x) => `<li><a href="#/cases/${esc(x.case_id)}" class="mono">${esc(x.case_number || x.case_id.slice(0, 8) + "…")}</a>
+            <span class="muted">${(x.score * 100).toFixed(0)}% match</span> · <a href="javascript:void(0)" onclick="Views.relate('${id}')">link it</a></li>`).join("")}</ul></details>`;
       }).catch(() => { const b = document.getElementById("gnn-rel"); if (b) b.innerHTML = ""; });
-      const stages = {};
-      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
-      // Role-based: the server says whose each item is (owner) and whether
-      // this user may tick it (can_check). Items with no owner keep the old
-      // rule. Stages are listed in the order a case moves through them.
-      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
-      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
-      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
-      html += `<h2>Stage checklists</h2>` + Object.entries(stages).sort((a, b) => stageRank(a[0]) - stageRank(b[0])).map(([stage, items]) =>
-        `<h3>${esc(stage.replace(/_/g, " "))}</h3><ul class="checklist">` + items.map((i) =>
-          `<li>${i.done ? "✅" : (mayTick(i)
-            ? `<button class="mini" onclick="Views.check('${i.id}')">check</button>` : "⬜")}
-            ${esc(i.item)}${i.required ? " *" : ""}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
-        `</ul>`).join("");
-      // Who holds the case (every case staff member sees it); the PM assigns, reassigns and unassigns here.
-      const isAssigner = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
-      html += `<div class="case-assignee" id="case-assignee" data-case="${esc(id)}"><span class="muted">Assigned to: …</span></div>`;
-      afterRender(() => loadCaseAssignee(id, isAssigner));
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN") || isAssigner)
-        html += `<div class="actions">
-          ${isAssigner ? `<button onclick="Views.assign('${id}')">Assign / reassign</button>` : ""}
-          ${can("CASE_MANAGER", "FEDERAL_ADMIN") ? `<button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
-          <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>` : ""}
-        </div>`;
 
-      // Notes — addNote (POST /notes) existed with no way to read them back
-      // at all; case notes also mirror onto the activity timeline below but
-      // without the stream field, so internal/coder/clinical/legal/
-      // external_agency notes were indistinguishable there. Confirmed live.
-      const notes = notesRes.notes || [];
-      // Only offer streams this role can actually write — the server has
-      // enforced this for a while, but the dropdown kept listing all five
-      // regardless, so picking a blocked one just produced a confusing
-      // 403 on submit instead of not being offered at all.
-      const streamOpts = [
-        ["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"],
-        ["legal", "Legal"], ["external_agency", "External agency"],
-      ];
-      const streamRoles = prog?.config?.notes_stream_roles || {};
-      const allowedStreams = streamOpts.filter(([key]) => {
-        const roles = streamRoles[key];
-        return !roles || !roles.length || can(...roles);
+      html += CaseLayout.tabs(id, P, { programmed, billing: !!P.billing });
+      // The program's own sections (state rules) arrive after; each says which tab it belongs to.
+      html += `<div id="prog" hidden></div>`;
+      programPanel(id).then((h) => {
+        const b = document.getElementById("prog");
+        if (!b) return;
+        b.innerHTML = h;
+        CaseLayout.distribute(b);
       });
-      html += `<h2>Notes</h2>
-        <form id="note-form" class="inline-form">
-          <select name="stream" aria-label="Note stream">
-            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) =>
-              `<option value="${v}">${label}</option>`).join("")}
-          </select>
-          <textarea name="body" rows="2" placeholder="Add a note…" required></textarea>
-          <button>Add note</button></form>` +
-        (notes.length ? `<table><tbody>` + notes.map((n) => `<tr>
-            <td>${badge(n.stream)}</td><td>${esc(n.body)}</td>
-            <td class="muted">${esc(n.author || "")} · ${fmtDate(n.created_at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No notes yet.</p>`);
-
-      html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
-        activities.map((a) => `<tr><td>${badge(a.type)}</td><td>${esc(a.body)}</td>
-          <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
-        `</tbody></table>` : `<p class="muted">No activity yet — voice calls and milestones attach automatically.</p>`);
+      afterRender(() => { loadCaseAssignee(id, isAssigner); CaseLayout.bind(id); });
 
       afterRender(() => {
         acts.forEach((a, i) =>
           document.querySelector(`[data-act="${i}"]`)?.addEventListener("click", async () => {
             try { await a[1](); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
           }));
-        $("#up").addEventListener("submit", async (ev) => {
+        $("#up")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = ev.target.file.files[0];
           await UI.run(ev.target.querySelector("button"), async () => {
@@ -2377,18 +2299,15 @@ const Views = (() => {
     const c = await Api.cases.get(id).catch(() => ({}));
     const det = c.details || {};
     const facts = [];
-    if (det.filing_party_type) facts.push(`<span class="chip">Filed by: ${det.filing_party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"}</span>`);
-    if (det.packet_complete_at) facts.push(`<span class="chip">Packet complete: ${fmtDate(det.packet_complete_at)} (10-day review clock basis)</span>`);
     if (det.volume_large) {
       const vv = det.volume_violations || [];
       facts.push(vv.length
         ? `<span class="badge warn" title="${esc(vv.join("; "))}">⚠ Large-volume policy: ${vv.length} violation(s) — ineligible per Capitol Bridge policy, resubmission permitted</span>`
         : `<span class="chip">Large-volume dispute — policy compliant</span>`);
     }
-    let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
-      ${facts.length ? `<p class="fact-row">${facts.join(" ")}</p>` : ""}
-      <div id="wf-steps" class="card wf-card"><p class="muted">Loading the steps…</p></div>
-      <details class="prog-sec" data-wf-admin><summary>Dual status (admin override)</summary>
+    let html = `${facts.length ? `<p class="fact-row" data-tab="overview">${facts.join(" ")}</p>` : ""}
+      <div id="wf-steps" class="card wf-card" data-tab="overview"><p class="muted">Loading the steps…</p></div>
+      <details class="prog-sec" data-wf-admin data-tab="activity"><summary>Status override (admin)</summary>
       <p class="muted">Current: ${c.internal_status ? badge(c.internal_status) : "<em>none</em>"} / ${c.agency_status ? badge(c.agency_status) : "<em>none</em>"}</p>
       <p class="muted">Case details: ${c.details && Object.keys(c.details).length
         ? Object.entries(c.details).filter(([, v]) => v === null || typeof v !== "object").map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
@@ -2400,12 +2319,12 @@ const Views = (() => {
           ${(cfg.statuses?.agency || []).map((s) => `<option ${s === c.agency_status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <button>Update status</button></form></details>
 
-      <details class="prog-sec" id="p-deadlines" open><summary>Deadlines</summary>
+      <details class="prog-sec" id="p-deadlines" data-tab="overview"><summary>Deadlines</summary>
       <p class="muted">Each deadline as it stands, from its program date.${can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
         ? " As the PM or an admin you can extend any of them except the statutory filing window — the reason is kept on the case." : ""}</p>
       <div id="p-clock-proj"><p class="muted">Loading…</p></div></details>
 
-      <details class="prog-sec"><summary>Program dates (clock bases)</summary>
+      <details class="prog-sec" data-tab="overview"><summary>Program dates <span class="muted">— the dates the deadlines run from</span></summary>
       <p class="muted">Statutory clocks run <b>from</b> these dates — recording one starts or restarts its clock.
         Record the date once; every deadline that depends on it re-projects automatically.</p>
       <div id="p-dates-list"></div>
@@ -2446,7 +2365,7 @@ const Views = (() => {
           <textarea name="notes" rows="2" maxlength="4000" placeholder="Your working notes on this review"></textarea></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
-      <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
+      <details class="prog-sec" id="p-send-details" data-tab="mail" open><summary>Write to the parties</summary>
       <form id="p-send" class="inline-form">
         ${corrTplCache = cfg.correspondence?.templates || [], ""}
         ${(setTimeout(() => corrTemplatesFor(id, "#p-send"), 0), "")}
@@ -2459,7 +2378,7 @@ const Views = (() => {
         <label><input type="checkbox" name="auto_download" /> Attach a download link to the latest generated document (minted on send)</label>
         <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
 
-      <details class="prog-sec" id="p-inv-details"><summary>Invoices & claims</summary>
+      <details class="prog-sec" id="p-inv-details" data-tab="billing" open><summary>Invoices &amp; claim lines</summary>
       ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form" data-wf="invoice">
         <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
         <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
@@ -2475,7 +2394,7 @@ const Views = (() => {
 
       ${Letters.caseSecHtml(id, cfg)}
 
-      <details class="prog-sec"><summary>Share links & opt-out</summary>
+      <details class="prog-sec" data-tab="mail"><summary>Secure links &amp; plan opt-out</summary>
       <div class="actions">
         <button id="p-share-up">Create upload link</button>
         <button id="p-share-dl">Create download link</button></div><div id="p-share-out"></div>
@@ -2483,27 +2402,21 @@ const Views = (() => {
         <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
         <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form>` : ""}</details>
 
-      ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<details class="prog-sec"><summary>At any time</summary>
-      <p class="muted">These are not steps: they can happen at any point in a case. Everything else follows the step list at the top.</p>
-      <div class="actions">
-        <button type="button" onclick="Views.wfAnytime('${id}','PROVIDER_WITHDRAW')">Provider asked to withdraw</button>
-        <button type="button" onclick="Views.wfAnytime('${id}','RFI_RESPONSE_RECEIVED')">RFI response received</button>
-        <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
-      </div></details>` : ""}
+
 
       ${sopCaseInfoHtml(id, c, cfg)}
       ${sopFwaHtml(id, c)}
       ${sopNotesHtml(id, c)}
       ${sopSummaryHtml(id, c, cfg)}
 
-      <details class="prog-sec"><summary>Call log</summary>
+      <details class="prog-sec" data-tab="activity"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
         <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
         <input name="phone" placeholder="phone number" required />
         <input name="summary" placeholder="brief description" required /><button>Log call</button></form>
       <div id="p-call-list"></div></details>
 
-      <details class="prog-sec"><summary>Inquiries log</summary>
+      <details class="prog-sec" data-tab="activity"><summary>Inquiries log</summary>
       <form id="p-inquiry" class="inline-form">
         <select name="method"><option>EMAIL</option><option>PHONE_CALL</option></select>
         <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
