@@ -110,7 +110,8 @@ async def provision_keycloak_account(tenant: str, stype: str, inp: dict) -> None
             "username": os.environ["KC_ADMIN"], "password": os.environ["KC_ADMIN_PASSWORD"],
         })).json()["access_token"]
         h = {"Authorization": f"Bearer {tok}"}
-        await client.post("/admin/realms/idre/users", headers=h, json={
+        realm = os.environ.get("KEYCLOAK_REALM", "idre")  # idre-prod has its own realm
+        await client.post(f"/admin/realms/{realm}/users", headers=h, json={
             "username": inp.get("contact_email", f"{stype.lower()}-{inp['application_id']}"),
             "enabled": True, "groups": [f"/tenant/{tenant}"],
             "realmRoles": [role], "requiredActions": ["UPDATE_PASSWORD", "VERIFY_EMAIL"],

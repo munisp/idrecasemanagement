@@ -113,7 +113,31 @@ func (s *server) kcAdminToken(ctx context.Context) (string, error) {
 	return out.AccessToken, nil
 }
 
+// kcRealm is the realm this deployment's users live in: the last segment of KEYCLOAK_ISSUER (".../realms/<realm>"),
+// "idre" when the issuer doesn't say. idre-prod runs on its own realm, idre-prod.
+func (s *server) kcRealm() string {
+	iss := strings.TrimRight(s.cfg.KeycloakIssuer, "/")
+	if i := strings.LastIndex(iss, "/realms/"); i >= 0 && i+len("/realms/") < len(iss) {
+		return iss[i+len("/realms/"):]
+	}
+	return "idre"
+}
+
+// kcRealmPath points an admin path written for the idre realm ("/admin/realms/idre/...") at this deployment's realm.
+func (s *server) kcRealmPath(path string) string {
+	const base = "/admin/realms/idre"
+	realm := s.kcRealm()
+	if realm == "idre" || !strings.HasPrefix(path, base) {
+		return path
+	}
+	if rest := path[len(base):]; rest == "" || rest[0] == '/' || rest[0] == '?' {
+		return "/admin/realms/" + url.PathEscape(realm) + rest
+	}
+	return path // e.g. "/admin/realms/idre-prod/..." already names a realm
+}
+
 func (s *server) kcDo(ctx context.Context, method, path string, token string, body []byte) (*http.Response, error) {
+	path = s.kcRealmPath(path)
 	req, err := http.NewRequestWithContext(ctx, method, s.cfg.KeycloakURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
