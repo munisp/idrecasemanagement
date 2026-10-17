@@ -50,8 +50,13 @@ async def recommendation_days_left(tenant: str, case_id: str) -> int:
     calendar days, plus any extension the PM granted on AGENCY_RECOMMENDATION,
     counted from today. 0 or less means the date has passed. A case with no
     Date Received on record has no days left (the caller's own 60-day timer has
-    already run)."""
+    already run) -- unless it is still awaiting its initial fee: then it has not
+    been received at all, its clock has not started, and the full 60 days are
+    reported so the caller waits instead of flagging a breach."""
     with _conn() as c:
+        st = c.execute(f"SELECT status FROM tenant_{tenant}.cases WHERE id=%s", (case_id,)).fetchone()
+        if st and st[0] == "AWAITING_PAYMENT":
+            return 60
         row = c.execute(
             f"SELECT (program_dates->>'received_at')::date + 60 - current_date"
             f" + coalesce((SELECT sum(days) FROM public.case_deadline_extensions e"

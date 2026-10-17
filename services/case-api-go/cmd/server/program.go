@@ -316,8 +316,14 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 // has a program_rules row; otherwise the federal NSA engine in engines.go runs).
 func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenant, caseID string, cfg *ProgramConfig) bool {
 	dates := s.programDates(r, tenant, caseID)
-	// received_at falls back to opened_at (federal field) when unset
-	if _, ok := dates["received_at"]; !ok {
+	// "Date Received" is the day the fee was paid: a case still awaiting payment has not been received, so no
+	// clock that runs from it has started (and none can breach) until the fee is paid.
+	var status string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
+	if status == "AWAITING_PAYMENT" {
+		delete(dates, "received_at")
+	} else if _, ok := dates["received_at"]; !ok {
+		// received_at falls back to opened_at (federal field) when unset
 		var opened time.Time
 		if err := s.db.QueryRow(r.Context(),
 			fmt.Sprintf(`SELECT opened_at FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
@@ -361,6 +367,16 @@ func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
 	if _, err := time.Parse("2006-01-02", in.Value); err != nil {
 		http.Error(w, `{"error":"value must be YYYY-MM-DD"}`, http.StatusBadRequest)
 		return
+	}
+	// The workflow records Date Received when it starts; for a payment-gated intake that is too early -- the
+	// date is the day the fee is paid, and activatePaidIntake records it then.
+	if in.Key == "received_at" {
+		var status string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), chi.URLParam(r, "caseId")).Scan(&status)
+		if status == "AWAITING_PAYMENT" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deferred", "reason": "Date Received is recorded when the initial fee is paid"})
+			return
+		}
 	}
 	// jsonb_build_object is polymorphic ("any"), so pgx's prepared-statement
 	// protocol can't infer $2/$3's type on its own (confirmed live: SQLSTATE

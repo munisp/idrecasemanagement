@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -214,7 +215,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 	if cfg.Fees.InitialFeeCents > 0 && batchPay {
 		if _, ierr := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents); ierr == nil {
 			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
-				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
+				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', program_dates = coalesce(program_dates,'{}'::jsonb) - 'received_at', updated_at=now() WHERE id=$1`,
 				sanitizeTenant(tenant)), caseID); uerr == nil {
 				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
 					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents, "paid_with": "bulk batch checkout",
@@ -227,7 +228,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 		checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
 		if cerr == nil {
 			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
-				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
+				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', program_dates = coalesce(program_dates,'{}'::jsonb) - 'received_at', updated_at=now() WHERE id=$1`,
 				sanitizeTenant(tenant)), caseID); uerr == nil {
 				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
 					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents,
@@ -244,8 +245,11 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake")
 				} else {
 					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake", merr.Error())
-					s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
-						fmt.Sprintf("Payment-required email SMTP delivery failed: %s", merr))
+					typ := "EMAIL_DELIVERY_FAILED"
+					if errors.Is(merr, errMailQueued) {
+						typ = "EMAIL_QUEUED"
+					}
+					s.logActivity(r.Context(), tenant, caseID, typ, fmt.Sprintf("Payment-required email: %s", merr))
 				}
 				s.notify(r, tenant, "*", "AHCA_INTAKE",
 					fmt.Sprintf("Intake awaiting fee payment: %s (%s)", org, email), "#/cases/"+caseID)
@@ -340,8 +344,11 @@ func (s *server) sendIntakeLinks(r *http.Request, tenant, caseID, caseNumber, em
 			s.logCorrespondenceInquiry(r, tenant, caseID, email, fmt.Sprintf("%s: %s", tpl.Key, subject), "system:ahca-intake")
 		} else {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake", merr.Error())
-			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
-				fmt.Sprintf("Submission instructions SMTP delivery failed: %s", merr))
+			typ := "EMAIL_DELIVERY_FAILED"
+			if errors.Is(merr, errMailQueued) {
+				typ = "EMAIL_QUEUED"
+			}
+			s.logActivity(r.Context(), tenant, caseID, typ, fmt.Sprintf("Submission instructions email: %s", merr))
 		}
 	}
 }

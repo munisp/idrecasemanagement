@@ -1028,6 +1028,22 @@ func main() {
 		}
 	}()
 
+	// Mail the provider turned away for now (mailqueue.go) goes out again as soon as it may.
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+				if n := s.sweepMailQueue(); n > 0 {
+					slog.Info("mail queue sweep", "sent", n)
+				}
+			}
+		}
+	}()
+
 	// No upload left unread (docrequeue.go): every few minutes, documents the
 	// reader should have read and has not are announced to it again; one it
 	// still cannot read is flagged to the people on the case.
