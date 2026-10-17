@@ -525,6 +525,7 @@ func main() {
 		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
+		r.Get("/cases/pipeline/counts", s.pipelineCounts) // per-stage totals for the Pipeline board (pages via /cases)
 		r.Get("/cases/{caseId}", s.getCase)
 		r.Post("/fees/transfer", s.postFeeTransfer)    // escrow/admin/IDRE fee double-entry
 		r.Post("/cases/{caseId}/signal", s.signalCase) // e.g. response filed, fees paid
@@ -585,6 +586,8 @@ func main() {
 		// Case management: assignment, escalation, relationships, checklists,
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
+		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
+		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)
@@ -624,6 +627,7 @@ func main() {
 		r.Put("/prefs", s.putPref)
 		r.Get("/cases/clocks", s.casesClocks)         // batch statutory-clock projection (grids)
 		r.Get("/cases/{caseId}/clocks", s.caseClocks) // per-case projection (workspace header)
+		r.Post("/cases/{caseId}/clocks/{clock}/extend", s.extendDeadline) // PM deadline extension (deadline_extensions.go)
 		r.Post("/cases/bulk", s.bulkCases)            // bulk assign / status with per-item results
 		r.Post("/queues/grab-next", s.grabNext)       // atomic queue claim (triage fast lane)
 
@@ -721,6 +725,7 @@ func main() {
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)              // suspend|reactivate
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)              // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)             // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote) // notes on a review (Reviewer, PM, Attorney)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
 		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                      // the SOP steps: done, next, upcoming
 		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                     // Reviewer: outcome, claims reviewed, award, party billed
@@ -750,6 +755,7 @@ func main() {
 		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)          // slot verdict grid
 		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                // ZIP of client folders
 		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                 // many disputes, each with its own six documents (ZIP)
+		r.Get("/tpa/disputes/bulk/sample.zip", s.tpaBulkSample)         // a sample ZIP to copy (tpa_bulk_sample.go)
 		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
 		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
@@ -1331,6 +1337,16 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	}
 	if st := q.Get("status"); st != "" {
 		add("c.status = $%d", st)
+	}
+	// Pipeline columns (pipelineCounts): one stage of the board, paged like any other list.
+	if st := q.Get("internal_status"); st != "" {
+		add("c.internal_status = $%d", st)
+	}
+	switch q.Get("unset") { // the board's "Not yet reviewed" column
+	case "internal_status":
+		where += " AND coalesce(c.internal_status,'') = ''"
+	case "status":
+		where += " AND coalesce(c.status,'') = ''"
 	}
 	if qs := q.Get("q"); qs != "" {
 		add("c.case_number ILIKE '%%' || $%d || '%%'", qs)

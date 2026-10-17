@@ -63,6 +63,10 @@ class AhcaDisputeWorkflow:
         # Templates of the letters that have really gone out (case-api
         # signals each send). The stage gates in _run_stages wait on these.
         self.letters_sent: set[str] = set()
+        # PM deadline extensions (case-api deadline_extensions.go): clock → days granted, and how many of those
+        # days a wait has already served (_deadline).
+        self.deadline_ext: dict[str, int] = {}
+        self._ext_used: dict[str, int] = {}
         self._rfi_round = 0  # numbers each RFI wait (see _wait's `site`)
         self.closed_early = False  # dismissed / refunded / opted out: stops the 60-day watcher
         # A resumed run (see run()) replays the case's recorded signals and
@@ -113,7 +117,28 @@ class AhcaDisputeWorkflow:
             return False
         return workflow.patched(f"wait-result-{site}")
 
+    async def _deadline(self, cond, days: int, site: str, clock: str, stage: bool = True) -> bool:
+        """_wait for a program deadline the PM may extend. When the timer runs out, the days granted on `clock`
+        (DEADLINE_EXTENDED) and not yet served are waited out before the caller's follow-up or breach. A history
+        without an extension never reaches the patched() call, so it replays exactly as before."""
+        met = await self._wait(cond, timedelta(days=days), site, stage)
+        n = 0
+        while not met:
+            extra = self.deadline_ext.get(clock, 0) - self._ext_used.get(clock, 0)
+            if extra <= 0 or not workflow.patched("deadline-extensions"):
+                return False
+            self._ext_used[clock] = self._ext_used.get(clock, 0) + extra
+            n += 1
+            met = await self._wait(cond, timedelta(days=extra), f"{site}-ext{n}", stage)
+        return True
+
     # ---- signals -------------------------------------------------------
+    @workflow.signal(name="DEADLINE_EXTENDED")
+    def on_deadline_extended(self, data: dict) -> None:
+        clock, days = str(data.get("clock") or ""), int(data.get("days") or 0)
+        if clock and days > 0:
+            self.deadline_ext[clock] = self.deadline_ext.get(clock, 0) + days
+
     @workflow.signal(name="PACKET_COMPLETE")
     def on_packet_complete(self, data: dict) -> None:
         self.packet_complete = True
@@ -221,6 +246,7 @@ class AhcaDisputeWorkflow:
                 "LETTER_SENT": self.on_letter_sent,
                 "RFI_SENT": self.on_rfi_sent,
                 "RFI_RESPONSE_RECEIVED": self.on_rfi_response_received,
+                "DEADLINE_EXTENDED": self.on_deadline_extended,
             }
             for sig in resume.get("signals") or []:
                 handler = handlers.get(sig.get("name"))
@@ -277,8 +303,8 @@ class AhcaDisputeWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
             self._rfi_round += 1
-            responded = await self._wait(
-                lambda: self.rfi_response_received, timedelta(days=15), f"rfi-{self._rfi_round}", stage=False)
+            responded = await self._deadline(
+                lambda: self.rfi_response_received, 15, f"rfi-{self._rfi_round}", "RFI_RESPONSE", stage=False)
             if responded:
                 self.rfi_pending = False
                 self.rfi_response_received = False
@@ -320,8 +346,10 @@ class AhcaDisputeWorkflow:
             done = lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
                             or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE")
             met = done()
+            # recommendation_days_left already counts the extensions granted so far; only later ones remain.
+            self._ext_used["AGENCY_RECOMMENDATION"] = self.deadline_ext.get("AGENCY_RECOMMENDATION", 0)
             if not met and (left or 0) > 0:
-                met = await self._wait(done, timedelta(days=left), "agency-recommendation-resumed", stage=False)
+                met = await self._deadline(done, left, "agency-recommendation-resumed", "AGENCY_RECOMMENDATION", stage=False)
             if not met:
                 await self._activity(
                     flag_cms_breach,
@@ -342,10 +370,10 @@ class AhcaDisputeWorkflow:
         # with an existing dedicated flag to check; DISMISSED and
         # CLOSED_REFUNDED (Stage 1/3's other early returns) have no such
         # flag today and are a known remaining gap, not fixed here.
-        met = await self._wait(
+        met = await self._deadline(
             lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
                      or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
-            timedelta(days=60), "agency-recommendation", stage=False)
+            60, "agency-recommendation", "AGENCY_RECOMMENDATION", stage=False)
         # The timer above started when the request to file came in, but the 60
         # days run from Date Received -- the day the fee was paid, which can
         # be later. Before raising the alert, ask how long the case really
@@ -396,8 +424,8 @@ class AhcaDisputeWorkflow:
                 set_program_date, args=[tenant, case_id, "outreach_at", workflow.now().date().isoformat()],
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            completed = await self._wait(
-                lambda: self.packet_complete or self.provider_withdrawn, timedelta(days=7), "refund-window")
+            completed = await self._deadline(
+                lambda: self.packet_complete or self.provider_withdrawn, 7, "refund-window", "REFUND_WINDOW")
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             if not completed:
@@ -436,8 +464,8 @@ class AhcaDisputeWorkflow:
             set_dual_status, args=[tenant, case_id, "Initial Review Pending", "Pending Initial Review"],
             start_to_close_timeout=timedelta(seconds=30),
         )
-        decided = await self._wait(
-            lambda: self.eligibility_result is not None, timedelta(days=10), "initial-review")
+        decided = await self._deadline(
+            lambda: self.eligibility_result is not None, 10, "initial-review", "INITIAL_REVIEW")
         if not decided:
             await self._activity(
                 flag_cms_breach, args=[tenant, case_id, "INITIAL_REVIEW", "Eligibility not decided within 10 calendar days"],
@@ -530,9 +558,9 @@ class AhcaDisputeWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
             # PROVIDER_PERMISSION: 15cd, day-13 follow-up (call_and_reply_all).
-            got_followup = await self._wait(
+            got_followup = await self._deadline(
                 lambda: self.estimate_permission is not None or self.provider_withdrawn or self.rfi_lapsed,
-                timedelta(days=13), "permission-day13")
+                13, "permission-day13", "PROVIDER_PERMISSION")
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             if self.rfi_lapsed:
@@ -543,9 +571,9 @@ class AhcaDisputeWorkflow:
                     args=[tenant, case_id, "call_and_reply_all", "Day 13 — provider permission not yet received, deadline is day 15"],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
-                await self._wait(
+                await self._deadline(
                     lambda: self.estimate_permission is not None or self.provider_withdrawn or self.rfi_lapsed,
-                    timedelta(days=2), "permission-day15")
+                    2, "permission-day15", "PROVIDER_PERMISSION")
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             if self.rfi_lapsed:
@@ -638,9 +666,9 @@ class AhcaDisputeWorkflow:
         ]
         prev_day = 0
         for day, action, detail in plan_followups:
-            reached = await self._wait(
+            reached = await self._deadline(
                 lambda: self.plan_response_received or self.plan_opted_out is not None or self.rfi_lapsed,
-                timedelta(days=day - prev_day), f"plan-day{day}")
+                day - prev_day, f"plan-day{day}", "PLAN_RESPONSE")
             prev_day = day
             if reached:
                 break
@@ -686,8 +714,8 @@ class AhcaDisputeWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 elapsed = (workflow.now().date() - date.fromisoformat(plan_notified_day)).days
-                await self._wait(lambda: self.plan_response_received or self.rfi_lapsed,
-                                 timedelta(days=max(1, 15 - elapsed)), "plan-after-opt-out-refused")
+                await self._deadline(lambda: self.plan_response_received or self.rfi_lapsed,
+                                     max(1, 15 - elapsed), "plan-after-opt-out-refused", "PLAN_RESPONSE")
                 if self.rfi_lapsed:
                     return "RFI_LAPSED"
             else:

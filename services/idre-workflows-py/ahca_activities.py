@@ -47,14 +47,18 @@ async def set_program_date(tenant: str, case_id: str, key: str, value: str) -> N
 @activity.defn
 async def recommendation_days_left(tenant: str, case_id: str) -> int:
     """Days until the recommendation is due to the agency: Date Received + 60
-    calendar days, counted from today. 0 or less means the date has passed.
-    A case with no Date Received on record has no days left (the caller's own
-    60-day timer has already run)."""
+    calendar days, plus any extension the PM granted on AGENCY_RECOMMENDATION,
+    counted from today. 0 or less means the date has passed. A case with no
+    Date Received on record has no days left (the caller's own 60-day timer has
+    already run)."""
     with _conn() as c:
         row = c.execute(
-            f"SELECT (program_dates->>'received_at')::date + 60 - current_date FROM tenant_{tenant}.cases "
+            f"SELECT (program_dates->>'received_at')::date + 60 - current_date"
+            f" + coalesce((SELECT sum(days) FROM public.case_deadline_extensions e"
+            f"             WHERE e.tenant=%s AND e.case_id=%s::text AND e.clock='AGENCY_RECOMMENDATION'), 0)"
+            f" FROM tenant_{tenant}.cases "
             f"WHERE id=%s AND coalesce(program_dates->>'received_at','') ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}'",
-            (case_id,),
+            (tenant, case_id, case_id),
         ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 

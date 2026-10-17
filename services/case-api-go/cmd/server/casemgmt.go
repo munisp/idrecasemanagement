@@ -318,59 +318,6 @@ func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 // Workload-balanced: the case manager (or arbitrator) of this tenant with the
 // fewest open assignments wins. Manual override via {"assignee": "<sub>"}.
 
-func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
-	// The PM assigns reviewers (SOP). A Reviewer still takes work with
-	// "Grab next"; it cannot route cases to other people.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
-		return
-	}
-	tenant := r.Context().Value(ctxTenant{}).(string)
-	caseID := chi.URLParam(r, "caseId")
-	var in struct {
-		Role     string `json:"role"`     // CASE_MANAGER | ARBITRATOR
-		Assignee string `json:"assignee"` // optional manual override
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	if in.Role == "" {
-		in.Role = "CASE_MANAGER"
-	}
-	assignee := in.Assignee
-	if assignee == "" {
-		// workload-balanced auto-assignment among eligible users (Keycloak group
-		// members are mirrored in accounts/contacts; here: least open cases)
-		err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
-			SELECT assigned_to FROM tenant_%s.cases
-			WHERE assigned_role=$1 AND assigned_to IS NOT NULL
-			  AND status NOT LIKE 'CLOSED%%'
-			GROUP BY assigned_to ORDER BY COUNT(*) ASC LIMIT 1`, sanitizeTenant(tenant)),
-			in.Role).Scan(&assignee)
-		if err != nil || assignee == "" {
-			assignee = "unassigned-pool" // first assignment starts the pool
-		}
-	}
-	_, err := s.db.Exec(r.Context(), fmt.Sprintf(`
-		UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now()
-		WHERE id=$3`, sanitizeTenant(tenant)), assignee, in.Role, caseID)
-	if err != nil {
-		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-		return
-	}
-	var cn string
-	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-		`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&cn)
-	s.notify(r, tenant, assignee, "ASSIGNMENT",
-		fmt.Sprintf("You were assigned %s as %s", cn, in.Role), "#/cases/"+caseID)
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.case_activities (tenant, case_id, type, body)
-		VALUES ($1,$2,'MILESTONE',$3)`, tenant, caseID,
-		fmt.Sprintf("Assigned to %s (%s)", assignee, in.Role))
-	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
-		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "assigned_to": assignee,
-		"role": in.Role, "manual": in.Assignee != "",
-	})
-	writeJSON(w, http.StatusOK, map[string]string{"assigned_to": assignee, "role": in.Role})
-}
 
 // ---- Escalations (SLA breach -> supervisor chain) --------------------------------
 

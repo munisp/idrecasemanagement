@@ -456,6 +456,10 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail("no folder named " + row.DisputeRef + " with this dispute's documents in the ZIP")
 			continue
 		}
+		if zipHasSampleDocs(entries) {
+			fail("this folder still holds the sample documents — replace them with this dispute's real documents")
+			continue
+		}
 		merged, discrete := splitFolder(entries)
 		row.Mode = "DISCRETE"
 		if merged != nil {

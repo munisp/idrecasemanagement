@@ -722,6 +722,7 @@ const Views = (() => {
     bar.setAttribute("aria-live", "polite");
     bar.innerHTML = `<b>${selection.size} selected</b>
       <button class="mini" id="bk-assign">Assign to me</button>
+      ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" id="bk-assign-to">Assign to…</button>` : ""}
       <button class="mini" id="bk-status">Set status…</button>
       <button class="mini" id="bk-clear">Clear</button>`;
     document.body.appendChild(bar);
@@ -732,6 +733,32 @@ const Views = (() => {
         const ok = r.results.filter((x) => x.ok).length;
         UI.toast(`Assigned ${ok} of ${r.results.length} disputes to you`);
         selection.clear(); App.rerender();
+      }, "Assigning…");
+    };
+    // PM: route the whole selection to one person (e.g. when someone leaves or is overloaded).
+    const assignTo = $("#bk-assign-to");
+    if (assignTo) assignTo.onclick = async (ev) => {
+      let role = "CASE_MANAGER";
+      const first = await Api.cm.assignees(role).catch((e) => { UI.toast(e.message, { kind: "warn" }); return null; });
+      if (!first) return;
+      const v = await UI.modal({ title: `Assign ${selection.size} dispute${selection.size === 1 ? "" : "s"}`, fields: [
+        { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
+        { name: "assignee", label: "Person", options: (first.assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`]), required: true },
+      ], submitLabel: "Assign selection",
+      onRefresh: async (vals, setOptions) => {
+        if (vals.role === role) return;
+        role = vals.role;
+        const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
+        setOptions("assignee", (r.assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`]));
+      } });
+      if (!v) return;
+      await UI.run(ev.currentTarget, async () => {
+        try {
+          const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection], role: v.role, assignee: v.assignee });
+          const ok = r.results.filter((x) => x.ok).length;
+          UI.toast(`Assigned ${ok} of ${r.results.length} disputes`);
+          selection.clear(); App.rerender();
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }, "Assigning…");
     };
     $("#bk-status").onclick = async (ev) => {
@@ -921,17 +948,61 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  async function assign(caseId) {
-    const v = await UI.modal({ title: "Assign / route", fields: [
-      { name: "role", label: "Assign as", options: [["CASE_MANAGER", "Case manager"], ["ARBITRATOR", "Arbitrator"]], required: true },
-      { name: "assignee", label: "Assignee", placeholder: "blank = workload-balanced auto" },
-    ] });
-    if (!v) return;
+  const ASSIGN_ROLES = [["CASE_MANAGER", "Reviewer"], ["ARBITRATOR", "Arbitrator"], ["CODER", "Coder"],
+    ["NURSE_PHYSICIAN", "Clinical reviewer"], ["ATTORNEY", "Attorney"]];
+  const assigneeOptions = (list) => [["", "Auto — whoever has the fewest open cases"],
+    ...list.map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`])];
+
+  // "Assigned to: <name> (Reviewer)" on the case page, plus Unassign for the PM.
+  async function loadCaseAssignee(caseId, isAssigner) {
+    const el = document.getElementById("case-assignee");
+    if (!el) return;
     try {
-      const r = await Api.cm.assign(caseId, v.role, v.assignee || "");
-      UI.toast(`Assigned to ${r.assigned_to}`);
+      const a = await Api.cm.assignment(caseId);
+      el.innerHTML = a.name
+        ? `Assigned to <b>${esc(a.name)}</b>${a.role_label ? ` <span class="muted">(${esc(a.role_label)})</span>` : ""}
+           ${isAssigner ? `<button class="mini" onclick="Views.unassign('${esc(caseId)}')">Unassign</button>` : ""}`
+        : `<span class="muted">Not assigned yet</span>`;
+    } catch { el.innerHTML = ""; }
+  }
+
+  // Assign or reassign: a real staff member of the chosen role, picked from a list showing each person's open
+  // cases (least loaded first), or "Auto". The person who had the case is told it moved.
+  async function assign(caseId) {
+    try {
+      const cur = await Api.cm.assignment(caseId).catch(() => ({}));
+      let role = ASSIGN_ROLES.some(([r]) => r === cur.assigned_role) ? cur.assigned_role : "CASE_MANAGER";
+      const first = await Api.cm.assignees(role);
+      const v = await UI.modal({
+        title: cur.name ? "Reassign case" : "Assign case",
+        body: cur.name ? `Currently with <b>${esc(cur.name)}</b>${cur.role_label ? ` (${esc(cur.role_label)})` : ""}. They'll be told it moved.` : "Not assigned yet.",
+        fields: [
+          { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
+          { name: "assignee", label: "Person", options: assigneeOptions(first.assignees || []) },
+          { name: "reason", label: "Reason", type: "textarea", placeholder: cur.name ? "Why it moves — kept on the case history" : "Optional — kept on the case history" },
+        ],
+        submitLabel: cur.name ? "Reassign" : "Assign",
+        onRefresh: async (vals, setOptions) => {
+          if (vals.role === role) return; // only a role change reloads the people list
+          role = vals.role;
+          const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
+          setOptions("assignee", assigneeOptions(r.assignees || []));
+        },
+      });
+      if (!v) return;
+      const r = await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "");
+      UI.toast(r.unchanged ? `Already assigned to ${r.name || "that person"}` : `Assigned to ${r.name || "staff"}`);
       App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function unassign(caseId) {
+    const v = await UI.modal({ title: "Unassign case", body: "The case goes back to the unassigned queue; the person who had it is told.",
+      fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }],
+      submitLabel: "Unassign", danger: true });
+    if (!v) return;
+    try { await Api.cm.assign(caseId, "", "", v.reason || "", "unassign"); UI.toast("Unassigned"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function letter(caseId, template) {
@@ -1557,11 +1628,15 @@ const Views = (() => {
             ? `<button class="mini" onclick="Views.check('${i.id}')">check</button>` : "⬜")}
             ${esc(i.item)}${i.required ? " *" : ""}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
         `</ul>`).join("");
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
+      // Who holds the case (every case staff member sees it); the PM assigns, reassigns and unassigns here.
+      const isAssigner = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      html += `<div class="case-assignee" id="case-assignee" data-case="${esc(id)}"><span class="muted">Assigned to: …</span></div>`;
+      afterRender(() => loadCaseAssignee(id, isAssigner));
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN") || isAssigner)
         html += `<div class="actions">
-          ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button onclick="Views.assign('${id}')">Assign / route</button>` : ""}
-          <button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
-          <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
+          ${isAssigner ? `<button onclick="Views.assign('${id}')">Assign / reassign</button>` : ""}
+          ${can("CASE_MANAGER", "FEDERAL_ADMIN") ? `<button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
+          <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>` : ""}
         </div>`;
 
       // Notes — addNote (POST /notes) existed with no way to read them back
@@ -2341,6 +2416,8 @@ const Views = (() => {
         <fieldset class="elig-flags"><legend>Tick any that apply — each one makes the dispute ineligible</legend>
           ${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<label><input type="checkbox" name="flag" value="${esc(x)}" /> ${esc(ELIG_REASON_LABELS[x] || x.replace(/_/g, " "))}</label>`).join("")}
         </fieldset>
+        <label class="elig-notes">Notes <span class="muted">(optional — saved with this review; the PM and Attorney can add to them)</span>
+          <textarea name="notes" rows="2" maxlength="4000" placeholder="Your working notes on this review"></textarea></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
       <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
@@ -2437,10 +2514,35 @@ const Views = (() => {
           const el = document.getElementById("p-clock-proj"); if (!el) return;
           const arr = Array.isArray(cls) ? cls : (cls.clocks || []);
           if (!arr.length) { el.innerHTML = ""; return; }
-          el.innerHTML = `<p><b>Projected deadlines</b></p><table><thead><tr><th>Clock</th><th>Due</th><th>State</th><th>Basis</th></tr></thead><tbody>` +
+          // PM deadline extensions: an extended clock shows its extra days (each grant in the tooltip), and the PM
+          // can extend any clock except the statutory filing window.
+          const canExtend = Auth.can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+          const extNote = (cl) => cl.extended_days ? ` <span class="badge" title="${esc((cl.extensions || []).map((x) =>
+            `+${x.days}d by ${x.granted_by} (${fmtDate(x.at)}): ${x.reason}`).join("\n"))}">+${cl.extended_days}d extended</span>` : "";
+          el.innerHTML = `<p><b>Projected deadlines</b></p><table><thead><tr><th>Clock</th><th>Due</th><th>State</th><th>Basis</th>${canExtend ? "<th></th>" : ""}</tr></thead><tbody>` +
             arr.map((cl) => `<tr><td>${esc(cl.label || cl.clock || "")}</td>
-              <td>${fmtDate(cl.due)}</td><td>${badge(cl.state || "")}</td>
-              <td class="muted">${esc(cl.basis_note || cl.basis || "")}</td></tr>`).join("") + `</tbody></table>`;
+              <td>${fmtDate(cl.due)}${extNote(cl)}</td><td>${badge(cl.state || "")}</td>
+              <td class="muted">${esc(cl.basis_note || cl.basis || "")}</td>
+              ${canExtend ? `<td>${cl.extendable ? `<details class="clock-extend"><summary>Extend</summary>
+                <form data-clock="${esc(cl.clock)}" class="clock-extend-form">
+                  <label>Days <input name="days" type="number" min="1" max="90" value="5" required /></label>
+                  <textarea name="reason" rows="2" minlength="10" maxlength="2000" required placeholder="Why the deadline is extended (kept on the case record)"></textarea>
+                  <button class="mini">Extend deadline</button></form></details>` : `<span class="muted" title="Statutory window — cannot be extended">fixed</span>`}</td>` : ""}</tr>`).join("") + `</tbody></table>`;
+          el.querySelectorAll(".clock-extend-form").forEach((f) => f.addEventListener("submit", async (ev) => {
+            ev.preventDefault();
+            const days = parseInt(f.days.value, 10), reason = f.reason.value.trim();
+            if (!(days >= 1 && days <= 90)) { UI.toast("An extension is 1 to 90 days", { kind: "warn" }); return; }
+            if (reason.length < 10) { UI.toast("Give the reason for the extension (at least 10 characters)", { kind: "warn" }); return; }
+            await UI.run(f.querySelector("button"), async () => {
+              try {
+                const r = await Api.cm.extendClock(id, f.dataset.clock, days, reason);
+                UI.toast(r.workflow_signalled ? `Deadline extended by ${days} day${days === 1 ? "" : "s"}`
+                  : `Deadline extended by ${days} day${days === 1 ? "" : "s"} (the case's workflow wasn't reachable — its reminders keep the old date)`,
+                  r.workflow_signalled ? {} : { kind: "warn" });
+                loadDates();
+              } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+            }, "Extending…");
+          }));
         }).catch(() => {});
       };
       loadDates();
@@ -2448,11 +2550,34 @@ const Views = (() => {
       const loadElig = () => Api.program.eligibilityHistory(id).then((r) => {
         const el = document.getElementById("p-elig-history"); if (!el) return;
         const revs = r.reviews || [];
+        const canNote = Auth.can("CASE_MANAGER", "PM", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+        const ROLE_LABEL = { CASE_MANAGER: "Reviewer", PM: "PM", ATTORNEY: "Attorney", TENANT_ADMIN: "Admin", FEDERAL_ADMIN: "Admin", PLATFORM_ADMIN: "Admin" };
+        const notesRow = (v) => {
+          const ns = v.notes || [];
+          if (!ns.length && !canNote) return "";
+          return `<tr class="elig-notes-row"><td colspan="5">
+            ${ns.map((n) => `<div class="elig-note"><div class="elig-note-head"><b>${esc(n.author || "")}</b>
+              <span class="muted">${esc(ROLE_LABEL[n.author_role] || n.author_role || "")} · ${fmtDate(n.created_at)}</span></div>
+              <div class="elig-note-body">${esc(n.body || "")}</div></div>`).join("")}
+            ${canNote ? `<details class="elig-note-add"><summary>${ns.length ? "Add a note" : "Add a note to this review"}</summary>
+              <form data-review="${esc(v.id)}" class="elig-note-form"><textarea name="body" rows="2" maxlength="4000" required placeholder="Note on this review"></textarea>
+              <button class="mini">Save note</button></form></details>` : ""}
+          </td></tr>`;
+        };
         el.innerHTML = revs.length ? `<table><thead><tr><th>Result</th><th>Reason</th><th>Rules</th><th>By</th><th>When</th></tr></thead><tbody>` +
           revs.map((v) => `<tr><td>${eligBadge(v)}</td><td>${esc(v.reason || "—")}${v.override_reason ? `<div class="muted">override: ${esc(v.override_reason)}</div>` : ""}</td>
             <td class="mono muted" title="rule version that produced this decision">${esc(v.rule_version || "—")}</td>
-            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>`).join("") +
+            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>${notesRow(v)}`).join("") +
           `</tbody></table>` : `<p class="muted">No eligibility review on record yet.</p>`;
+        el.querySelectorAll(".elig-note-form").forEach((f) => f.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const body = f.body.value.trim();
+          if (!body) return;
+          await UI.run(f.querySelector("button"), async () => {
+            try { await Api.program.eligibilityNote(id, f.dataset.review, body); UI.toast("Note saved"); loadElig(); }
+            catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Saving…");
+        }));
       }).catch(() => {});
       // Result renderer shared by manual + auto paths: verdict, rule version,
       // borderline callout, and — on INELIGIBLE — the override form (a written
@@ -2509,6 +2634,7 @@ const Views = (() => {
           dispute_type: f.dispute_type ? f.dispute_type.value : "",
           flags: [...f.querySelectorAll('input[name="flag"]:checked')].map((x) => x.value),
           aor_valid: f.aor_valid.checked, aor_reason: f.aor_reason.value,
+          notes: f.notes ? f.notes.value : "",
         });
         const out = document.getElementById("p-elig-out");
         const resubmit = async (reason) => {
@@ -6529,7 +6655,11 @@ const Views = (() => {
 CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14
 CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
                   <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. Up to 500 disputes per ZIP.</p>
-                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div></details>
+                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div>
+              <div class="tpa-samples"><p><b>Sample ZIPs to copy</b> — open one to see the exact layout. They are filled in with your clients where you have them;
+                every sample document says what the real one must show. Replace the sample PDFs before uploading: a ZIP that still holds them is refused.</p>
+                <button type="button" class="mini" onclick="Views.tpaBdSample('separate', this)">Download sample — six separate documents</button>
+                <button type="button" class="mini" onclick="Views.tpaBdSample('merged', this)">Download sample — one merged PDF per dispute</button></div></details>
             <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
             <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
@@ -7722,6 +7852,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     finally { btn.disabled = false; }
   }
+  async function tpaBdSample(layout, btn) {
+    await UI.run(btn, async () => {
+      try { await Api.program.tpaBulkSample(layout); UI.toast("Sample ZIP downloaded — see README.txt inside"); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Preparing…");
+  }
   const tpaBdPay = (batchId, btn) => tpaPayDialog({ batch_id: batchId }, btn);
   // Eligibility as decided by the Reviewer (eligibility_reviews), in words.
   const ELIG = { ELIGIBLE: ["filed", "Eligible"], INELIGIBLE: ["rejected", "Not eligible"], HOLD_AOR: ["needs-review", "On hold — authorization (AOR)"] };
@@ -8747,5 +8883,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { npiReviewDecideFn, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

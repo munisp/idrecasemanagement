@@ -617,6 +617,16 @@ th.sortable:focus-visible{outline:2px solid var(--accent-fg);outline-offset:-2px
 .elig-flags{border:1px solid var(--line,#ddd);border-radius:8px;padding:8px 12px;margin:8px 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:4px 16px}
 .elig-flags legend{font-size:.85em;padding:0 6px}
 .elig-flags label{display:flex;gap:6px;align-items:flex-start;font-weight:400}
+.elig-notes{display:flex;flex-direction:column;gap:4px;margin:8px 0;max-width:60em}
+.elig-notes textarea,.elig-note-form textarea{width:100%;box-sizing:border-box}
+.elig-notes-row td{background:var(--surface-sunken);padding:6px 12px 10px}
+.elig-note{padding:6px 0;border-bottom:1px dashed var(--border-subtle,var(--line,#ddd))}
+.elig-note:last-of-type{border-bottom:0}
+.elig-note-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.elig-note-body{white-space:pre-wrap;margin-top:2px}
+.elig-note-add summary{cursor:pointer;font-size:.9em;margin-top:4px}
+.elig-note-form{display:flex;flex-direction:column;gap:6px;margin-top:6px;max-width:60em}
+.elig-note-form button{align-self:flex-start}
 .case-lock{border:1px solid #c0392b;background:rgba(192,57,43,.08);border-radius:8px;padding:10px 14px;margin:8px 0 14px;line-height:1.45}
 [data-frozen]{opacity:.45;cursor:not-allowed}
 
@@ -893,3 +903,20 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 .home-activity li.unread{border-left:3px solid var(--accent-bg)}
 
 .checks-line { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; margin-top: 4px; }
+
+/* Pipeline: per-column pager */
+.kanban-pager{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:6px 8px;border-top:1px solid var(--border-subtle,#ddd);font-size:.85em;font-variant-numeric:tabular-nums}
+.kanban-col-body.is-loading{opacity:.55}
+
+/* PM deadline extensions in the projected-deadlines table */
+.clock-extend summary{cursor:pointer;font-size:.9em}
+.clock-extend-form{display:flex;flex-direction:column;gap:6px;margin-top:6px;min-width:16em}
+.clock-extend-form input[name=days]{width:5em}
+.clock-extend-form button{align-self:flex-start}
+
+/* Case page: who holds the case */
+.case-assignee{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}
+
+/* TPA bulk filing: sample ZIP downloads */
+.tpa-samples{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle,#ddd)}
+.tpa-samples p{flex-basis:100%;margin:0}
