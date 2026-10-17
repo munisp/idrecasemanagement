@@ -138,7 +138,9 @@ const CrmViews = (() => {
     afterRender(() => accountsBox(""));
     const typeFilter = `<select id="acc-type" onchange="CrmViews.accountsFilter(this.value)"><option value="">All types</option>
       ${["PROVIDER", "PAYER", "IDRE", "AUDITOR", "OTHER"].map((t) => `<option value="${t}">${t}</option>`).join("")}</select>`;
+    SrvSearch.on("acc", () => accountsBox(document.getElementById("acc-type")?.value || ""));
     return `<div class="view-head"><h1>Accounts</h1><a class="button" href="#/crm/accounts/new">New account</a>${typeFilter}</div>
+      ${SrvSearch.html("acc", "Search name, NPI, phone, website…")}
       <div id="acc-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -147,18 +149,18 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.accounts(type || null, { limit: Pager.size() });
+      const page = await Api.crm.accounts(type || null, { limit: Pager.size(), ...SrvSearch.params("acc") });
       const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
             <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
       if (!state.loaded.length) {
-        box.innerHTML = `<p class="muted">${type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
+        box.innerHTML = `<p class="muted">${SrvSearch.q("acc") ? `No account matches “${esc(SrvSearch.q("acc"))}”.` : type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
         return;
       }
       box.innerHTML = `<table id="acc-tb" data-serverpaged><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc");
       bindPager("acc", "#acc-tb tbody", state,
-        (off, limit) => Api.crm.accounts(type || null, { limit, offset: off }).then((r) => ({ rows: r.accounts, total: r.total })),
+        (off, limit) => Api.crm.accounts(type || null, { limit, offset: off, ...SrvSearch.params("acc") }).then((r) => ({ rows: r.accounts, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -235,8 +237,10 @@ const CrmViews = (() => {
       <option value="OPEN" selected>Not converted</option>
       <option value="">All</option>
       <option value="CONVERTED">Converted</option></select>`;
+    SrvSearch.on("lead", () => leadsBox(document.getElementById("lead-status")?.value ?? "OPEN"));
     return `<div class="view-head"><h1>Leads</h1>${statusFilter}</div>
       <p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
+      ${SrvSearch.html("lead", "Search name, organization, phone, email, summary…")}
       <div id="lead-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -245,19 +249,19 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.leads({ limit: Pager.size(), status });
+      const page = await Api.crm.leads({ limit: Pager.size(), status, ...SrvSearch.params("lead") });
       const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
             <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
             <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
       if (!state.loaded.length) {
-        box.innerHTML = `<p class="muted">No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.</p>`;
+        box.innerHTML = `<p class="muted">${SrvSearch.q("lead") ? `No lead matches “${esc(SrvSearch.q("lead"))}”.` : `No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.`}</p>`;
         return;
       }
       box.innerHTML = `<table id="lead-tb" data-serverpaged><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead");
       bindPager("lead", "#lead-tb tbody", state,
-        (off, limit) => Api.crm.leads({ limit, offset: off, status }).then((r) => ({ rows: r.leads, total: r.total })),
+        (off, limit) => Api.crm.leads({ limit, offset: off, status, ...SrvSearch.params("lead") }).then((r) => ({ rows: r.leads, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -283,6 +287,7 @@ const CrmViews = (() => {
   function tasks() {
     const mine = new URLSearchParams(location.hash.split("?")[1] || "").get("all") !== "1";
     const title = mine ? "My tasks" : "All tasks";
+    SrvSearch.on("task", () => tasksBox(mine, document.getElementById("task-status")?.value ?? "OPEN"));
     afterRender(() => {
       tasksBox(mine, "OPEN");
       document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
@@ -303,6 +308,7 @@ const CrmViews = (() => {
         <input name="subject" placeholder="Subject" required />
         <input name="case_id" placeholder="Case ID (optional)" />
         <input name="due_date" type="date" /><button>Create</button></form>`}
+      ${SrvSearch.html("task", "Search subject, task ref, case…")}
       <div id="task-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -311,7 +317,7 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.tasks(mine, { limit: Pager.size(), status });
+      const page = await Api.crm.tasks(mine, { limit: Pager.size(), ...(status ? { status } : {}), ...SrvSearch.params("task") });
       const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
           <td>${esc(t.subject)}</td>
@@ -321,14 +327,14 @@ const CrmViews = (() => {
           <td>${badge(t.status)}</td>
           <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
       if (!state.loaded.length) {
-        box.innerHTML = `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
+        box.innerHTML = `<p class="muted">${SrvSearch.q("task") ? `No task matches “${esc(SrvSearch.q("task"))}”.` : mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
         return;
       }
       box.innerHTML = `<table id="task-tb" data-serverpaged><thead><tr><th>Ref</th><th>Subject</th>
           ${mine ? "" : "<th>Assignee</th>"}<th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task");
       bindPager("task", "#task-tb tbody", state,
-        (off, limit) => Api.crm.tasks(mine, { limit, offset: off, status }).then((r) => ({ rows: r.tasks, total: r.total })),
+        (off, limit) => Api.crm.tasks(mine, { limit, offset: off, ...(status ? { status } : {}), ...SrvSearch.params("task") }).then((r) => ({ rows: r.tasks, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }

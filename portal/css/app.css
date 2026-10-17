@@ -924,3 +924,9 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 /* Disputes page search */
 .case-search{display:flex;gap:6px;align-items:center;flex:1 1 22em;max-width:34em;margin-left:12px}
 .case-search input{flex:1;min-width:0}
+
+/* Search on every list (ui.js Pager) */
+tr.sf-out{display:none !important}
+.tsearch{display:flex;align-items:center;gap:10px;margin:6px 0 8px;max-width:36em}
+.tsearch input{flex:1;min-width:0}
+.tsearch-n{font-size:.85em;white-space:nowrap;font-variant-numeric:tabular-nums}

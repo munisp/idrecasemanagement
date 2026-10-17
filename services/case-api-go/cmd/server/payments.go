@@ -405,6 +405,10 @@ func (s *server) listPayments(w http.ResponseWriter, r *http.Request) {
 		where += ` AND case_id=$2`
 		args = append(args, caseID)
 	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		where += searchClause(len(args), "payer_email", "payer_name", "payer_org", "case_id", "status", "provider", "session_id", "payment_intent")
+	}
 	limit, offset := pageParams(r, 50, 500)
 	var total int
 	if err := s.db.QueryRow(r.Context(),

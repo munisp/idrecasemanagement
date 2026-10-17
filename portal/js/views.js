@@ -3074,15 +3074,17 @@ const Views = (() => {
       <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
         eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
         not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>` : "") +
+      SrvSearch.html("intake", "Search email, contact, organization, case #…") +
       `<div id="intake-box"><p class="muted">Loading…</p></div>`;
   }
+  SrvSearch.on("intake", () => intakeBox(document.getElementById("intake-status")?.value || ""));
 
   async function intakeBox(status) {
     const box = document.getElementById("intake-box");
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status }), Api.program.get().catch(() => null)]);
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status, ...SrvSearch.params("intake") }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
       const intakeTotal = r.total ?? rows.length;
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
@@ -3093,10 +3095,10 @@ const Views = (() => {
       const label = amtLabel(prog);
       box.innerHTML = (rows.length ? `<table id="intake-tb" data-serverpaged><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests${status ? ` with status ${status}` : ""}.</p>`) +
+          `</tbody></table>` : `<p class="muted">${SrvSearch.q("intake") ? `No intake request matches “${esc(SrvSearch.q("intake"))}”` : `No intake requests${status ? ` with status ${status}` : ""}`}.</p>`) +
         (rows.length ? `<div id="intake-pg"></div>` : "");
       Pager.server(document.getElementById("intake-pg"), { total: intakeTotal, shown: rows.length }, async (limit, offset) => {
-        const pr = await Api.program.intake({ limit, offset, status });
+        const pr = await Api.program.intake({ limit, offset, status, ...SrvSearch.params("intake") });
         const prows = pr.intake || [];
         document.querySelector("#intake-tb tbody").innerHTML = prows.map(intakeRowHtml).join("");
         return { total: pr.total ?? intakeTotal, shown: prows.length };
@@ -3369,8 +3371,8 @@ const Views = (() => {
       const FIN_PAGE = Pager.size();
       const [fin, pays, chks] = await Promise.all([
         Api.program.financial(),
-        Api.program.payments(null, { limit: FIN_PAGE }).catch(() => ({ payments: [] })),
-        Api.program.checks("", { limit: FIN_PAGE }).catch(() => ({ checks: [] })),
+        Api.program.payments(null, { limit: FIN_PAGE, ...SrvSearch.params("fin-pay") }).catch(() => ({ payments: [] })),
+        Api.program.checks("", { limit: FIN_PAGE, ...SrvSearch.params("fin-ck") }).catch(() => ({ checks: [] })),
       ]);
       // first page of each server-paged list
       finPager = {
@@ -3443,16 +3445,19 @@ const Views = (() => {
           <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
           <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
+        (ck.length || SrvSearch.q("fin-ck") ? SrvSearch.html("fin-ck", "Search check #, payer, memo, case, invoice…") : "") +
         (ck.length ? `<table data-serverpaged><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
           ck.map(checkRow).join("") + `</tbody></table>` +
           (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
-          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`) +
+          (SrvSearch.q("fin-ck") ? `<p class="muted">No check matches “${esc(SrvSearch.q("fin-ck"))}”.</p>` : `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`)) +
         (ck.length ? `<div id="fin-ck-pg"></div>` : "");
 
       // Card payments
       const plist = finPager.payments.rows;
+      if (!plist.length && SrvSearch.q("fin-pay"))
+        html += `<h2>Card payments</h2>${SrvSearch.html("fin-pay", "Search payer, email, case, status, Stripe ref…")}<p class="muted">No card payment matches “${esc(SrvSearch.q("fin-pay"))}”.</p>`;
       if (plist.length)
-        html += `<h2>Card payments</h2><table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
+        html += `<h2>Card payments</h2>${SrvSearch.html("fin-pay", "Search payer, email, case, status, Stripe ref…")}<table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
           plist.map(payRow).join("") + `</tbody></table>` +
           `<div id="fin-pay-pg"></div>`;
 
@@ -3476,8 +3481,8 @@ const Views = (() => {
           Pager.server(document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"),
             { total: st.total, shown: st.rows.length }, async (limit, offset) => {
               const r = kind === "checks"
-                ? await Api.program.checks("", { limit, offset })
-                : await Api.program.payments(null, { limit, offset });
+                ? await Api.program.checks("", { limit, offset, ...SrvSearch.params("fin-ck") })
+                : await Api.program.payments(null, { limit, offset, ...SrvSearch.params("fin-pay") });
               st.rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
               st.total = r.total ?? st.total;
               document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body").innerHTML =
@@ -3492,6 +3497,8 @@ const Views = (() => {
 
   // finance() pager state — survives only for the rendered page
   let finPager = null;
+  SrvSearch.on("fin-ck", () => App.rerender());
+  SrvSearch.on("fin-pay", () => App.rerender());
   let checkRow = null, payRow = null; // row renderers set by finance()
 
   async function requestRescan(checkId, caseId, btn) {
@@ -5785,7 +5792,7 @@ const Views = (() => {
         `</div>
         <h2>Change history <span class="muted">append-only audit trail, newest first</span></h2>
         ${window._rulesAudit.length ? `<p><input placeholder="Filter by who changed it or the note…" oninput="Views.rulesAuditFilter(this.value)" style="min-width:280px" /></p>` : ""}
-        <div id="rules-audit-box">${rulesAuditHtml(window._rulesAudit)}</div>`;
+        <div id="rules-audit-box" data-nosearch>${rulesAuditHtml(window._rulesAudit)}</div>`;
     } catch (e) { return err(e); }
   }
 
@@ -6119,11 +6126,11 @@ const Views = (() => {
           <input name="action" placeholder="filter by action (e.g. NPI_VERIFICATION_DEGRADED)" />
           <button>Filter</button>
         </form>
-        <div id="al-list">${auditRows(r.entries || [])}</div></div>
+        <div id="al-list" data-nosearch>${auditRows(r.entries || [])}</div></div>
         <div id="al-own" hidden><form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('al-own-box', 'mine')">
           <input name="q" placeholder="Search: dispute, action" aria-label="Search your actions">
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('al-own-box', 'mine')"> Include page views</label>
-          <button>Search</button></form><div id="al-own-box"></div></div>`;
+          <button>Search</button></form><div id="al-own-box" data-nosearch></div></div>`;
     } catch (e) { return err(e); }
   }
 
@@ -6366,7 +6373,7 @@ const Views = (() => {
           <select id="arap-ar-bucket" onchange="Views.arapArFilter()"><option value="">All buckets</option>
             ${buckets.map((b) => `<option value="${b}">${b}</option>`).join("")}</select>
           <input id="arap-ar-q" placeholder="Filter by party…" oninput="Views.arapArFilter()" /></p>` : ""}
-        <div id="arap-ar-results">${arapArResultsHtml(window._arapAr, "", "")}</div>`;
+        <div id="arap-ar-results" data-nosearch>${arapArResultsHtml(window._arapAr, "", "")}</div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6602,7 +6609,7 @@ const Views = (() => {
             <p class="muted">Every dispute you filed, for every client. Open a case number for its details, payment and documents.</p>
             <div id="tpa-fees"></div>
             <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
-            <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+            <div id="tpa-cases" data-nosearch><p class="muted">Loading…</p></div></div>
         </section>
 
 
@@ -6712,7 +6719,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
             <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('tpa-audit', 'tpa')"> Include page views</label>
             <button>Search</button></form>
-          <div id="tpa-audit"><p class="muted">Loading…</p></div></div></section>
+          <div id="tpa-audit" data-nosearch><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-tpa-panel="oversight" style="display:none">
@@ -7069,7 +7076,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
             <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('hp-audit', 'hp')"> Include page views</label>
             <button>Search</button></form>
-          <div id="hp-audit"><p class="muted">Loading…</p></div></div></section>
+          <div id="hp-audit" data-nosearch><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-hp-panel="oversight" style="display:none">
@@ -8084,7 +8091,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <input name="q" placeholder="Search: dispute, action" aria-label="Search your activity">
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('my-audit', 'mine')"> Include page views</label>
           <button>Search</button></form>
-        <div id="my-audit"><p class="muted">Loading…</p></div></div>`;
+        <div id="my-audit" data-nosearch><p class="muted">Loading…</p></div></div>`;
   }
   // The sidebar's Audit log for a TPA or plan account: its organization's trail.
   function orgAuditPage() {
@@ -8100,7 +8107,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <label class="muted"><input type="checkbox" name="mine" onchange="Views.orgAuditBox('org-audit', '${kind}')"> Only my actions</label>
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('org-audit', '${kind}')"> Include page views</label>
           <button>Search</button></form>
-        <div id="org-audit"><p class="muted">Loading…</p></div></div>`;
+        <div id="org-audit" data-nosearch><p class="muted">Loading…</p></div></div>`;
   }
   // An organization's own audit trail (orgaudit.go): the TPA or plan page's "Audit log" tab.
   async function orgAuditBox(boxId, kind) {
@@ -8853,7 +8860,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
         <select name="type" aria-label="Who">
           <option value="">Anyone</option>${Object.entries(SCR_TYPE).map(([k, v]) => `<option value="${k}" ${scrFilter.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       </form>
-      <div id="scr-list"><p class="muted">Loading…</p></div>`;
+      <div id="scr-list" data-nosearch><p class="muted">Loading…</p></div>`;
   }
 
   const SCR_TYPE = { MANUAL: "Other", PARTY: "Provider or health plan", TPA: "Third-party administrator", VENDOR: "Vendor", ARBITRATOR: "Independent reviewer",

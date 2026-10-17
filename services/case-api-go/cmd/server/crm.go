@@ -64,6 +64,10 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		q += ` AND type=$2`
 		args = append(args, typ)
 	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		q += searchClause(len(args), "legal_name", "npi", "phone", "website", "type", "address::text", "custom::text")
+	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int
 	if err := s.db.QueryRow(r.Context(),
@@ -275,6 +279,10 @@ func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 	if statusArg != nil {
 		queryArgs = append(queryArgs, statusArg)
 	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		queryArgs = append(queryArgs, like)
+		statusClause += searchClause(len(queryArgs), "name", "organization", "phone", "email", "summary", "source", "status")
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
 		`SELECT count(*) FROM public.leads WHERE tenant=$1`+statusClause, queryArgs...).Scan(&total); err != nil {
@@ -383,6 +391,10 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	if status := r.URL.Query().Get("status"); status != "" {
 		args = append(args, status)
 		q += fmt.Sprintf(` AND status=$%d`, len(args))
+	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		q += searchClause(len(args), "subject", "task_ref", "case_id", "status")
 	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int

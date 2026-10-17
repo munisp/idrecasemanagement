@@ -715,6 +715,20 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = filtered
 	}
+	// Search (?q=): same merged set, so it filters here too -- requester, contact, organization, case number,
+	// status, service line, filing party.
+	if t := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q"))); t != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			for _, k := range []string{"email", "contact_name", "org", "case_number", "status", "service_line", "filing_party_type"} {
+				if strings.Contains(strings.ToLower(str(row[k])), t) {
+					filtered = append(filtered, row)
+					break
+				}
+			}
+		}
+		rows = filtered
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		ti, _ := rows[i]["created_at"].(time.Time)
 		tj, _ := rows[j]["created_at"].(time.Time)
