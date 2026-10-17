@@ -680,6 +680,12 @@ const Api = (() => {
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),
     },
+    letters: {
+      report: (caseId) => req("GET", `${t()}/cases/${caseId}/decision-report`),
+      saveReport: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/decision-report`, body),
+      settings: () => req("GET", `${t()}/letter-settings`),
+      saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
+    },
     geo: {
       mapUrl: () => `${config.caseApiBase}/geo/map`,
     },

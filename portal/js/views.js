@@ -2400,11 +2400,15 @@ const Views = (() => {
           ${(cfg.statuses?.agency || []).map((s) => `<option ${s === c.agency_status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <button>Update status</button></form></details>
 
+      <details class="prog-sec" id="p-deadlines" open><summary>Deadlines</summary>
+      <p class="muted">Each deadline as it stands, from its program date.${can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+        ? " As the PM or an admin you can extend any of them except the statutory filing window — the reason is kept on the case." : ""}</p>
+      <div id="p-clock-proj"><p class="muted">Loading…</p></div></details>
+
       <details class="prog-sec"><summary>Program dates (clock bases)</summary>
       <p class="muted">Statutory clocks run <b>from</b> these dates — recording one starts or restarts its clock.
         Record the date once; every deadline that depends on it re-projects automatically.</p>
       <div id="p-dates-list"></div>
-      <div id="p-clock-proj"></div>
       <form id="p-date" class="inline-form">
         <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
         <input type="date" name="value" required /><button>Record date</button></form></details>
@@ -2468,6 +2472,8 @@ const Views = (() => {
           date_of_service(YYYY-MM-DD),date_claim_submitted(YYYY-MM-DD),provider_name,facility_name,evidence_location
           — the import is rejected with the exact missing fields per line if any are blank.</p>
         <button>Import claims</button></form><div id="p-claims-list"></div></details>
+
+      ${Letters.caseSecHtml(id, cfg)}
 
       <details class="prog-sec"><summary>Share links & opt-out</summary>
       <div class="actions">
@@ -2535,7 +2541,7 @@ const Views = (() => {
         Api.cm.clocks(id).then((cls) => {
           const el = document.getElementById("p-clock-proj"); if (!el) return;
           const arr = Array.isArray(cls) ? cls : (cls.clocks || []);
-          if (!arr.length) { el.innerHTML = ""; return; }
+          if (!arr.length) { el.innerHTML = `<p class="muted">No deadline is running yet — they start when their program dates are recorded.</p>`; return; }
           // PM deadline extensions: an extended clock shows its extra days (each grant in the tooltip), and the PM
           // can extend any clock except the statutory filing window.
           const canExtend = Auth.can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
@@ -5030,6 +5036,7 @@ const Views = (() => {
     afterRender(tplLoad);
     return `<div class="view-head"><h1>Templates</h1>
       <span class="muted">the emails this program sends, and which one is used when</span></div>
+      ${Letters.settingsCardHtml()}
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
   }
 
@@ -6190,6 +6197,7 @@ const Views = (() => {
         <button>Generate DRAFT</button></form>
       <p class="muted">Idempotent per period — an existing active invoice for the same period is reported, never duplicated. Billable time without a role rate blocks generation (configurable).</p>
       <div id="billing-gen-out"></div></div>
+      ${Letters.settingsCardHtml()}
       <div id="billing-list"><p class="muted">Loading…</p></div>
       <div id="billing-detail"></div>`;
   }

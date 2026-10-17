@@ -729,6 +729,10 @@ func main() {
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
 		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                      // the SOP steps: done, next, upcoming
 		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                     // Reviewer: outcome, claims reviewed, award, party billed
+		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport) // the written decision: sections, amounts, claims tables
+		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
+		r.Get("/letter-settings", s.getLetterSettings) // letterhead, Agency addressee, invoice terms, remit-to
+		r.Put("/letter-settings", s.putLetterSettings)
 		r.Post("/cases/{caseId}/fwa", s.fwaAction)                             // fraud/waste/abuse: report, assign reviewer, conclude
 		r.Put("/program/contract-dates", s.setContractDates)                   // admin: contract execution/effective/end dates
 		r.Get("/program/recipients", s.getCorrespondenceRecipients)            // agency contacts + PM copy addresses

@@ -179,8 +179,9 @@ func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles
 	return out
 }
 
-// renderTemplate substitutes {case_number}, {provider_name}, {payer_name},
-// {amount}, {due_date} placeholders from the case row.
+// renderTemplate substitutes the case's placeholders ({case_number}, {provider_name}, {payer_name}, ...), the
+// office's own names ({org_name}, {contact_email}, {agency_salutation}, ... -- letterVars) and the bracketed
+// fill-ins the case can answer ([Plan name], [Provider Contact Name], ...).
 func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) string {
 	var caseNumber, providerID, payerID string
 	var qpa int64
@@ -191,13 +192,13 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 	// Names as people know them: what was read from the documents or given
 	// at intake. The internal ids these placeholders used to print mean
 	// nothing in a letter.
-	var provider, plan, filer, filerType string
+	var provider, plan, filer, filerType, contact string
 	var disputed int64
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT coalesce(details->>'provider_org',''), coalesce(details->>'health_plan',''),
 		       coalesce(details->>'requester_org',''), coalesce(details->>'filing_party_type',''),
-		       coalesce(disputed_amount_cents,0)
-		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &filerType, &disputed)
+		       coalesce(disputed_amount_cents,0), coalesce(details->>'requester_contact_name','')
+		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &filerType, &disputed, &contact)
 	if provider == "" {
 		provider = s.accountName(r, tenant, providerID)
 	}
@@ -219,10 +220,17 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 		"{qpa}":             fmt.Sprintf("$%d.%02d", qpa/100, qpa%100),
 		"{case_url_suffix}": "#/cases/" + caseID,
 	}
+	for k, v := range s.letterVars(r, tenant) {
+		repl[k] = v
+	}
 	for k, v := range repl {
 		text = strings.ReplaceAll(text, k, v)
 	}
-	return text
+	// The filer's contact is the provider's contact only when a provider filed.
+	if strings.EqualFold(filerType, "HEALTH_PLAN") {
+		contact = ""
+	}
+	return fillInNames(text, provider, plan, contact)
 }
 
 // draftCorrespondence renders a program template for a case. If the template

@@ -72,6 +72,12 @@ var templatePlaceholders = []map[string]string{
 	{"token": "{payer_name}", "meaning": "The health plan named on the dispute"},
 	{"token": "{disputed_amount}", "meaning": "The amount in dispute"},
 	{"token": "{today}", "meaning": "Today's date"},
+	{"token": "{org_name}", "meaning": "Your organization's name (Letterhead & invoice), e.g. Capitol Bridge LLC"},
+	{"token": "{org_short}", "meaning": "Its short name, e.g. Capitol Bridge"},
+	{"token": "{contact_email}", "meaning": "The contact email (Letterhead & invoice)"},
+	{"token": "{contact_phone}", "meaning": "The contact phone (Letterhead & invoice)"},
+	{"token": "{program_name}", "meaning": "The program's name, e.g. Florida AHCA"},
+	{"token": "{agency_salutation}", "meaning": "How emails to the Agency open, e.g. Dear Mr. Hoeler and Ms. Rooks,"},
 	{"token": "{share_link}", "meaning": "A secure upload link, created when the message is sent"},
 	{"token": "{download_link}", "meaning": "A secure download link, created when the message is sent"},
 }

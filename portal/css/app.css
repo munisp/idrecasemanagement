@@ -930,3 +930,17 @@ tr.sf-out{display:none !important}
 .tsearch{display:flex;align-items:center;gap:10px;margin:6px 0 8px;max-width:36em}
 .tsearch input{flex:1;min-width:0}
 .tsearch-n{font-size:.85em;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* Decision report (letters.js): the decision fields in a grid, each section a labelled block, editable tables. */
+.dr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(14em,1fr));gap:10px 14px;margin:8px 0}
+.dr-grid label,.dr-sec,.ls-group label{display:flex;flex-direction:column;gap:4px}
+.dr-secs{display:flex;flex-direction:column;gap:14px;margin:12px 0}
+.dr-sec textarea,.dr-sec input{width:100%;box-sizing:border-box}
+.dr-hint{font-size:.85em}
+.dr-reviewers{display:flex;flex-wrap:wrap;gap:6px 16px;margin:8px 0}
+.dr-tbl input{width:100%;min-width:6em;box-sizing:border-box}
+.dr-tbl input.num{text-align:right}
+.tbl-scroll{overflow-x:auto}
+.ls-form{display:flex;flex-direction:column;gap:12px}
+.ls-group{display:grid;grid-template-columns:repeat(auto-fit,minmax(16em,1fr));gap:8px 14px}
+#ls-card summary{cursor:pointer}
