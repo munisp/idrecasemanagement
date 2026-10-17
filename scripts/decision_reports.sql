@@ -36,11 +36,15 @@ CREATE TABLE IF NOT EXISTS public.letter_settings (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Owned by the database's app role -- whoever owns public.invoices (idre on dev, idre_prod on idre-prod) -- so
+-- the case-api of that deployment can read and write them.
 DO $own$
+DECLARE app text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'idre') THEN
-    ALTER TABLE public.decision_reports OWNER TO idre;
-    ALTER TABLE public.letter_settings OWNER TO idre;
+  SELECT tableowner INTO app FROM pg_tables WHERE schemaname = 'public' AND tablename = 'invoices';
+  IF app IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE public.decision_reports OWNER TO %I', app);
+    EXECUTE format('ALTER TABLE public.letter_settings OWNER TO %I', app);
   END IF;
 END
 $own$;
