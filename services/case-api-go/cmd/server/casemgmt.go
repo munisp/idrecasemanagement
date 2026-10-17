@@ -318,7 +318,6 @@ func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 // Workload-balanced: the case manager (or arbitrator) of this tenant with the
 // fewest open assignments wins. Manual override via {"assignee": "<sub>"}.
 
-
 // ---- Escalations (SLA breach -> supervisor chain) --------------------------------
 
 // escalateCase: POST /cases/{caseId}/escalate {clock, detail} — also called by

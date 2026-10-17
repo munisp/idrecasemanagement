@@ -9,11 +9,11 @@ package main
 
 import (
 	"crypto/tls"
-	"time"
 	"encoding/base64"
 	"fmt"
 	"net/smtp"
 	"strings"
+	"time"
 )
 
 // sendMail delivers one message. Returns nil on acceptance by the relay.

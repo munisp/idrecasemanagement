@@ -79,3 +79,21 @@ func TestFillInNames(t *testing.T) {
 		t.Error("an unknown name is left for the drafter")
 	}
 }
+
+func TestTemplateVariableNames(t *testing.T) {
+	for _, ok := range []string{"agency_contacts", "director_name", "ab"} {
+		if !tvNameRE.MatchString(ok) || tvReserved(ok) {
+			t.Errorf("%s should be a usable variable name", ok)
+		}
+	}
+	for _, bad := range []string{"Agency", "1st", "a", "with space", "x-y"} {
+		if tvNameRE.MatchString(bad) {
+			t.Errorf("%q should not be a variable name", bad)
+		}
+	}
+	for _, taken := range []string{"case_number", "provider_name", "share_link", "org_name", "agency_salutation"} {
+		if !tvReserved(taken) {
+			t.Errorf("{%s} is filled by the system and must not be a variable", taken)
+		}
+	}
+}

@@ -127,7 +127,31 @@ def load_case(tenant: str, case_id: str) -> dict:
     }
     for k, v in details.items():
         fields[f"details.{k}"] = str(v)
+    fields.update(office_variables(tenant))
     return fields
+
+
+def office_variables(tenant: str) -> dict:
+    """The tenant's template variables -- {agency_contacts}, {org_name}, {contact_email}... -- so an uploaded DOCX
+    template can use the same names the email templates do (program config "letters", overlaid with what the
+    office set on the Templates page)."""
+    with psycopg.connect(DSN) as c:
+        prog = c.execute("SELECT config->'letters' FROM public.program_rules WHERE tenant=%s", (tenant,)).fetchone()
+        ls = c.execute("SELECT settings FROM public.letter_settings WHERE tenant=%s", (tenant,)).fetchone()
+    d = (prog[0] if prog and prog[0] else {}) or {}
+    st = (ls[0] if ls and ls[0] else {}) or {}
+    head = st.get("letterhead") or {}
+    out = {k: str(v) for k, v in (d.get("variables") or {}).items()}
+    out.update({k: str(v) for k, v in (st.get("variables") or {}).items()})
+    for k in ("org_name", "org_short", "contact_email", "contact_phone", "program_name"):
+        if head.get(k) or d.get(k):
+            out[k] = head.get(k) or d.get(k)
+    sal = (st.get("agency") or {}).get("email_salutation") or d.get("agency_email_salutation")
+    if not sal and out.get("agency_contacts"):
+        sal = f"Dear {out['agency_contacts']},"
+    if sal:
+        out["agency_salutation"] = sal
+    return out
 
 
 def merge_docx(template: bytes, fields: dict) -> bytes:

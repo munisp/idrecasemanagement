@@ -5036,6 +5036,7 @@ const Views = (() => {
     afterRender(tplLoad);
     return `<div class="view-head"><h1>Templates</h1>
       <span class="muted">the emails this program sends, and which one is used when</span></div>
+      ${Letters.variablesCardHtml()}
       ${Letters.settingsCardHtml()}
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
   }

@@ -63,8 +63,8 @@ var (
 // npiRecord is what NPPES holds for one NPI.
 type npiRecord struct {
 	Found    bool     `json:"found"`
-	Name     string   `json:"name"`            // organization name, or "FIRST LAST"
-	Others   []string `json:"other_names"`     // former and doing-business-as names
+	Name     string   `json:"name"`             // organization name, or "FIRST LAST"
+	Others   []string `json:"other_names"`      // former and doing-business-as names
 	Type     string   `json:"enumeration_type"` // NPI-1 person, NPI-2 organization
 	Taxonomy string   `json:"taxonomy"`
 	State    string   `json:"state"`

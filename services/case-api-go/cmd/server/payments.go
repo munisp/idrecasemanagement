@@ -221,11 +221,11 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 	switch evt.Type {
 	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
 		var sess struct {
-			ID            string            `json:"id"`
-			PaymentIntent string            `json:"payment_intent"`
-			PaymentStatus string            `json:"payment_status"`
-			AmountTotal   int64             `json:"amount_total"`
-			Email         string            `json:"customer_email"`
+			ID            string `json:"id"`
+			PaymentIntent string `json:"payment_intent"`
+			PaymentStatus string `json:"payment_status"`
+			AmountTotal   int64  `json:"amount_total"`
+			Email         string `json:"customer_email"`
 			Details       struct {
 				Email string `json:"email"`
 			} `json:"customer_details"`

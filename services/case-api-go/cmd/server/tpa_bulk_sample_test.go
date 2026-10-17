@@ -95,5 +95,6 @@ func TestBulkSampleZipShape(t *testing.T) {
 	}
 }
 
-func fmtSscanf(line string, off *int) (int, error) { return fmt.Sscanf(strings.Fields(line)[0], "%d", off) }
-
+func fmtSscanf(line string, off *int) (int, error) {
+	return fmt.Sscanf(strings.Fields(line)[0], "%d", off)
+}

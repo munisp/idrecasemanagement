@@ -448,7 +448,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		Notes               string `json:"notes"`
 		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
-		QPACents            int64  `json:"qpa_cents"` // federal NSA tenants only — programmed tenants use disputed_amount_cents
+		QPACents            int64  `json:"qpa_cents"`    // federal NSA tenants only — programmed tenants use disputed_amount_cents
 		ServiceLine         string `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
@@ -490,7 +490,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 			`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"case_id": caseID, "case_number": caseNumber, "status": st,
-			"payment_required": st == "AWAITING_PAYMENT",
+			"payment_required":  st == "AWAITING_PAYMENT",
 			"filing_party_type": fpt, "programmed": true,
 		})
 		return

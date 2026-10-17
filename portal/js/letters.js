@@ -304,5 +304,68 @@ const Letters = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
   }
 
-  return { caseSecHtml, gen, save, addRow, delRow, fromCase, settingsCardHtml, saveSettings };
+  // ---- template variables (Templates page) --------------------------------------------------------------------
+  // Named values set once for the whole tenant and used as {name} in any email template or uploaded letter:
+  // the office's own (organization name, contact details, the Agency's salutation) and any the office adds,
+  // like {agency_contacts} = "Mr. Hoeler and Ms. Rooks".
+  let tvData = null;
+  function variablesCardHtml() {
+    if (!can(...STAFF)) return "";
+    afterRender(loadVariables);
+    return `<details class="card" id="tv-card" open><summary><b>Template variables</b> <span class="muted">— names and values every template can use</span></summary>
+      <div id="tv-body"><p class="muted">Loading…</p></div></details>`;
+  }
+  async function loadVariables() {
+    const box = document.getElementById("tv-body");
+    if (!box) return;
+    try { tvData = await Api.letters.variables(); }
+    catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    tvData.rows = (tvData.variables || []).map((v) => ({ ...v }));
+    tvRender();
+  }
+  function tvRender() {
+    const box = document.getElementById("tv-body");
+    if (!box || !tvData) return;
+    const ed = tvData.can_edit, dis = ed ? "" : " disabled";
+    box.innerHTML = `<p class="muted">Write <span class="mono">{name}</span> in any template and it is replaced by the value here when the
+        email or letter is drafted. One change here applies to every case.${ed ? "" : " The PM or an administrator changes these."}</p>
+      <h4>Your variables</h4>
+      <table class="tbl" data-nosearch><thead><tr><th>In a template</th><th>Value</th><th></th></tr></thead><tbody>
+      ${tvData.rows.map((v, i) => `<tr>
+        <td>${v.standard ? `<span class="mono">{${esc(v.name)}}</span>` : `<input class="mono" data-tv="${i}" data-k="name" value="${esc(v.name)}" placeholder="name_in_lowercase" maxlength="41"${dis} />`}</td>
+        <td><input data-tv="${i}" data-k="value" value="${esc(v.value)}" maxlength="2000"${dis} />
+          ${v.standard && v.value !== v.standard_value ? `<span class="muted dr-hint">Standard: ${esc(v.standard_value)}</span>` : ""}</td>
+        <td>${ed ? (v.standard ? `<button type="button" class="mini" title="Back to the standard value" onclick="Letters.tvReset(${i})">Reset</button>`
+          : `<button type="button" class="mini" title="Remove this variable" onclick="Letters.tvDel(${i})">×</button>`) : ""}</td></tr>`).join("")
+        || `<tr><td colspan="3" class="muted">None yet.</td></tr>`}</tbody></table>
+      ${ed ? `<button type="button" class="mini" onclick="Letters.tvAdd()">Add a variable</button>` : ""}
+      <h4>Your office</h4>
+      <table class="tbl" data-nosearch><thead><tr><th>In a template</th><th>What it is</th><th>Value</th></tr></thead><tbody>
+      ${(tvData.builtin || []).map((b) => `<tr><td class="mono">{${esc(b.name)}}</td><td>${esc(b.meaning)}</td>
+        <td><input data-tvb="${esc(b.name)}" value="${b.set ? esc(b.value) : ""}" placeholder="${esc(b.value)}" maxlength="300"${dis} /></td></tr>`).join("")}
+      </tbody></table>
+      <p class="muted">An office value left blank uses the standard wording shown greyed out.</p>
+      ${ed ? `<div class="actions"><button type="button" onclick="Letters.tvSave()">Save variables</button></div>` : ""}`;
+    box.oninput = (ev) => {
+      const el = ev.target;
+      if (el.dataset.tv !== undefined) tvData.rows[+el.dataset.tv][el.dataset.k] = el.value;
+    };
+  }
+  function tvAdd() { tvData.rows.push({ name: "", value: "" }); tvRender(); }
+  function tvDel(i) { tvData.rows.splice(i, 1); tvRender(); }
+  function tvReset(i) { const v = tvData.rows[i]; v.value = v.standard_value; tvRender(); }
+  async function tvSave() {
+    const variables = {};
+    for (const v of tvData.rows) {
+      const name = (v.name || "").trim();
+      if (!name && !(v.value || "").trim()) continue;
+      variables[name] = v.value;
+    }
+    const builtin = {};
+    document.querySelectorAll("#tv-body [data-tvb]").forEach((el) => { builtin[el.dataset.tvb] = el.value; });
+    try { await Api.letters.saveVariables({ builtin, variables }); UI.toast("Template variables saved"); loadVariables(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
+
+  return { caseSecHtml, gen, save, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
 })();

@@ -153,9 +153,11 @@ var billingViewRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMI
 
 // postSvcLedger posts the double-entry leg of a service-invoice event to the
 // tenant's TigerBeetle ledger:
-//   issue   -> debit AR (7000)           credit revenue (7001)
-//   void    -> debit revenue (7001)      credit AR (7000)
-//   payment -> debit operating cash (7002) credit AR (7000)
+//
+//	issue   -> debit AR (7000)           credit revenue (7001)
+//	void    -> debit revenue (7001)      credit AR (7000)
+//	payment -> debit operating cash (7002) credit AR (7000)
+//
 // Idempotent via deterministic transfer ids; fail-open with an error log —
 // the Temporal reconcile_ledger service_ar_check catches any gap.
 func (s *server) postSvcLedger(tenant, key string, debitCode, creditCode uint32, amount int64) {
@@ -259,7 +261,7 @@ func (s *server) generateInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(unrated) > 0 && blockUnrated {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "billable time without a configured role rate — set rates first (or set billing.block_on_unrated=false to exclude it)",
+			"error":   "billable time without a configured role rate — set rates first (or set billing.block_on_unrated=false to exclude it)",
 			"unrated": unrated})
 		return
 	}

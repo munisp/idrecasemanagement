@@ -21,15 +21,15 @@ import (
 // ---- Statutory clock projection -------------------------------------------------
 
 type ClockView struct {
-	Clock     string `json:"clock"`      // NEGOTIATION_30BD | OFFER_WINDOW_10BD | DETERMINATION_30BD | PAYMENT_30CD
-	Label     string `json:"label"`      // human label
-	Basis     string `json:"basis"`      // business | calendar
-	TotalDays int    `json:"total_days"` // statutory length
-	Remaining int    `json:"remaining"`  // days remaining (negative = breach)
-	Due       string `json:"due"`        // YYYY-MM-DD
-	State     string `json:"state"`      // ok | watch | risk | breach | closed | paused
-	Cite      string `json:"cite"`       // 45 CFR citation
-	BasisNote string `json:"basis_note"` // provenance of the start timestamp
+	Clock     string `json:"clock"`              // NEGOTIATION_30BD | OFFER_WINDOW_10BD | DETERMINATION_30BD | PAYMENT_30CD
+	Label     string `json:"label"`              // human label
+	Basis     string `json:"basis"`              // business | calendar
+	TotalDays int    `json:"total_days"`         // statutory length
+	Remaining int    `json:"remaining"`          // days remaining (negative = breach)
+	Due       string `json:"due"`                // YYYY-MM-DD
+	State     string `json:"state"`              // ok | watch | risk | breach | closed | paused
+	Cite      string `json:"cite"`               // 45 CFR citation
+	BasisNote string `json:"basis_note"`         // provenance of the start timestamp
 	HardDue   string `json:"hard_due,omitempty"` // contract hard limit, when later than Due (state "late" in between)
 	// PM deadline extensions (deadline_extensions.go): days added to Due/HardDue, and each extension granted.
 	ExtendedDays int              `json:"extended_days,omitempty"`
@@ -64,9 +64,9 @@ func clockState(remaining, total int) string {
 }
 
 type clockRow struct {
-	id, status            string
-	openedAt, updatedAt   time.Time
-	negEnd, offerEnds     *time.Time
+	id, status          string
+	openedAt, updatedAt time.Time
+	negEnd, offerEnds   *time.Time
 }
 
 func projectClocks(c clockRow, today time.Time) []ClockView {

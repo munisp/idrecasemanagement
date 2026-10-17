@@ -21,8 +21,8 @@ package main
 
 import (
 	"archive/zip"
-	"context"
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -830,7 +830,7 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"client_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": npi != "" && tin != "",
-			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
+			"npi":              npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})
@@ -841,8 +841,10 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 // --- bulk ZIP packages ---------------------------------------------------------
 
 // tpaUploadBulkZip: one ZIP, many clients. Layout:
-//   <party_name>/eob.pdf, itemized_bill.pdf, ...     -> DISCRETE package
-//   <party_name>/merged.pdf                          -> MERGED package
+//
+//	<party_name>/eob.pdf, itemized_bill.pdf, ...     -> DISCRETE package
+//	<party_name>/merged.pdf                          -> MERGED package
+//
 // Every client folder gets its own package and per-slot validation; the
 // response is a per-client report so one bad folder never blocks the rest.
 func (s *server) tpaUploadBulkZip(w http.ResponseWriter, r *http.Request) {
@@ -892,11 +894,11 @@ func (s *server) tpaUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 		byClient[parts[0]] = append(byClient[parts[0]], entry{parts[1], zf})
 	}
 	type clientReport struct {
-		Client     string   `json:"client"`
-		PackageID  string   `json:"package_id,omitempty"`
-		Mode       string   `json:"mode,omitempty"`
-		Attached   []string `json:"attached,omitempty"`
-		Errors     []string `json:"errors,omitempty"`
+		Client    string   `json:"client"`
+		PackageID string   `json:"package_id,omitempty"`
+		Mode      string   `json:"mode,omitempty"`
+		Attached  []string `json:"attached,omitempty"`
+		Errors    []string `json:"errors,omitempty"`
 	}
 	reports := []clientReport{}
 	for clientName, entries := range byClient {

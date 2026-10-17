@@ -1,4 +1,3 @@
-
 // screening_gate_test.go — payment-origination OFAC gate posture.
 package main
 

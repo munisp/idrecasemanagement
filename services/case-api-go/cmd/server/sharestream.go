@@ -94,7 +94,7 @@ func (s *server) shareCreateUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Upload-Offset", "0")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"upload_id": uploadID, "offset": 0,
-		"patch_to":  fmt.Sprintf("/api/share/%s/uploads/%s", token, uploadID),
+		"patch_to":       fmt.Sprintf("/api/share/%s/uploads/%s", token, uploadID),
 		"part_size_hint": sharePartMin,
 	})
 }

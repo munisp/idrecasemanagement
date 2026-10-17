@@ -16,9 +16,9 @@ package main
 // QPA-substantiation expectation for plan-uploaded OFFER_SUBSTANTIATION.
 
 import (
-	"context"
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
@@ -1064,7 +1064,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"party_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": tin != "" && (ptype == "EMPLOYER_GROUP" || npi != ""),
-			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
+			"npi":              npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})
@@ -1362,7 +1362,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "case_number": caseNumber, "status": st,
 		"payment_required": st == "AWAITING_PAYMENT",
-		"party": partyName, "filed_by": org.Name,
+		"party":            partyName, "filed_by": org.Name,
 		"note": "payment link and case instructions go to the health plan contact — you pay and upload on behalf of " + partyName,
 	})
 }

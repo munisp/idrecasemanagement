@@ -7,8 +7,8 @@ func TestKcRealmPath(t *testing.T) {
 	prod := &server{cfg: Config{KeycloakIssuer: "https://keycloak-servers.newfire.app/realms/idre-prod/"}}
 	none := &server{cfg: Config{}}
 	cases := []struct {
-		s          *server
-		in, want   string
+		s        *server
+		in, want string
 	}{
 		{dev, "/admin/realms/idre/users", "/admin/realms/idre/users"},
 		{prod, "/admin/realms/idre/users", "/admin/realms/idre-prod/users"},

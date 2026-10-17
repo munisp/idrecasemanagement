@@ -56,10 +56,10 @@ type CorrTemplate struct {
 
 	// Set for what the Templates screen manages (templates_admin.go); a
 	// program's own config carries none of these.
-	Name        string `json:"name,omitempty"`         // the name people see; the key when empty
-	Inactive    bool   `json:"inactive,omitempty"`     // retired: kept, no longer offered
-	Custom      bool   `json:"custom,omitempty"`       // added from the dashboard, not a standard template
-	Edited      bool   `json:"edited,omitempty"`       // a standard template whose wording was changed
+	Name        string `json:"name,omitempty"`     // the name people see; the key when empty
+	Inactive    bool   `json:"inactive,omitempty"` // retired: kept, no longer offered
+	Custom      bool   `json:"custom,omitempty"`   // added from the dashboard, not a standard template
+	Edited      bool   `json:"edited,omitempty"`   // a standard template whose wording was changed
 	UpdatedBy   string `json:"updated_by,omitempty"`
 	UpdatedAt   string `json:"updated_at,omitempty"`
 	ContentFrom string `json:"content_from,omitempty"` // the template whose content a usage rule put here
@@ -223,8 +223,11 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 	for k, v := range s.letterVars(r, tenant) {
 		repl[k] = v
 	}
-	for k, v := range repl {
-		text = strings.ReplaceAll(text, k, v)
+	// Twice: an office value may itself use a variable ("Dear {agency_contacts},").
+	for pass := 0; pass < 2; pass++ {
+		for k, v := range repl {
+			text = strings.ReplaceAll(text, k, v)
+		}
 	}
 	// The filer's contact is the provider's contact only when a provider filed.
 	if strings.EqualFold(filerType, "HEALTH_PLAN") {

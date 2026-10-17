@@ -685,6 +685,8 @@ const Api = (() => {
       saveReport: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/decision-report`, body),
       settings: () => req("GET", `${t()}/letter-settings`),
       saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
+      variables: () => req("GET", `${t()}/template-variables`),
+      saveVariables: (body) => req("PUT", `${t()}/template-variables`, body),
     },
     geo: {
       mapUrl: () => `${config.caseApiBase}/geo/map`,
