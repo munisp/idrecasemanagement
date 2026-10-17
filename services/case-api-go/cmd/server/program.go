@@ -110,9 +110,13 @@ type ProgramConfig struct {
 		AgencyRecipients []string       `json:"agency_recipients"`
 		Templates        []CorrTemplate `json:"templates"`
 	} `json:"correspondence"`
-	Billing        BillingConfig `json:"billing"`        // service-fee invoicing engine (billing.go)
-	Reconciliation ReconConfig   `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
-	Bank           BankConfig    `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
+	// The letters lettergen builds ({key, subject, filename, folder}) and the office's standard letterhead
+	// wording -- the case page's Letters list and the Letterhead & invoice card read them.
+	LetterTemplates []map[string]any `json:"letter_templates"`
+	Letters         map[string]any   `json:"letters"`
+	Billing         BillingConfig    `json:"billing"`        // service-fee invoicing engine (billing.go)
+	Reconciliation  ReconConfig      `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
+	Bank            BankConfig       `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.
