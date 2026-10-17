@@ -920,3 +920,7 @@ details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 
 /* TPA bulk filing: sample ZIP downloads */
 .tpa-samples{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle,#ddd)}
 .tpa-samples p{flex-basis:100%;margin:0}
+
+/* Disputes page search */
+.case-search{display:flex;gap:6px;align-items:center;flex:1 1 22em;max-width:34em;margin-left:12px}
+.case-search input{flex:1;min-width:0}

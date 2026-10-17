@@ -810,10 +810,11 @@ const Views = (() => {
       const sort = hq.get("sort") || "";
       const lane = hq.get("lane") || "";
       const groupBatch = hq.get("batch") === "1";
+      const search = (hq.get("q") || "").trim();
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
-      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}) };
       const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
       let loaded = page.cases.slice();   // the rows of the page on screen
       // The default sort pages by keyset, so going back needs the cursor each
@@ -826,6 +827,24 @@ const Views = (() => {
       document.body.classList.toggle("density-compact", density === "compact");
       afterRender(() => {
         bindGrid(loaded);
+        // Search: case number, parties (provider, health plan, TPA client) by name, email or NPI, statuses and the
+        // case's details. Kept in the hash like the lane, so a search can be shared and survives a reload.
+        const box = $("#case-search");
+        if (box) {
+          let tmr;
+          const go = () => {
+            const q = new URLSearchParams(location.hash.split("?")[1] || "");
+            const val = box.value.trim();
+            val ? q.set("q", val) : q.delete("q");
+            const s = q.toString();
+            const next = "#/cases" + (s ? "?" + s : "");
+            if (next !== location.hash) location.hash = next;
+          };
+          box.addEventListener("input", () => { clearTimeout(tmr); tmr = setTimeout(go, 350); });
+          box.addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(tmr); go(); } if (e.key === "Escape") { box.value = ""; go(); } });
+          if (search) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+        }
+        $("#case-search-clear")?.addEventListener("click", () => { const b = $("#case-search"); if (b) { b.value = ""; b.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); } });
         // Lever 2: lane tabs re-filter server-side; Lever 3: batch grouping
         // toggles batch-as-one rows. Both live in the hash = shareable.
         document.querySelectorAll(".lane-tab").forEach((b) => b.addEventListener("click", () => {
@@ -855,7 +874,7 @@ const Views = (() => {
         };
         Pager.server($("#pg"), { total, shown: loaded.length }, async (limit, _offset, pg) => {
           if (pg === 0) cursors.length = 1; // also the page-size change path: old cursors are stale
-          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}) };
           const cursor = cursors[pg] || "";
           if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else if (cursor) more.cursor = cursor;
           const next = await Api.cases.list(more);
@@ -869,7 +888,10 @@ const Views = (() => {
           return { total: grandTotal, shown: loaded.length };
         });
       });
-      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
+      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}</span>
+        <div class="case-search"><input id="case-search" type="search" value="${esc(search)}" maxlength="100"
+          placeholder="Search case number, provider, health plan, NPI, email…" aria-label="Search disputes" />
+          ${search ? `<button class="mini" id="case-search-clear" aria-label="Clear search">Clear</button>` : ""}</div>
 
         <span style="flex:1"></span>
         <button class="mini" id="grab">⇪ Grab next</button>

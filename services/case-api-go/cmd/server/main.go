@@ -1348,8 +1348,23 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	case "status":
 		where += " AND coalesce(c.status,'') = ''"
 	}
-	if qs := q.Get("q"); qs != "" {
-		add("c.case_number ILIKE '%%' || $%d || '%%'", qs)
+	// Search (the Disputes page's search box): case number, service line, statuses, payer, anything in the case's
+	// details (provider org, requester, health plan, contacts, notes, CPT codes...), and the filing and responding
+	// parties by name, email or NPI. LIKE wildcards in the term are taken literally.
+	if qs := strings.TrimSpace(q.Get("q")); qs != "" {
+		if len(qs) > 100 {
+			qs = qs[:100]
+		}
+		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(qs) + "%"
+		args = append(args, like)
+		n := len(args)
+		where += fmt.Sprintf(` AND (c.case_number ILIKE $%[1]d OR coalesce(c.service_line,'') ILIKE $%[1]d
+			OR coalesce(c.internal_status,'') ILIKE $%[1]d OR coalesce(c.agency_status,'') ILIKE $%[1]d
+			OR coalesce(c.payer_id,'') ILIKE $%[1]d OR coalesce(c.details::text,'') ILIKE $%[1]d
+			OR EXISTS (SELECT 1 FROM public.case_origin o WHERE o.tenant=$1 AND o.case_id=c.id::text
+			           AND (coalesce(o.initiating_party_name,'') ILIKE $%[1]d OR coalesce(o.filed_by_email,'') ILIKE $%[1]d))
+			OR EXISTS (SELECT 1 FROM public.case_respondents rp WHERE rp.tenant=$1 AND rp.case_id=c.id::text
+			           AND (coalesce(rp.name,'') ILIKE $%[1]d OR coalesce(rp.email,'') ILIKE $%[1]d OR coalesce(rp.npi,'') ILIKE $%[1]d)))`, n)
 	}
 	// mine=true: same convention as listTasks (crm.go) -- assigned_to is the
 	// Keycloak sub assignCase/the auto-assign queue already writes, so this
