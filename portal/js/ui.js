@@ -256,6 +256,43 @@ const TableSort = (() => {
 //   - Lists the server pages (disputes, CRM, intake, mail log, payments,
 //     checks) sit inside [data-serverpaged] and call Pager.server(), which
 //     fetches the next page instead of hiding rows.
+// Search box for a list the SERVER pages (?q=): it sits outside the list's box, so the box can reload under it
+// without the box losing focus. SrvSearch.html(id, placeholder) renders it; SrvSearch.on(id, reload) is called
+// (debounced) with the term; SrvSearch.q(id) is the current term for the list's own fetches.
+const SrvSearch = (() => {
+  const terms = new Map(), handlers = new Map();
+  let tmr;
+  document.addEventListener("input", (e) => {
+    const el = e.target.closest && e.target.closest("input[data-srvsearch]");
+    if (!el) return;
+    clearTimeout(tmr);
+    tmr = setTimeout(() => {
+      const id = el.dataset.srvsearch;
+      const v = el.value.trim();
+      if ((terms.get(id) || "") === v) return;
+      v ? terms.set(id, v) : terms.delete(id);
+      typing = { id, at: Date.now() };
+      const h = handlers.get(id);
+      if (h) h(v);
+    }, 300);
+  });
+  // A list that re-renders its whole page re-creates the box: put the cursor back where the person was typing.
+  let typing = null;
+  new MutationObserver(() => {
+    if (!typing || Date.now() - typing.at > 4000) return;
+    const el = document.querySelector(`input[data-srvsearch="${typing.id}"]`);
+    if (el && document.activeElement !== el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }).observe(document.body, { childList: true, subtree: true });
+  const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  return {
+    html: (id, placeholder) => `<div class="tsearch"><input type="search" data-srvsearch="${id}" value="${esc(terms.get(id) || "")}"
+      placeholder="${esc(placeholder || "Search…")}" aria-label="${esc(placeholder || "Search")}" maxlength="100" /></div>`,
+    on: (id, fn) => handlers.set(id, fn),
+    q: (id) => terms.get(id) || "",
+    params: (id) => (terms.get(id) ? { q: terms.get(id) } : {}),
+  };
+})();
+
 const Pager = (() => {
   const SIZES = [25, 50, 100, 250, 500];
   const KEY = "idre.pageSize";
@@ -300,14 +337,75 @@ const Pager = (() => {
     if (heads.length && out.length) out[out.length - 1].push(...heads);
     return out;
   }
+  // ---- search: every list of SEARCH_MIN+ records gets a box above it --------
+  // Matching records stay; the rest carry .sf-out (display:none), which never touches `hidden`, so paging and a
+  // page's own collapsed detail rows are left alone. Paging then runs over the matches only. The term is kept per
+  // page + table, so a list that reloads after an action keeps its search. Opt out: data-nosearch on the table (or
+  // an ancestor) -- for lists that already have their own search.
+  const SEARCH_MIN = 8;
+  const queries = new Map();
+  const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const tableKey = (table) => (location.hash.split("?")[0] || "#") + "|" +
+    (table.id || "t" + [...document.querySelectorAll("table")].indexOf(table));
+  function dropSearch(table) {
+    if (table._sfBar) { table._sfBar.remove(); table._sfBar = null; }
+    table.querySelectorAll("tr.sf-out").forEach((tr) => tr.classList.remove("sf-out"));
+  }
+  function ensureSearch(table) {
+    if (table._sfBar && table._sfBar.isConnected) return;
+    const key = tableKey(table);
+    table._sfKey = key;
+    table._q = queries.get(key) || "";
+    const bar = document.createElement("div");
+    bar.className = "tsearch";
+    bar.innerHTML = `<input type="search" placeholder="Search this list…" aria-label="Search this list" maxlength="120" />
+      <span class="muted tsearch-n" aria-live="polite"></span>`;
+    const input = bar.querySelector("input");
+    input.value = table._q;
+    let tmr;
+    input.addEventListener("input", () => {
+      clearTimeout(tmr);
+      tmr = setTimeout(() => {
+        table._q = input.value.trim();
+        table._q ? queries.set(key, table._q) : queries.delete(key);
+        if (table._pg) table._pg.page = 0;
+        apply(table);
+      }, 150);
+    });
+    input.addEventListener("keydown", (e) => { if (e.key === "Escape" && input.value) { input.value = ""; input.dispatchEvent(new Event("input")); } });
+    table._sfBar = bar;
+    (table.closest(".dg-wrap") || table).insertAdjacentElement("beforebegin", bar);
+  }
+  // records that match the table's search term (all of them when there is none); the rest are marked out
+  function searchUnits(table, all) {
+    if (all.length < SEARCH_MIN || table.closest("[data-nosearch], .modal")) { dropSearch(table); return all; }
+    ensureSearch(table);
+    const terms = norm(table._q).split(/\s+/).filter(Boolean);
+    const out = [];
+    for (const u of all) {
+      const ok = !terms.length || terms.every((t) => {
+        const r0 = u[u.length - 1]; // the record's own row caches the unit's text
+        const txt = r0._sfTxt || (r0._sfTxt = norm(u.map((tr) => tr.textContent).join(" ")));
+        return txt.includes(t);
+      });
+      u.forEach((tr) => tr.classList.toggle("sf-out", !ok));
+      if (ok) out.push(u);
+    }
+    const n = table._sfBar.querySelector(".tsearch-n");
+    const msg = terms.length ? (out.length ? `${out.length} of ${all.length}` : `No match in ${all.length}`) : "";
+    if (n.textContent !== msg) n.textContent = msg;
+    return out;
+  }
+
   const bars = new Set();
   function dropBar(table) {
     if (table._pgBar) { table._pgBar.remove(); bars.delete(table._pgBar); table._pgBar = null; }
   }
   function apply(table) {
     const body = table.tBodies[0];
-    if (!table.tHead || !body || table.dataset.nopage !== undefined || table.closest("[data-serverpaged]")) return;
-    const us = units(body);
+    if (!table.tHead || !body || table.closest("[data-serverpaged]")) return;
+    const us = searchUnits(table, units(body));
+    if (table.dataset.nopage !== undefined) return;
     const total = us.length;
     if (total <= SIZES[0]) { // fits on the smallest page: nothing to page
       if (table._pgBar) { us.forEach((u) => u.forEach((tr) => { if (tr.hidden) tr.hidden = false; })); dropBar(table); }
@@ -340,6 +438,7 @@ const Pager = (() => {
   function scan() {
     queued = false;
     bars.forEach((b) => { if (!b._table.isConnected) { b.remove(); bars.delete(b); } });
+    document.querySelectorAll(".tsearch").forEach((b) => { if (!b.nextElementSibling || !(b.nextElementSibling.matches("table") || b.nextElementSibling.querySelector("table"))) b.remove(); });
     document.querySelectorAll("table").forEach(apply);
   }
   new MutationObserver(() => { if (!queued) { queued = true; setTimeout(scan, 60); } })

@@ -456,6 +456,10 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail("no folder named " + row.DisputeRef + " with this dispute's documents in the ZIP")
 			continue
 		}
+		if zipHasSampleDocs(entries) {
+			fail("this folder still holds the sample documents — replace them with this dispute's real documents")
+			continue
+		}
 		merged, discrete := splitFolder(entries)
 		row.Mode = "DISCRETE"
 		if merged != nil {
@@ -608,6 +612,7 @@ func (s *server) fileReadyBulkDisputes() int {
 	s.reconcileOpenFeeCheckouts(ctx)
 	s.reconcilePendingSetups(ctx)
 	s.recheckClientNPIs(ctx)
+	s.startVerificationSweep()
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id::text FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_packages pk ON pk.id=i.package_id

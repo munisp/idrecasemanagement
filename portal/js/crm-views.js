@@ -46,63 +46,91 @@ const CrmViews = (() => {
     "Decided - Invoice Paid", "Invoice Paid", "Plan Opt-Out", "Ineligible", "Dismissed",
     "Withdrawn", "Provider Closure Letter Issued", "Provider - Withdrawal",
   ]);
+  // Pipeline: every column shows its stage's true count (pipelineCounts) and pages its own cards through /cases,
+  // PIPE_PAGE at a time, so a stage with hundreds of disputes stays usable and nothing past the first 200 cases
+  // goes missing (the board used to load one list of 200 and group it client-side).
+  const PIPE_PAGE = 20;
+  const pipeCols = {};
   async function pipeline() {
     try {
-      const [{ cases }, prog] = await Promise.all([Api.cases.list({ limit: 200 }), Api.program.get().catch(() => null)]);
+      const prog = await Api.program.get().catch(() => null);
       // Programmed tenants (e.g. FL AHCA) never populate the federal `status`
       // column -- they track real progress via internal_status/agency_status
-      // instead (confirmed in programops.go: dual-status writers only ever
-      // SET internal_status, never status), so a PIPELINE keyed on `status`
-      // -- even one with FL's own vocabulary hardcoded in -- still shows
-      // every column empty for them. Confirmed live. Fall back to the
-      // federal grouping when no program config exists for this tenant.
+      // instead (programops.go only ever SETs internal_status), so the board
+      // groups by internal_status for them and by status otherwise.
       const internalStatuses = prog?.config?.statuses?.internal;
       const byField = internalStatuses?.length ? "internal_status" : "status";
       const knownStages = internalStatuses?.length ? internalStatuses.map((s) => [s, s]) : PIPELINE;
+      const counts = await Api.cases.pipelineCounts(byField);
+      const countOf = new Map((counts.stages || []).map((x) => [x.stage, x]));
       // Safety net: a status the board doesn't know yet still gets a column
-      // instead of its cases disappearing silently.
+      // instead of its cases disappearing silently; cases with no status at
+      // all get a leading "Not yet reviewed" column.
       const known = new Set(knownStages.map(([s]) => s));
-      const withStatus = cases.filter((c) => c[byField]);
-      const noStatus = cases.filter((c) => !c[byField]);
-      const extra = [...new Set(withStatus.filter((c) => !known.has(c[byField])).map((c) => c[byField]))];
-      // Cases with NO status set yet (e.g. a freshly-opened PENDING_INTAKE
-      // case, before the first eligibility/status call) matched nothing in
-      // `known` AND got filtered out of `extra` by its own Boolean check --
-      // they vanished from the board with no column to land in at all.
-      // Confirmed live: ~1 in 6 FL cases had no internal_status and were
-      // simply invisible here. Give them an explicit leading column instead.
+      const extra = (counts.stages || []).map((x) => x.stage).filter((s) => s && !known.has(s));
       const stages = [
-        ...(noStatus.length ? [["__NONE__", "Not yet reviewed"]] : []),
+        ...(countOf.get("")?.count ? [["__NONE__", "Not yet reviewed"]] : []),
         ...knownStages,
         ...extra.map((s) => [s, s.replace(/_/g, " ").toLowerCase()]),
       ];
-      const amtField = (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents";
       const amtLabel = (prog && prog.config) ? "Disputed" : "QPA";
-      const usd = (cents) => "$" + ((cents || 0) / 100).toLocaleString();
-      // Every card renders now -- a column scrolls internally (fixed
-      // height, its own scrollbar) instead of hard-capping at 8 with a
-      // "+N more" dead end that gave no way to actually reach the rest.
-      // The board itself still scrolls horizontally across columns.
-      const cols = stages.map(([status, label]) => {
-        const items = status === "__NONE__" ? noStatus : withStatus.filter((c) => c[byField] === status);
-        const terminal = TERMINAL_STAGES.has(status);
-        return `<div class="kanban-col ${terminal ? "is-terminal" : ""} ${items.length ? "" : "is-empty"}">
-          <h3>${esc(label)} <span class="kanban-count">${items.length}</span></h3>
-          <div class="kanban-col-body">` +
-          items.map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
-            <b>${esc(c.case_number)}</b>
-            <span class="muted">${esc(c.service_line || "—")} · ${usd(c[amtField])}</span></div>`).join("") +
-          `</div></div>`;
+      const amtKey = (prog && prog.config) ? "disputed_cents" : "qpa_cents";
+      const usd = (cents) => "$" + ((Number(cents) || 0) / 100).toLocaleString();
+      for (const k of Object.keys(pipeCols)) delete pipeCols[k];
+      const cols = stages.map(([status, label], i) => {
+        const c = countOf.get(status === "__NONE__" ? "" : status) || { count: 0 };
+        const n = Number(c.count) || 0;
+        const colId = `pipe-col-${i}`;
+        if (n) pipeCols[colId] = { status, byField, total: n, cursors: [""], page: 0, amtField: (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents" };
+        return `<div class="kanban-col ${TERMINAL_STAGES.has(status) ? "is-terminal" : ""} ${n ? "" : "is-empty"}">
+          <h3>${esc(label)} <span class="kanban-count" title="${esc(amtLabel)} total ${usd(c[amtKey])}">${n}</span></h3>
+          <div class="kanban-col-body" id="${colId}">${n ? `<p class="muted">Loading…</p>` : ""}</div>
+          ${n > PIPE_PAGE ? `<div class="kanban-pager" id="${colId}-pager"></div>` : ""}</div>`;
       });
-      const totalShown = withStatus.length + noStatus.length;
-      afterRender(() => $("#pipe-show-empty")?.addEventListener("change", (ev) =>
-        $("#pipe-board")?.classList.toggle("hide-empty", !ev.target.checked)));
+      afterRender(() => {
+        $("#pipe-show-empty")?.addEventListener("change", (ev) => $("#pipe-board")?.classList.toggle("hide-empty", !ev.target.checked));
+        Object.keys(pipeCols).forEach((colId) => pipelinePage(colId, 0));
+      });
+      const total = Number(counts.total) || 0;
       return `<div class="view-head"><h1>Pipeline</h1>
-          <span class="muted">${totalShown} dispute${totalShown === 1 ? "" : "s"} across ${stages.length} stage${stages.length === 1 ? "" : "s"}
+          <span class="muted">${total} dispute${total === 1 ? "" : "s"} across ${stages.length} stage${stages.length === 1 ? "" : "s"}
             · amounts shown as ${esc(amtLabel)}</span></div>
         <label class="pipe-toggle"><input type="checkbox" id="pipe-show-empty" /> Show empty stages</label>
         <div class="kanban hide-empty" id="pipe-board">${cols.join("")}</div>`;
     } catch (e) { return `<h1>Pipeline</h1>` + err(e); }
+  }
+
+  // One page of one column: `delta` +1 = next, -1 = previous, 0 = reload the current page. Pages are keyset
+  // cursors from /cases; the column keeps the cursor of every page it has opened, so Previous needs no offset.
+  async function pipelinePage(colId, delta) {
+    const col = pipeCols[colId];
+    const body = document.getElementById(colId);
+    if (!col || !body) return;
+    const page = Math.max(0, col.page + delta);
+    if (page >= col.cursors.length) return;
+    const params = { limit: PIPE_PAGE, cursor: col.cursors[page] };
+    if (col.status === "__NONE__") params.unset = col.byField; else params[col.byField] = col.status;
+    body.classList.add("is-loading");
+    try {
+      const r = await Api.cases.list(params);
+      col.page = page;
+      if (r.next_cursor && col.cursors.length === page + 1) col.cursors.push(r.next_cursor);
+      const usd = (cents) => "$" + ((cents || 0) / 100).toLocaleString();
+      body.innerHTML = (r.cases || []).map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
+          <b>${esc(c.case_number)}</b>
+          <span class="muted">${esc(c.service_line || "—")} · ${usd(c[col.amtField])}</span></div>`).join("")
+        || `<p class="muted">No disputes on this page.</p>`;
+      body.scrollTop = 0;
+      const pager = document.getElementById(colId + "-pager");
+      if (pager) {
+        const from = page * PIPE_PAGE + 1, to = Math.min(col.total, (page + 1) * PIPE_PAGE);
+        const hasNext = col.cursors.length > page + 1 && to < col.total;
+        pager.innerHTML = `<button class="mini" ${page ? "" : "disabled"} onclick="CrmViews.pipelinePage('${colId}', -1)" aria-label="Previous page">‹</button>
+          <span class="muted">${from}–${to} of ${col.total}</span>
+          <button class="mini" ${hasNext ? "" : "disabled"} onclick="CrmViews.pipelinePage('${colId}', 1)" aria-label="Next page">›</button>`;
+      }
+    } catch (e) { body.innerHTML = err(e); }
+    finally { body.classList.remove("is-loading"); }
   }
 
   // ---- Accounts ---------------------------------------------------------------
@@ -110,7 +138,9 @@ const CrmViews = (() => {
     afterRender(() => accountsBox(""));
     const typeFilter = `<select id="acc-type" onchange="CrmViews.accountsFilter(this.value)"><option value="">All types</option>
       ${["PROVIDER", "PAYER", "IDRE", "AUDITOR", "OTHER"].map((t) => `<option value="${t}">${t}</option>`).join("")}</select>`;
+    SrvSearch.on("acc", () => accountsBox(document.getElementById("acc-type")?.value || ""));
     return `<div class="view-head"><h1>Accounts</h1><a class="button" href="#/crm/accounts/new">New account</a>${typeFilter}</div>
+      ${SrvSearch.html("acc", "Search name, NPI, phone, website…")}
       <div id="acc-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -119,18 +149,18 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.accounts(type || null, { limit: Pager.size() });
+      const page = await Api.crm.accounts(type || null, { limit: Pager.size(), ...SrvSearch.params("acc") });
       const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
             <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
       if (!state.loaded.length) {
-        box.innerHTML = `<p class="muted">${type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
+        box.innerHTML = `<p class="muted">${SrvSearch.q("acc") ? `No account matches “${esc(SrvSearch.q("acc"))}”.` : type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
         return;
       }
       box.innerHTML = `<table id="acc-tb" data-serverpaged><thead><tr><th>Legal name</th><th>Type</th><th>NPI</th><th>Phone</th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("acc");
       bindPager("acc", "#acc-tb tbody", state,
-        (off, limit) => Api.crm.accounts(type || null, { limit, offset: off }).then((r) => ({ rows: r.accounts, total: r.total })),
+        (off, limit) => Api.crm.accounts(type || null, { limit, offset: off, ...SrvSearch.params("acc") }).then((r) => ({ rows: r.accounts, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -207,8 +237,10 @@ const CrmViews = (() => {
       <option value="OPEN" selected>Not converted</option>
       <option value="">All</option>
       <option value="CONVERTED">Converted</option></select>`;
+    SrvSearch.on("lead", () => leadsBox(document.getElementById("lead-status")?.value ?? "OPEN"));
     return `<div class="view-head"><h1>Leads</h1>${statusFilter}</div>
       <p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
+      ${SrvSearch.html("lead", "Search name, organization, phone, email, summary…")}
       <div id="lead-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -217,19 +249,19 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.leads({ limit: Pager.size(), status });
+      const page = await Api.crm.leads({ limit: Pager.size(), status, ...SrvSearch.params("lead") });
       const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
             <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
             <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
       if (!state.loaded.length) {
-        box.innerHTML = `<p class="muted">No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.</p>`;
+        box.innerHTML = `<p class="muted">${SrvSearch.q("lead") ? `No lead matches “${esc(SrvSearch.q("lead"))}”.` : `No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.`}</p>`;
         return;
       }
       box.innerHTML = `<table id="lead-tb" data-serverpaged><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead");
       bindPager("lead", "#lead-tb tbody", state,
-        (off, limit) => Api.crm.leads({ limit, offset: off, status }).then((r) => ({ rows: r.leads, total: r.total })),
+        (off, limit) => Api.crm.leads({ limit, offset: off, status, ...SrvSearch.params("lead") }).then((r) => ({ rows: r.leads, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -255,6 +287,7 @@ const CrmViews = (() => {
   function tasks() {
     const mine = new URLSearchParams(location.hash.split("?")[1] || "").get("all") !== "1";
     const title = mine ? "My tasks" : "All tasks";
+    SrvSearch.on("task", () => tasksBox(mine, document.getElementById("task-status")?.value ?? "OPEN"));
     afterRender(() => {
       tasksBox(mine, "OPEN");
       document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
@@ -275,6 +308,7 @@ const CrmViews = (() => {
         <input name="subject" placeholder="Subject" required />
         <input name="case_id" placeholder="Case ID (optional)" />
         <input name="due_date" type="date" /><button>Create</button></form>`}
+      ${SrvSearch.html("task", "Search subject, task ref, case…")}
       <div id="task-box"><p class="muted">Loading…</p></div>`;
   }
 
@@ -283,7 +317,7 @@ const CrmViews = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const page = await Api.crm.tasks(mine, { limit: Pager.size(), status });
+      const page = await Api.crm.tasks(mine, { limit: Pager.size(), ...(status ? { status } : {}), ...SrvSearch.params("task") });
       const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
           <td>${esc(t.subject)}</td>
@@ -293,14 +327,14 @@ const CrmViews = (() => {
           <td>${badge(t.status)}</td>
           <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
       if (!state.loaded.length) {
-        box.innerHTML = `<p class="muted">${mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
+        box.innerHTML = `<p class="muted">${SrvSearch.q("task") ? `No task matches “${esc(SrvSearch.q("task"))}”.` : mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
         return;
       }
       box.innerHTML = `<table id="task-tb" data-serverpaged><thead><tr><th>Ref</th><th>Subject</th>
           ${mine ? "" : "<th>Assignee</th>"}<th>Case</th><th>Due</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("task");
       bindPager("task", "#task-tb tbody", state,
-        (off, limit) => Api.crm.tasks(mine, { limit, offset: off, status }).then((r) => ({ rows: r.tasks, total: r.total })),
+        (off, limit) => Api.crm.tasks(mine, { limit, offset: off, ...(status ? { status } : {}), ...SrvSearch.params("task") }).then((r) => ({ rows: r.tasks, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
@@ -761,6 +795,6 @@ const CrmViews = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { pipeline, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, done, search, calendar, calTaskDone, calTaskAdd,
+  return { pipeline, pipelinePage, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, done, search, calendar, calTaskDone, calTaskAdd,
     entity360, entitySearchPage, openEntity360, entityUnlinkFn, entityLinkPicker, entityMergeModal, entityOutreachLead };
 })();

@@ -3,20 +3,20 @@
 // Business policy lives in DATA (public.program_rules config.rules[]), not in
 // code. A rule is:
 //
-//   {
-//     "name": "intake-day13-incomplete",
-//     "event": "sweep.intake",              // which hook fires it
-//     "enabled": true,
-//     "conditions": [                        // ALL must hold (AND)
-//       {"field": "days_since_outreach", "op": "gte", "value": 13},
-//       {"field": "status", "op": "in", "value": ["INSTRUCTED","DOCS_RECEIVED"]}
-//     ],
-//     "actions": [
-//       {"type": "set_status", "params": {"status": "INELIGIBLE"}},
-//       {"type": "notify", "params": {"kind": "SLA_BREACH",
-//          "body": "Intake {{id}} incomplete at day 13 — issue ineligibility letter"}}
-//     ]
-//   }
+//	{
+//	  "name": "intake-day13-incomplete",
+//	  "event": "sweep.intake",              // which hook fires it
+//	  "enabled": true,
+//	  "conditions": [                        // ALL must hold (AND)
+//	    {"field": "days_since_outreach", "op": "gte", "value": 13},
+//	    {"field": "status", "op": "in", "value": ["INSTRUCTED","DOCS_RECEIVED"]}
+//	  ],
+//	  "actions": [
+//	    {"type": "set_status", "params": {"status": "INELIGIBLE"}},
+//	    {"type": "notify", "params": {"kind": "SLA_BREACH",
+//	       "body": "Intake {{id}} incomplete at day 13 — issue ineligibility letter"}}
+//	  ]
+//	}
 //
 // Events are fired by code at decision points (intake.advance, doc.upload,
 // claims.imported, invoice.settled, sweep.intake). The engine evaluates

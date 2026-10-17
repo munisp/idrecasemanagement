@@ -39,13 +39,13 @@ func TestRoutingValid(t *testing.T) {
 
 func TestTPASlotFromFilename(t *testing.T) {
 	cases := map[string]string{
-		"EOB_claim42.pdf":              "EOB",
-		"itemized_bill.pdf":            "ITEMIZED_BILL",
-		"proof_of_coverage.pdf":        "PROOF_OF_COVERAGE",
-		"open_negotiation_notice.pdf":  "OPEN_NEGOTIATION_NOTICE",
-		"offer_substantiation.pdf":     "OFFER_SUBSTANTIATION",
-		"idre_attestation.pdf":         "IDRE_ATTESTATION",
-		"random_notes.txt":             "",
+		"EOB_claim42.pdf":             "EOB",
+		"itemized_bill.pdf":           "ITEMIZED_BILL",
+		"proof_of_coverage.pdf":       "PROOF_OF_COVERAGE",
+		"open_negotiation_notice.pdf": "OPEN_NEGOTIATION_NOTICE",
+		"offer_substantiation.pdf":    "OFFER_SUBSTANTIATION",
+		"idre_attestation.pdf":        "IDRE_ATTESTATION",
+		"random_notes.txt":            "",
 	}
 	for name, want := range cases {
 		if got := tpaSlotFromFilename(name); got != want {

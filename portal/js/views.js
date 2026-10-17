@@ -269,16 +269,16 @@ const Views = (() => {
     const steps = r.steps || [];
     const next = steps.find((x) => x.state === "next");
     window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin };
-    box.innerHTML = `<h3>Steps</h3>
-      <p class="muted">${next ? `Only the next step can be acted on, by the ${esc(next.owner)} (or an admin). Everything else is greyed out until its turn.`
-        : "No open step — nothing further is due on this case."}</p>
+    CaseLayout.nextStep(steps, next, next && next.can_act ? WF_BUTTON(next.action) : "");
+    box.innerHTML = `<details class="wf-all"${box.classList.contains("wf-open") ? " open" : ""}><summary><b>All steps</b>
+      <span class="muted">— ${steps.filter((x) => x.state === "done" || x.state === "skipped").length} of ${steps.length} done. Only the next step can be acted on, by its owner (or an admin).</span></summary>
       <ol class="wf">${steps.map((x) => `<li class="wf-${x.state}">
         <span class="wf-mark" aria-hidden="true">${WF_MARK[x.state] || ""}</span>
         <span class="wf-label">${esc(x.label)}</span> <span class="chip">${esc(x.owner)}</span>
         ${x.state === "next" ? (x.can_act
           ? `<button type="button" class="mini" onclick="Views.wfAct('${esc(x.key)}')">${WF_BUTTON(x.action)}</button>`
           : `<span class="muted">waiting on the ${esc(x.owner)}</span>`) : ""}
-        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol>`;
+        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol></details>`;
     wfApplyLocks();
   }
   function wfApplyLocks() {
@@ -299,6 +299,7 @@ const Views = (() => {
         else el.open = true;
       }
     });
+    CaseLayout.markTabs();
     // Stage letters can only be drafted on their own step.
     const sel = document.querySelector('#p-send select[name="template"]');
     if (sel) {
@@ -323,7 +324,7 @@ const Views = (() => {
     const st = (steps || []).find((x) => x.key === key);
     if (!st || st.state !== "next" || !st.can_act) return;
     const a = st.action;
-    const open = (sel) => { const el = document.querySelector(sel); if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+    const open = (sel) => { const el = document.querySelector(sel); if (el) { CaseLayout.reveal(el); el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
     if (a.startsWith("letter:")) {
       const tpl = a.slice(7), sel = document.querySelector('#p-send select[name="template"]');
       if (sel) { sel.value = tpl; corrTemplateBody(sel); }
@@ -722,6 +723,7 @@ const Views = (() => {
     bar.setAttribute("aria-live", "polite");
     bar.innerHTML = `<b>${selection.size} selected</b>
       <button class="mini" id="bk-assign">Assign to me</button>
+      ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" id="bk-assign-to">Assign to…</button>` : ""}
       <button class="mini" id="bk-status">Set status…</button>
       <button class="mini" id="bk-clear">Clear</button>`;
     document.body.appendChild(bar);
@@ -732,6 +734,32 @@ const Views = (() => {
         const ok = r.results.filter((x) => x.ok).length;
         UI.toast(`Assigned ${ok} of ${r.results.length} disputes to you`);
         selection.clear(); App.rerender();
+      }, "Assigning…");
+    };
+    // PM: route the whole selection to one person (e.g. when someone leaves or is overloaded).
+    const assignTo = $("#bk-assign-to");
+    if (assignTo) assignTo.onclick = async (ev) => {
+      let role = "CASE_MANAGER";
+      const first = await Api.cm.assignees(role).catch((e) => { UI.toast(e.message, { kind: "warn" }); return null; });
+      if (!first) return;
+      const v = await UI.modal({ title: `Assign ${selection.size} dispute${selection.size === 1 ? "" : "s"}`, fields: [
+        { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
+        { name: "assignee", label: "Person", options: (first.assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`]), required: true },
+      ], submitLabel: "Assign selection",
+      onRefresh: async (vals, setOptions) => {
+        if (vals.role === role) return;
+        role = vals.role;
+        const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
+        setOptions("assignee", (r.assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`]));
+      } });
+      if (!v) return;
+      await UI.run(ev.currentTarget, async () => {
+        try {
+          const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection], role: v.role, assignee: v.assignee });
+          const ok = r.results.filter((x) => x.ok).length;
+          UI.toast(`Assigned ${ok} of ${r.results.length} disputes`);
+          selection.clear(); App.rerender();
+        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }, "Assigning…");
     };
     $("#bk-status").onclick = async (ev) => {
@@ -783,10 +811,11 @@ const Views = (() => {
       const sort = hq.get("sort") || "";
       const lane = hq.get("lane") || "";
       const groupBatch = hq.get("batch") === "1";
+      const search = (hq.get("q") || "").trim();
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
-      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}) };
       const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
       let loaded = page.cases.slice();   // the rows of the page on screen
       // The default sort pages by keyset, so going back needs the cursor each
@@ -799,6 +828,24 @@ const Views = (() => {
       document.body.classList.toggle("density-compact", density === "compact");
       afterRender(() => {
         bindGrid(loaded);
+        // Search: case number, parties (provider, health plan, TPA client) by name, email or NPI, statuses and the
+        // case's details. Kept in the hash like the lane, so a search can be shared and survives a reload.
+        const box = $("#case-search");
+        if (box) {
+          let tmr;
+          const go = () => {
+            const q = new URLSearchParams(location.hash.split("?")[1] || "");
+            const val = box.value.trim();
+            val ? q.set("q", val) : q.delete("q");
+            const s = q.toString();
+            const next = "#/cases" + (s ? "?" + s : "");
+            if (next !== location.hash) location.hash = next;
+          };
+          box.addEventListener("input", () => { clearTimeout(tmr); tmr = setTimeout(go, 350); });
+          box.addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(tmr); go(); } if (e.key === "Escape") { box.value = ""; go(); } });
+          if (search) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+        }
+        $("#case-search-clear")?.addEventListener("click", () => { const b = $("#case-search"); if (b) { b.value = ""; b.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); } });
         // Lever 2: lane tabs re-filter server-side; Lever 3: batch grouping
         // toggles batch-as-one rows. Both live in the hash = shareable.
         document.querySelectorAll(".lane-tab").forEach((b) => b.addEventListener("click", () => {
@@ -828,7 +875,7 @@ const Views = (() => {
         };
         Pager.server($("#pg"), { total, shown: loaded.length }, async (limit, _offset, pg) => {
           if (pg === 0) cursors.length = 1; // also the page-size change path: old cursors are stale
-          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}) };
           const cursor = cursors[pg] || "";
           if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else if (cursor) more.cursor = cursor;
           const next = await Api.cases.list(more);
@@ -842,7 +889,10 @@ const Views = (() => {
           return { total: grandTotal, shown: loaded.length };
         });
       });
-      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
+      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}</span>
+        <div class="case-search"><input id="case-search" type="search" value="${esc(search)}" maxlength="100"
+          placeholder="Search case number, provider, health plan, NPI, email…" aria-label="Search disputes" />
+          ${search ? `<button class="mini" id="case-search-clear" aria-label="Clear search">Clear</button>` : ""}</div>
 
         <span style="flex:1"></span>
         <button class="mini" id="grab">⇪ Grab next</button>
@@ -921,17 +971,61 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  async function assign(caseId) {
-    const v = await UI.modal({ title: "Assign / route", fields: [
-      { name: "role", label: "Assign as", options: [["CASE_MANAGER", "Case manager"], ["ARBITRATOR", "Arbitrator"]], required: true },
-      { name: "assignee", label: "Assignee", placeholder: "blank = workload-balanced auto" },
-    ] });
-    if (!v) return;
+  const ASSIGN_ROLES = [["CASE_MANAGER", "Reviewer"], ["ARBITRATOR", "Arbitrator"], ["CODER", "Coder"],
+    ["NURSE_PHYSICIAN", "Clinical reviewer"], ["ATTORNEY", "Attorney"]];
+  const assigneeOptions = (list) => [["", "Auto — whoever has the fewest open cases"],
+    ...list.map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`])];
+
+  // "Assigned to: <name> (Reviewer)" on the case page, plus Unassign for the PM.
+  async function loadCaseAssignee(caseId, isAssigner) {
+    const el = document.getElementById("case-assignee");
+    if (!el) return;
     try {
-      const r = await Api.cm.assign(caseId, v.role, v.assignee || "");
-      UI.toast(`Assigned to ${r.assigned_to}`);
+      const a = await Api.cm.assignment(caseId);
+      el.innerHTML = a.name
+        ? `Assigned to <b>${esc(a.name)}</b>${a.role_label ? ` <span class="muted">(${esc(a.role_label)})</span>` : ""}
+           ${isAssigner ? `<button class="mini" onclick="Views.unassign('${esc(caseId)}')">Unassign</button>` : ""}`
+        : `<span class="muted">Not assigned yet</span>`;
+    } catch { el.innerHTML = ""; }
+  }
+
+  // Assign or reassign: a real staff member of the chosen role, picked from a list showing each person's open
+  // cases (least loaded first), or "Auto". The person who had the case is told it moved.
+  async function assign(caseId) {
+    try {
+      const cur = await Api.cm.assignment(caseId).catch(() => ({}));
+      let role = ASSIGN_ROLES.some(([r]) => r === cur.assigned_role) ? cur.assigned_role : "CASE_MANAGER";
+      const first = await Api.cm.assignees(role);
+      const v = await UI.modal({
+        title: cur.name ? "Reassign case" : "Assign case",
+        body: cur.name ? `Currently with <b>${esc(cur.name)}</b>${cur.role_label ? ` (${esc(cur.role_label)})` : ""}. They'll be told it moved.` : "Not assigned yet.",
+        fields: [
+          { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
+          { name: "assignee", label: "Person", options: assigneeOptions(first.assignees || []) },
+          { name: "reason", label: "Reason", type: "textarea", placeholder: cur.name ? "Why it moves — kept on the case history" : "Optional — kept on the case history" },
+        ],
+        submitLabel: cur.name ? "Reassign" : "Assign",
+        onRefresh: async (vals, setOptions) => {
+          if (vals.role === role) return; // only a role change reloads the people list
+          role = vals.role;
+          const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
+          setOptions("assignee", assigneeOptions(r.assignees || []));
+        },
+      });
+      if (!v) return;
+      const r = await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "");
+      UI.toast(r.unchanged ? `Already assigned to ${r.name || "that person"}` : `Assigned to ${r.name || "staff"}`);
       App.rerender();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function unassign(caseId) {
+    const v = await UI.modal({ title: "Unassign case", body: "The case goes back to the unassigned queue; the person who had it is told.",
+      fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }],
+      submitLabel: "Unassign", danger: true });
+    if (!v) return;
+    try { await Api.cm.assign(caseId, "", "", v.reason || "", "unassign"); UI.toast("Unassigned"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function letter(caseId, template) {
@@ -1383,229 +1477,154 @@ const Views = (() => {
         Api.program.get().catch(() => null),
       ]);
       Palette.remember("case", c.id, c.case_number);
-      let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>
-        ${badge(c.status)}</div>
-        <p class="muted">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
+      // The case page: a header that says what this dispute is and where it stands, one "next step" banner, and
+      // the rest in tabs by what people come to do (read the documents, review, write to the parties, bill,
+      // look back). Every section keeps its own id, so the step buttons still find and open it (CaseLayout.reveal).
+      const programmed = !!(prog && prog.config);
+      const det = c.details || {};
+      const P = { overview: "", documents: "", review: "", mail: "", billing: "", activity: "" };
+      let html = CaseLayout.header(c, prog, clocks);
       if (c.lock) {
         html += `<div class="case-lock" role="status"><b>${c.lock === "AWAITING_PAYMENT" ? "Awaiting payment" : "Ineligible"} — this case is frozen.</b>
           ${c.lock === "AWAITING_PAYMENT"
-            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Correspondence, letters, call and inquiry log) to send payment reminders."
-            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Correspondence, letters, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
+            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Letters &amp; email, call and inquiry log) to send payment reminders."
+            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Letters &amp; email, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
         afterRender(() => freezeCasePage(c.lock));
       }
+      html += programmed ? `<div id="case-next" class="case-next"><p class="muted">Loading the next step…</p></div>` : "";
 
-      // Statutory clock cluster (server-projected)
-      if (clocks.length)
-        html += `<div class="sla-cluster">` + clocks.map((cl) => `
-          <div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
-            <span class="lbl">${esc(cl.label)}</span>
-            <span class="cite">${esc(cl.cite)} · due ${esc(cl.due)} · ${esc(cl.basis_note)}</span></div>`).join("") + `</div>`;
-
-      // Workflow actions by role + status
+      // Occasional actions live in one "More" menu. The federal IDR actions (offers, IDRE selection, party
+      // invites, batching, the federal letters) only exist on federal cases.
       const acts = [];
-      if (can("PARTY") && c.status === "INITIATED")
-        acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
-      if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN")
-        if (App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
-      if (can("PARTY"))
-        acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
-      if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
-      if (can("ARBITRATOR"))
-        acts.push(["Issue determination", () => determinationForm(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
-      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
+      if (!programmed) {
+        if (can("PARTY") && c.status === "INITIATED") acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
+        if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN" && App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
+        if (can("PARTY")) acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
+        if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
+        if (can("ARBITRATOR")) acts.push(["Issue determination", () => determinationForm(id)]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
+        if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
+        if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status)) acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
+          acts.push(["Generate offer-window notice", () => Views.letter(id, "offer_window_notice")]);
+          acts.push(["Generate determination letter", () => Views.letter(id, "determination_letter")]);
+        }
+      }
+      const isAssigner = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      if (isAssigner) acts.push([c.assigned_to ? "Reassign" : "Assign", () => Views.assign(id)]);
+      if (programmed && can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        acts.push(["Provider asked to withdraw", () => Views.wfAnytime(id, "PROVIDER_WITHDRAW")]);
+        acts.push(["RFI response received", () => Views.wfAnytime(id, "RFI_RESPONSE_RECEIVED")]);
+        acts.push(["Outreach done (paid, no packet)", () => Views.wfAnytime(id, "OUTREACH_DONE")]);
+      }
+      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
         acts.push(["Escalate", () => Views.escalate(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Link related case", () => Views.relate(id)]);
-      if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
-      if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status))
-        acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
-      if (can("FINANCE"))
-        acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
-      if (acts.length)
-        html += `<div class="actions">` + acts.map((a, i) =>
-          `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
+        acts.push(["Link a related case", () => Views.relate(id)]);
+      }
+      if (can("FINANCE")) acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
+      html = html.replace("<!--case-more-->", CaseLayout.moreMenu(acts));
 
-      // Copilot (Phases 1-3): grounded brief; QA-gated drafts; bounded,
-      // human-approved action batches via Temporal. Everything the model
-      // produces is advisory until a person approves it.
+      // ---- Overview: steps (filled by wfLoad), deadlines (program panel), notes ----
+      P.overview += `<div id="case-overview-prog"></div>`;
+      const notes = notesRes.notes || [];
+      const streamOpts = [["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"], ["legal", "Legal"], ["external_agency", "External agency"]];
+      const streamRoles = prog?.config?.notes_stream_roles || {};
+      const allowedStreams = streamOpts.filter(([key]) => { const roles = streamRoles[key]; return !roles || !roles.length || can(...roles); });
+      P.overview += `<section class="case-card" id="case-notes"><h3>Notes <span class="muted">${notes.length || ""}</span></h3>
+        <form id="note-form" class="note-form">
+          <textarea name="body" rows="2" placeholder="Add a note for the team…" required></textarea>
+          <div class="note-form-row"><select name="stream" aria-label="Who can read it">
+            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) => `<option value="${v}">${label}</option>`).join("")}</select>
+            <button class="mini">Add note</button></div></form>` +
+        (notes.length ? `<ul class="note-list">` + notes.map((n) => `<li><div>${esc(n.body)}</div>
+            <div class="muted">${badge(n.stream)} ${esc(n.author || "")} · ${fmtDate(n.created_at)}</div></li>`).join("") + `</ul>`
+          : `<p class="muted">No notes yet.</p>`) + `</section>`;
+
+      // ---- Documents: requests, then the documents by folder ----
+      P.documents += `<section class="case-card"><h3>Document requests</h3><div id="docreq-box"><p class="muted">Loading…</p></div></section>`;
+      caseDocReqBox(id);
+      P.documents += CaseLayout.documents(id, docs);
+      P.documents += `<div id="analysis"></div>`;
+
+      // ---- Review: the Copilot's advisory drafts and the SOP checklist (the program's sections join here) ----
       if (can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Copilot <span class="badge s-review">DRAFT · advisory</span></h2>
+        P.review += `<details class="prog-sec" id="case-copilot"><summary>Copilot drafts <span class="muted">— advisory; nothing goes out without approval</span></summary>
           <div id="copilot"><p class="muted">Loading…</p></div>
           <div class="actions">
             <button class="mini" onclick="Views.copilotDraftQA('${id}','determination_rationale',this)">✍ Draft determination rationale</button>
             <button class="mini" onclick="Views.copilotDraftQA('${id}','correspondence',this)">✉ Draft correspondence</button>
             <button class="mini" onclick="Views.copilotPropose('${id}',this)">⚙ Propose action batch</button>
-          </div>
-          <div id="copilot-batches"></div>`;
-        Api.program.copilotBriefLatest(id).then((r) => {
-          const b = document.getElementById("copilot");
-          if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id);
-        }).catch(() => {
-          const b = document.getElementById("copilot");
-          if (b) b.innerHTML = copilotCard(null, null, id);
-        });
+          </div><div id="copilot-batches"></div></details>`;
+        Api.program.copilotBriefLatest(id).then((r) => { const b = document.getElementById("copilot"); if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id); })
+          .catch(() => { const b = document.getElementById("copilot"); if (b) b.innerHTML = copilotCard(null, null, id); });
         copilotLoadBatches(id);
       }
+      const stages = {};
+      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
+      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
+      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
+      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
+      if (checklist.length) {
+        const done = checklist.filter((i) => i.done).length;
+        P.review += `<details class="prog-sec" id="case-checklist"><summary>SOP checklist <span class="muted">— ${done} of ${checklist.length} done</span></summary>` +
+          Object.entries(stages).sort((x, y) => stageRank(x[0]) - stageRank(y[0])).map(([stage, items]) =>
+            `<h4>${esc(stage.charAt(0) + stage.slice(1).toLowerCase().replace(/_/g, " "))}</h4><ul class="checklist">` + items.map((i) =>
+              `<li>${i.done ? "✅" : (mayTick(i) ? `<button class="mini" onclick="Views.check('${i.id}')">Done</button>` : "⬜")}
+                ${esc(i.item)}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") + `</ul>`).join("") + `</details>`;
+      }
 
-      // Document requests — what the review team asked a side for, and what came back.
-      html += `<h2>Document requests</h2><div id="docreq-box"><p class="muted">Loading…</p></div>`;
-      caseDocReqBox(id);
-
-      // Documents — docket grouped by folder with full metadata + RBAC controls
-      const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
-      html += `<h2>Docket</h2>
-        <p><a class="button" href="javascript:void(0)" onclick="Views.downloadZip('${id}')">⬇ Download all as zip (plan-notification bundle)</a></p>
-        <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
-        <select name="folder" aria-label="Folder">${FOLDERS.map((f) => `<option>${f}</option>`).join("")}</select>
-        <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
-        <button>Upload</button></form>`;
-      if (docs.length) {
-        const byFolder = {};
-        docs.forEach((d) => { (byFolder[d.folder || "GENERAL"] = byFolder[d.folder || "GENERAL"] || []).push(d); });
-        html += Object.entries(byFolder).map(([folder, items]) => `
-          <h3 class="doc-folder">📁 ${esc(folder)} <span class="muted">(${items.length})</span></h3>
-          <table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Scan</th><th>Sealed</th><th>Uploaded</th><th>Analysis</th><th></th></tr></thead><tbody>` +
-          items.map((d) => `<tr>
-            <td class="mono">${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</td>
-            <td>${esc(d.content_type || "—")}</td>
-            <td>${d.size_bytes > 1048576 ? (d.size_bytes / 1048576).toFixed(1) + " MB" : (d.size_bytes / 1024).toFixed(0) + " KB"}</td>
-            <td>${d.scan_status === "CLEAN" ? '<span class="badge s-paid">✓ clean</span>' : badge(d.scan_status || "PENDING")}</td>
-            <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
-            <td class="muted">${esc(d.uploaded_by || "")} · ${fmtDate(d.uploaded_at)}</td>
-            <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
-            <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')">download</a>
-            ${/\.(txt|835|edi|x12)$/i.test(d.filename || "") ? ` · <a href="javascript:void(0)" title="If this is an 835 remittance (ERA), download it as a spreadsheet table" onclick="Views.era835Fn('${id}','${d.doc_id}')">835 → table</a>` : ""}
-            ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
-            ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
-              ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">move…</option>
-                ${FOLDERS.filter((f) => f !== d.folder).map((f) => `<option>${f}</option>`).join("")}</select>` : ""}</td></tr>`).join("") +
-          `</tbody></table>`).join("");
-      } else html += `<p class="muted">No documents yet.</p>`;
-      html += `<div id="analysis"></div>`;
-
-      // Time — per-role effort ledger on this dispute. Append-only; the
-      // role stamped is the logger's real role. Eligibility decides whether
-      // the work is billable; this records that it happened.
+      // ---- Billing: money on this dispute and the time spent on it ----
+      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        P.billing += `<section class="case-card"><h3>Money on this dispute</h3><div id="fin-box"><p class="muted">Loading…</p></div></section>`;
+        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
+      }
       if (can("CASE_MANAGER", "PM", "CODER", "DOCTOR", "NURSE", "NURSE_PHYSICIAN", "ARBITRATOR", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
+        P.billing += `<section class="case-card" id="case-time"><h3>Time on this dispute</h3><div id="time-box"><p class="muted">Loading…</p></div>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
             <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
             ${timeRoleSelect()}
             <input name="entry_date" type="date" aria-label="Date worked" />
             <input name="note" placeholder="what was done" maxlength="500" />
             <label><input type="checkbox" name="billable" checked /> billable</label>
-            <button class="mini">Log time</button>
-            <span class="muted">recorded under your name and role — corrections are compensating entries, never edits</span></form>`;
+            <button class="mini">Log time</button></form>
+          <p class="muted">Recorded under your name and role. A correction is a new entry, never an edit.</p></section>`;
         timeCaseBox(id).then((h) => { const b = document.getElementById("time-box"); if (b) b.innerHTML = h; });
       }
 
-      // Financials — every dollar tied to this dispute: fee invoices and
-      // payments, service-fee lines and allocated payments, payables
-      // (awards), and the raw event stream.
-      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Financials</h2><div id="fin-box"><p class="muted">Loading…</p></div>`;
-        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
-      }
-
-      // Program panels (per-state rules: eligibility, correspondence/QA,
-      // invoices, claims, dual status, program dates, opt-out) — rendered
-      // only when the tenant runs a custom program.
-      html += `<div id="prog"></div>`;
-      programPanel(id).then((h) => {
-        const b = document.getElementById("prog");
-        if (b) b.innerHTML = h;
-      });
-
+      // ---- Activity: what happened, related disputes ----
+      P.activity += CaseLayout.timeline(activities);
       if (rels.length)
-        html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
-          `<tr><td>${badge(r.rel_type)}</td><td class="mono">${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
-
-      // GNN link-prediction panel (graph-intel; degrades gracefully offline)
-      html += `<div id="gnn-rel"></div>`;
+        P.activity += `<section class="case-card"><h3>Related disputes</h3><ul class="plain">` + rels.map((r) =>
+          `<li>${badge(r.rel_type)} <a href="#/cases/${esc(r.related_case_id)}" class="mono">${esc(r.related_case_number || r.related_case_id.slice(0, 8) + "…")}</a></li>`).join("") + `</ul></section>`;
+      P.activity += `<div id="gnn-rel"></div>`;
       Api.graph.related(id).then((g) => {
         const box = document.getElementById("gnn-rel");
-        if (!box) return;
-        const preds = (g && g.predictions) || [];
-        box.innerHTML = `<h2>Suggested related disputes <span class="muted">· GraphSAGE ${esc(g.model_version || "")}</span></h2>` +
-          (preds.length ? `<table><thead><tr><th>Case</th><th>Link score</th><th></th></tr></thead><tbody>` +
-            preds.map((p) => `<tr><td class="mono">${esc(p.case_id.slice(0, 8))}…</td>
-              <td><span class="gnn-score" style="--s:${p.score}">${(p.score * 100).toFixed(0)}%</span></td>
-              <td><a href="#/cases/${esc(p.case_id)}">open</a> ·
-                  <a href="javascript:void(0)" onclick="Views.relate('${id}')">confirm link</a></td></tr>`).join("") +
-            `</tbody></table>` :
-            `<p class="muted">${esc(g.reason || "No link predictions yet — train the model (POST /graph/train) after a few cases exist.")}</p>`);
+        const preds = ((g && g.predictions) || []).filter((x) => x.score >= 0.5);
+        if (!box || !preds.length) { if (box) box.innerHTML = ""; return; }
+        box.innerHTML = `<details class="prog-sec"><summary>Possibly related disputes <span class="muted">— suggested from shared parties and claims</span></summary>
+          <ul class="plain">${preds.map((x) => `<li><a href="#/cases/${esc(x.case_id)}" class="mono">${esc(x.case_number || x.case_id.slice(0, 8) + "…")}</a>
+            <span class="muted">${(x.score * 100).toFixed(0)}% match</span> · <a href="javascript:void(0)" onclick="Views.relate('${id}')">link it</a></li>`).join("")}</ul></details>`;
       }).catch(() => { const b = document.getElementById("gnn-rel"); if (b) b.innerHTML = ""; });
-      const stages = {};
-      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
-      // Role-based: the server says whose each item is (owner) and whether
-      // this user may tick it (can_check). Items with no owner keep the old
-      // rule. Stages are listed in the order a case moves through them.
-      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
-      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
-      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
-      html += `<h2>Stage checklists</h2>` + Object.entries(stages).sort((a, b) => stageRank(a[0]) - stageRank(b[0])).map(([stage, items]) =>
-        `<h3>${esc(stage.replace(/_/g, " "))}</h3><ul class="checklist">` + items.map((i) =>
-          `<li>${i.done ? "✅" : (mayTick(i)
-            ? `<button class="mini" onclick="Views.check('${i.id}')">check</button>` : "⬜")}
-            ${esc(i.item)}${i.required ? " *" : ""}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
-        `</ul>`).join("");
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        html += `<div class="actions">
-          ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button onclick="Views.assign('${id}')">Assign / route</button>` : ""}
-          <button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
-          <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
-        </div>`;
 
-      // Notes — addNote (POST /notes) existed with no way to read them back
-      // at all; case notes also mirror onto the activity timeline below but
-      // without the stream field, so internal/coder/clinical/legal/
-      // external_agency notes were indistinguishable there. Confirmed live.
-      const notes = notesRes.notes || [];
-      // Only offer streams this role can actually write — the server has
-      // enforced this for a while, but the dropdown kept listing all five
-      // regardless, so picking a blocked one just produced a confusing
-      // 403 on submit instead of not being offered at all.
-      const streamOpts = [
-        ["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"],
-        ["legal", "Legal"], ["external_agency", "External agency"],
-      ];
-      const streamRoles = prog?.config?.notes_stream_roles || {};
-      const allowedStreams = streamOpts.filter(([key]) => {
-        const roles = streamRoles[key];
-        return !roles || !roles.length || can(...roles);
+      html += CaseLayout.tabs(id, P, { programmed, billing: !!P.billing });
+      // The program's own sections (state rules) arrive after; each says which tab it belongs to.
+      html += `<div id="prog" hidden></div>`;
+      programPanel(id).then((h) => {
+        const b = document.getElementById("prog");
+        if (!b) return;
+        b.innerHTML = h;
+        CaseLayout.distribute(b);
       });
-      html += `<h2>Notes</h2>
-        <form id="note-form" class="inline-form">
-          <select name="stream" aria-label="Note stream">
-            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) =>
-              `<option value="${v}">${label}</option>`).join("")}
-          </select>
-          <textarea name="body" rows="2" placeholder="Add a note…" required></textarea>
-          <button>Add note</button></form>` +
-        (notes.length ? `<table><tbody>` + notes.map((n) => `<tr>
-            <td>${badge(n.stream)}</td><td>${esc(n.body)}</td>
-            <td class="muted">${esc(n.author || "")} · ${fmtDate(n.created_at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No notes yet.</p>`);
-
-      html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
-        activities.map((a) => `<tr><td>${badge(a.type)}</td><td>${esc(a.body)}</td>
-          <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
-        `</tbody></table>` : `<p class="muted">No activity yet — voice calls and milestones attach automatically.</p>`);
+      afterRender(() => { loadCaseAssignee(id, isAssigner); CaseLayout.bind(id); });
 
       afterRender(() => {
         acts.forEach((a, i) =>
           document.querySelector(`[data-act="${i}"]`)?.addEventListener("click", async () => {
             try { await a[1](); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
           }));
-        $("#up").addEventListener("submit", async (ev) => {
+        $("#up")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = ev.target.file.files[0];
           await UI.run(ev.target.querySelector("button"), async () => {
@@ -2280,18 +2299,15 @@ const Views = (() => {
     const c = await Api.cases.get(id).catch(() => ({}));
     const det = c.details || {};
     const facts = [];
-    if (det.filing_party_type) facts.push(`<span class="chip">Filed by: ${det.filing_party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"}</span>`);
-    if (det.packet_complete_at) facts.push(`<span class="chip">Packet complete: ${fmtDate(det.packet_complete_at)} (10-day review clock basis)</span>`);
     if (det.volume_large) {
       const vv = det.volume_violations || [];
       facts.push(vv.length
         ? `<span class="badge warn" title="${esc(vv.join("; "))}">⚠ Large-volume policy: ${vv.length} violation(s) — ineligible per Capitol Bridge policy, resubmission permitted</span>`
         : `<span class="chip">Large-volume dispute — policy compliant</span>`);
     }
-    let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
-      ${facts.length ? `<p class="fact-row">${facts.join(" ")}</p>` : ""}
-      <div id="wf-steps" class="card wf-card"><p class="muted">Loading the steps…</p></div>
-      <details class="prog-sec" data-wf-admin><summary>Dual status (admin override)</summary>
+    let html = `${facts.length ? `<p class="fact-row" data-tab="overview">${facts.join(" ")}</p>` : ""}
+      <div id="wf-steps" class="card wf-card" data-tab="overview"><p class="muted">Loading the steps…</p></div>
+      <details class="prog-sec" data-wf-admin data-tab="activity"><summary>Status override (admin)</summary>
       <p class="muted">Current: ${c.internal_status ? badge(c.internal_status) : "<em>none</em>"} / ${c.agency_status ? badge(c.agency_status) : "<em>none</em>"}</p>
       <p class="muted">Case details: ${c.details && Object.keys(c.details).length
         ? Object.entries(c.details).filter(([, v]) => v === null || typeof v !== "object").map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
@@ -2303,11 +2319,15 @@ const Views = (() => {
           ${(cfg.statuses?.agency || []).map((s) => `<option ${s === c.agency_status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <button>Update status</button></form></details>
 
-      <details class="prog-sec"><summary>Program dates (clock bases)</summary>
+      <details class="prog-sec" id="p-deadlines" data-tab="overview"><summary>Deadlines</summary>
+      <p class="muted">Each deadline as it stands, from its program date.${can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+        ? " As the PM or an admin you can extend any of them except the statutory filing window — the reason is kept on the case." : ""}</p>
+      <div id="p-clock-proj"><p class="muted">Loading…</p></div></details>
+
+      <details class="prog-sec" data-tab="overview"><summary>Program dates <span class="muted">— the dates the deadlines run from</span></summary>
       <p class="muted">Statutory clocks run <b>from</b> these dates — recording one starts or restarts its clock.
         Record the date once; every deadline that depends on it re-projects automatically.</p>
       <div id="p-dates-list"></div>
-      <div id="p-clock-proj"></div>
       <form id="p-date" class="inline-form">
         <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
         <input type="date" name="value" required /><button>Record date</button></form></details>
@@ -2341,9 +2361,11 @@ const Views = (() => {
         <fieldset class="elig-flags"><legend>Tick any that apply — each one makes the dispute ineligible</legend>
           ${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<label><input type="checkbox" name="flag" value="${esc(x)}" /> ${esc(ELIG_REASON_LABELS[x] || x.replace(/_/g, " "))}</label>`).join("")}
         </fieldset>
+        <label class="elig-notes">Notes <span class="muted">(optional — saved with this review; the PM and Attorney can add to them)</span>
+          <textarea name="notes" rows="2" maxlength="4000" placeholder="Your working notes on this review"></textarea></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
-      <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
+      <details class="prog-sec" id="p-send-details" data-tab="mail" open><summary>Write to the parties</summary>
       <form id="p-send" class="inline-form">
         ${corrTplCache = cfg.correspondence?.templates || [], ""}
         ${(setTimeout(() => corrTemplatesFor(id, "#p-send"), 0), "")}
@@ -2356,7 +2378,7 @@ const Views = (() => {
         <label><input type="checkbox" name="auto_download" /> Attach a download link to the latest generated document (minted on send)</label>
         <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
 
-      <details class="prog-sec" id="p-inv-details"><summary>Invoices & claims</summary>
+      <details class="prog-sec" id="p-inv-details" data-tab="billing" open><summary>Invoices &amp; claim lines</summary>
       ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form" data-wf="invoice">
         <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
         <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
@@ -2370,7 +2392,9 @@ const Views = (() => {
           — the import is rejected with the exact missing fields per line if any are blank.</p>
         <button>Import claims</button></form><div id="p-claims-list"></div></details>
 
-      <details class="prog-sec"><summary>Share links & opt-out</summary>
+      ${Letters.caseSecHtml(id, cfg)}
+
+      <details class="prog-sec" data-tab="mail"><summary>Secure links &amp; plan opt-out</summary>
       <div class="actions">
         <button id="p-share-up">Create upload link</button>
         <button id="p-share-dl">Create download link</button></div><div id="p-share-out"></div>
@@ -2378,27 +2402,21 @@ const Views = (() => {
         <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
         <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form>` : ""}</details>
 
-      ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<details class="prog-sec"><summary>At any time</summary>
-      <p class="muted">These are not steps: they can happen at any point in a case. Everything else follows the step list at the top.</p>
-      <div class="actions">
-        <button type="button" onclick="Views.wfAnytime('${id}','PROVIDER_WITHDRAW')">Provider asked to withdraw</button>
-        <button type="button" onclick="Views.wfAnytime('${id}','RFI_RESPONSE_RECEIVED')">RFI response received</button>
-        <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
-      </div></details>` : ""}
+
 
       ${sopCaseInfoHtml(id, c, cfg)}
       ${sopFwaHtml(id, c)}
       ${sopNotesHtml(id, c)}
       ${sopSummaryHtml(id, c, cfg)}
 
-      <details class="prog-sec"><summary>Call log</summary>
+      <details class="prog-sec" data-tab="activity"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
         <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
         <input name="phone" placeholder="phone number" required />
         <input name="summary" placeholder="brief description" required /><button>Log call</button></form>
       <div id="p-call-list"></div></details>
 
-      <details class="prog-sec"><summary>Inquiries log</summary>
+      <details class="prog-sec" data-tab="activity"><summary>Inquiries log</summary>
       <form id="p-inquiry" class="inline-form">
         <select name="method"><option>EMAIL</option><option>PHONE_CALL</option></select>
         <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
@@ -2436,11 +2454,36 @@ const Views = (() => {
         Api.cm.clocks(id).then((cls) => {
           const el = document.getElementById("p-clock-proj"); if (!el) return;
           const arr = Array.isArray(cls) ? cls : (cls.clocks || []);
-          if (!arr.length) { el.innerHTML = ""; return; }
-          el.innerHTML = `<p><b>Projected deadlines</b></p><table><thead><tr><th>Clock</th><th>Due</th><th>State</th><th>Basis</th></tr></thead><tbody>` +
+          if (!arr.length) { el.innerHTML = `<p class="muted">No deadline is running yet — they start when their program dates are recorded.</p>`; return; }
+          // PM deadline extensions: an extended clock shows its extra days (each grant in the tooltip), and the PM
+          // can extend any clock except the statutory filing window.
+          const canExtend = Auth.can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+          const extNote = (cl) => cl.extended_days ? ` <span class="badge" title="${esc((cl.extensions || []).map((x) =>
+            `+${x.days}d by ${x.granted_by} (${fmtDate(x.at)}): ${x.reason}`).join("\n"))}">+${cl.extended_days}d extended</span>` : "";
+          el.innerHTML = `<p><b>Projected deadlines</b></p><table><thead><tr><th>Clock</th><th>Due</th><th>State</th><th>Basis</th>${canExtend ? "<th></th>" : ""}</tr></thead><tbody>` +
             arr.map((cl) => `<tr><td>${esc(cl.label || cl.clock || "")}</td>
-              <td>${fmtDate(cl.due)}</td><td>${badge(cl.state || "")}</td>
-              <td class="muted">${esc(cl.basis_note || cl.basis || "")}</td></tr>`).join("") + `</tbody></table>`;
+              <td>${fmtDate(cl.due)}${extNote(cl)}</td><td>${badge(cl.state || "")}</td>
+              <td class="muted">${esc(cl.basis_note || cl.basis || "")}</td>
+              ${canExtend ? `<td>${cl.extendable ? `<details class="clock-extend"><summary>Extend</summary>
+                <form data-clock="${esc(cl.clock)}" class="clock-extend-form">
+                  <label>Days <input name="days" type="number" min="1" max="90" value="5" required /></label>
+                  <textarea name="reason" rows="2" minlength="10" maxlength="2000" required placeholder="Why the deadline is extended (kept on the case record)"></textarea>
+                  <button class="mini">Extend deadline</button></form></details>` : `<span class="muted" title="Statutory window — cannot be extended">fixed</span>`}</td>` : ""}</tr>`).join("") + `</tbody></table>`;
+          el.querySelectorAll(".clock-extend-form").forEach((f) => f.addEventListener("submit", async (ev) => {
+            ev.preventDefault();
+            const days = parseInt(f.days.value, 10), reason = f.reason.value.trim();
+            if (!(days >= 1 && days <= 90)) { UI.toast("An extension is 1 to 90 days", { kind: "warn" }); return; }
+            if (reason.length < 10) { UI.toast("Give the reason for the extension (at least 10 characters)", { kind: "warn" }); return; }
+            await UI.run(f.querySelector("button"), async () => {
+              try {
+                const r = await Api.cm.extendClock(id, f.dataset.clock, days, reason);
+                UI.toast(r.workflow_signalled ? `Deadline extended by ${days} day${days === 1 ? "" : "s"}`
+                  : `Deadline extended by ${days} day${days === 1 ? "" : "s"} (the case's workflow wasn't reachable — its reminders keep the old date)`,
+                  r.workflow_signalled ? {} : { kind: "warn" });
+                loadDates();
+              } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+            }, "Extending…");
+          }));
         }).catch(() => {});
       };
       loadDates();
@@ -2448,11 +2491,34 @@ const Views = (() => {
       const loadElig = () => Api.program.eligibilityHistory(id).then((r) => {
         const el = document.getElementById("p-elig-history"); if (!el) return;
         const revs = r.reviews || [];
+        const canNote = Auth.can("CASE_MANAGER", "PM", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+        const ROLE_LABEL = { CASE_MANAGER: "Reviewer", PM: "PM", ATTORNEY: "Attorney", TENANT_ADMIN: "Admin", FEDERAL_ADMIN: "Admin", PLATFORM_ADMIN: "Admin" };
+        const notesRow = (v) => {
+          const ns = v.notes || [];
+          if (!ns.length && !canNote) return "";
+          return `<tr class="elig-notes-row"><td colspan="5">
+            ${ns.map((n) => `<div class="elig-note"><div class="elig-note-head"><b>${esc(n.author || "")}</b>
+              <span class="muted">${esc(ROLE_LABEL[n.author_role] || n.author_role || "")} · ${fmtDate(n.created_at)}</span></div>
+              <div class="elig-note-body">${esc(n.body || "")}</div></div>`).join("")}
+            ${canNote ? `<details class="elig-note-add"><summary>${ns.length ? "Add a note" : "Add a note to this review"}</summary>
+              <form data-review="${esc(v.id)}" class="elig-note-form"><textarea name="body" rows="2" maxlength="4000" required placeholder="Note on this review"></textarea>
+              <button class="mini">Save note</button></form></details>` : ""}
+          </td></tr>`;
+        };
         el.innerHTML = revs.length ? `<table><thead><tr><th>Result</th><th>Reason</th><th>Rules</th><th>By</th><th>When</th></tr></thead><tbody>` +
           revs.map((v) => `<tr><td>${eligBadge(v)}</td><td>${esc(v.reason || "—")}${v.override_reason ? `<div class="muted">override: ${esc(v.override_reason)}</div>` : ""}</td>
             <td class="mono muted" title="rule version that produced this decision">${esc(v.rule_version || "—")}</td>
-            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>`).join("") +
+            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>${notesRow(v)}`).join("") +
           `</tbody></table>` : `<p class="muted">No eligibility review on record yet.</p>`;
+        el.querySelectorAll(".elig-note-form").forEach((f) => f.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const body = f.body.value.trim();
+          if (!body) return;
+          await UI.run(f.querySelector("button"), async () => {
+            try { await Api.program.eligibilityNote(id, f.dataset.review, body); UI.toast("Note saved"); loadElig(); }
+            catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Saving…");
+        }));
       }).catch(() => {});
       // Result renderer shared by manual + auto paths: verdict, rule version,
       // borderline callout, and — on INELIGIBLE — the override form (a written
@@ -2509,6 +2575,7 @@ const Views = (() => {
           dispute_type: f.dispute_type ? f.dispute_type.value : "",
           flags: [...f.querySelectorAll('input[name="flag"]:checked')].map((x) => x.value),
           aor_valid: f.aor_valid.checked, aor_reason: f.aor_reason.value,
+          notes: f.notes ? f.notes.value : "",
         });
         const out = document.getElementById("p-elig-out");
         const resubmit = async (reason) => {
@@ -2752,7 +2819,7 @@ const Views = (() => {
       const list = (v) => (Array.isArray(v) ? v : []).join(", ");
       const sendHtml = toSend.length
         ? `<h2>Passed QA — ready to send</h2>
-          <p class="muted">These drafts were approved and are back with the Reviewer. Check the addresses and send; the send is logged and the case's dates are set.</p>
+          <p class="muted">These drafts were approved and are back with the person who drafted them. Check the addresses and send; the send is logged and the case's dates are set.</p>
           <table><thead><tr><th>Subject</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
           toSend.map((i) => `<tr><td>${esc(i.subject)}</td><td>${esc(i.reviewed_by || "—")}</td><td class="muted">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
             <td>${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
@@ -2772,13 +2839,14 @@ const Views = (() => {
         return `<div class="view-head"><h1>QA gate</h1>
           <span class="muted">nothing reaches a party without approval on gated templates</span></div>
           ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}`;
+      // A drafter (the Coder) sees only their own drafts, and never reviews one.
       const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
             <td>${esc(i.drafted_by)}</td>
-            <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
+            <td>${r.own_only ? '<span class="muted">waiting for QA</span>' : `<button class="mini" onclick="Views.qaReview('${i.id}')">review</button>`}</td></tr>`).join("");
       const { bodyHtml, pagerHtml } = initClientPager("qa", q, rowsHtml);
       afterRender(() => bindClientPager("qa", "#qa-tb tbody"));
       return `<div class="view-head"><h1>QA gate</h1>
-        <span class="muted">nothing reaches a party without approval on gated templates</span></div>
+        <span class="muted">${r.own_only ? "your drafts: waiting for QA, and ready for you to send" : "nothing reaches a party without approval on gated templates"}</span></div>
         ${intro}<h2>Awaiting review (${q.length})</h2>
         <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead>
         <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}`;
@@ -2925,15 +2993,17 @@ const Views = (() => {
       <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
         eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
         not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>` : "") +
+      SrvSearch.html("intake", "Search email, contact, organization, case #…") +
       `<div id="intake-box"><p class="muted">Loading…</p></div>`;
   }
+  SrvSearch.on("intake", () => intakeBox(document.getElementById("intake-status")?.value || ""));
 
   async function intakeBox(status) {
     const box = document.getElementById("intake-box");
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status }), Api.program.get().catch(() => null)]);
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status, ...SrvSearch.params("intake") }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
       const intakeTotal = r.total ?? rows.length;
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
@@ -2944,10 +3014,10 @@ const Views = (() => {
       const label = amtLabel(prog);
       box.innerHTML = (rows.length ? `<table id="intake-tb" data-serverpaged><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests${status ? ` with status ${status}` : ""}.</p>`) +
+          `</tbody></table>` : `<p class="muted">${SrvSearch.q("intake") ? `No intake request matches “${esc(SrvSearch.q("intake"))}”` : `No intake requests${status ? ` with status ${status}` : ""}`}.</p>`) +
         (rows.length ? `<div id="intake-pg"></div>` : "");
       Pager.server(document.getElementById("intake-pg"), { total: intakeTotal, shown: rows.length }, async (limit, offset) => {
-        const pr = await Api.program.intake({ limit, offset, status });
+        const pr = await Api.program.intake({ limit, offset, status, ...SrvSearch.params("intake") });
         const prows = pr.intake || [];
         document.querySelector("#intake-tb tbody").innerHTML = prows.map(intakeRowHtml).join("");
         return { total: pr.total ?? intakeTotal, shown: prows.length };
@@ -3220,8 +3290,8 @@ const Views = (() => {
       const FIN_PAGE = Pager.size();
       const [fin, pays, chks] = await Promise.all([
         Api.program.financial(),
-        Api.program.payments(null, { limit: FIN_PAGE }).catch(() => ({ payments: [] })),
-        Api.program.checks("", { limit: FIN_PAGE }).catch(() => ({ checks: [] })),
+        Api.program.payments(null, { limit: FIN_PAGE, ...SrvSearch.params("fin-pay") }).catch(() => ({ payments: [] })),
+        Api.program.checks("", { limit: FIN_PAGE, ...SrvSearch.params("fin-ck") }).catch(() => ({ checks: [] })),
       ]);
       // first page of each server-paged list
       finPager = {
@@ -3294,16 +3364,19 @@ const Views = (() => {
           <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
           <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
+        (ck.length || SrvSearch.q("fin-ck") ? SrvSearch.html("fin-ck", "Search check #, payer, memo, case, invoice…") : "") +
         (ck.length ? `<table data-serverpaged><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
           ck.map(checkRow).join("") + `</tbody></table>` +
           (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
-          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`) +
+          (SrvSearch.q("fin-ck") ? `<p class="muted">No check matches “${esc(SrvSearch.q("fin-ck"))}”.</p>` : `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`)) +
         (ck.length ? `<div id="fin-ck-pg"></div>` : "");
 
       // Card payments
       const plist = finPager.payments.rows;
+      if (!plist.length && SrvSearch.q("fin-pay"))
+        html += `<h2>Card payments</h2>${SrvSearch.html("fin-pay", "Search payer, email, case, status, Stripe ref…")}<p class="muted">No card payment matches “${esc(SrvSearch.q("fin-pay"))}”.</p>`;
       if (plist.length)
-        html += `<h2>Card payments</h2><table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
+        html += `<h2>Card payments</h2>${SrvSearch.html("fin-pay", "Search payer, email, case, status, Stripe ref…")}<table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
           plist.map(payRow).join("") + `</tbody></table>` +
           `<div id="fin-pay-pg"></div>`;
 
@@ -3327,8 +3400,8 @@ const Views = (() => {
           Pager.server(document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"),
             { total: st.total, shown: st.rows.length }, async (limit, offset) => {
               const r = kind === "checks"
-                ? await Api.program.checks("", { limit, offset })
-                : await Api.program.payments(null, { limit, offset });
+                ? await Api.program.checks("", { limit, offset, ...SrvSearch.params("fin-ck") })
+                : await Api.program.payments(null, { limit, offset, ...SrvSearch.params("fin-pay") });
               st.rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
               st.total = r.total ?? st.total;
               document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body").innerHTML =
@@ -3343,6 +3416,8 @@ const Views = (() => {
 
   // finance() pager state — survives only for the rendered page
   let finPager = null;
+  SrvSearch.on("fin-ck", () => App.rerender());
+  SrvSearch.on("fin-pay", () => App.rerender());
   let checkRow = null, payRow = null; // row renderers set by finance()
 
   async function requestRescan(checkId, caseId, btn) {
@@ -4874,6 +4949,8 @@ const Views = (() => {
     afterRender(tplLoad);
     return `<div class="view-head"><h1>Templates</h1>
       <span class="muted">the emails this program sends, and which one is used when</span></div>
+      ${Letters.variablesCardHtml()}
+      ${Letters.settingsCardHtml()}
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
   }
 
@@ -5636,7 +5713,7 @@ const Views = (() => {
         `</div>
         <h2>Change history <span class="muted">append-only audit trail, newest first</span></h2>
         ${window._rulesAudit.length ? `<p><input placeholder="Filter by who changed it or the note…" oninput="Views.rulesAuditFilter(this.value)" style="min-width:280px" /></p>` : ""}
-        <div id="rules-audit-box">${rulesAuditHtml(window._rulesAudit)}</div>`;
+        <div id="rules-audit-box" data-nosearch>${rulesAuditHtml(window._rulesAudit)}</div>`;
     } catch (e) { return err(e); }
   }
 
@@ -5970,11 +6047,11 @@ const Views = (() => {
           <input name="action" placeholder="filter by action (e.g. NPI_VERIFICATION_DEGRADED)" />
           <button>Filter</button>
         </form>
-        <div id="al-list">${auditRows(r.entries || [])}</div></div>
+        <div id="al-list" data-nosearch>${auditRows(r.entries || [])}</div></div>
         <div id="al-own" hidden><form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('al-own-box', 'mine')">
           <input name="q" placeholder="Search: dispute, action" aria-label="Search your actions">
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('al-own-box', 'mine')"> Include page views</label>
-          <button>Search</button></form><div id="al-own-box"></div></div>`;
+          <button>Search</button></form><div id="al-own-box" data-nosearch></div></div>`;
     } catch (e) { return err(e); }
   }
 
@@ -6034,6 +6111,7 @@ const Views = (() => {
         <button>Generate DRAFT</button></form>
       <p class="muted">Idempotent per period — an existing active invoice for the same period is reported, never duplicated. Billable time without a role rate blocks generation (configurable).</p>
       <div id="billing-gen-out"></div></div>
+      ${Letters.settingsCardHtml()}
       <div id="billing-list"><p class="muted">Loading…</p></div>
       <div id="billing-detail"></div>`;
   }
@@ -6217,7 +6295,7 @@ const Views = (() => {
           <select id="arap-ar-bucket" onchange="Views.arapArFilter()"><option value="">All buckets</option>
             ${buckets.map((b) => `<option value="${b}">${b}</option>`).join("")}</select>
           <input id="arap-ar-q" placeholder="Filter by party…" oninput="Views.arapArFilter()" /></p>` : ""}
-        <div id="arap-ar-results">${arapArResultsHtml(window._arapAr, "", "")}</div>`;
+        <div id="arap-ar-results" data-nosearch>${arapArResultsHtml(window._arapAr, "", "")}</div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6453,7 +6531,7 @@ const Views = (() => {
             <p class="muted">Every dispute you filed, for every client. Open a case number for its details, payment and documents.</p>
             <div id="tpa-fees"></div>
             <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
-            <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+            <div id="tpa-cases" data-nosearch><p class="muted">Loading…</p></div></div>
         </section>
 
 
@@ -6528,7 +6606,11 @@ const Views = (() => {
 CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14
 CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
                   <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. Up to 500 disputes per ZIP.</p>
-                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div></details>
+                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div>
+              <div class="tpa-samples"><p><b>Sample ZIPs to copy</b> — open one to see the exact layout. They are filled in with your clients where you have them;
+                every sample document says what the real one must show. Replace the sample PDFs before uploading: a ZIP that still holds them is refused.</p>
+                <button type="button" class="mini" onclick="Views.tpaBdSample('separate', this)">Download sample — six separate documents</button>
+                <button type="button" class="mini" onclick="Views.tpaBdSample('merged', this)">Download sample — one merged PDF per dispute</button></div></details>
             <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
             <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
@@ -6559,7 +6641,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
             <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('tpa-audit', 'tpa')"> Include page views</label>
             <button>Search</button></form>
-          <div id="tpa-audit"><p class="muted">Loading…</p></div></div></section>
+          <div id="tpa-audit" data-nosearch><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-tpa-panel="oversight" style="display:none">
@@ -6568,6 +6650,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <div class="card"><h2>Documents waiting for review</h2>
           <p class="muted">Documents the reader could not decide on. Open each one, then accept it or say why it is rejected — the filer sees the note.</p>
           <div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>Possible exclusion-list matches</h2>
+          <p class="muted">These clients match an entry on the HHS-OIG List of Excluded Individuals/Entities by NPI or by name. Compare the details (address, specialty, dates) and decide: <b>Clear</b> when it is a different provider, <b>Excluded</b> when it is the same one. Either way, say how you decided. The client can't file until then.</p>
+          <div id="tpa-ex-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>NPIs waiting for review</h2>
           <p class="muted">The national NPI registry holds these NPIs under a different name than the client's. Confirm when it is the same provider (a former or trading name); reject with a note when it is not — the TPA sees the note and must enter the right NPI. The client can't file until then.</p>
           <div id="tpa-npi-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}` : ""}`;
@@ -6591,7 +6676,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       disputes: () => { tpaFeesBox(); tpaDashBox(); },
       clients: () => { tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox(); },
       bulk: () => tpaBdBatchesBox(),
-      reviews: () => { onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); },
+      reviews: () => { onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); exclusionReviewsBox("tpa-ex-reviews", "tpa"); },
       oversight: () => tpaAdminBox(),
       audit: () => orgAuditBox("tpa-audit", "tpa"),
       docreq: () => orgDocReqBox("tpa-docreq", "tpa"),
@@ -6606,7 +6691,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     const el = document.getElementById("tpa-tc-" + k);
     if (el) el.textContent = text ? String(text) : "";
   }
-  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", NPI_REVIEW: "NPI under review", NPI_REJECTED: "NPI rejected", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
+  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", NPI_REVIEW: "NPI under review", NPI_REJECTED: "NPI rejected", EXCLUSION_REVIEW: "Exclusion check under review", EXCLUDED: "On the exclusion list", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
   // The national NPI registry's answer on a client's NPI.
   function npiLine(c) {
     if (!c.npi) return "";
@@ -6617,7 +6702,21 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       : c.npi_status === "REJECTED" ? `<div class="error">${esc(c.npi_review_note || "Rejected by the review team")}. Enter the correct NPI under Profile.</div>`
       : c.npi_status === "UNVERIFIED" ? `<div class="muted">The registry could not be reached; it is checked again automatically.</div>`
       : `<div class="muted">${esc(c.npi)}${reg}</div>`;
-    return `<div><span class="badge s-${st[0]}">${st[1]}</span>${why}</div>`;
+    return `<div><span class="badge s-${st[0]}">${st[1]}</span>${why}</div>${checksLine(c)}`;
+  }
+  // The other checks: the federal exclusion list, and the TIN.
+  function checksLine(c) {
+    const ck = c.checks || {};
+    const ex = ck.EXCLUSION && ck.EXCLUSION.status, tin = ck.TIN && ck.TIN.status;
+    const exb = { CLEAR: ["ck-clear", "Not on the exclusion list"], CLEARED: ["ck-clear", "Exclusion list: cleared by the review team"],
+      NEEDS_REVIEW: ["ck-review", "Possible exclusion-list match — under review"], EXCLUDED: ["ck-excluded", "On the federal exclusion list"],
+      UNAVAILABLE: ["ck-unavailable", "Exclusion list not checked yet"] }[ex];
+    const parts = [];
+    if (exb) parts.push(`<span class="badge s-${exb[0]}" title="HHS-OIG List of Excluded Individuals/Entities">${exb[1]}</span>`);
+    if (ex === "EXCLUDED" && ck.EXCLUSION.note) parts.push(`<div class="error">${esc(ck.EXCLUSION.note)}</div>`);
+    if (ex === "UNAVAILABLE") parts.push('<div class="muted">The list could not be loaded yet; it is checked automatically once it is.</div>');
+    if (tin === "NOT_CONFIGURED") parts.push('<div class="muted">TIN: format checked · matching against IRS records is not set up</div>');
+    return parts.length ? `<div class="checks-line">${parts.join("")}</div>` : "";
   }
   const PKG_STATUS = { ASSEMBLING: "started", VALIDATING: "checking", REJECTED: "needs a fix", READY: "ready to file", FILED: "filed" };
   const onbStatus = (st) => `<span class="badge s-${esc(String(st || "")).toLowerCase().replace(/_/g, "-")}">${esc(ONB_STATUS[st] || st || "—")}</span>`;
@@ -6670,7 +6769,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox();
+      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); exclusionReviewsBox("tpa-ex-reviews", "tpa");
       if (document.getElementById("tpa-body")?.style.display === "none") tpaTab("oversight", true);  // not acting for a TPA
     }
   }
@@ -6899,13 +6998,16 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
             <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('hp-audit', 'hp')"> Include page views</label>
             <button>Search</button></form>
-          <div id="hp-audit"><p class="muted">Loading…</p></div></div></section>
+          <div id="hp-audit" data-nosearch><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-hp-panel="oversight" style="display:none">
         <div class="card"><h2>All health plans in this program</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div></section>
       <section data-hp-panel="reviews" style="display:none">
         <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>Possible exclusion-list matches</h2>
+          <p class="muted">These parties match an entry on the HHS-OIG exclusion list by NPI or by name. Clear it when it is a different provider, mark it Excluded when it is the same one, and say how you decided. The party can't file until then.</p>
+          <div id="hp-ex-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>NPIs waiting for review</h2>
           <p class="muted">The national NPI registry holds these networks' and facilities' NPIs under a different name. Confirm when it is the same provider; reject with a note when it is not — the health plan sees the note. The party can't file until then.</p>
           <div id="hp-npi-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}`;
@@ -6921,7 +7023,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       against: () => respondListBox("hp"),
       parties: () => hpOnboardingBox(),
       file: () => hpOnboardingBox(),
-      reviews: () => { onboardingReviewsBox("hp-reviews", "hp"); npiReviewsBox("hp-npi-reviews", "hp"); },
+      reviews: () => { onboardingReviewsBox("hp-reviews", "hp"); npiReviewsBox("hp-npi-reviews", "hp"); exclusionReviewsBox("hp-ex-reviews", "hp"); },
       oversight: () => hpAdminBox(),
       audit: () => orgAuditBox("hp-audit", "hp"),
       docreq: () => orgDocReqBox("hp-docreq", "hp"),
@@ -7701,6 +7803,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     finally { btn.disabled = false; }
   }
+  async function tpaBdSample(layout, btn) {
+    await UI.run(btn, async () => {
+      try { await Api.program.tpaBulkSample(layout); UI.toast("Sample ZIP downloaded — see README.txt inside"); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Preparing…");
+  }
   const tpaBdPay = (batchId, btn) => tpaPayDialog({ batch_id: batchId }, btn);
   // Eligibility as decided by the Reviewer (eligibility_reviews), in words.
   const ELIG = { ELIGIBLE: ["filed", "Eligible"], INELIGIBLE: ["rejected", "Not eligible"], HOLD_AOR: ["needs-review", "On hold — authorization (AOR)"] };
@@ -7905,7 +8013,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <input name="q" placeholder="Search: dispute, action" aria-label="Search your activity">
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('my-audit', 'mine')"> Include page views</label>
           <button>Search</button></form>
-        <div id="my-audit"><p class="muted">Loading…</p></div></div>`;
+        <div id="my-audit" data-nosearch><p class="muted">Loading…</p></div></div>`;
   }
   // The sidebar's Audit log for a TPA or plan account: its organization's trail.
   function orgAuditPage() {
@@ -7921,7 +8029,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <label class="muted"><input type="checkbox" name="mine" onchange="Views.orgAuditBox('org-audit', '${kind}')"> Only my actions</label>
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('org-audit', '${kind}')"> Include page views</label>
           <button>Search</button></form>
-        <div id="org-audit"><p class="muted">Loading…</p></div></div>`;
+        <div id="org-audit" data-nosearch><p class="muted">Loading…</p></div></div>`;
   }
   // An organization's own audit trail (orgaudit.go): the TPA or plan page's "Audit log" tab.
   async function orgAuditBox(boxId, kind) {
@@ -8100,6 +8208,35 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
           <td style="white-space:nowrap">${decides ? `<button class="mini" onclick="Views.npiReviewDecideFn('${kind}','${x.id}','CONFIRM','${boxId}')">Confirm</button>
             <button class="mini danger" onclick="Views.npiReviewDecideFn('${kind}','${x.id}','REJECT','${boxId}')">Reject</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function exclusionReviewsBox(boxId, kind) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const decides = can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    try {
+      const r = await Api.program.verificationReviews();
+      const rows = (r.reviews || []).filter((x) => x.kind === kind);
+      const listNote = r.list_rows ? `<p class="muted">Exclusion list loaded ${fmtDate(r.list_loaded_at)} (${Number(r.list_rows).toLocaleString()} entries); it refreshes weekly.</p>`
+        : '<p class="warn">The exclusion list has not loaded yet, so nothing has been checked against it. It loads automatically; clients are checked once it does.</p>';
+      if (!rows.length) { box.innerHTML = listNote + '<p class="muted">Nothing waiting — no possible matches.</p>'; return; }
+      box.innerHTML = listNote + `<table class="tbl"><thead><tr><th>${kind === "hp" ? "Health plan · party" : "TPA · client"}</th><th>NPI</th><th>The exclusion list holds</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td>${esc(x.organization)}<br><span class="muted">${esc(x.party_name)}</span></td><td>${esc(x.npi || "—")}</td>
+          <td>${(x.matches || []).map((m) => `<b>${esc(m.name)}</b> <span class="badge s-ck-review">matched on ${m.matched_on === "npi" ? "NPI" : "name"}</span>
+            <br><span class="muted">${esc([m.npi && "NPI " + m.npi, m.general, m.specialty, m.state, m.excluded_since && "excluded since " + m.excluded_since.replace(/(\d{4})(\d{2})(\d{2})/, "$2/$3/$1"), m.exclusion_type].filter(Boolean).join(" · "))}</span>`).join("<br>")}
+            <br><a class="muted" href="https://exclusions.oig.hhs.gov/" target="_blank" rel="noopener">search the OIG site</a></td>
+          <td style="white-space:nowrap">${decides ? `<button class="mini" onclick="Views.exclusionDecideFn('${x.review_id}','CLEAR','${boxId}','${kind}')">Clear</button>
+            <button class="mini danger" onclick="Views.exclusionDecideFn('${x.review_id}','EXCLUDED','${boxId}','${kind}')">Excluded</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function exclusionDecideFn(reviewId, decision, boxId, kind) {
+    const q = decision === "CLEAR" ? "How do you know this is a different provider? (for example: different address and specialty)" : "What confirmed it is the same provider? The filer sees this note.";
+    const note = (prompt(q) || "").trim();
+    if (!note) return;
+    try {
+      await Api.program.verificationReviewDecide(reviewId, decision, note);
+      UI.toast(decision === "CLEAR" ? "Cleared — filing can go ahead" : "Marked as excluded — filing stays blocked");
+      exclusionReviewsBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
   async function npiReviewDecideFn(kind, id, decision, boxId) {
     let note = "";
@@ -8645,7 +8782,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
         <select name="type" aria-label="Who">
           <option value="">Anyone</option>${Object.entries(SCR_TYPE).map(([k, v]) => `<option value="${k}" ${scrFilter.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       </form>
-      <div id="scr-list"><p class="muted">Loading…</p></div>`;
+      <div id="scr-list" data-nosearch><p class="muted">Loading…</p></div>`;
   }
 
   const SCR_TYPE = { MANUAL: "Other", PARTY: "Provider or health plan", TPA: "Third-party administrator", VENDOR: "Vendor", ARBITRATOR: "Independent reviewer",
@@ -8697,5 +8834,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { npiReviewDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

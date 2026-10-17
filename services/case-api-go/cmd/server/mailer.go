@@ -9,11 +9,11 @@ package main
 
 import (
 	"crypto/tls"
-	"time"
 	"encoding/base64"
 	"fmt"
 	"net/smtp"
 	"strings"
+	"time"
 )
 
 // sendMail delivers one message. Returns nil on acceptance by the relay.
@@ -67,8 +67,9 @@ func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject 
 	fmt.Fprintf(b, "Subject: %s\r\n", subject)
 }
 
-// deliver runs the SMTP transaction for an already-composed message.
-func (s *server) deliver(from string, to, cc []string, msg []byte) error {
+// smtpDeliver runs the SMTP transaction for an already-composed message (deliver, in mailqueue.go, paces and
+// queues around it).
+func (s *server) smtpDeliver(from string, to, cc []string, msg []byte) error {
 	cfg := s.cfg
 	all := append(append([]string{}, to...), cc...)
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)

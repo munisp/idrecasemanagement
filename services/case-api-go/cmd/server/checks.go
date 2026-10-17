@@ -434,10 +434,17 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	status := r.URL.Query().Get("status")
 	limit, offset := pageParams(r, 50, 500)
+	// Search (?q=): check number, payer, memo, case, invoice number, status. Not the bank account/routing numbers.
+	args := []any{tenant, status}
+	search := ""
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		search = searchClause(len(args), "c.check_number", "c.payer_name", "c.memo", "c.case_id", "c.status", "i.invoice_no")
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
-		`SELECT count(*) FROM public.checks WHERE tenant=$1 AND ($2='' OR status=$2)`,
-		tenant, status).Scan(&total); err != nil {
+		`SELECT count(*) FROM public.checks c LEFT JOIN public.invoices i ON i.id = c.invoice_id AND i.tenant = c.tenant
+		 WHERE c.tenant=$1 AND ($2='' OR c.status=$2)`+search, args...).Scan(&total); err != nil {
 		http.Error(w, `{"error":"query"}`, http.StatusInternalServerError)
 		return
 	}
@@ -448,8 +455,8 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 		       c.invoice_id, c.case_id, coalesce(i.invoice_no,'') AS case_number, c.payer_name, c.created_at
 		FROM public.checks c
 		LEFT JOIN public.invoices i ON i.id = c.invoice_id AND i.tenant = c.tenant
-		WHERE c.tenant=$1 AND ($2='' OR c.status=$2)
-		ORDER BY c.created_at DESC, c.id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, status)
+		WHERE c.tenant=$1 AND ($2='' OR c.status=$2)`+search+`
+		ORDER BY c.created_at DESC, c.id DESC LIMIT %d OFFSET %d`, limit, offset), args...)
 	if err != nil {
 		http.Error(w, `{"error":"query"}`, http.StatusInternalServerError)
 		return

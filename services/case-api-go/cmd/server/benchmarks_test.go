@@ -6,9 +6,9 @@ import "testing"
 // (unit-level) and the role floor on both analytics endpoints.
 func TestPercentileStats(t *testing.T) {
 	cases := []struct {
-		name                    string
-		in                      []int64
-		p25, median, p75        int64
+		name             string
+		in               []int64
+		p25, median, p75 int64
 	}{
 		{"empty", nil, 0, 0, 0},
 		{"single", []int64{1000}, 1000, 1000, 1000},

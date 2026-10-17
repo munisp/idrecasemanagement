@@ -105,6 +105,9 @@ TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
                  "revenue code", "drg"],
     },
 }
+# The office's own letters (decision report, cover letter, review invoice, IRO decision): letter_docs.py.
+import letter_docs as _letter_docs  # noqa: E402
+TYPE_SIGNALS.update(_letter_docs.TYPE_SIGNALS)
 WEIGHT = {"strong": 3, "weak": 1}
 
 # Minimum score to accept a classification at all, and minimum lead over the
@@ -1210,8 +1213,13 @@ def stage_fields(ctx: dict, cfg: dict) -> dict:
     import learning as _learning
     text = ctx.get("text", "") or ""
     ex = _fields.extract_fields(text, extra_labels=_learning.get_active_labels())
+    issues = _fields.cross_check(ex)
+    letter, letter_issues = _letter_docs.extract(ctx.get("doc_type") or "", text)
+    if letter:
+        ex["letter"] = letter
+        issues = issues + letter_issues
     ctx["extracted_fields"] = ex
-    ctx["field_check_issues"] = _fields.cross_check(ex)
+    ctx["field_check_issues"] = issues
     return ctx
 
 
@@ -1386,6 +1394,13 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
         if ex.get("claim_number") and case.get("case_number"):
             # claim vs CMS case number are different identifiers; record both
             ctx["extracted"]["cms_case_number"] = case["case_number"]
+        # One of the office's letters names its case: uploaded to another case, someone should look.
+        lcase = ((ctx.get("extracted_fields") or {}).get("letter") or {}).get("case_number")
+        if lcase and case.get("case_number"):
+            a, b = _letter_docs.case_seq(lcase), _letter_docs.case_seq(case["case_number"])
+            if a and b and a != b:
+                findings.append({"field": "case_number", "issue": f"This letter is for case {lcase}, but it was "
+                                 f"uploaded to case {case['case_number']} — check it belongs here"})
     # Out-of-domain guard: VLM verdict, zero-signal classification, or an
     # all-null extraction each independently mean a human should look before
     # this document is treated as case evidence.

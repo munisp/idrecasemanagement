@@ -20,6 +20,7 @@ Run: python main.py
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import sys
 import tempfile
 from datetime import date
 
+import builtin_letters
 import httpx
 import otel_setup
 import psycopg
@@ -125,7 +127,31 @@ def load_case(tenant: str, case_id: str) -> dict:
     }
     for k, v in details.items():
         fields[f"details.{k}"] = str(v)
+    fields.update(office_variables(tenant))
     return fields
+
+
+def office_variables(tenant: str) -> dict:
+    """The tenant's template variables -- {agency_contacts}, {org_name}, {contact_email}... -- so an uploaded DOCX
+    template can use the same names the email templates do (program config "letters", overlaid with what the
+    office set on the Templates page)."""
+    with psycopg.connect(DSN) as c:
+        prog = c.execute("SELECT config->'letters' FROM public.program_rules WHERE tenant=%s", (tenant,)).fetchone()
+        ls = c.execute("SELECT settings FROM public.letter_settings WHERE tenant=%s", (tenant,)).fetchone()
+    d = (prog[0] if prog and prog[0] else {}) or {}
+    st = (ls[0] if ls and ls[0] else {}) or {}
+    head = st.get("letterhead") or {}
+    out = {k: str(v) for k, v in (d.get("variables") or {}).items()}
+    out.update({k: str(v) for k, v in (st.get("variables") or {}).items()})
+    for k in ("org_name", "org_short", "contact_email", "contact_phone", "program_name"):
+        if head.get(k) or d.get(k):
+            out[k] = head.get(k) or d.get(k)
+    sal = (st.get("agency") or {}).get("email_salutation") or d.get("agency_email_salutation")
+    if not sal and out.get("agency_contacts"):
+        sal = f"Dear {out['agency_contacts']},"
+    if sal:
+        out["agency_salutation"] = sal
+    return out
 
 
 def merge_docx(template: bytes, fields: dict) -> bytes:
@@ -202,6 +228,37 @@ def template_config(tenant: str, key: str) -> dict:
     raise KeyError(f"no letter template {key} for tenant {tenant}")
 
 
+PLACEHOLDER_MARK = "PLACEHOLDER TEMPLATE"
+
+
+def uploaded_template(tenant: str, key: str) -> bytes | None:
+    """The tenant's own DOCX for this letter, or None when there is none (or only the placeholder)."""
+    try:
+        data = minio.get_object(TEMPLATE_BUCKET, f"{tenant}/{key}.docx").read()
+    except Exception:  # noqa: BLE001 -- NoSuchKey: not uploaded
+        return None
+    try:
+        first = " ".join(p.text for p in Document(io.BytesIO(data)).paragraphs[:3])
+    except Exception:  # noqa: BLE001 -- unreadable upload: let merge_docx report it
+        return data
+    return None if PLACEHOLDER_MARK in first else data
+
+
+def docx_preview(docx_bytes: bytes) -> str:
+    """The letter's words for the QA queue, tables included (an invoice's amounts live in tables)."""
+    doc = Document(io.BytesIO(docx_bytes))
+    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    for t in doc.tables:
+        for row in t.rows:
+            seen = []
+            for cell in row.cells:
+                if cell.text.strip() and cell.text not in seen:
+                    seen.append(cell.text)
+            if seen:
+                parts.append(" | ".join(seen))
+    return re.sub(r"\s+", " ", " ".join(parts))[:4000]
+
+
 def handle(evt: dict) -> None:
     tenant, case_id, key = evt["tenant"], evt["case_id"], evt["template"]
     requested_by = evt.get("requested_by", "system")
@@ -210,14 +267,22 @@ def handle(evt: dict) -> None:
     if key == "determination_letter" and features_for(tenant).get("letter_citation", True):
         fields.update(load_citations(tenant, case_id))
 
-    obj = minio.get_object(TEMPLATE_BUCKET, f"{tenant}/{key}.docx")
-    merged = merge_docx(obj.read(), fields)
+    # An uploaded template wins (the office's own wording, replaceable without a deploy); without one -- or with
+    # the "content pending" placeholder -- the built-in letter in the program's layout is built from the case.
+    template = uploaded_template(tenant, key)
+    if template is not None:
+        merged = merge_docx(template, fields)
+    elif builtin_letters.has_builder(key):
+        merged, extra = builtin_letters.build(DSN, minio, TEMPLATE_BUCKET, tenant, case_id, key)
+        fields.update(extra)
+    else:
+        raise KeyError(f"no template {tenant}/{key}.docx uploaded and no built-in letter for {key}")
     pdf = to_pdf(merged)
 
     filename = tpl.get("filename", "{case_number}.pdf").format(**fields)
     object_key = f"{tenant}/{case_id}/{key}-{date.today().isoformat()}.pdf"
     ct = vault_seal(tenant, object_key, pdf)
-    minio.put_object(DOC_BUCKET, object_key, data=__import__("io").BytesIO(ct), length=len(ct))
+    minio.put_object(DOC_BUCKET, object_key, data=io.BytesIO(ct), length=len(ct))
 
     with psycopg.connect(DSN, autocommit=True) as c:
         c.execute(
@@ -229,9 +294,7 @@ def handle(evt: dict) -> None:
              tpl.get("folder", "CORRESPONDENCE")),
         )
         # Every letter goes through QA before it is mailed (G4).
-        body_preview = re.sub(r"\s+", " ", " ".join(
-            p.text for p in Document(__import__("io").BytesIO(merged)).paragraphs if p.text.strip()
-        ))[:4000]
+        body_preview = docx_preview(merged)
         c.execute(
             """INSERT INTO public.qa_reviews
                  (tenant, case_id, artifact, channel, subject, body, status, drafted_by)
@@ -308,7 +371,9 @@ def main() -> None:
                         c.execute(
                             """INSERT INTO public.case_activities (tenant, case_id, type, body)
                                VALUES (%s,%s,'LETTER_GENERATION_FAILED',%s)""",
-                            (tenant, case_id, f"Letter template {key!r} failed to generate: {e}"),
+                            (tenant, case_id, f"Letter {key!r} could not be generated: {e}"
+                             if isinstance(e, builtin_letters.LetterDataMissing)
+                             else f"Letter template {key!r} failed to generate: {e}"),
                         )
                         c.execute(
                             """INSERT INTO public.notifications (tenant, user_sub, type, body, link)

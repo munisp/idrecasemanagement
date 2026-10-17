@@ -525,6 +525,7 @@ func main() {
 		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases", s.listCases)
+		r.Get("/cases/pipeline/counts", s.pipelineCounts) // per-stage totals for the Pipeline board (pages via /cases)
 		r.Get("/cases/{caseId}", s.getCase)
 		r.Post("/fees/transfer", s.postFeeTransfer)    // escrow/admin/IDRE fee double-entry
 		r.Post("/cases/{caseId}/signal", s.signalCase) // e.g. response filed, fees paid
@@ -585,6 +586,8 @@ func main() {
 		// Case management: assignment, escalation, relationships, checklists,
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
+		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
+		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)
@@ -622,10 +625,11 @@ func main() {
 		r.Post("/views", s.saveView)
 		r.Get("/prefs", s.getPrefs) // server-side user preferences (source of truth)
 		r.Put("/prefs", s.putPref)
-		r.Get("/cases/clocks", s.casesClocks)         // batch statutory-clock projection (grids)
-		r.Get("/cases/{caseId}/clocks", s.caseClocks) // per-case projection (workspace header)
-		r.Post("/cases/bulk", s.bulkCases)            // bulk assign / status with per-item results
-		r.Post("/queues/grab-next", s.grabNext)       // atomic queue claim (triage fast lane)
+		r.Get("/cases/clocks", s.casesClocks)                             // batch statutory-clock projection (grids)
+		r.Get("/cases/{caseId}/clocks", s.caseClocks)                     // per-case projection (workspace header)
+		r.Post("/cases/{caseId}/clocks/{clock}/extend", s.extendDeadline) // PM deadline extension (deadline_extensions.go)
+		r.Post("/cases/bulk", s.bulkCases)                                // bulk assign / status with per-item results
+		r.Post("/queues/grab-next", s.grabNext)                           // atomic queue claim (triage fast lane)
 
 		// Graph intelligence (proxied to graph-intel: FalkorDB + GraphSAGE + EPR-KGQA).
 		r.Post("/graph/ask", s.graphAsk)                  // EPR-KGQA natural-language query
@@ -714,23 +718,30 @@ func main() {
 		r.Post("/tpa/clients", s.tpaAddClient)      // add an initiating party I represent
 		r.Get("/tpa/clients", s.tpaListClients)
 		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
-		r.Post("/tpa/intake", s.tpaIntake)                                     // file a dispute on behalf of a client
-		r.Get("/tpa/dashboard", s.tpaDashboard)                                // status of all my clients' disputes
-		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                    // correct my own filing while it awaits payment
-		r.Get("/admin/tpas", s.adminListTPAs)                                  // state oversight
-		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)              // suspend|reactivate
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)              // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)             // past reviews (G2)
-		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
-		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                      // the SOP steps: done, next, upcoming
-		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                     // Reviewer: outcome, claims reviewed, award, party billed
-		r.Post("/cases/{caseId}/fwa", s.fwaAction)                             // fraud/waste/abuse: report, assign reviewer, conclude
-		r.Put("/program/contract-dates", s.setContractDates)                   // admin: contract execution/effective/end dates
-		r.Get("/program/recipients", s.getCorrespondenceRecipients)            // agency contacts + PM copy addresses
-		r.Put("/program/recipients", s.setCorrespondenceRecipients)            // admin
-		r.Get("/program/templates", s.listTemplates)                           // the Templates screen
-		r.Post("/program/templates/preview", s.previewTemplate)                // placeholders filled from a real case
-		r.Put("/program/templates/usage", s.putTemplateUsage)                  // which template is used when (PM/admin)
+		r.Post("/tpa/intake", s.tpaIntake)                                           // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)                                      // status of all my clients' disputes
+		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                          // correct my own filing while it awaits payment
+		r.Get("/admin/tpas", s.adminListTPAs)                                        // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                    // suspend|reactivate
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                    // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)                   // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote) // notes on a review (Reviewer, PM, Attorney)
+		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist)       // printable Eligibility Checklist
+		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                            // the SOP steps: done, next, upcoming
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                           // Reviewer: outcome, claims reviewed, award, party billed
+		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                // the written decision: sections, amounts, claims tables
+		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
+		r.Get("/letter-settings", s.getLetterSettings) // letterhead, Agency addressee, invoice terms, remit-to
+		r.Put("/letter-settings", s.putLetterSettings)
+		r.Get("/template-variables", s.getTemplateVariables) // the office's values and its own {variables}
+		r.Put("/template-variables", s.putTemplateVariables)
+		r.Post("/cases/{caseId}/fwa", s.fwaAction)                  // fraud/waste/abuse: report, assign reviewer, conclude
+		r.Put("/program/contract-dates", s.setContractDates)        // admin: contract execution/effective/end dates
+		r.Get("/program/recipients", s.getCorrespondenceRecipients) // agency contacts + PM copy addresses
+		r.Put("/program/recipients", s.setCorrespondenceRecipients) // admin
+		r.Get("/program/templates", s.listTemplates)                // the Templates screen
+		r.Post("/program/templates/preview", s.previewTemplate)     // placeholders filled from a real case
+		r.Put("/program/templates/usage", s.putTemplateUsage)       // which template is used when (PM/admin)
 		r.Delete("/program/templates/usage/{id}", s.deleteTemplateUsage)
 		r.Get("/program/templates/{key}/history", s.templateHistory)
 		r.Put("/program/templates/{key}", s.putTemplate)       // add or change a template (PM/admin)
@@ -741,20 +752,21 @@ func main() {
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)      // Attorney rules on a flagged AOR
 		// TPA onboarding (tpa_onboarding.go): profile -> payment -> 6-doc package.
 		r.Put("/tpa/clients/{clientId}/profile", s.tpaUpdateClientProfile)
-		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)            // bulk roster (CSV)
-		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment)     // CARD/ACH rail
+		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)        // bulk roster (CSV)
+		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment) // CARD/ACH rail
 		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
 		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)
-		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)        // one slot
-		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)   // one giant PDF
-		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)          // slot verdict grid
-		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                // ZIP of client folders
-		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                 // many disputes, each with its own six documents (ZIP)
-		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
-		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
+		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)           // one slot
+		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)      // one giant PDF
+		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)             // slot verdict grid
+		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                   // ZIP of client folders
+		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                    // many disputes, each with its own six documents (ZIP)
+		r.Get("/tpa/disputes/bulk/sample.zip", s.tpaBulkSample)            // a sample ZIP to copy (tpa_bulk_sample.go)
+		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)               // my bulk dispute batches
+		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)       // per-row report: documents, case number
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
-		r.Get("/tpa/fees", s.orgFees("tpa"))            // what this TPA owes now
-		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout) // one payment for all unpaid fees
+		r.Get("/tpa/fees", s.orgFees("tpa"))                               // what this TPA owes now
+		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout)                    // one payment for all unpaid fees
 		// Saved cards and bank accounts (ACH), the TPA's own and each client's;
 		// a Pay with {"source":"CLIENT"|"TPA"} charges them (tpa_saved_payments.go).
 		r.Post("/tpa/payment-methods/setup", s.tpaPaymentSetup)
@@ -765,8 +777,8 @@ func main() {
 		r.Post("/tpa/tasks", s.tpaTaskCreate)
 		r.Post("/tpa/tasks/{taskId}/done", s.tpaTaskDone)
 		r.Get("/tpa/fees/runs/{runId}", s.tpaFeeRun)
-		r.Get("/tpa/audit", s.orgAuditLog("tpa"))       // the TPA's own audit trail (orgaudit.go)
-		r.Get("/hp/audit", s.orgAuditLog("hp"))         // the plan's own audit trail
+		r.Get("/tpa/audit", s.orgAuditLog("tpa")) // the TPA's own audit trail (orgaudit.go)
+		r.Get("/hp/audit", s.orgAuditLog("hp"))   // the plan's own audit trail
 		// Document requests (document_requests.go): asked on the case, answered in the portal.
 		r.Get("/tpa/document-requests", s.orgDocRequests("tpa"))
 		r.Post("/tpa/document-requests/{reqId}/files", s.orgDocRequestUpload("tpa"))
@@ -789,10 +801,10 @@ func main() {
 		r.Get("/hp/disputes/{caseId}/fee", s.disputeFee("hp"))
 		r.Post("/hp/fees/checkout/{groupId}/confirm", s.checkoutConfirm("hp"))
 		r.Post("/hp/fees/checkout/{groupId}/cancel", s.checkoutCancel("hp"))
-		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
+		r.Get("/tpa/onboarding", s.tpaOnboardingBoard) // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
-		r.Post("/hp/unlink", s.hpUnlink)                                // staff: stop acting for a plan
+		r.Post("/hp/unlink", s.hpUnlink) // staff: stop acting for a plan
 		// The other side of disputes (respondents.go): a plan answers the
 		// disputes filed against it (a TPA files; it does not answer).
 		r.Get("/hp/responding", s.respondingList("plan"))
@@ -801,9 +813,11 @@ func main() {
 		r.Post("/hp/responding/{caseId}/documents", s.respondingUpload("plan"))
 		r.Post("/hp/responding/{caseId}/submit", s.respondingSubmit("plan"))
 		r.Post("/hp/responding/{caseId}/opt-out", s.respondingOptOut)
-		r.Get("/onboarding/npi-reviews", s.npiReviews)                  // client NPIs the registry holds under another name
+		r.Get("/onboarding/verification-reviews", s.verificationReviews) // exclusion-list (HHS-OIG) matches
+		r.Post("/onboarding/verification-reviews/{reviewId}", s.verificationReviewDecide)
+		r.Get("/onboarding/npi-reviews", s.npiReviews) // client NPIs the registry holds under another name
 		r.Post("/onboarding/npi-reviews/{kind}/{id}", s.npiReviewDecide)
-		r.Get("/onboarding/reviews", s.onboardingReviews)               // documents doc-intel left for a person (both rails)
+		r.Get("/onboarding/reviews", s.onboardingReviews) // documents doc-intel left for a person (both rails)
 		r.Get("/onboarding/reviews/{kind}/{docId}/file", s.onboardingReviewFile)
 		r.Post("/onboarding/reviews/{kind}/{docId}", s.onboardingReviewDecide)
 		r.Get("/hp/me", s.hpMe)
@@ -1010,6 +1024,22 @@ func main() {
 			case <-sweepStop:
 				return
 			case <-t.C:
+			}
+		}
+	}()
+
+	// Mail the provider turned away for now (mailqueue.go) goes out again as soon as it may.
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+				if n := s.sweepMailQueue(); n > 0 {
+					slog.Info("mail queue sweep", "sent", n)
+				}
 			}
 		}
 	}()
@@ -1330,8 +1360,33 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	if st := q.Get("status"); st != "" {
 		add("c.status = $%d", st)
 	}
-	if qs := q.Get("q"); qs != "" {
-		add("c.case_number ILIKE '%%' || $%d || '%%'", qs)
+	// Pipeline columns (pipelineCounts): one stage of the board, paged like any other list.
+	if st := q.Get("internal_status"); st != "" {
+		add("c.internal_status = $%d", st)
+	}
+	switch q.Get("unset") { // the board's "Not yet reviewed" column
+	case "internal_status":
+		where += " AND coalesce(c.internal_status,'') = ''"
+	case "status":
+		where += " AND coalesce(c.status,'') = ''"
+	}
+	// Search (the Disputes page's search box): case number, service line, statuses, payer, anything in the case's
+	// details (provider org, requester, health plan, contacts, notes, CPT codes...), and the filing and responding
+	// parties by name, email or NPI. LIKE wildcards in the term are taken literally.
+	if qs := strings.TrimSpace(q.Get("q")); qs != "" {
+		if len(qs) > 100 {
+			qs = qs[:100]
+		}
+		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(qs) + "%"
+		args = append(args, like)
+		n := len(args)
+		where += fmt.Sprintf(` AND (c.case_number ILIKE $%[1]d OR coalesce(c.service_line,'') ILIKE $%[1]d
+			OR coalesce(c.internal_status,'') ILIKE $%[1]d OR coalesce(c.agency_status,'') ILIKE $%[1]d
+			OR coalesce(c.payer_id,'') ILIKE $%[1]d OR coalesce(c.details::text,'') ILIKE $%[1]d
+			OR EXISTS (SELECT 1 FROM public.case_origin o WHERE o.tenant=$1 AND o.case_id=c.id::text
+			           AND (coalesce(o.initiating_party_name,'') ILIKE $%[1]d OR coalesce(o.filed_by_email,'') ILIKE $%[1]d))
+			OR EXISTS (SELECT 1 FROM public.case_respondents rp WHERE rp.tenant=$1 AND rp.case_id=c.id::text
+			           AND (coalesce(rp.name,'') ILIKE $%[1]d OR coalesce(rp.email,'') ILIKE $%[1]d OR coalesce(rp.npi,'') ILIKE $%[1]d)))`, n)
 	}
 	// mine=true: same convention as listTasks (crm.go) -- assigned_to is the
 	// Keycloak sub assignCase/the auto-assign queue already writes, so this

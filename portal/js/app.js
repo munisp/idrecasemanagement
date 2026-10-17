@@ -461,6 +461,9 @@
     if (page === "search") return menu.has("cases");
     // Your own actions: always yours to see (bookmarks of the old "My activity").
     if (page === "my-activity") return true;
+    // The Coder drafts the cost estimate email and sends it once QA approves it:
+    // the step's "Send it" opens the QA gate, which shows the Coder its own drafts.
+    if (page === "qa") return has("CODER");
     // A TPA has no Disputes list, but opens the disputes it filed from its own page.
     if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return outside;
     // Entity 360 rides on the Accounts permission and its own flag.

@@ -107,9 +107,10 @@ func (s *server) sweepPaymentReminders() int {
 		if org != "" {
 			who = org
 		}
-		body := s.renderTemplate(r, x.tenant, x.caseID, tpl.Body)
+		// The billed party first: rendering would otherwise fill "[Plan name] or [Provider Name]" with both names.
+		body := strings.ReplaceAll(tpl.Body, "[Plan name] or [Provider Name]", who)
+		body = s.renderTemplate(r, x.tenant, x.caseID, body)
 		body = strings.ReplaceAll(body, "[due date]", x.due.Format("January 2, 2006"))
-		body = strings.ReplaceAll(body, "[Plan name] or [Provider Name]", who)
 		subject := s.renderTemplate(r, x.tenant, x.caseID, tpl.Subject)
 		if to == nil {
 			to = []string{}

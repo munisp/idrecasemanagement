@@ -16,9 +16,9 @@ package main
 // QPA-substantiation expectation for plan-uploaded OFFER_SUBSTANTIATION.
 
 import (
-	"context"
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
@@ -116,8 +116,8 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.FEIN = strings.TrimSpace(in.FEIN)
-	if !tinValid(in.FEIN) {
-		http.Error(w, `{"error":"FEIN is required (9 digits)"}`, http.StatusBadRequest)
+	if msg := feinProblem(in.FEIN); msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
 		return
 	}
 	in.NAIC = strings.TrimSpace(in.NAIC)
@@ -414,8 +414,8 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"NPI failed the 10-digit Luhn check"}`, http.StatusBadRequest)
 		return
 	}
-	if !tinValid(in.TIN) {
-		http.Error(w, `{"error":"TIN must be exactly 9 digits"}`, http.StatusBadRequest)
+	if msg := tinProblem(in.TIN); msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
 		return
 	}
 	if in.Address == "" {
@@ -444,6 +444,7 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 	case in.NPI == "": // an employer group without one: nothing to decide
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.hp_parties SET npi_status=NULL, npi_registry_name=NULL WHERE tenant=$1 AND id::text=$2`, tenant, partyID)
 	}
+	s.runVerifications(r.Context(), "hp", tenant, partyID, in.NPI, partyName, in.TIN)
 	st := s.recomputeHpPartyStatus(r, tenant, partyID)
 	var npiStatus, registry string
 	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(npi_status,''), coalesce(npi_registry_name,'') FROM public.hp_parties WHERE tenant=$1 AND id::text=$2`,
@@ -482,6 +483,12 @@ func (s *server) recomputeHpPartyStatusCtx(ctx context.Context, tenant, partyID 
 			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 			tenant, partyID, status)
 		return status
+	}
+	if hold := s.exclusionOnboardingStatus(ctx, "hp", tenant, partyID); hold != "" {
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
+			tenant, partyID, hold)
+		return hold
 	}
 	status = "PAYMENT_PENDING"
 	var payments int
@@ -575,8 +582,8 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 			res.Error = "NPI failed Luhn check"
 		case ptype != "EMPLOYER_GROUP" && npi == "":
 			res.Error = "NPI required for DELEGATED_NETWORK/FACILITY"
-		case tin != "" && !tinValid(tin):
-			res.Error = "TIN must be 9 digits"
+		case tin != "" && tinProblem(tin) != "":
+			res.Error = tinProblem(tin)
 		default:
 			var chk npiCheck
 			if npi != "" {
@@ -601,6 +608,7 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 				if chk.Status != "" {
 					s.saveNPICheck(r.Context(), "hp", tenant, id, chk)
 				}
+				s.runVerifications(r.Context(), "hp", tenant, id, npi, name, tin)
 				s.recomputeHpPartyStatus(r, tenant, id)
 				if s.featureEnabled(r, tenant, "entity360") {
 					s.ensureEntityQuiet(r.Context(), tenant, "hp_parties", id, ptype, name, npi, tin, "", "")
@@ -1037,6 +1045,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
+	checks := s.verificationsSummary(r.Context(), "hp", tenant)
 	parties := []map[string]any{}
 	for rows.Next() {
 		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote string
@@ -1055,7 +1064,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"party_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": tin != "" && (ptype == "EMPLOYER_GROUP" || npi != ""),
-			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote,
+			"npi":              npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})
@@ -1353,7 +1362,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "case_number": caseNumber, "status": st,
 		"payment_required": st == "AWAITING_PAYMENT",
-		"party": partyName, "filed_by": org.Name,
+		"party":            partyName, "filed_by": org.Name,
 		"note": "payment link and case instructions go to the health plan contact — you pay and upload on behalf of " + partyName,
 	})
 }

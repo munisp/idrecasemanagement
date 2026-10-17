@@ -2,15 +2,18 @@
 // retention/legal-hold, and analysis-status tracking.
 //
 // Flow (upload):  multipart -> vault /docs/seal (AES-256-GCM, tenant data key)
-//                 -> MinIO ciphertext object -> metadata row -> Kafka event
-//                 (doc-intel service consumes and analyzes).
+//
+//	-> MinIO ciphertext object -> metadata row -> Kafka event
+//	(doc-intel service consumes and analyzes).
+//
 // Flow (download): authorize -> sealed-document guard -> MinIO fetch
-//                 -> vault /docs/open -> plaintext stream.
+//
+//	-> vault /docs/open -> plaintext stream.
 package main
 
 import (
-	"context"
 	"bytes"
+	"context"
 	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -566,5 +569,5 @@ func newUUID() string { // uuid v4 without an extra dep
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-func b64enc(b []byte) string        { return base64.StdEncoding.EncodeToString(b) }
+func b64enc(b []byte) string          { return base64.StdEncoding.EncodeToString(b) }
 func b64dec(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }

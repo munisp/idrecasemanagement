@@ -110,9 +110,13 @@ type ProgramConfig struct {
 		AgencyRecipients []string       `json:"agency_recipients"`
 		Templates        []CorrTemplate `json:"templates"`
 	} `json:"correspondence"`
-	Billing        BillingConfig `json:"billing"`        // service-fee invoicing engine (billing.go)
-	Reconciliation ReconConfig   `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
-	Bank           BankConfig    `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
+	// The letters lettergen builds ({key, subject, filename, folder}) and the office's standard letterhead
+	// wording -- the case page's Letters list and the Letterhead & invoice card read them.
+	LetterTemplates []map[string]any `json:"letter_templates"`
+	Letters         map[string]any   `json:"letters"`
+	Billing         BillingConfig    `json:"billing"`        // service-fee invoicing engine (billing.go)
+	Reconciliation  ReconConfig      `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
+	Bank            BankConfig       `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.
@@ -258,7 +262,11 @@ func (s *server) programDates(r *http.Request, tenant, caseID string) map[string
 
 // projectProgramClocks runs the generic date-driven clock engine over a case's
 // program_dates. Calendar-day and business-day rules both supported.
-func projectProgramClocks(rules []ClockRule, dates map[string]string, today time.Time) []ClockView {
+func projectProgramClocks(rules []ClockRule, dates map[string]string, today time.Time, ext ...map[string]int) []ClockView {
+	extended := map[string]int{} // clock → days the PM extended it (deadline_extensions.go)
+	if len(ext) > 0 && ext[0] != nil {
+		extended = ext[0]
+	}
 	out := []ClockView{}
 	for _, rl := range rules {
 		raw, ok := dates[rl.Basis]
@@ -271,26 +279,28 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 		}
 		var due time.Time
 		var remaining int
+		extra := extended[rl.Name]
 		if rl.DayType == "business" {
-			due = addBusinessDays(basis, rl.Days)
+			due = addBusinessDays(basis, rl.Days+extra)
 			remaining = businessDaysBetween(today, due)
 		} else {
-			due = basis.AddDate(0, 0, rl.Days)
+			due = basis.AddDate(0, 0, rl.Days+extra)
 			remaining = int(due.Sub(today).Hours() / 24)
 		}
 		cv := ClockView{
 			Clock: rl.Name, Label: rl.Label, Basis: rl.DayType,
 			TotalDays: rl.Days, Remaining: remaining,
-			Due: due.Format("2006-01-02"), State: clockState(remaining, rl.Days),
+			Due: due.Format("2006-01-02"), State: clockState(remaining, rl.Days+extra),
+			ExtendedDays: extra, Extendable: !nonExtendableClocks[rl.Name],
 			Cite:      rl.Cite,
 			BasisNote: fmt.Sprintf("from %s %s", rl.Basis, raw[:minI(10, len(raw))]),
 		}
 		// Past the target but inside the contract's hard limit is "late",
 		// not yet a breach.
 		if rl.MaxDays > rl.Days {
-			hard := basis.AddDate(0, 0, rl.MaxDays)
+			hard := basis.AddDate(0, 0, rl.MaxDays+extra)
 			if rl.DayType == "business" {
-				hard = addBusinessDays(basis, rl.MaxDays)
+				hard = addBusinessDays(basis, rl.MaxDays+extra)
 			}
 			cv.HardDue = hard.Format("2006-01-02")
 			if remaining < 0 && !today.After(hard) {
@@ -306,8 +316,14 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 // has a program_rules row; otherwise the federal NSA engine in engines.go runs).
 func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenant, caseID string, cfg *ProgramConfig) bool {
 	dates := s.programDates(r, tenant, caseID)
-	// received_at falls back to opened_at (federal field) when unset
-	if _, ok := dates["received_at"]; !ok {
+	// "Date Received" is the day the fee was paid: a case still awaiting payment has not been received, so no
+	// clock that runs from it has started (and none can breach) until the fee is paid.
+	var status string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
+	if status == "AWAITING_PAYMENT" {
+		delete(dates, "received_at")
+	} else if _, ok := dates["received_at"]; !ok {
+		// received_at falls back to opened_at (federal field) when unset
 		var opened time.Time
 		if err := s.db.QueryRow(r.Context(),
 			fmt.Sprintf(`SELECT opened_at FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
@@ -323,7 +339,12 @@ func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenan
 	// off by one). engines.go's federal-default clock path already
 	// truncates the same way (casesClocks/caseClocks) -- this path never
 	// matched it.
-	writeJSON(w, http.StatusOK, projectProgramClocks(cfg.Clocks, dates, time.Now().Truncate(24*time.Hour)))
+	ext, extList := s.clockExtensions(r.Context(), tenant, caseID)
+	views := projectProgramClocks(cfg.Clocks, dates, time.Now().Truncate(24*time.Hour), ext)
+	for i := range views {
+		views[i].Extensions = extList[views[i].Clock]
+	}
+	writeJSON(w, http.StatusOK, views)
 	return true
 }
 
@@ -346,6 +367,16 @@ func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
 	if _, err := time.Parse("2006-01-02", in.Value); err != nil {
 		http.Error(w, `{"error":"value must be YYYY-MM-DD"}`, http.StatusBadRequest)
 		return
+	}
+	// The workflow records Date Received when it starts; for a payment-gated intake that is too early -- the
+	// date is the day the fee is paid, and activatePaidIntake records it then.
+	if in.Key == "received_at" {
+		var status string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), chi.URLParam(r, "caseId")).Scan(&status)
+		if status == "AWAITING_PAYMENT" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deferred", "reason": "Date Received is recorded when the initial fee is paid"})
+			return
+		}
 	}
 	// jsonb_build_object is polymorphic ("any"), so pgx's prepared-statement
 	// protocol can't infer $2/$3's type on its own (confirmed live: SQLSTATE
@@ -483,6 +514,7 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	var override struct {
 		Override bool   `json:"override"`
 		Reason   string `json:"override_reason"`
+		Notes    string `json:"notes"` // the Reviewer's working notes, saved with the review (eligibility_notes.go)
 	}
 	// Decode twice: the decision input, then the override envelope (separate
 	// type so eligibilityInput stays exactly the rule inputs).
@@ -492,6 +524,11 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.Unmarshal(raw, &override)
+	notes, notesOK := cleanEligibilityNote(override.Notes)
+	if !notesOK {
+		http.Error(w, `{"error":"notes are limited to 4000 characters"}`, http.StatusBadRequest)
+		return
+	}
 	// A human-submitted date that does not parse must be rejected, not
 	// ignored: evalEligibility skips a rule whose date is unusable, which
 	// would turn a typo into a silent pass on the filing window.
@@ -565,6 +602,9 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	// logAudit's "by" above, which is an intentionally stable-identity
 	// audit key).
 	reviewID := s.persistEligibilityOutcome(r, tenant, id, displayName(p), result, reason, evidence, opts)
+	if notes != "" && reviewID != "" {
+		_, _ = s.insertEligibilityNote(r.Context(), tenant, id, reviewID, notes, p)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence,
 		"rule_version": opts.ruleVersion, "borderline": opts.borderline, "override": opts.override,
@@ -585,6 +625,15 @@ func (s *server) eligibilityHistory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	notes := s.eligibilityNotesByReview(r, tenant, id)
+	for _, rv := range rows {
+		rid, _ := rv["id"].(string)
+		if n := notes[rid]; n != nil {
+			rv["notes"] = n
+		} else {
+			rv["notes"] = []map[string]any{}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reviews": rows})
 }

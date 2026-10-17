@@ -258,6 +258,7 @@ const Api = (() => {
     cases: {
       // Keyset-paginated: {cases, next_cursor, total}. Legacy bare-array
       // responses are normalized so older backends still work.
+      pipelineCounts: (by) => req("GET", `${t()}/cases/pipeline/counts?by=${encodeURIComponent(by || "internal_status")}`),
       list: (params = {}) => {
         const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
         return req("GET", `${t()}/cases${qs ? "?" + qs : ""}`)
@@ -352,7 +353,9 @@ const Api = (() => {
       search: (q) => req("GET", `${t()}/search?q=${encodeURIComponent(q)}`),
     },
     cm: {
-      assign: (caseId, role, assignee) => req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee }),
+      assign: (caseId, role, assignee, reason = "", action = "") => req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee, reason, action }),
+      assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
+      assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
       relate: (p) => req("POST", `${t()}/cases/relate`, p),
       relationships: (caseId) => req("GET", `${t()}/cases/${caseId}/relationships`),
@@ -365,6 +368,7 @@ const Api = (() => {
       views: () => req("GET", `${t()}/views`),
       saveView: (p) => req("POST", `${t()}/views`, p),
       clocks: (id) => req("GET", `${t()}/cases/${id}/clocks`),
+      extendClock: (id, clock, days, reason) => req("POST", `${t()}/cases/${id}/clocks/${encodeURIComponent(clock)}/extend`, { days, reason }),
       allClocks: () => req("GET", `${t()}/cases/clocks`),
       bulk: (p) => req("POST", `${t()}/cases/bulk`, p),
       grabNext: () => req("POST", `${t()}/queues/grab-next`),
@@ -412,8 +416,10 @@ const Api = (() => {
       copilotUnshareThread: (caseId, userId) => req("DELETE", `${t()}/cases/${caseId}/copilot/chat/shares/${userId}`),
       briefing: () => req("GET", `${t()}/assistant/briefing`),
       eligibilityHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/eligibility`),
+      eligibilityNote: (caseId, reviewId, body) => req("POST", `${t()}/cases/${caseId}/eligibility/${reviewId}/notes`, { body }),
       workflow: (caseId) => req("GET", `${t()}/cases/${caseId}/workflow`),
       eligibilityChecklist: (caseId) => download(`${t()}/cases/${caseId}/eligibility/checklist`, "Eligibility Checklist.html"),
+      tpaBulkSample: (layout) => download(`${t()}/tpa/disputes/bulk/sample.zip?layout=${layout === "merged" ? "merged" : "separate"}`, `sample-disputes-${layout === "merged" ? "merged" : "separate"}.zip`),
       setReviewNote: (caseId, field, text) => req("PUT", `${t()}/cases/${caseId}/review-notes`, { field, text }),
       setDisputeSummary: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/dispute-summary`, body),
       confirmAor: (caseId, valid, reason) => req("POST", `${t()}/cases/${caseId}/aor-confirmation`, { valid, reason }),
@@ -570,6 +576,8 @@ const Api = (() => {
       onboardingReviewFile: (kind, docId) => blobURL(`${t()}/onboarding/reviews/${kind}/${docId}/file`),
       onboardingReviewDecide: (kind, docId, decision, note) => req("POST", `${t()}/onboarding/reviews/${kind}/${docId}`, { decision, note }),
       npiReviews: () => req("GET", `${t()}/onboarding/npi-reviews`),
+      verificationReviews: () => req("GET", `${t()}/onboarding/verification-reviews`),
+      verificationReviewDecide: (id, decision, note) => req("POST", `${t()}/onboarding/verification-reviews/${id}`, { decision, note }),
       npiReviewDecide: (kind, id, decision, note) => req("POST", `${t()}/onboarding/npi-reviews/${kind}/${id}`, { decision, note }),
       hpMe: () => req("GET", `${t()}/hp/me`),
       hpOnboarding: () => req("GET", `${t()}/hp/onboarding`),
@@ -671,6 +679,14 @@ const Api = (() => {
     },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),
+    },
+    letters: {
+      report: (caseId) => req("GET", `${t()}/cases/${caseId}/decision-report`),
+      saveReport: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/decision-report`, body),
+      settings: () => req("GET", `${t()}/letter-settings`),
+      saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
+      variables: () => req("GET", `${t()}/template-variables`),
+      saveVariables: (body) => req("PUT", `${t()}/template-variables`, body),
     },
     geo: {
       mapUrl: () => `${config.caseApiBase}/geo/map`,

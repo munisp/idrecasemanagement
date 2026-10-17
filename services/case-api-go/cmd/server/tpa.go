@@ -477,7 +477,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		ClientID            string `json:"client_id"`
-		PackageID           string `json:"package_id"` // optional until onboarding completes for the client
+		PackageID           string `json:"package_id"`   // optional until onboarding completes for the client
 		ContactName         string `json:"contact_name"` // client's contact for the dispute
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		Notes               string `json:"notes"`
@@ -625,13 +625,13 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 	s.attachFeeStates(r.Context(), tenant, rows)
 	// Roll up per initiating party.
 	type rollup struct {
-		ClientID   string `json:"client_id"`
-		Party      string `json:"initiating_party"`
-		PartyType  string `json:"party_type"`
-		Cases      int    `json:"cases"`
-		Open       int    `json:"open"`
-		Invoiced   int64  `json:"invoiced_cents"`
-		Paid       int64  `json:"paid_cents"`
+		ClientID  string `json:"client_id"`
+		Party     string `json:"initiating_party"`
+		PartyType string `json:"party_type"`
+		Cases     int    `json:"cases"`
+		Open      int    `json:"open"`
+		Invoiced  int64  `json:"invoiced_cents"`
+		Paid      int64  `json:"paid_cents"`
 	}
 	byClient := map[string]*rollup{}
 	order := []string{}
