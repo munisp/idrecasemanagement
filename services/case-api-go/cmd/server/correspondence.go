@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -405,8 +406,9 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		s.notify(r, tenant, "role:"+tpl.QARole, "QA_REVIEW",
 			fmt.Sprintf("%s draft on case %s awaiting %s QA approval", tpl.Key, caseID, tpl.QARole), "#/qa")
 	} else {
-		// No QA gate on this template — deliver immediately via SMTP.
-		if err := s.sendMail(in.To, in.CC, subject, body); err != nil {
+		// No QA gate on this template — deliver immediately via SMTP. Mail the provider queued for later
+		// (mailqueue.go) is sent: it goes out automatically, so the letter counts as sent.
+		if err := s.sendMail(in.To, in.CC, subject, body); err != nil && !errors.Is(err, errMailQueued) {
 			s.logCorrespondence(r, tenant, caseID, "OUT", in.Template, subject, body, in.To, in.CC, p.Subject, err.Error())
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
@@ -575,7 +577,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	// a decision, which this endpoint doesn't support.
 	// Retry only applies to mail rows — channel 'note' rows (copilot
 	// determination rationales) are terminal at APPROVED, nothing is sent.
-	isRetry := status == "APPROVED" && in.Decision == "APPROVE" && channel != "note"
+	isRetry := status == "APPROVED" && in.Decision == "APPROVE" && channel != "note" && channel != "letter"
 	if err != nil || (status != "PENDING" && !isRetry) {
 		http.Error(w, `{"error":"not pending"}`, http.StatusConflict)
 		return
@@ -727,6 +729,22 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	deliveryError := ""
+	// channel 'letter' (a generated PDF letter: decision report, cover letter, invoice, stage letters): approval
+	// clears the document itself. Nothing is emailed here -- the letter goes out attached to the email that
+	// carries it (the Final Order package, the acceptance email...), so there is no recipient to ask for.
+	if in.Decision == "APPROVE" && channel == "letter" {
+		s.logActivity(r.Context(), tenant, caseID, "LETTER_APPROVED",
+			fmt.Sprintf("%s passed QA (%s) — ready to go out with its email", subject, displayName(p)))
+		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+			"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "channel": channel,
+		})
+		if requestedBySub != "" {
+			s.notify(r, tenant, requestedBySub, "DRAFT_APPROVED",
+				fmt.Sprintf("The letter %q passed QA.", subject), "#/cases/"+caseID)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": newStatus, "letter": true})
+		return
+	}
 	if in.Decision == "APPROVE" && channel == "note" {
 		// channel 'note' (copilot determination rationale): approval files the
 		// rationale on the case timeline — nothing is emailed, ever.
@@ -1014,7 +1032,8 @@ func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, case
 	} else {
 		sendErr = s.sendMail(to, cc, subject, body)
 	}
-	if err := sendErr; err != nil {
+	queued := errors.Is(sendErr, errMailQueued)
+	if err := sendErr; err != nil && !queued {
 		deliveryError = err.Error()
 		if !s.settleHeldMail(r, tenant, qid, "FAILED", err.Error(), body, to, cc) {
 			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject, err.Error())
@@ -1039,8 +1058,12 @@ func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, case
 		if len(to) > 0 {
 			s.logCorrespondenceInquiry(r, tenant, caseID, to[0], fmt.Sprintf("%s: %s", artifact, subject), p.Subject)
 		}
+		how := "sent"
+		if queued {
+			how = "accepted for sending — the mail provider's limit was reached, so it goes out automatically shortly"
+		}
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
-			fmt.Sprintf("QA-approved by %s: %s sent to %d recipient(s)", p.Subject, subject, len(to)))
+			fmt.Sprintf("QA-approved by %s: %s %s to %d recipient(s)", p.Subject, subject, how, len(to)))
 		if requestedBySub != "" {
 			s.notify(r, tenant, requestedBySub, "DRAFT_SENT",
 				fmt.Sprintf("Your correspondence draft %q was approved and sent to %d recipient(s).", subject, len(to)), "#/cases/"+caseID)

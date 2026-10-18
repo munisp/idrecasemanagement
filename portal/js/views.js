@@ -456,9 +456,11 @@ const Views = (() => {
       fees.unpaid ? "tone-pay" : ""));
     if (tpa) {
       const cs = dash.cases || [];
-      const open = cs.filter((c) => !CLOSED_ST.includes(c.status) && c.status !== "AWAITING_PAYMENT").length;
+      // A programmed (FL) case moves on its Agency status; the basic status stays at intake.
+      const isClosed = (c) => CLOSED_ST.includes(c.status) || c.agency_status === "Closed";
+      const open = cs.filter((c) => !isClosed(c) && c.status !== "AWAITING_PAYMENT").length;
       const waitPay = cs.filter((c) => c.status === "AWAITING_PAYMENT").length;
-      const closed = cs.filter((c) => CLOSED_ST.includes(c.status)).length;
+      const closed = cs.filter(isClosed).length;
       cards.unshift(homeCard("Disputes", String(cs.length), [`${open} open`, waitPay ? `${waitPay} awaiting payment` : "", closed ? `${closed} closed` : ""], g("disputes")));
       const clients = onb.clients || [];
       const ready = clients.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length;
@@ -2860,6 +2862,7 @@ const Views = (() => {
       const to = (d.to_recipients || []).join(", ");
       const cc = (d.cc_recipients || []).join(", ");
       const isNote = d.channel === "note";
+      const isLetter = d.channel === "letter"; // a generated PDF: approved as a document, emailed later with its email
       const isCopilot = (d.artifact || "").startsWith("copilot_");
       box.dataset.channel = d.channel || "email";
       // Copilot drafts are accept/EDIT/reject: the reviewer rewrites in place
@@ -2874,18 +2877,20 @@ const Views = (() => {
       // reached this screen, and approving it used to fail at the raw SMTP
       // layer ("503 need RCPT command") with no way to actually supply an
       // address and retry, despite the error text promising one.
-      const recipientsHtml = isNote ? "" : `
+      const recipientsHtml = isNote || isLetter ? "" : `
         <div class="form" style="margin:8px 0">
           <label>To <input id="qa-to" value="${esc(to)}" placeholder="recipient emails, comma-separated" /></label>
           <label>Cc <input id="qa-cc" value="${esc(cc)}" placeholder="cc emails, comma-separated" /></label>
         </div>`;
       box.innerHTML = `<div class="card"><h3>${esc(d.subject)}</h3>
-        <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval" : `channel ${esc(d.channel)}`}
+        <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval"
+          : isLetter ? "generated letter · approving clears it to go out with the email that carries it (nothing is emailed now)"
+          : `channel ${esc(d.channel)}`}
           ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
         ${recipientsHtml}
         ${bodyHtml}
         <div class="actions">
-          <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
+          <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : isLetter ? "Approve the letter" : "Approve & send"}</button>
           <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Reject</button></div></div>`;
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
@@ -2909,10 +2914,11 @@ const Views = (() => {
   async function qaDecide(qaId, decision, el) {
     let note = "";
     const isNote = $("#qa-detail")?.dataset.channel === "note";
+    const isLetter = $("#qa-detail")?.dataset.channel === "letter";
     const edited = $("#qa-edit") ? $("#qa-edit").value : "";
     const splitEmails = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
-    const to = isNote ? undefined : splitEmails($("#qa-to")?.value);
-    const cc = isNote ? undefined : splitEmails($("#qa-cc")?.value);
+    const to = isNote || isLetter ? undefined : splitEmails($("#qa-to")?.value);
+    const cc = isNote || isLetter ? undefined : splitEmails($("#qa-cc")?.value);
     if (decision === "REJECT") {
       const v = await UI.modal({ title: "Reject draft", danger: true, submitLabel: "Reject",
         fields: [{ name: "note", label: "Rejection note", type: "textarea", required: true,
@@ -2921,6 +2927,8 @@ const Views = (() => {
       note = v.note;
     } else if (isNote) {
       if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
+    } else if (isLetter) {
+      if (!(await UI.confirm("Approve this letter?", "The letter is cleared to go out with the email that carries it. Nothing is emailed now.", "Approve the letter"))) return;
     } else if (!to.length && !cc.length) {
       UI.toast("Add at least one recipient before approving — this draft has none on file.", { kind: "warn" });
       return;
@@ -2928,7 +2936,9 @@ const Views = (() => {
     await UI.run(el, async () => {
       try {
         const r = await Api.program.qaDecision(qaId, decision, note, edited, to, cc);
-        if (r.next && r.status === "APPROVED" && !r.first_check) {
+        if (r.letter) {
+          UI.toast("Letter approved — ready to go out with its email", { duration: 6000 });
+        } else if (r.next && r.status === "APPROVED" && !r.first_check) {
           UI.toast(`Approved — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
         } else if (r.first_check) {
           UI.toast(`Your check is recorded — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
@@ -4566,7 +4576,7 @@ const Views = (() => {
       if (!q.length) { box.innerHTML = ""; return; }
       const cards = await Promise.all(q.map(async (i) => {
         const d = await Api.program.qaGet(i.id);
-        const isNote = d.channel === "note";
+        const isNote = d.channel === "note", isLetter = d.channel === "letter";
         const isCopilot = (d.artifact || "").startsWith("copilot_");
         const bodyHtml = isCopilot
           ? `<textarea id="asst-qa-edit-${d.id}" rows="10" style="width:100%">${esc(d.body)}</textarea>
@@ -4574,11 +4584,11 @@ const Views = (() => {
           : `<pre class="qa-body">${esc(d.body)}</pre>`;
         return `<div class="card asst-qa-card" data-qa="${d.id}" data-channel="${esc(d.channel || "email")}">
           <h3>⛨ Gate: ${esc(d.subject)}</h3>
-          <p class="muted">${esc(d.drafted_by)} · ${isNote ? "determination rationale · files to timeline" : `to: ${esc((d.to_recipients || []).join(", "))}`}
+          <p class="muted">${esc(d.drafted_by)} · ${isNote ? "determination rationale · files to timeline" : isLetter ? "generated letter · goes out with its email" : `to: ${esc((d.to_recipients || []).join(", "))}`}
             ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
           ${bodyHtml}
           <div class="actions">
-            <button onclick="Views.asstQaDecide('${caseId}','${d.id}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
+            <button onclick="Views.asstQaDecide('${caseId}','${d.id}','APPROVE',this)">${isNote ? "Approve & file" : isLetter ? "Approve the letter" : "Approve & send"}</button>
             <button class="danger" onclick="Views.asstQaDecide('${caseId}','${d.id}','REJECT',this)">Reject</button></div></div>`;
       }));
       box.innerHTML = `<h3 style="margin:10px 0 6px">${q.length} item(s) at the QA gate for this case</h3>` + cards.join("");
@@ -4587,7 +4597,7 @@ const Views = (() => {
 
   async function asstQaDecide(caseId, qaId, decision, btn) {
     const card = document.querySelector(`.asst-qa-card[data-qa="${qaId}"]`);
-    const isNote = card?.dataset.channel === "note";
+    const isNote = card?.dataset.channel === "note", isLetter = card?.dataset.channel === "letter";
     const edited = document.getElementById(`asst-qa-edit-${qaId}`)?.value || "";
     let note = "";
     if (decision === "REJECT") {
@@ -4598,6 +4608,8 @@ const Views = (() => {
       note = v.note;
     } else if (isNote) {
       if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
+    } else if (isLetter) {
+      if (!(await UI.confirm("Approve this letter?", "The letter is cleared to go out with the email that carries it. Nothing is emailed now.", "Approve the letter"))) return;
     } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
     await UI.run(btn, async () => {
       try {
@@ -4606,7 +4618,8 @@ const Views = (() => {
         asstAppend(caseId, "assistant",
           decision === "APPROVE"
             ? (r.email_delivery_error ? `⚠ Approved but email failed: ${r.email_delivery_error}`
-              : isNote ? "Rationale approved and filed to the case timeline." : "Draft approved and sent — logged to correspondence.")
+              : isNote ? "Rationale approved and filed to the case timeline." : isLetter ? "Letter approved — ready to go out with its email."
+              : "Draft approved and sent — logged to correspondence.")
             : "Draft rejected and returned to the drafter.", "");
         const box = document.getElementById("asst-qa");
         if (box && !box.querySelector(".asst-qa-card")) box.innerHTML = "";
@@ -7351,7 +7364,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
         ${g.rows.map((x) => `<tr>
           <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
-          <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${x.fee_cents ? usdC(x.fee_cents) : "—"}</td>
+          <td>${x.agency_status && x.status !== "AWAITING_PAYMENT" ? `<span class="badge" title="The dispute's status with the Agency">${esc(x.agency_status)}</span>` : badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${x.fee_cents ? usdC(x.fee_cents) : "—"}</td>
           <td>${feePill(x)}</td><td>${esc(x.filed)}</td>
           <td class="row-actions">${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
             ${x.status === "AWAITING_PAYMENT" && canPay ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}

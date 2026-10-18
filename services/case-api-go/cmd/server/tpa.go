@@ -605,7 +605,7 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT o.case_id, o.initiating_party_name, o.initiating_party_type, o.filed_by_email,
 		       o.created_at::date::text AS filed,
-		       c.case_number, c.status, c.disputed_amount_cents,
+		       c.case_number, c.status, coalesce(c.agency_status,'') AS agency_status, c.disputed_amount_cents,
 		       cl.party_name AS client_name, cl.id AS client_id,
 		       coalesce(c.details->>'initiating_party_contact','') AS contact_name,
 		       coalesce(c.details->>'filing_notes','') AS notes,
