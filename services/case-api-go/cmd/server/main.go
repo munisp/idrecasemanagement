@@ -1320,11 +1320,13 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	// sort switches to offset mode (keyset over arbitrary columns isn't stable).
 	// sort=sla is the deadline-driven order (Lever 4): closest to statutory
 	// breach first = oldest opened_at ASC.
-	sortCol, sortDir := "opened_at", "DESC"
+	sortCol, sortDir := "c.opened_at", "DESC"
 	if s := q.Get("sort"); s != "" {
-		whitelist := map[string]string{"opened_at": "opened_at", "case_number": "case_number",
-			"status": "status", "qpa_cents": "qpa_cents", "service_line": "service_line",
-			"disputed_amount_cents": "disputed_amount_cents", "sla": "opened_at"}
+		// Status sorts by what the list shows: a programmed case's Internal
+		// Status (its basic status stays PENDING_INTAKE), else the status.
+		whitelist := map[string]string{"opened_at": "c.opened_at", "case_number": "c.case_number",
+			"status": "coalesce(c.internal_status, c.status)", "qpa_cents": "c.qpa_cents", "service_line": "c.service_line",
+			"disputed_amount_cents": "c.disputed_amount_cents", "sla": "c.opened_at"}
 		col, dir := s, "ASC"
 		if strings.HasPrefix(s, "-") {
 			col, dir = strings.TrimPrefix(s, "-"), "DESC"
@@ -1336,7 +1338,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 			sortCol, sortDir = c, dir
 		}
 	}
-	offsetMode := sortCol != "opened_at" || sortDir != "DESC"
+	offsetMode := sortCol != "c.opened_at" || sortDir != "DESC"
 	offset := 0
 	if offsetMode {
 		if n, err := strconv.Atoi(q.Get("offset")); err == nil && n >= 0 {
@@ -1418,7 +1420,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		                    coalesce(c.service_line,''), coalesce(c.qpa_cents,0), coalesce(c.disputed_amount_cents,0), c.opened_at,
 		                    c.batch_id::text, coalesce(c.payer_id,''), %s AS triage_lane, %s AS sla_days_remaining
 		             %s WHERE true%s
-		             ORDER BY c.%s %s, c.id DESC LIMIT %d`, triageLaneSQL, slaDaysSQL, fromClause, where, sortCol, sortDir, limit+1)
+		             ORDER BY %s %s, c.id DESC LIMIT %d`, triageLaneSQL, slaDaysSQL, fromClause, where, sortCol, sortDir, limit+1)
 	if offsetMode {
 		query += fmt.Sprintf(" OFFSET %d", offset)
 	}

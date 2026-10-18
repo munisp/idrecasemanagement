@@ -45,6 +45,10 @@ const Views = (() => {
   // so every FL case always counted as open. agency_status='Closed' is
   // the one consistent marker the backend actually sets across every
   // terminal internal_status (confirmed against live data).
+  // The status a case row shows: a programmed case's Internal Status (with the
+  // agency status on hover), else its status.
+  const caseBadge = (c) => c.internal_status
+    ? `<span title="${esc(c.agency_status ? "Agency: " + c.agency_status : "")}">${badge(c.internal_status)}</span>` : badge(c.status);
   const caseClosed = (prog, c) => (prog && prog.config) ? c.agency_status === "Closed" : String(c.status).startsWith("CLOSED");
 
   // Client-side CSV export: reports were read-only on screen with no way to
@@ -627,7 +631,7 @@ const Views = (() => {
             return `<div class="att-item" onclick="location.hash='#/cases/${c.id}'">
               <span class="att-id">${esc(c.case_number)}</span>
               <span class="att-title">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()}</span>
-              ${badge(c.status)} ${clockChip(cl)}</div>`;
+              ${caseBadge(c)} ${clockChip(cl)}</div>`;
           }).join("") + `</div>`
         : `<p class="muted">Nothing needs you right now. New assignments and deadline risk appear here.</p>`;
       const { bodyHtml, pagerHtml } = initClientPager("od", open, (list) => caseTable(list, clocks, "", prog));
@@ -746,14 +750,15 @@ const Views = (() => {
     const s = q.toString();
     location.hash = "#/cases" + (s ? "?" + s : "");
   }
+  let caseListPoll = null;
   const caseTable = (rows, clocks = {}, sort = "", prog = null, groupBatch = false) => {
     if (!rows.length) return `<p class="muted">No disputes.</p>`;
     const row = (c) => `<tr class="click" data-case="${c.id}">
         <td class="selcol"><input type="checkbox" class="sel-one" data-id="${c.id}" ${selection.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.case_number)}"></td>
-        <td class="mono">${esc(c.case_number)}</td><td>${badge(c.status)}</td><td>${esc(c.service_line)}</td>
+        <td class="mono">${esc(c.case_number)}</td><td>${caseBadge(c)}</td><td>${esc(c.service_line)}</td>
         <td class="num">$${((c[amtField(prog)] || 0) / 100).toLocaleString()}</td>
         <td>${laneChip(c.triage_lane)}</td>
-        <td>${slaBadge(c.sla_days_remaining)}</td>
+        <td>${caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining)}</td>
         <td>${clocks[c.id] && clocks[c.id].length ? clockChip(nearestClock(clocks[c.id])) : '<span class="muted">—</span>'}</td>
         <td class="muted">${fmtDate(c.opened_at)}</td>
         <td><button class="mini peek" data-id="${c.id}" title="Peek without losing your place">▸</button></td></tr>`;
@@ -886,7 +891,7 @@ const Views = (() => {
       p.querySelector(".peek-b").innerHTML = `
         <div class="mono muted">${esc(c.case_number)}</div>
         <h3>${esc(c.service_line)} · $${((c[amtField(prog)] || 0) / 100).toLocaleString()}</h3>
-        <p>${badge(c.status)}</p>
+        <p>${caseBadge(c)}</p>
         ${clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}">${clockChip(cl)}</span>
           <span class="muted" style="font-size:11px">${esc(cl.label)} · ${esc(cl.cite)}</span></div>`).join("")}
         <p style="margin-top:14px"><button class="mini" onclick="location.hash='#/cases/${c.id}'">Open workspace →</button></p>`;
@@ -921,6 +926,29 @@ const Views = (() => {
       document.body.classList.toggle("density-compact", density === "compact");
       afterRender(() => {
         bindGrid(loaded);
+        // Statuses move while the list is open (someone finishes a step, a
+        // payment lands): every 30 seconds the rows on screen get their
+        // current status and SLA again. Only those cells change; the scroll
+        // position, the selection and the page stay as they are.
+        clearInterval(caseListPoll);
+        caseListPoll = setInterval(async () => {
+          if (!location.hash.startsWith("#/cases") || location.hash.startsWith("#/cases/")) { clearInterval(caseListPoll); return; }
+          if (document.hidden) return;
+          const ids = [...document.querySelectorAll("#view tr[data-case]")].map((tr) => tr.dataset.case);
+          if (!ids.length) return;
+          try {
+            const fresh = await Api.cases.list({ ...reqParams, limit: Math.max(ids.length, reqParams.limit || 0) });
+            for (const c of fresh.cases || []) {
+              const tr = document.querySelector(`#view tr[data-case="${c.id}"]`);
+              if (!tr) continue;
+              const cells = tr.children;
+              if (cells[2]) cells[2].innerHTML = caseBadge(c);
+              if (cells[6]) cells[6].innerHTML = caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining);
+              const old = loaded.find((x) => x.id === c.id);
+              if (old) Object.assign(old, c);
+            }
+          } catch { /* the next round tries again */ }
+        }, 30000);
         // Search: case number, parties (provider, health plan, TPA client) by name, email or NPI, statuses and the
         // case's details. Kept in the hash like the lane, so a search can be shared and survives a reload.
         const box = $("#case-search");
