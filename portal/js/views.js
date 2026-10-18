@@ -279,7 +279,8 @@ const Views = (() => {
     const next = steps.find((x) => x.state === "next");
     window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin };
     CaseLayout.nextStep(steps, next, next && next.can_act ? WF_BUTTON(next.action) : "");
-    box.innerHTML = `<details class="wf-all"${box.classList.contains("wf-open") ? " open" : ""}><summary><b>All steps</b>
+    const wasOpen = box.querySelector("details.wf-all")?.open;
+    box.innerHTML = `<details class="wf-all"${wasOpen || box.classList.contains("wf-open") ? " open" : ""}><summary><b>All steps</b>
       <span class="muted">— ${steps.filter((x) => x.state === "done" || x.state === "skipped").length} of ${steps.length} done. Only the next step can be acted on, by its owner (or an admin).</span></summary>
       <ol class="wf">${steps.map((x) => `<li class="wf-${x.state}">
         <span class="wf-mark" aria-hidden="true">${WF_MARK[x.state] || ""}</span>
@@ -289,6 +290,51 @@ const Views = (() => {
           : `<span class="muted">waiting on the ${esc(x.owner)}</span>`) : ""}
         ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol></details>`;
     wfApplyLocks();
+  }
+  // Keeping the steps current without a reload. After anything is saved on the
+  // open case (api.js fires idre:changed) the step list and the next-step
+  // banner are read again -- and again a few times, since a step can move on a
+  // moment later, once the workflow has taken the change in. While a case is
+  // open they are also re-read every 20 seconds, so a step someone else
+  // finished shows up here too. Only the steps are redrawn: what is being typed
+  // in the forms stays.
+  let wfTimer = null, wfPoll = null;
+  async function wfRefresh(tries = [0, 1500, 3500, 7000, 12000]) {
+    const w = window._wf;
+    if (!w || !document.getElementById("wf-steps") || !location.hash.includes(w.id)) return;
+    const before = w.next ? w.next.key : "";
+    clearTimeout(wfTimer);
+    const step = async (i) => {
+      if (i >= tries.length) return;
+      wfTimer = setTimeout(async () => {
+        const cur = window._wf;
+        if (!cur || cur.id !== w.id || !location.hash.includes(w.id)) return;
+        await wfLoad(w.id, w.cfg);
+        const after = window._wf && window._wf.next ? window._wf.next.key : "";
+        if (after !== before) { wfMoved(window._wf.next); return; }
+        step(i + 1);
+      }, tries[i]);
+    };
+    step(0);
+  }
+  function wfMoved(next) {
+    if (!next) { UI.toast("All steps are done"); return; }
+    UI.toast(next.can_act ? `Next: ${next.label} — it's yours` : `Next: ${next.label} — with the ${next.owner}`);
+  }
+  window.addEventListener("idre:changed", () => wfRefresh());
+  function wfStartPolling() {
+    clearInterval(wfPoll);
+    wfPoll = setInterval(async () => {
+      const w = window._wf;
+      if (!w || !document.getElementById("wf-steps") || !location.hash.includes(w.id)) { clearInterval(wfPoll); return; }
+      if (document.hidden) return;
+      const before = w.next ? w.next.key : "";
+      try {
+        const r = await Api.program.workflow(w.id);
+        const n = (r.steps || []).find((x) => x.state === "next");
+        if ((n ? n.key : "") !== before) { await wfLoad(w.id, w.cfg); wfMoved(window._wf.next); }
+      } catch { /* the next round tries again */ }
+    }, 20000);
   }
   function wfApplyLocks() {
     const { next, isAdmin } = window._wf || {};
@@ -2471,7 +2517,7 @@ const Views = (() => {
 
     afterRender(() => {
       const money = (v) => Math.round(parseFloat(v) * 100);
-      wfLoad(id, cfg);
+      wfLoad(id, cfg); wfStartPolling();
       $("#p-status")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;

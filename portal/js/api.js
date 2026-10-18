@@ -36,6 +36,8 @@ const Api = (() => {
       if (typeof data === "object" && data.details) err.details = data.details;
       throw err;
     }
+    // A change was saved: a case page that is open re-reads its steps (views.js, wfRefresh).
+    if (method !== "GET") window.dispatchEvent(new CustomEvent("idre:changed", { detail: { method, path } }));
     return data;
   }
 
