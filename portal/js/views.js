@@ -116,21 +116,29 @@ const Views = (() => {
     const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : "";
     return `<details class="prog-sec" id="p-summary-details" data-wf="summary" data-wf-roles="CODER"><summary>Dispute Summary (Coder)</summary>
       <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead, the summary of the dispute,
-        and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${sopStamp(ds)}</p>
+        and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${ds.by ? `<br/><span class="form-stamp">Last saved by ${esc(ds.by)}, ${fmtDate(ds.at)}</span>` : ""}</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveDisputeSummary('${id}',this)">
-        <div class="inline-form">
-          <input name="plan_type" placeholder="health plan type" value="${esc(ds.plan_type || "")}" ${ro} />
-          <label>verified from the plan's letterhead <input type="checkbox" name="verified" ${ds.plan_type_verified_from_letterhead ? "checked" : ""} ${ro} /></label>
-          <label>coding review required <input type="checkbox" name="coding" ${ds.coding_review_required ? "checked" : ""} ${ro} /></label>
-        </div>
-        <label>Summary <textarea name="summary" rows="3" ${mine ? "" : "readonly"}>${esc(ds.summary || "")}</textarea></label>
-        <div class="inline-form">
-          ${matrix.length ? `<select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
-            <option value="">Estimated Cost Matrix…</option>
-            ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select>` : ""}
-          <input name="estimate" type="number" step="0.01" min="0" placeholder="full review cost estimate $" value="${est}" ${ro} />
-          <input name="basis" placeholder="matrix row / basis for the estimate" value="${esc(ds.estimate_basis || "")}" ${ro} />
-        </div>
+        <div class="field-group"><h4>Health plan</h4>
+          <div class="field-grid">
+            <label>Health plan type
+              <input name="plan_type" placeholder="e.g. Medicaid managed care" value="${esc(ds.plan_type || "")}" ${ro} /></label>
+            <label><input type="checkbox" name="verified" ${ds.plan_type_verified_from_letterhead ? "checked" : ""} ${ro} /> Verified from the plan's letterhead</label>
+            <label><input type="checkbox" name="coding" ${ds.coding_review_required ? "checked" : ""} ${ro} /> Coding review required</label>
+          </div></div>
+        <div class="field-group"><h4>Dispute</h4>
+          <label>Summary of the dispute
+            <textarea name="summary" rows="4" placeholder="What is in dispute and why, in a sentence or two" ${mine ? "" : "readonly"}>${esc(ds.summary || "")}</textarea></label></div>
+        <div class="field-group"><h4>Full review cost estimate <span class="field-hint">— only when the filer asked for one</span></h4>
+          <div class="field-grid">
+            ${matrix.length ? `<label>From the Estimated Cost Matrix
+              <select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
+              <option value="">Choose a row…</option>
+              ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select></label>` : ""}
+            <label>Estimate ($)
+              <input name="estimate" type="number" step="0.01" min="0" placeholder="0.00" value="${est}" ${ro} /></label>
+            <label>Basis for the estimate
+              <input name="basis" placeholder="matrix row or reason" value="${esc(ds.estimate_basis || "")}" ${ro} /></label>
+          </div></div>
         ${mine ? `<button class="mini">Save Dispute Summary</button>` : ""}</form></details>`;
   }
   // Documents that disagree with what the case carries: the case value is
@@ -138,9 +146,11 @@ const Views = (() => {
   function sopConflictsHtml(c) {
     const cs = (c.details && c.details.eligibility_conflicts) || [];
     if (!cs.length) return "";
-    const show = (f, v) => (f === "disputed_amount_cents" ? usdC(v) : String(v));
+    const show = (f, v) => (f === "disputed_amount_cents" ? usdC(v) : f === "provider_type" ? providerTypeLabel(v)
+      : f === "contracted" ? (v === true || v === "true" ? "in the plan's network" : "not in the plan's network") : String(v));
+    const name = (f) => (f === "contracted" ? "network status" : String(f).replace(/_cents$/, "").replace(/_/g, " "));
     return `<div class="err-box"><b>⚠ Documents disagree with the case.</b> The case value was kept — check which is right before deciding.
-      <ul>${cs.map((x) => `<li>${esc(String(x.field).replace(/_cents$/, "").replace(/_/g, " "))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
+      <ul>${cs.map((x) => `<li>${esc(name(x.field))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
         ${esc(x.document || "a document")} says <b>${esc(show(x.field, x.document_value))}</b></li>`).join("")}</ul></div>`;
   }
   // Case information: the fields the Reviewer completes after payment
@@ -156,19 +166,18 @@ const Views = (() => {
     return `<details class="prog-sec"><summary>Case information${missing && mine ? ` — ${missing} report field(s) not filled` : ""}</summary>
       <p class="muted">Completed by the Reviewer. These go on the monthly report to Florida; the provider's name and the health plan come from the linked accounts unless typed here.</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveCaseInfo('${id}', this)">
-        <div class="inline-form">
+        <div class="field-grid">
           ${sel("line_of_business", "Line of business", fs.line_of_business)}
           ${sel("disputed_issue", "Disputed issue", fs.disputed_issue)}
           ${sel("out_of_network", "Out-of-network provider", fs.out_of_network || ["Yes", "No"])}
-          ${inp("claims_submitted", "Claims in the filing packet", 'type="number" min="0" style="width:7em"')}
-          ${d.claims_detected && !d.claims_submitted ? `<span class="muted">the documents show ${esc(d.claims_detected)} claim(s)</span>` : ""}
+          ${inp("claims_submitted", "Claims in the filing packet" + (d.claims_detected && !d.claims_submitted ? ` <span class="field-hint">— the documents show ${esc(d.claims_detected)}</span>` : ""), 'type="number" min="0"')}
         </div>
-        <div class="inline-form">
+        <h4 class="sub">Provider and health plan</h4><div class="field-grid">
           ${inp("provider_org", "Provider organization")}${inp("provider_contact", "Provider contact")}${inp("health_plan", "Health plan")}
         </div>
-        <div class="inline-form">
-          ${inp("provider_street", "Street address", 'style="min-width:18em"')}${inp("provider_city", "City")}
-          ${inp("provider_state", "State", 'maxlength="2" style="width:4em" placeholder="FL"')}${inp("provider_postal", "Postal code", 'style="width:8em" placeholder="12345"')}
+        <h4 class="sub">Provider address</h4><div class="field-grid">
+          ${inp("provider_street", "Street address", '')}${inp("provider_city", "City")}
+          ${inp("provider_state", "State", 'maxlength="2" placeholder="FL"')}${inp("provider_postal", "Postal code", 'placeholder="12345"')}
         </div>
         ${mine ? `<button class="mini">Save case information</button>` : ""}</form></details>`;
   }
@@ -2358,8 +2367,8 @@ const Views = (() => {
         Record the date once; every deadline that depends on it re-projects automatically.</p>
       <div id="p-dates-list"></div>
       <form id="p-date" class="inline-form">
-        <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
-        <input type="date" name="value" required /><button>Record date</button></form></details>
+        <label>Date <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.label)}</option>`).join("")}</select></label>
+        <label>On <input type="date" name="value" required /></label><button>Record date</button></form></details>
 
       <details class="prog-sec" id="p-elig-details" data-wf="eligibility aor_confirm letter:acceptance letter:ineligible" data-wf-roles="CASE_MANAGER ATTORNEY" data-wf-hide><summary>Eligibility review</summary>
       <p class="muted">The engine applies this program's rules in order and records the evidence with the verdict:
@@ -2375,17 +2384,19 @@ const Views = (() => {
       <div class="actions"><button id="p-elig-auto" title="Derives every rule input from the case record and analyzed documents, then decides — or tells you exactly which inputs are still missing">⚡ Auto-adjudicate from case + documents</button></div>
       <div id="p-elig-auto-out"></div>
       <form id="p-elig" class="form">
-        <div class="inline-form">
+        <div class="field-grid">
         <label>Provider type <select name="provider_type" required><option value="">choose…</option>
           ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join("")}</select></label>
         <label>In the plan's network <select name="contracted" title="Whether the provider has a contract with the health plan — it picks a hospital's minimum amount"><option value="">not stated</option><option value="no">No</option><option value="yes">Yes</option></select></label>
-        <input name="amount" type="number" step="0.01" placeholder="aggregate disputed $" required />
-        <label>final determination <input name="fd" type="date" required title="Final determination date — the last EOB date, service date or appeal documents are accepted as proof. The 12-month filing window runs from it." /></label>
-        <label>date of service <input name="service_date" type="date" title="Earliest date of service in dispute${(cfg.eligibility || {}).services_after ? ` — must be after ${esc(cfg.eligibility.services_after)}` : ""}" /></label>
-        ${((cfg.eligibility || {}).dispute_types || []).length ? `<select name="dispute_type" title="claim type"><option value="">claim type…</option>
-          ${cfg.eligibility.dispute_types.map((x) => `<option value="${esc(x)}">${esc(x.replace(/_/g, " "))}</option>`).join("")}</select>` : ""}
-        <label>AOR valid <input type="checkbox" name="aor_valid" checked /></label>
-        <input name="aor_reason" placeholder="AOR: reason it is valid / not valid" title="Recorded with the review. If the AOR is not valid, the Attorney confirms." style="min-width:18em" />
+        <label>Disputed amount, all claims ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required /></label>
+        <label>Final determination date <input name="fd" type="date" required title="Final determination date — the last EOB date, service date or appeal documents are accepted as proof. The 12-month filing window runs from it." /></label>
+        <label>Date of service <input name="service_date" type="date" title="Earliest date of service in dispute${(cfg.eligibility || {}).services_after ? ` — must be after ${esc(cfg.eligibility.services_after)}` : ""}" /></label>
+        ${((cfg.eligibility || {}).dispute_types || []).length ? `<label>Claim type <select name="dispute_type"><option value="">choose…</option>
+          ${cfg.eligibility.dispute_types.map((x) => `<option value="${esc(x)}">${esc(x.charAt(0).toUpperCase() + x.slice(1).replace(/_/g, " "))}</option>`).join("")}</select></label>` : ""}
+        </div>
+        <div class="field-grid">
+        <label><input type="checkbox" name="aor_valid" checked /> The AOR is valid</label>
+        <label class="wide">Why the AOR is valid or not <input name="aor_reason" placeholder="e.g. signed by the provider, on file" title="Recorded with the review. If the AOR is not valid, the Attorney confirms." /></label>
         </div>
         <fieldset class="elig-flags"><legend>Tick any that apply — each one makes the dispute ineligible</legend>
           ${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<label><input type="checkbox" name="flag" value="${esc(x)}" /> ${esc(ELIG_REASON_LABELS[x] || x.replace(/_/g, " "))}</label>`).join("")}
@@ -2395,23 +2406,27 @@ const Views = (() => {
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
       <details class="prog-sec" id="p-send-details" data-tab="mail" open><summary>Write to the parties</summary>
-      <form id="p-send" class="inline-form">
+      <form id="p-send" class="form">
         ${corrTplCache = cfg.correspondence?.templates || [], ""}
         ${(setTimeout(() => corrTemplatesFor(id, "#p-send"), 0), "")}
-        <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(cfg.correspondence?.templates || [])}</select>
-        <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
-        <input name="to" placeholder="to emails (comma-separated)" required />
-        <input name="cc" placeholder="cc emails" />
-        <textarea name="body" rows="3" placeholder="message body — {share_link} inserts a secure upload link, {download_link} a link to the latest generated document; both are minted on send" required></textarea>
-        <label><input type="checkbox" name="auto_share" checked /> Attach a secure upload link (minted on send)</label>
-        <label><input type="checkbox" name="auto_download" /> Attach a download link to the latest generated document (minted on send)</label>
+        <div class="field-grid">
+          <label>Template <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(cfg.correspondence?.templates || [])}</select></label>
+          <label>Request for information goes to <select name="rfi_to" title="only used for the Request for Additional Information template"><option value="provider">The provider</option><option value="plan">The health plan</option></select></label>
+          <label>To <input name="to" type="text" placeholder="name@example.com, …" required /></label>
+          <label>Cc <input name="cc" type="text" placeholder="optional" /></label>
+          <label class="wide">Message
+            <textarea name="body" rows="5" placeholder="Write the message. {share_link} puts in a secure upload link and {download_link} a link to the latest generated document; both are created when it is sent." required></textarea></label>
+          <div class="wide" style="display:flex;flex-wrap:wrap;gap:4px 24px">
+            <label><input type="checkbox" name="auto_share" checked /> Attach a secure upload link</label>
+            <label><input type="checkbox" name="auto_download" /> Attach a link to the latest generated document</label></div>
+        </div>
         <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
 
       <details class="prog-sec" id="p-inv-details" data-tab="billing" open><summary>Invoices &amp; claim lines</summary>
       ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form" data-wf="invoice">
-        <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
-        <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
-        <input name="amount" type="number" step="0.01" placeholder="amount $" required />
+        <label>Bill to <select name="party"><option value="HEALTH_PLAN">Health plan</option><option value="PROVIDER">Provider</option></select></label>
+        <label>Invoice for <select name="kind"><option value="INITIAL_FEE">Initial fee</option><option value="FULL_REVIEW">Full review</option><option value="DEFAULT">Default</option></select></label>
+        <label>Amount ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required /></label>
         <button>Issue invoice</button></form>` : `<p class="muted">Invoices are created by the PM.</p>`}<div id="p-inv-list" data-case-id="${esc(id)}"></div>
       <form id="p-claims" class="inline-form">
         <textarea name="csv" rows="3" placeholder="claim_number,cpt,billed,paid per line (bulk import)"></textarea>
@@ -2440,18 +2455,18 @@ const Views = (() => {
 
       <details class="prog-sec" data-tab="activity"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
-        <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
-        <input name="phone" placeholder="phone number" required />
-        <input name="summary" placeholder="brief description" required /><button>Log call</button></form>
+        <label>Direction <select name="direction"><option value="OUTBOUND">We called</option><option value="INBOUND">They called</option></select></label>
+        <label>Phone number <input name="phone" type="tel" placeholder="(555) 123-4567" required /></label>
+        <label style="flex:1;min-width:240px">What was discussed <input name="summary" placeholder="a brief description" required /></label><button>Log call</button></form>
       <div id="p-call-list"></div></details>
 
       <details class="prog-sec" data-tab="activity"><summary>Inquiries log</summary>
       <form id="p-inquiry" class="inline-form">
-        <select name="method"><option>EMAIL</option><option>PHONE_CALL</option></select>
-        <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
+        <label>How <select name="method"><option value="EMAIL">Email</option><option value="PHONE_CALL">Phone call</option></select></label>
+        <label>Kind <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
           <option value="GENERAL_INQUIRY">General inquiry</option>
-          <option value="SUBMISSION_DOCUMENTS">Submission of documents</option></select>
-        <input name="detail" placeholder="detail (optional)" /><button>Log inquiry</button></form>
+          <option value="SUBMISSION_DOCUMENTS">Submission of documents</option></select></label>
+        <label style="flex:1;min-width:240px">Detail <input name="detail" placeholder="optional" /></label><button>Log inquiry</button></form>
       <div id="p-inquiry-list"></div></details>`;
 
     afterRender(() => {

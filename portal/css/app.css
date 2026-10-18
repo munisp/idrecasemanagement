@@ -1019,3 +1019,42 @@ tr.pkg-hist td{border-top:0;padding-top:0}
 .elig-need{padding:12px 14px;border-radius:8px;background:var(--warning-bg);color:var(--fg,inherit)}
 .elig-need p{margin:4px 0}.elig-need ul{margin:6px 0 6px 20px;padding:0}
 #p-elig .need{outline:2px solid var(--warning-fg);outline-offset:1px;background:var(--warning-bg)}
+
+/* ---- Case-page sections: one form style for every section ------------------
+   A section is the card; its forms sit flat inside it (no card in a card), with
+   the same inner padding, a label above every field, checkboxes beside their
+   text, and the body font in every text box. */
+.prog-sec{padding:0 18px 16px}
+.prog-sec>summary{margin:0 -18px;padding:12px 18px}
+.prog-sec[open]>summary{margin-bottom:4px;border-bottom:1px solid var(--border-subtle)}
+.prog-sec>p.muted,.prog-sec>.muted{margin:10px 0 12px;max-width:80ch;line-height:1.5}
+.prog-sec .form{background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:12px 0 0;max-width:none;gap:14px}
+.prog-sec .form+.form{border-top:1px solid var(--border-subtle);padding-top:14px}
+.prog-sec .inline-form{padding:0;margin:10px 0;gap:10px 12px;align-items:flex-end}
+.prog-sec .form .inline-form{margin:0}
+.prog-sec label{font-size:12.5px;font-weight:550;color:var(--text-secondary)}
+.prog-sec .form label:not(:has(>input[type=checkbox])),.prog-sec .inline-form label:not(:has(>input[type=checkbox])){display:flex;flex-direction:column;gap:5px}
+.prog-sec label:has(>input[type=checkbox]){display:inline-flex;flex-direction:row;align-items:center;gap:8px;font-weight:500;color:var(--text-primary);min-height:36px;cursor:pointer}
+.prog-sec label>input[type=checkbox]{order:-1;width:16px;height:16px;margin:0;accent-color:var(--accent-primary)}
+.prog-sec input:not([type=checkbox]):not([type=radio]):not([type=file]),.prog-sec select{height:36px;padding:0 12px;border:1px solid var(--border-default);border-radius:var(--radius-input,8px);background:var(--surface-raised);color:var(--text-primary);font:inherit;font-size:13px;min-width:0;box-sizing:border-box}
+.prog-sec textarea{width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--border-default);border-radius:var(--radius-input,8px);background:var(--surface-raised);color:var(--text-primary);font:inherit;font-size:13.5px;line-height:1.55;resize:vertical;min-height:72px}
+.prog-sec textarea:focus,.prog-sec input:focus,.prog-sec select:focus{outline:2px solid var(--focus-ring);outline-offset:1px;border-color:transparent}
+.prog-sec textarea[readonly],.prog-sec input:disabled,.prog-sec select:disabled,.prog-sec textarea:disabled{background:var(--surface-sunken);color:var(--text-secondary)}
+.prog-sec ::placeholder{color:var(--text-tertiary)}
+.prog-sec fieldset{border:1px solid var(--border-subtle);border-radius:var(--radius-input,8px);padding:8px 14px 10px;margin:0}
+.prog-sec legend{padding:0 6px;font-size:12.5px;font-weight:600;color:var(--text-secondary)}
+/* A form's own save button: the one primary action, at the start of its row. */
+.prog-sec .form>button:last-child,.prog-sec .form>.actions>button:last-child{justify-self:start;min-height:34px;padding:6px 16px;font-size:13px;background:var(--action-primary-bg);color:var(--action-primary-fg);border-color:transparent}
+.prog-sec .form>button:last-child:hover{background:var(--action-primary-bg-hover)}
+/* Fields laid out on a grid rather than wrapping wherever they happen to fit. */
+.prog-sec .field-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px 14px;align-items:end}
+.prog-sec .field-grid .wide{grid-column:1/-1}
+.prog-sec .field-hint{font-size:12px;font-weight:400;color:var(--text-tertiary)}
+.prog-sec .field-group{display:grid;gap:10px}
+.prog-sec .field-group>h4{margin:4px 0 0;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--text-tertiary)}
+.prog-sec .form-stamp{font-size:12px;color:var(--text-tertiary)}
+.prog-sec .form h4.sub{margin:6px 0 -4px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--text-tertiary)}
+.prog-sec input,.prog-sec select,.prog-sec textarea{font-weight:400}
+.prog-sec label .muted,.prog-sec label .dr-hint,.prog-sec .dr-hint,.prog-sec label small{font-weight:400}
+.prog-sec input[type=checkbox],.prog-sec input[type=radio]{min-width:0;flex-shrink:0}
+.prog-sec .field-grid+.field-grid{margin-top:12px}
