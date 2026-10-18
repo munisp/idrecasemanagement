@@ -36,3 +36,15 @@ func TestMailQueuedErrorIsRecognised(t *testing.T) {
 		t.Error("callers recognise a queued message with errors.Is")
 	}
 }
+
+func TestCleanAddrs(t *testing.T) {
+	got, err := cleanAddrs([]string{" ifegbesan6+plan1@gmail.com. ", "a@b.co,", ""})
+	if err != nil || len(got) != 2 || got[0] != "ifegbesan6+plan1@gmail.com" || got[1] != "a@b.co" {
+		t.Errorf("got %v %v", got, err)
+	}
+	for _, bad := range []string{"not-an-email", "x@nodot", "two words@x.com"} {
+		if _, err := cleanAddrs([]string{bad}); err == nil {
+			t.Errorf("%q should be refused", bad)
+		}
+	}
+}

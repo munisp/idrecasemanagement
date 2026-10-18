@@ -11,16 +11,42 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"net/mail"
 	"net/smtp"
 	"strings"
 	"time"
 )
+
+// cleanAddrs tidies addresses typed by hand -- spaces, and a full stop, comma or semicolon carried over from a
+// sentence ("…@gmail.com.") -- and refuses one that is still not an email address, in words a person can act on
+// instead of the relay's "501 Bad recipient address syntax".
+func cleanAddrs(list []string) ([]string, error) {
+	out := make([]string, 0, len(list))
+	for _, a := range list {
+		a = strings.Trim(strings.TrimSpace(a), ".,;:<>\"' ")
+		if a == "" {
+			continue
+		}
+		if parsed, err := mail.ParseAddress(a); err != nil || parsed.Address != a || !strings.Contains(a[strings.LastIndex(a, "@")+1:], ".") {
+			return nil, fmt.Errorf("%q is not a valid email address — correct it and send again", a)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
 
 // sendMail delivers one message. Returns nil on acceptance by the relay.
 func (s *server) sendMail(to, cc []string, subject, body string) error {
 	cfg := s.cfg
 	if cfg.SMTPHost == "" {
 		return fmt.Errorf("smtp not configured")
+	}
+	var err error
+	if to, err = cleanAddrs(to); err != nil {
+		return err
+	}
+	if cc, err = cleanAddrs(cc); err != nil {
+		return err
 	}
 	from := cfg.SMTPFrom
 	var b strings.Builder
