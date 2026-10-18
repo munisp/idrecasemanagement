@@ -757,6 +757,7 @@ func main() {
 		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
 		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)
 		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)           // one slot
+		r.Delete("/tpa/packages/{packageId}/docs/{slot}", s.tpaRemoveDoc)  // take a file out of a set not yet filed
 		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)      // one giant PDF
 		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)             // slot verdict grid
 		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                   // ZIP of client folders

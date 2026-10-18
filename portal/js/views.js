@@ -6886,33 +6886,61 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     if (!tpaPackageBox._open || tpaPackageBox._open !== packageId) { tpaPackageBox._open = packageId; card.scrollIntoView({ behavior: "smooth", block: "start" }); }
     try {
       const p = await Api.program.tpaPackage(packageId);
-      box.innerHTML = `<p>${badge(p.status)} · mode ${esc(p.mode)} · package <code>${esc(packageId)}</code>
+      // Until the set is filed, any slot can be uploaded, replaced or removed; every earlier file is kept and shown.
+      const open = p.status !== "FILED";
+      const when = (t) => (t ? fmtDate(t) : "");
+      const verdict = (s) => `${badge(s.status)}${s.uploaded_by ? `<div class="muted">${esc(s.uploaded_by)}${s.uploaded_at ? " · " + when(s.uploaded_at) : ""}</div>` : ""}`;
+      const why = (rs) => (rs || []).map((r2) => esc(r2.detail || r2.code)).join("; ");
+      const change = (s) => !open ? "" : `<label class="mini button-like">${s.status === "MISSING" ? "Upload…" : "Replace…"}
+          <input type="file" hidden accept=".pdf,application/pdf,image/*" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this,'${esc(s.status)}')" /></label>
+        ${s.status !== "MISSING" ? `<button type="button" class="mini ghost" onclick="Views.tpaSlotRemove('${packageId}','${s.slot}','${esc(s.filename || "")}')">Remove</button>` : ""}`;
+      const history = (s) => (s.history || []).length ? `<tr class="pkg-hist"><td></td><td colspan="4"><details><summary class="muted">Earlier versions (${s.history.length})</summary>
+          <table class="tbl" data-nosearch><thead><tr><th>File</th><th>Verdict</th><th>Why</th><th>Uploaded</th><th>What happened</th></tr></thead><tbody>
+          ${s.history.map((h) => `<tr><td>${esc(h.filename || "—")}</td><td>${badge(h.status)}</td><td class="muted">${why(h.reasons) || "—"}</td>
+            <td class="muted">${esc(h.uploaded_by || "")}${h.uploaded_at ? " · " + when(h.uploaded_at) : ""}</td>
+            <td class="muted">${h.ended_how === "REMOVED" ? "Removed" : "Replaced"} by ${esc(h.ended_by || "—")} · ${when(h.ended_at)}</td></tr>`).join("")}
+          </tbody></table></details></td></tr>` : "";
+      const needsFix = p.slots.filter((s) => ["REJECTED", "NEEDS_REVIEW"].includes(s.status)).length;
+      box.innerHTML = `<p>${badge(p.status)} · ${p.mode === "MERGED" ? "merged PDF" : "six files"} · set <code>${esc(packageId)}</code>
           <button class="mini" onclick="Views.tpaPackageBox('${packageId}')">Refresh</button></p>
-        <table class="tbl"><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>Upload</th></tr></thead><tbody>
-        ${p.slots.map((s) => `<tr><td><code>${esc(s.slot)}</code></td>
+        ${needsFix && open ? `<p class="warn-line">${needsFix} document${needsFix === 1 ? " was" : "s were"} not accepted. The reason is beside each; upload a corrected file with <b>Replace…</b>.</p>` : ""}
+        ${open ? `<p class="muted">You can upload, replace or remove any document until this set is filed with a dispute. Every earlier file is kept and every change is in your Audit log.</p>`
+          : `<p class="muted">This set has been filed with a dispute; its documents can no longer be changed. To send a corrected document, use the dispute's document requests.</p>`}
+        <table class="tbl" data-nosearch><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>${open ? "Change" : ""}</th></tr></thead><tbody>
+        ${p.slots.map((s) => `<tr class="${["REJECTED", "NEEDS_REVIEW"].includes(s.status) ? "pkg-bad" : ""}"><td><code>${esc(s.slot)}</code></td>
           <td>${esc(s.filename || "—")}${s.page_start && !/\(pages /.test(s.filename || "") ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
-          <td>${badge(s.status)}</td>
-          <td class="muted">${(s.reasons || []).map((r2) => esc(r2.code + ": " + r2.detail)).join("; ") || "—"}</td>
-          <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
-            ? `<input type="file" id="pkg-${s.slot}" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this)" />` : ""}</td>
-        </tr>`).join("")}</tbody></table>
-        ${p.mode === "MERGED" && !["READY", "FILED"].includes(p.status) ? `
+          <td>${verdict(s)}</td>
+          <td class="muted">${why(s.reasons) || "—"}</td>
+          <td>${change(s)}</td></tr>${history(s)}`).join("")}</tbody></table>
+        ${p.mode === "MERGED" && open ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaMergedFn(this,'${packageId}')">
             <input name="file" type="file" accept=".pdf,application/pdf" required />
-            <button class="mini">Upload merged PDF</button></form>` : ""}
-        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when filing.</p>' : ""}`;
+            <button class="mini">Upload a new merged PDF</button></form>` : ""}
+        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this set can be used to file a dispute.</p>' : ""}`;
       // The filing list is filled by the board: redraw it once the package is
       // ready, or a READY package only showed up there after a page reload.
       if (p.status === "READY" || p.status === "FILED") tpaOnboardingBox();
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
-  async function tpaSlotUpload(packageId, slot, input) {
+  async function tpaSlotUpload(packageId, slot, input, current) {
     if (!input.files[0]) return;
+    if (current === "ACCEPTED" && !(await UI.confirm("Replace an accepted document?",
+      `The ${slot.replace(/_/g, " ").toLowerCase()} was accepted. Replacing it sends the set back to be checked; the current file is kept in its history.`, "Replace"))) {
+      input.value = ""; return;
+    }
     try {
       await Api.program.tpaAttachDoc(packageId, slot, input.files[0]);
+      UI.toast(current && current !== "MISSING" ? "Replaced — the new file is being checked" : "Uploaded — the file is being checked");
       setTimeout(() => tpaPackageBox(packageId), 300);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function tpaSlotRemove(packageId, slot, filename) {
+    if (!(await UI.confirm("Remove this document?",
+      `${filename || "The file"} is taken out of the ${slot.replace(/_/g, " ").toLowerCase()} slot. It stays in the slot's history, and the change is in your Audit log.`, "Remove", true))) return;
+    try { await Api.program.tpaRemoveDoc(packageId, slot); UI.toast("Removed"); tpaPackageBox(packageId); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaMergedFn(form, packageId) {
@@ -8847,5 +8875,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { npiReviewDecideFn, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

@@ -504,6 +504,7 @@ const Api = (() => {
         fd.append("file", file);
         return req("POST", `${t()}/tpa/packages/${packageId}/docs`, fd, true);
       },
+      tpaRemoveDoc: (packageId, slot) => req("DELETE", `${t()}/tpa/packages/${packageId}/docs/${slot}`),
       tpaUploadMerged: (packageId, file) => {
         const fd = new FormData();
         fd.append("file", file);

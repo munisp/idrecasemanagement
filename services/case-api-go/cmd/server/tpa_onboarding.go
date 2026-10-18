@@ -584,17 +584,28 @@ func (s *server) storePackageDoc(r *http.Request, tenant, tpaID, pkgID, slot, fi
 		}); err != nil {
 		return "", fmt.Errorf("store failed")
 	}
+	// What the slot held before, kept in its history (package_doc_history) rather than overwritten.
+	by := uploaderName(r)
+	prev, hadPrev := s.endPackageDoc(r, tenant, pkgID, slot, by, "REPLACED")
 	var rowID string
 	err = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.tpa_package_docs (tenant, package_id, slot, object_key, filename, status)
-		VALUES ($1,$2,$3,$4,$5,'PENDING')
+		INSERT INTO public.tpa_package_docs (tenant, package_id, slot, object_key, filename, status, uploaded_by, uploaded_at)
+		VALUES ($1,$2,$3,$4,$5,'PENDING',$6,now())
 		ON CONFLICT (package_id, slot) DO UPDATE SET
 		  object_key=excluded.object_key, filename=excluded.filename,
-		  status='PENDING', reasons='[]'::jsonb, analyzed_at=NULL
-		RETURNING id`, tenant, pkgID, slot, objectKey, filename).Scan(&rowID)
+		  status='PENDING', reasons='[]'::jsonb, analyzed_at=NULL,
+		  uploaded_by=excluded.uploaded_by, uploaded_at=now()
+		RETURNING id`, tenant, pkgID, slot, objectKey, filename, by).Scan(&rowID)
 	if err != nil {
 		return "", fmt.Errorf("db")
 	}
+	action, payload := "PACKAGE_DOC_UPLOADED", s.packageDocAudit(r, tenant, tpaID, pkgID, slot)
+	payload["filename"] = filename
+	if hadPrev {
+		action = "PACKAGE_DOC_REPLACED"
+		payload["replaced_filename"], payload["replaced_status"] = prev.filename, prev.status
+	}
+	s.logAudit(r.Context(), tenant, "", action, payload)
 	s.packageDocReplaced(r, tenant, onboardingKinds["tpa"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
 		"type": "tpa_doc.uploaded", "tenant": tenant, "package_id": pkgID,
@@ -621,10 +632,11 @@ func (s *server) tpaAttachDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
-	// Until it is filed, a slot can be added or replaced: slots are checked
-	// one at a time, so the package is VALIDATING after the first upload.
-	if mode != "DISCRETE" || status == "FILED" {
-		http.Error(w, `{"error":"this package takes one merged PDF, or it has already been filed"}`, http.StatusConflict)
+	// Until it is filed, any slot can be added or replaced -- in a merged set too, once the PDF was split -- and
+	// the set is checked again. A filed set is the dispute's evidence and does not change.
+	_ = mode
+	if status == "FILED" {
+		http.Error(w, `{"error":"this document set has been filed with a dispute, so its documents can't be changed — send a corrected document through the dispute's document requests"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -753,9 +765,11 @@ func (s *server) tpaPackageStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
+	history := s.packageDocHistory(r, tenant, pkgID)
 	rows, err := s.db.Query(r.Context(), `
 		SELECT id, slot, coalesce(filename,''), status, reasons::text,
-		       coalesce(page_start::text,''), coalesce(page_end::text,''), coalesce(analyzed_at::text,'')
+		       coalesce(page_start::text,''), coalesce(page_end::text,''), coalesce(analyzed_at::text,''),
+		       coalesce(uploaded_by,''), coalesce(coalesce(uploaded_at, created_at)::text,'')
 		FROM public.tpa_package_docs WHERE tenant=$1 AND package_id=$2 ORDER BY slot`, tenant, pkgID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -764,20 +778,26 @@ func (s *server) tpaPackageStatus(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	bySlot := map[string]map[string]any{}
 	for rows.Next() {
-		var id, slot, fn, st, reasons, ps, pe, at string
-		if rows.Scan(&id, &slot, &fn, &st, &reasons, &ps, &pe, &at) == nil {
+		var id, slot, fn, st, reasons, ps, pe, at, ub, ua string
+		if rows.Scan(&id, &slot, &fn, &st, &reasons, &ps, &pe, &at, &ub, &ua) == nil {
 			bySlot[slot] = map[string]any{
 				"id": id, "slot": slot, "filename": fn, "status": st,
-				"reasons": json.RawMessage(reasons), "page_start": ps, "page_end": pe, "analyzed_at": at}
+				"reasons": json.RawMessage(reasons), "page_start": ps, "page_end": pe, "analyzed_at": at,
+				"uploaded_by": ub, "uploaded_at": ua}
 		}
 	}
 	grid := make([]map[string]any, 0, len(tpaSlots))
 	for _, slot := range tpaSlots {
-		if d, ok := bySlot[slot]; ok {
-			grid = append(grid, d)
-		} else {
-			grid = append(grid, map[string]any{"slot": slot, "status": "MISSING"})
+		d, ok := bySlot[slot]
+		if !ok {
+			d = map[string]any{"slot": slot, "status": "MISSING"}
 		}
+		h := history[slot]
+		if h == nil {
+			h = []map[string]any{}
+		}
+		d["history"] = h
+		grid = append(grid, d)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"package_id": pkgID, "client_id": clientID, "mode": mode,
