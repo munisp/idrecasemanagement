@@ -191,7 +191,8 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 	// The mail log records that the email went out, not what it said: the
 	// sign-in details belong to the recipient only.
 	logBody := tpaWelcomeLogNote
-	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
+	// A queued email (the provider's limit was reached) still arrives: the registration stands.
+	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
 		// Without the email nobody holds the password, so the account would
 		// be unusable and the address could not be registered again. Undo
 		// the registration and let the person retry.
