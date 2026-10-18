@@ -647,8 +647,9 @@ const Views = (() => {
   // ("not sure") option.
   async function fillProviderTypes(sel) {
     if (!sel || sel.dataset.filled) return;
-    const cfg = await Api.program.get().catch(() => null);
-    const types = [...new Set((((cfg || {}).eligibility || {}).thresholds || []).map((x) => x.provider_type))];
+    const prog = await Api.program.get().catch(() => null);
+    const cfg = (prog && prog.config) || {};
+    const types = [...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))];
     sel.insertAdjacentHTML("beforeend", types.map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join(""));
     sel.dataset.filled = "1";
   }
