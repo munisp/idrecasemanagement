@@ -60,6 +60,8 @@ type wfFacts struct {
 	ReviewerSends    bool              // an approved draft goes back to its drafter to send
 	ReviewInvoice    bool              // an invoice other than the initial fee exists
 	OpenInvoices     int
+	ReportSaved      bool              // the decision report has been saved
+	Generated        map[string]bool   // generated letter (lettergen template) -> a draft not rejected in QA
 }
 
 var wfOwnerLabels = map[string]string{
@@ -92,6 +94,11 @@ var wfStatusReached = map[string]string{
 func buildWorkflowSteps(f wfFacts) []wfStep {
 	var steps []wfStep
 	done := map[string]bool{}
+	// Steps whose evidence may come early: the decision report and its letters
+	// can be saved and generated at any point (the Attorney and the Coder
+	// write their parts during their own steps), so their being done says
+	// nothing about how far the case has got.
+	early := map[string]bool{}
 	add := func(key, label, role, action string, isDone bool, hint string) {
 		steps = append(steps, wfStep{Key: key, Label: label, Owner: wfOwnerLabels[role], OwnerRoles: []string{role},
 			Action: action, Hint: hint})
@@ -184,6 +191,21 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("attorney_review", "Final rationale and Final Order package", "ATTORNEY", "signal:ATTORNEY_REVIEW_COMPLETE",
 			has("ATTORNEY_REVIEW_COMPLETE"), "Enter the rationale; record the outcome.")
 		add("invoice", "Create the review invoice", "PM", "invoice", f.ReviewInvoice, "")
+		// The decision report, then the documents made from it, before the
+		// Final Order package that carries them.
+		add("report_save", "Save the decision report", "CASE_MANAGER", "report:save", f.ReportSaved,
+			"Review every part of the decision report and save it.")
+		add("report_generate", "Generate the decision report", "CASE_MANAGER", "report:final_order_rationale",
+			f.Generated["final_order_rationale"], "It goes under Documents and to the QA gate.")
+		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
+			f.Generated["cover_letter_final_notice"], "")
+		add("report_plan_invoice", "Generate the health plan invoice", "CASE_MANAGER", "report:invoice_health_plan",
+			f.Generated["invoice_health_plan"], "")
+		// The Reviewer and the PM may both edit the whole report.
+		for i := len(steps) - 4; i < len(steps); i++ {
+			early[steps[i].Key] = true
+			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
+		}
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
 		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
 			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
@@ -204,7 +226,7 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 	reached := -1
 	for i, st := range steps {
 		mapped := wfStatusReached[f.Internal]
-		if done[st.Key] || st.Key == mapped || (strings.HasPrefix(mapped, "qa:") && st.Key == "send:"+strings.TrimPrefix(mapped, "qa:")) {
+		if (done[st.Key] && !early[st.Key]) || st.Key == mapped || (strings.HasPrefix(mapped, "qa:") && st.Key == "send:"+strings.TrimPrefix(mapped, "qa:")) {
 			reached = i
 		}
 	}
@@ -335,6 +357,20 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 			var tpl, st string
 			if rows.Scan(&tpl, &st) == nil {
 				f.Letter[tpl] = st
+			}
+		}
+		rows.Close()
+	}
+	_ = s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.decision_reports WHERE tenant=$1 AND case_id=$2)`,
+		tenant, caseID).Scan(&f.ReportSaved)
+	f.Generated = map[string]bool{}
+	if rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT ON (artifact) artifact, status FROM public.qa_reviews
+		WHERE tenant=$1 AND case_id=$2 AND channel='letter' ORDER BY artifact, created_at DESC`, tenant, caseID); err == nil {
+		for rows.Next() {
+			var tpl, st string
+			if rows.Scan(&tpl, &st) == nil {
+				f.Generated[tpl] = st != "REJECTED"
 			}
 		}
 		rows.Close()

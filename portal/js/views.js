@@ -265,7 +265,8 @@ const Views = (() => {
   const WF_STAGE_LETTERS = ["acceptance", "ineligible", "estimate_cost", "plan_notification", "final_order", "final_order_rationale_copy"];
   const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate" : a.startsWith("send:") ? "Send it"
     : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "aor_confirm" ? "Give the ruling"
-    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it" : "Open");
+    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it"
+    : a === "report:save" ? "Open the decision report" : a.startsWith("report:") ? "Generate it" : "Open");
   async function wfLoad(id, cfg) {
     const box = document.getElementById("wf-steps");
     if (!box) return;
@@ -299,7 +300,7 @@ const Views = (() => {
   // finished shows up here too. Only the steps are redrawn: what is being typed
   // in the forms stays.
   let wfTimer = null, wfPoll = null;
-  async function wfRefresh(tries = [0, 1500, 3500, 7000, 12000]) {
+  async function wfRefresh(tries = [0, 1500, 3500, 7000, 12000, 20000, 30000]) {
     const w = window._wf;
     if (!w || !document.getElementById("wf-steps") || !location.hash.includes(w.id)) return;
     const before = w.next ? w.next.key : "";
@@ -389,6 +390,14 @@ const Views = (() => {
     if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
     if (a === "summary") return open("#p-summary-details");
     if (a === "invoice") return open("#p-inv-details");
+    if (a === "report:save") return open("#p-dr-details");
+    if (a.startsWith("report:")) {
+      // Generating is quick to ask for and takes a few seconds to land: the
+      // step moves on once the generated document reaches the QA gate.
+      await Letters.gen(id, a.slice(7), true);
+      wfRefresh([2500, 5000, 9000, 15000, 25000, 40000]);
+      return;
+    }
     if (a === "settle") { location.hash = "#/finance"; return; }
     if (a === "outcome") {
       const fs = (cfg && cfg.field_schema) || {};
