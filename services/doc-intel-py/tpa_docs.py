@@ -136,6 +136,17 @@ def _verdict(slot: str, filename: str, text: str, classify_text, extract_fields,
     return "NEEDS_REVIEW", reasons
 
 
+def _fields(ctx: dict, text: str) -> dict:
+    """The eligibility facts the document states (main.package_fields), kept
+    with the slot and carried onto the case when the set is filed. Reading
+    them never costs the verdict."""
+    try:
+        return (ctx.get("package_fields") or (lambda _t: {}))(text) or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"tpa-doc: could not read eligibility facts: {type(exc).__name__}: {exc}", flush=True)
+        return {}
+
+
 def _notify_rejected(conn, tenant: str, package_id: str, prefix: str) -> None:
     """The TPA or plan hears in the portal's bell that a document of its
     package was rejected (addressed to the organization, as case-api's
@@ -335,14 +346,16 @@ def _handle_discrete(evt: dict, ctx: dict, actor: str = "tpa") -> None:
             text = raw.decode("utf-8", "ignore")
         status, reasons = _verdict(evt["slot"], evt.get("filename") or "", text,
                                    ctx["classify_text"], ctx["extract_fields"], actor)
+        fields = _fields(ctx, text)
     except Exception as exc:  # noqa: BLE001 — analyzer outage must fail open
         status, reasons = "NEEDS_REVIEW", [{"code": "ANALYZER_ERROR", "detail": str(exc)[:300]}]
+        fields = {}
     with psycopg.connect(ctx["dsn"]) as conn:
         conn.execute(
             f"""UPDATE public.{prefix}_package_docs
-               SET status=%s, reasons=%s::jsonb, analyzed_at=now()
+               SET status=%s, reasons=%s::jsonb, fields=%s::jsonb, analyzed_at=now()
                WHERE tenant=%s AND id=%s""",
-            (status, json.dumps(reasons), tenant, doc_id))
+            (status, json.dumps(reasons), json.dumps(fields), tenant, doc_id))
         pkg_status = _refresh_package(conn, tenant, evt["package_id"], prefix)
         conn.commit()
     print(f"tpa-doc {doc_id} slot={evt['slot']} -> {status} ({len(reasons)} reasons); "
@@ -377,17 +390,17 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
                                                ctx["classify_text"], ctx["extract_fields"], actor)
                     conn.execute(
                         f"""INSERT INTO public.{prefix}_package_docs
-                             (tenant, package_id, slot, object_key, filename, status, reasons, page_start, page_end, analyzed_at)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,now())
+                             (tenant, package_id, slot, object_key, filename, status, reasons, fields, page_start, page_end, analyzed_at)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,now())
                            ON CONFLICT (package_id, slot) DO UPDATE SET
                              object_key=excluded.object_key, filename=excluded.filename,
-                             status=excluded.status, reasons=excluded.reasons,
+                             status=excluded.status, reasons=excluded.reasons, fields=excluded.fields,
                              page_start=excluded.page_start, page_end=excluded.page_end,
                              analyzed_at=now()""",
                         (tenant, package_id, slot, key, f"{slot.lower()} (pages {start + 1}-{end + 1})",
                          status, json.dumps(reasons + [{"code": "SPLIT_FROM_MERGED",
                                                         "detail": f"pages {start + 1}-{end + 1}"}]),
-                         start + 1, end + 1))
+                         json.dumps(_fields(ctx, text)), start + 1, end + 1))
                 else:
                     # Slot never found in the merged PDF: NEEDS_REVIEW with the
                     # source as evidence — a human decides whether it's missing

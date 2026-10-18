@@ -226,3 +226,52 @@ func TestEligibilityProviderTypesAndConflicts(t *testing.T) {
 		t.Error("no conflicts should yield nothing")
 	}
 }
+
+// Network status is asked for only where it picks the threshold.
+func TestMissingInputsAsksNetworkStatusOnlyWhereItMatters(t *testing.T) {
+	cfg := flTestConfig()
+	has := func(m []string, k string) bool { return strings.Contains(","+strings.Join(m, ",")+",", ","+k+",") }
+	physician := missingEligibilityInputs(cfg, eligibilityInput{ProviderType: "physician_dentist", FinalDeterminationAt: "2026-09-18"})
+	if len(physician) != 0 {
+		t.Fatalf("a physician's dispute needs nothing more, got %v", physician)
+	}
+	hospital := missingEligibilityInputs(cfg, eligibilityInput{ProviderType: "hospital_outpatient", FinalDeterminationAt: "2026-09-18"})
+	if !has(hospital, "contracted") {
+		t.Fatalf("a hospital's threshold depends on its network status, got %v", hospital)
+	}
+	unknown := missingEligibilityInputs(cfg, eligibilityInput{})
+	for _, k := range []string{"provider_type", "contracted", "final_determination_at"} {
+		if !has(unknown, k) {
+			t.Fatalf("with nothing known %s is missing, got %v", k, unknown)
+		}
+	}
+}
+
+// A filed document set's facts: a stated provider type beats an inferred
+// one, the EOB is read first, and the network status sets out-of-network.
+func TestPackageCaseFacts(t *testing.T) {
+	got := packageCaseFacts([]packageSlotFacts{
+		{Slot: "ITEMIZED_BILL", Fields: []byte(`{"provider_type":"physician_dentist","provider_type_basis":"provider is a professional practice (X Physicians)"}`)},
+		{Slot: "OFFER_SUBSTANTIATION", Fields: []byte(`{"provider_type":"hospital_outpatient"}`)},
+		{Slot: "EOB", Fields: []byte(`{"contracted":false,"service_date":"2026-08-14"}`)},
+		{Slot: "PROOF_OF_COVERAGE", Fields: []byte(`{"contracted":true}`)},
+	})
+	if got["provider_type"] != "hospital_outpatient" || got["provider_type_basis"] != nil {
+		t.Fatalf("a stated type beats an inferred one: %v", got)
+	}
+	if got["contracted"] != false || got["out_of_network"] != "Yes" {
+		t.Fatalf("the EOB's network status is read first: %v", got)
+	}
+	if _, ok := got["service_date"]; ok {
+		t.Fatalf("dates stay with each document's analysis: %v", got)
+	}
+	inferred := packageCaseFacts([]packageSlotFacts{
+		{Slot: "ITEMIZED_BILL", Fields: []byte(`{"provider_type":"physician_dentist","provider_type_basis":"provider is a professional practice (X Physicians)"}`)},
+	})
+	if inferred["provider_type"] != "physician_dentist" || !strings.HasPrefix(inferred["provider_type_basis"].(string), "inferred: ") {
+		t.Fatalf("an inferred type is kept with its basis: %v", inferred)
+	}
+	if len(packageCaseFacts([]packageSlotFacts{{Slot: "EOB", Fields: []byte(`{}`)}})) != 0 {
+		t.Fatal("nothing read, nothing set")
+	}
+}

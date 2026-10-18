@@ -414,6 +414,49 @@ def _contracted_from_network_status(text: str | None) -> bool | None:
     return None
 
 
+_SERVICE_DATE_LABELS = ("date of service", "service date", "dos")
+_DECISION_DATE_LABELS = ("determination date", "decision date", "process date", "processed date",
+                         "paid date", "check date", "statement date", "date issued")
+_PROVIDER_LINE = re.compile(r"(?im)^\s*(?:rendering\s+|billing\s+)?provider(?:\s+name)?\s*[:#]\s*"
+                            r"(.{2,120}?)(?=\s{2,}|\s+NPI\b|\s*$)")
+_NETWORK_LINE = re.compile(r"(?im)\b(?:network\s+status|network|participation(?:\s+status)?|provider\s+status)"
+                           r"\s*[:#]\s*([^\n]{2,40})")
+
+
+def package_fields(text: str | None) -> dict:
+    """The eligibility facts a document in a TPA's or plan's document set
+    states, read when the set is checked -- the set is filed later, and the
+    eligibility review needs these on the case: the dates of service, the
+    plan's decision date, the provider type and the network status. Only what
+    the page prints; a value it doesn't state is left out. Pure, so it is
+    tested."""
+    t = text or ""
+    f = extract_fields(t)
+    out: dict = {}
+    svc = [d["iso"] for d in f.get("dates", []) if d["label"] in _SERVICE_DATE_LABELS]
+    dec = [d["iso"] for d in f.get("dates", []) if d["label"] in _DECISION_DATE_LABELS]
+    if svc:
+        out["service_date"] = min(svc)
+    if dec:
+        out["determination_date"] = max(dec)
+    ptype, basis = provider_type_from_text(t), ""
+    if not ptype:
+        m = _PROVIDER_LINE.search(t)
+        ptype, basis = infer_provider_type(m.group(1).strip() if m else None, t, f.get("cpt_codes"))
+    if ptype:
+        out["provider_type"] = ptype
+        if basis:
+            out["provider_type_basis"] = basis
+    m = _NETWORK_LINE.search(t)
+    contracted = _contracted_from_network_status(m.group(1)) if m else None
+    if contracted is not None:
+        out["contracted"] = contracted
+    npi = (f.get("identifiers") or {}).get("npi") or {}
+    if npi.get("luhn_valid"):
+        out["provider_npi"] = npi["value"]
+    return out
+
+
 def eligibility_conflicts(current: dict, found: dict, source: str, known: list | None = None) -> list[dict]:
     """Where a document disagrees with a value the case already carries.
 
@@ -1162,7 +1205,7 @@ def main() -> None:
                 tpa_docs.handle_tpa_doc(evt, {
                     "dsn": DSN, "vault": VAULT, "vault_headers": VAULT_HEADERS,
                     "minio": minio, "doc_bucket": DOC_BUCKET, "classify_text": classify_text,
-                    "extract_fields": extract_fields,
+                    "extract_fields": extract_fields, "package_fields": package_fields,
                     "fetch_and_decrypt": fetch_and_decrypt,
                     "features_for": features_for,
                 })

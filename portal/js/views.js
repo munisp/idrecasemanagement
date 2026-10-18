@@ -633,6 +633,32 @@ const Views = (() => {
     improper_aggregation: "Claims aggregated incorrectly",
     internal_process_not_exhausted: "Contract requires the internal dispute process, and it was not exhausted",
   };
+  // Plain-language names for the program's provider types (the threshold
+  // matrix). An unlisted type falls back to the code itself.
+  const PROVIDER_TYPE_LABELS = {
+    hospital_inpatient: "Hospital — inpatient",
+    hospital_outpatient: "Hospital — outpatient",
+    physician_dentist: "Physician or dentist",
+    rural_hospital: "Rural hospital",
+    other: "Other provider",
+  };
+  const providerTypeLabel = (x) => PROVIDER_TYPE_LABELS[x] || String(x || "").replace(/_/g, " ");
+  // Fills a provider-type select with the program's types, keeping its first
+  // ("not sure") option.
+  async function fillProviderTypes(sel) {
+    if (!sel || sel.dataset.filled) return;
+    const cfg = await Api.program.get().catch(() => null);
+    const types = [...new Set((((cfg || {}).eligibility || {}).thresholds || []).map((x) => x.provider_type))];
+    sel.insertAdjacentHTML("beforeend", types.map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join(""));
+    sel.dataset.filled = "1";
+  }
+  // The eligibility inputs, as the Reviewer knows them.
+  const ELIG_INPUT_LABELS = {
+    provider_type: ["Provider type", "what kind of provider this is"],
+    contracted: ["In the plan's network", "whether the provider is in the health plan's network"],
+    final_determination_at: ["Final determination date", "when the health plan made its final decision on the claim (the last EOB date works)"],
+    service_date: ["Date of service", "the earliest date of service in dispute"],
+  };
   const slaBadge = (days) => {
     if (days === undefined || days === null) return '<span class="muted">—</span>';
     const cls = days < 0 ? "sla breach" : days <= 3 ? "sla risk" : days <= 7 ? "sla watch" : "sla ok";
@@ -2349,9 +2375,9 @@ const Views = (() => {
       <div id="p-elig-auto-out"></div>
       <form id="p-elig" class="form">
         <div class="inline-form">
-        <select name="provider_type" required title="provider type"><option value="">provider type…</option>
-          ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option>${esc(x)}</option>`).join("")}</select>
-        <label>contracted <input type="checkbox" name="contracted" /></label>
+        <label>Provider type <select name="provider_type" required><option value="">choose…</option>
+          ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join("")}</select></label>
+        <label>In the plan's network <select name="contracted" title="Whether the provider has a contract with the health plan — it picks a hospital's minimum amount"><option value="">not stated</option><option value="no">No</option><option value="yes">Yes</option></select></label>
         <input name="amount" type="number" step="0.01" placeholder="aggregate disputed $" required />
         <label>final determination <input name="fd" type="date" required title="Final determination date — the last EOB date, service date or appeal documents are accepted as proof. The 12-month filing window runs from it." /></label>
         <label>date of service <input name="service_date" type="date" title="Earliest date of service in dispute${(cfg.eligibility || {}).services_after ? ` — must be after ${esc(cfg.eligibility.services_after)}` : ""}" /></label>
@@ -2549,8 +2575,16 @@ const Views = (() => {
           try {
             const r = await Api.program.eligibilityAuto(id);
             if (r.result === "NEEDS_HUMAN") {
-              out.innerHTML = `<p class="warn-box">⚠ Can't auto-decide — missing rule inputs:
-                <b>${(r.missing || []).map(esc).join(", ")}</b>. Fill them in the form below and compute manually.</p>`;
+              const missing = r.missing || [];
+              const f = document.getElementById("p-elig");
+              const filled = f ? eligPrefill(f, r.inputs || {}, missing) : [];
+              const bad = /not a valid calendar date/.test(r.detail || "");
+              out.innerHTML = `<div class="warn-box elig-need"><p><b>We need a little more to decide this one automatically.</b>
+                ${bad ? "A date read from the documents isn't a real calendar date, so it needs entering by hand:" : "The case and its documents don't say:"}</p>
+                <ul>${missing.map((k) => `<li>${esc((ELIG_INPUT_LABELS[k] || [])[1] || k.replace(/_/g, " "))}</li>`).join("")}</ul>
+                <p>${filled.length ? `We've filled in what we found (${filled.map(esc).join(", ")}). ` : ""}Complete the highlighted ${missing.length === 1 ? "field" : "fields"} in the form below, then click <b>Compute eligibility</b>.</p></div>`;
+              const first = f && f.querySelector(".need");
+              if (first) { first.scrollIntoView({ behavior: "smooth", block: "center" }); first.focus({ preventScroll: true }); }
             } else {
               // A decided result (ELIGIBLE/INELIGIBLE/HOLD_AOR) moves the
               // case's internal/agency status server-side -- rerender so the
@@ -2566,11 +2600,27 @@ const Views = (() => {
           } catch (e) { UI.toast(e.message, { kind: "warn" }); }
         }, "Evaluating…");
       });
+      // Fills the eligibility form with what auto-adjudication found and marks
+      // the inputs it could not; returns the labels of the fields it filled.
+      const eligPrefill = (f, inp, missing) => {
+        const filled = [];
+        const put = (el, v, label) => { if (el && v !== undefined && v !== null && v !== "" && !el.value) { el.value = v; filled.push(label); } };
+        put(f.provider_type, inp.provider_type, "provider type");
+        if (inp.contracted === true || inp.contracted === false) { f.contracted.value = inp.contracted ? "yes" : "no"; filled.push("network status"); }
+        if (inp.disputed_amount_cents) put(f.amount, (inp.disputed_amount_cents / 100).toFixed(2), "disputed amount");
+        put(f.fd, inp.final_determination_at, "final determination date");
+        put(f.service_date, inp.service_date, "date of service");
+        if (f.dispute_type) put(f.dispute_type, inp.dispute_type, "claim type");
+        const field = { provider_type: f.provider_type, contracted: f.contracted, final_determination_at: f.fd, service_date: f.service_date };
+        f.querySelectorAll(".need").forEach((el) => el.classList.remove("need"));
+        missing.forEach((k) => { const el = field[k]; if (el) { el.classList.add("need"); el.addEventListener("change", () => el.classList.remove("need"), { once: true }); } });
+        return filled;
+      };
       $("#p-elig")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;
         const payload = () => ({
-          provider_type: f.provider_type.value, contracted: f.contracted.checked,
+          provider_type: f.provider_type.value, contracted: f.contracted.value === "" ? null : f.contracted.value === "yes",
           disputed_amount_cents: money(f.amount.value),
           final_determination_at: f.fd.value || "",
           service_date: f.service_date.value || "",
@@ -6592,8 +6642,11 @@ const Views = (() => {
               <input name="other_party_name" placeholder="health plan the dispute is against" required />
               <input name="other_party_email" type="email" data-email-check placeholder="health plan's email for notices" required />
               <input name="other_party_naic" placeholder="plan NAIC (optional)" />
+              <select name="provider_type" id="tpa-file-ptype" title="What kind of provider the client is — used to check the dispute meets the minimum amount"><option value="">Provider type — not sure</option></select>
+              <select name="in_network" title="Whether the client has a contract with this health plan"><option value="">In the plan's network? — not sure</option><option value="no">Not in the plan's network</option><option value="yes">In the plan's network</option></select>
               <input name="notes" placeholder="notes" />
               <button class="mini">File dispute</button></form>
+            <p class="muted">Provider type and network status decide the minimum amount a dispute must reach. If you're not sure, leave them: we read them from the documents where they say, and the reviewer confirms.</p>
             <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all) and manage documents for the client. Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p>
             <div id="tpa-file-result"></div></div>
         </section>
@@ -6615,10 +6668,10 @@ const Views = (() => {
 └── CLAIM-002/
     └── merged.pdf        ← or one PDF holding all six</pre>
                 <div><p><b>disputes.csv</b> — one row per dispute:</p>
-                  <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes
-CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14
-CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
-                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. Up to 500 disputes per ZIP.</p>
+                  <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes,provider_type,in_network
+CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14,physician_dentist,no
+CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
+                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. <code>provider_type</code> (<code>hospital_inpatient</code>, <code>hospital_outpatient</code>, <code>physician_dentist</code>, <code>rural_hospital</code> or <code>other</code>) and <code>in_network</code> (<code>yes</code> or <code>no</code>) are optional: leave them blank if you're not sure. Up to 500 disputes per ZIP.</p>
                   <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div>
               <div class="tpa-samples"><p><b>Sample ZIPs to copy</b> — open one to see the exact layout. They are filled in with your clients where you have them;
                 every sample document says what the real one must show. Replace the sample PDFs before uploading: a ZIP that still holds them is refused.</p>
@@ -7329,6 +7382,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         ${cs.map((c) => `<tr><td>${esc(c.party_name)}</td><td>${badge(c.party_type)}</td><td>${esc(c.contact_email || "—")}</td>
           <td>${c.case_count}</td><td>${badge(c.status)}</td>
           <td><button class="mini" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></td></tr>`).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one above.</p>';
+      fillProviderTypes(document.getElementById("tpa-file-ptype"));
       const sel = document.getElementById("tpa-file-client");
       if (sel) sel.innerHTML = cs.filter((c) => c.status === "ACTIVE").map((c) => `<option value="${c.id}">${esc(c.party_name)} (${esc(c.party_type)})</option>`).join("");
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -7356,6 +7410,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         contact_name: form.contact_name.value,
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
         other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_naic: form.other_party_naic.value,
+        provider_type: form.provider_type ? form.provider_type.value : "", in_network: form.in_network ? form.in_network.value : "",
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? `Pay its fee to open it: <a href="#/cases/${r.case_id}">Pay now</a>.` : ""}</p>`;
       // A filed package leaves the board and the "file with" list.
@@ -7834,8 +7889,8 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         .filter((c) => c.status === "ACTIVE" && ["READY", "DOCS_PENDING"].includes(c.onboarding_status));
       if (!cs.length) { UI.toast("No client is ready yet: finish a client's profile and payment method in the Clients tab first.", { kind: "warn" }); return; }
       const q = (v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
-      const csv = "dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes\n" +
-        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.party_name), "", "", "", "", "", ""].join(",")).join("\n") + "\n";
+      const csv = "dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes,provider_type,in_network\n" +
+        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.party_name), "", "", "", "", "", "", "", ""].join(",")).join("\n") + "\n";
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
       a.download = "disputes.csv"; document.body.appendChild(a); a.click(); a.remove();

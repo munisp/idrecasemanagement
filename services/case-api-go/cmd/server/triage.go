@@ -172,8 +172,15 @@ func missingEligibilityInputs(cfg *ProgramConfig, in eligibilityInput) []string 
 			missing = append(missing, "provider_type")
 		}
 	}
+	// Network status only matters where it picks the threshold: FL's
+	// physician/dentist threshold is the same either way, so a physician's
+	// dispute is not held for it. With the provider type unknown, any
+	// network-dependent threshold may be the one.
 	needsContracted := false
 	for _, th := range cfg.Eligibility.Thresholds {
+		if in.ProviderType != "" && th.ProviderType != in.ProviderType {
+			continue
+		}
 		if th.Contracted != nil {
 			needsContracted = true
 			break
@@ -364,14 +371,16 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	// question for a person, not a pass.
 	if msg := invalidEligibilityInput(in); msg != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"result": "NEEDS_HUMAN", "missing": []string{strings.SplitN(msg, " ", 2)[0]},
+			"result": "NEEDS_HUMAN", "missing": []string{strings.SplitN(msg, " ", 2)[0]}, "inputs": in,
 			"detail": "a date read from the documents is not a valid calendar date (" + msg + "): enter it by hand",
 		})
 		return
 	}
 	if missing := missingEligibilityInputs(cfg, in); len(missing) > 0 {
+		// What was found goes back too, so the form can be filled with it
+		// and only the blanks are left to the Reviewer.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"result": "NEEDS_HUMAN", "missing": missing,
+			"result": "NEEDS_HUMAN", "missing": missing, "inputs": in,
 			"detail": "rule-required inputs are not derivable from the case record or analyzed documents",
 		})
 		return

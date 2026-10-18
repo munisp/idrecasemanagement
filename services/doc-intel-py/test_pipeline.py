@@ -881,3 +881,25 @@ def test_a_crooked_page_is_straightened_and_a_straight_one_left_alone():
     assert [p for p, _ in done] == [1] and abs(pl.skew_degrees(fixed[0])) <= 0.5
     ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 1.0}, "pages_straightened": [(1, -5.0)], "text": "1.00"}, {}, None)
     assert any("crooked (5.0°)" in f["issue"] for f in ctx["findings"])
+
+
+def test_package_fields_reads_what_a_filing_document_states():
+    from main import package_fields as f
+    eob = ("EXPLANATION OF BENEFITS\nSunshine Health Plan - Remittance Advice\n"
+           "Claim Number: TPA-TEST-55021   Member ID: TSTMBR-7781\n"
+           "Service Date: 08/14/2026   Procedure: CPT 99285 Emergency dept visit\n"
+           "Determination Date: 09/18/2026\nNetwork Status: Out-of-Network\n")
+    got = f(eob)
+    assert got["service_date"] == "2026-08-14" and got["determination_date"] == "2026-09-18"
+    assert got["contracted"] is False
+    bill = ("ITEMIZED BILL - UB-04 Summary\nProvider: Gulf Coast Emergency Physicians  NPI 1234567893\n"
+            "Patient: TEST PATIENT   Service Date: 08/14/2026\nPlace of Service: 23\n")
+    got = f(bill)
+    assert got["provider_type"] == "physician_dentist" and got["provider_type_basis"].startswith("provider is a professional practice")
+    assert got["provider_npi"] == "1234567893" and "contracted" not in got and "determination_date" not in got
+
+
+def test_package_fields_states_nothing_it_does_not_read():
+    from main import package_fields as f
+    assert f("") == {}
+    assert f("OPEN NEGOTIATION NOTICE\nThe parties negotiated in good faith.") == {}

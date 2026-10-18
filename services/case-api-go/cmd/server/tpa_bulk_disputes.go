@@ -28,10 +28,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -170,18 +172,21 @@ func (s *server) fillTPAPackage(r *http.Request, tenant, tpaID, pkgID string, me
 // checked. The stored (sealed) object is shared, not copied.
 func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboardingKind, pkgID, caseID, uploadedBy string) int {
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT slot, object_key, coalesce(filename,'') FROM public.%s_package_docs
+		SELECT slot, object_key, coalesce(filename,''), coalesce(fields,'{}'::jsonb) FROM public.%s_package_docs
 		WHERE tenant=$1 AND package_id=$2 AND status='ACCEPTED' AND object_key IS NOT NULL
 		ORDER BY slot`, k.prefix), tenant, pkgID)
 	if err != nil {
 		slog.Error("attach package documents: query", "package", pkgID, "err", err)
 		return 0
 	}
-	type doc struct{ slot, key, filename string }
+	type doc struct {
+		slot, key, filename string
+		fields              []byte
+	}
 	var docs []doc
 	for rows.Next() {
 		var d doc
-		if rows.Scan(&d.slot, &d.key, &d.filename) == nil {
+		if rows.Scan(&d.slot, &d.key, &d.filename, &d.fields) == nil {
 			docs = append(docs, d)
 		}
 	}
@@ -207,14 +212,84 @@ func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboa
 		// as its analysis. Without one, the unread-documents sweep sent it to
 		// doc-intel again, whose PDF library crashed on these one-page
 		// segments and took the whole document queue down with it.
-		s.recordPackageAnalysis(r.Context(), tenant, docID, caseID, d.slot, pkgID)
+		s.recordPackageAnalysis(r.Context(), tenant, docID, caseID, d.slot, pkgID, d.fields)
 		n++
 	}
 	if n > 0 {
 		s.logActivity(r.Context(), tenant, caseID, "DOCUMENTS_ATTACHED",
 			fmt.Sprintf("%d checked filing documents attached from the onboarding package", n))
 	}
+	slots := make([]packageSlotFacts, 0, len(docs))
+	for _, d := range docs {
+		slots = append(slots, packageSlotFacts{Slot: d.slot, Fields: d.fields})
+	}
+	if facts := packageCaseFacts(slots); len(facts) > 0 {
+		b, _ := json.Marshal(facts)
+		// Only where the case has no value yet: a value already on the case
+		// (entered by a person) beats a document's reading.
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.cases SET details = $2::jsonb || coalesce(details,'{}'::jsonb) WHERE id=$1`,
+			sanitizeTenant(tenant)), caseID, b)
+	}
 	return n
+}
+
+// packageSlotFacts is one filed slot and the eligibility facts doc-intel read
+// off it when the document set was checked (tpa_docs.py, package_fields).
+type packageSlotFacts struct {
+	Slot   string
+	Fields []byte
+}
+
+// packageCaseFacts picks the provider type and network status for the case
+// from its filed documents: a value a document states outright beats one
+// worked out from the provider's name (kept with its basis, so the
+// eligibility review asks for a second look), and the EOB is read first.
+// Dates are not copied here: they stay with each document's analysis, where
+// the eligibility review takes the last decision date and the earliest date
+// of service across all of them. Pure, so it is tested.
+func packageCaseFacts(slots []packageSlotFacts) map[string]any {
+	rank := func(slot string) int {
+		switch slot {
+		case "EOB":
+			return 0
+		case "ITEMIZED_BILL":
+			return 1
+		case "OFFER_SUBSTANTIATION":
+			return 2
+		}
+		return 3
+	}
+	sorted := append([]packageSlotFacts(nil), slots...)
+	sort.SliceStable(sorted, func(i, j int) bool { return rank(sorted[i].Slot) < rank(sorted[j].Slot) })
+	out := map[string]any{}
+	var inferredType, inferredBasis string
+	for _, sl := range sorted {
+		var f map[string]any
+		if json.Unmarshal(sl.Fields, &f) != nil {
+			continue
+		}
+		if pt, _ := f["provider_type"].(string); pt != "" && out["provider_type"] == nil {
+			if basis, _ := f["provider_type_basis"].(string); basis != "" {
+				if inferredType == "" {
+					inferredType, inferredBasis = pt, basis
+				}
+			} else {
+				out["provider_type"] = pt
+			}
+		}
+		if c, ok := f["contracted"].(bool); ok && out["contracted"] == nil {
+			out["contracted"] = c
+		}
+	}
+	if out["provider_type"] == nil && inferredType != "" {
+		out["provider_type"] = inferredType
+		out["provider_type_basis"] = "inferred: " + inferredBasis
+	}
+	if c, ok := out["contracted"].(bool); ok {
+		out["out_of_network"] = map[bool]string{true: "No", false: "Yes"}[c]
+	}
+	return out
 }
 
 // packageDocType names an accepted slot in doc-intel's document types.
@@ -228,12 +303,20 @@ func packageDocType(slot string) string {
 	return strings.ToLower(slot)
 }
 
-func (s *server) recordPackageAnalysis(ctx context.Context, tenant, docID, caseID, slot, pkgID string) {
+// The facts read off the document when its set was checked go in as its
+// normalized fields -- the same place a case document's analysis keeps them,
+// so the eligibility review finds the dates of service and the plan's
+// decision date on a filed set too.
+func (s *server) recordPackageAnalysis(ctx context.Context, tenant, docID, caseID, slot, pkgID string, fields []byte) {
+	if len(fields) == 0 {
+		fields = []byte("{}")
+	}
 	_, _ = s.db.Exec(ctx, `
 		INSERT INTO public.doc_analysis (doc_id, tenant, case_id, status, doc_type, result, analyzed_at)
 		VALUES ($1::uuid,$2,$3::uuid,'ANALYZED',$4,
-		        jsonb_build_object('source','onboarding_package','slot',$5::text,'package_id',$6::text,'verdict','ACCEPTED'), now())
-		ON CONFLICT DO NOTHING`, docID, tenant, caseID, packageDocType(slot), slot, pkgID)
+		        jsonb_build_object('source','onboarding_package','slot',$5::text,'package_id',$6::text,'verdict','ACCEPTED',
+		                           'normalized',$7::jsonb), now())
+		ON CONFLICT DO NOTHING`, docID, tenant, caseID, packageDocType(slot), slot, pkgID, fields)
 }
 
 // backfillPackageAnalyses gives every already-attached package document its
@@ -367,7 +450,7 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, need := range []string{"dispute_ref", "party_name", "disputed_amount", "other_party_name", "other_party_email"} {
 		if _, ok := col[need]; !ok {
-			http.Error(w, fmt.Sprintf(`{"error":"disputes.csv must have the columns dispute_ref, party_name, disputed_amount, other_party_name, other_party_email (missing %s); other_party_naic, contact_name and notes are optional"}`, need), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf(`{"error":"disputes.csv must have the columns dispute_ref, party_name, disputed_amount, other_party_name, other_party_email (missing %s); other_party_naic, contact_name, notes, provider_type and in_network (yes/no) are optional"}`, need), http.StatusBadRequest)
 			return
 		}
 	}
@@ -423,6 +506,12 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail(msg)
 			continue
 		}
+		answers, msg := s.filerEligibilityAnswers(r, tenant, get(rec, "provider_type"), get(rec, "in_network"))
+		if msg != "" {
+			fail(msg)
+			continue
+		}
+		answersJSON, _ := json.Marshal(answers)
 		var clientID, cstatus string
 		var npi, tin, addr *string
 		if err := s.db.QueryRow(r.Context(), `
@@ -479,10 +568,10 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.db.Exec(r.Context(), `
 			INSERT INTO public.tpa_dispute_batch_items
 			  (tenant, batch_id, row_no, dispute_ref, client_id, package_id, disputed_amount_cents, contact_name, notes,
-			   other_party_name, other_party_email, other_party_naic)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$10,$11,NULLIF($12,''))`,
+			   other_party_name, other_party_email, other_party_naic, eligibility_answers)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$10,$11,NULLIF($12,''),$13::jsonb)`,
 			tenant, batchID, row.Row, row.DisputeRef, clientID, row.PackageID, amount,
-			get(rec, "contact_name"), get(rec, "notes"), other.Name, other.Email, other.NAIC); err != nil {
+			get(rec, "contact_name"), get(rec, "notes"), other.Name, other.Email, other.NAIC, answersJSON); err != nil {
 			fail("could not record the dispute")
 			continue
 		}
@@ -635,18 +724,22 @@ func (s *server) fileReadyBulkDisputes() int {
 	for _, id := range ids {
 		var tenant, tpaID, clientID, pkgID, contact, notes, batchID, oName, oEmail, oNAIC string
 		var amount int64
+		var answersJSON []byte
 		if err := s.db.QueryRow(ctx, `
 			UPDATE public.tpa_dispute_batch_items i SET status='FILING'
 			FROM public.tpa_dispute_batches b
 			WHERE i.id::text=$1 AND i.status='WAITING_DOCS' AND b.id=i.batch_id
 			RETURNING i.tenant, b.tpa_id::text, i.client_id::text, i.package_id::text, i.disputed_amount_cents,
 			          coalesce(i.contact_name,''), coalesce(i.notes,''), i.batch_id::text,
-			          coalesce(i.other_party_name,''), coalesce(i.other_party_email,''), coalesce(i.other_party_naic,'')`, id).
-			Scan(&tenant, &tpaID, &clientID, &pkgID, &amount, &contact, &notes, &batchID, &oName, &oEmail, &oNAIC); err != nil {
+			          coalesce(i.other_party_name,''), coalesce(i.other_party_email,''), coalesce(i.other_party_naic,''),
+			          coalesce(i.eligibility_answers,'{}'::jsonb)`, id).
+			Scan(&tenant, &tpaID, &clientID, &pkgID, &amount, &contact, &notes, &batchID, &oName, &oEmail, &oNAIC, &answersJSON); err != nil {
 			continue // another replica claimed it
 		}
+		var answers map[string]any
+		_ = json.Unmarshal(answersJSON, &answers)
 		caseNumber, ferr := s.fileOneBulkDispute(ctx, tenant, tpaID, clientID, pkgID, contact, notes, amount,
-			respondent{Side: "HEALTH_PLAN", Name: oName, Email: oEmail, NAIC: oNAIC})
+			respondent{Side: "HEALTH_PLAN", Name: oName, Email: oEmail, NAIC: oNAIC}, answers)
 		if ferr != nil {
 			_, _ = s.db.Exec(ctx, `UPDATE public.tpa_dispute_batch_items SET status='ERROR', error=$2 WHERE id::text=$1`, id, ferr.Error())
 			slog.Error("bulk dispute filing failed", "item", id, "err", ferr)
@@ -669,7 +762,7 @@ func (s *server) fileReadyBulkDisputes() int {
 // fileOneBulkDispute re-checks what may have changed since the upload (the
 // client suspended, its payment method removed, the package used elsewhere)
 // and files the dispute.
-func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID, pkgID, contact, notes string, amount int64, other respondent) (string, error) {
+func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID, pkgID, contact, notes string, amount int64, other respondent, answers map[string]any) (string, error) {
 	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/", nil)
 	var org tpaOrg
 	if err := s.db.QueryRow(ctx, `
@@ -709,6 +802,7 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	if other.Name != "" {
 		s.recordRespondent(r, tenant, caseID, other)
 	}
+	s.applyFilerEligibilityAnswers(ctx, tenant, caseID, answers)
 	s.logAudit(ctx, tenant, caseID, "BULK_DISPUTE_FILED", map[string]any{
 		"tpa_id": tpaID, "client_id": clientID, "package_id": pkgID, "case_number": caseNumber, "by": "system:bulk-filer",
 		"notice": caseNumber + " filed for " + partyName})

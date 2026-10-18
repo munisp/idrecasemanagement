@@ -485,9 +485,18 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		OtherPartyName      string `json:"other_party_name"`  // the health plan the dispute is against
 		OtherPartyEmail     string `json:"other_party_email"` // where its notices go
 		OtherPartyNAIC      string `json:"other_party_naic"`
+		// The filer's own answers to two eligibility questions the
+		// documents often don't state: "" = not sure, left to the documents.
+		ProviderType string `json:"provider_type"`
+		InNetwork    string `json:"in_network"` // yes | no | ""
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.ClientID == "" {
 		http.Error(w, `{"error":"client_id required"}`, http.StatusBadRequest)
+		return
+	}
+	answers, msg := s.filerEligibilityAnswers(r, tenant, in.ProviderType, in.InNetwork)
+	if msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
 	rsp := respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC}
@@ -556,6 +565,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	caseID, caseNumber, st, err := s.fileTPADispute(r, tenant, org, in.ClientID, partyName, partyType, in.PackageID, in.ContactName, in.Notes, in.DisputedAmountCents)
 	if err == nil {
 		s.recordRespondent(r, tenant, caseID, rsp)
+		s.applyFilerEligibilityAnswers(r.Context(), tenant, caseID, answers)
 	}
 	if err != nil {
 		switch {

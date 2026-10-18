@@ -1015,3 +1015,7 @@ label.button-like:hover{background:var(--surface-sunken)}
 tr.pkg-bad td{background:var(--danger-bg)}
 tr.pkg-hist td{border-top:0;padding-top:0}
 .warn-line{padding:8px 12px;border-radius:8px;background:var(--warning-bg);color:var(--warning-fg)}
+/* Auto-adjudication could not decide: what is still needed, and the fields to fill */
+.elig-need{padding:12px 14px;border-radius:8px;background:var(--warning-bg);color:var(--fg,inherit)}
+.elig-need p{margin:4px 0}.elig-need ul{margin:6px 0 6px 20px;padding:0}
+#p-elig .need{outline:2px solid var(--warning-fg);outline-offset:1px;background:var(--warning-bg)}
