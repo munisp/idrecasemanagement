@@ -1276,7 +1276,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
 		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
 	}
-	s.graphSync(tenant) // nudge FalkorDB + lakehouse silver (best-effort)
+	s.graphSync(tenant, caseID) // the new case in the graph (best-effort)
 	s.logAudit(r.Context(), tenant, caseID, "CASE_INITIATED", map[string]any{
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "case_number": req.CaseNumber,
 		"status": initialStatus, "workflow_id": wfID, "late_initiation": lateInitiation,
@@ -1628,7 +1628,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	detail, _ := json.Marshal(data)
 	s.logActivity(r.Context(), tenant, id, signal,
 		fmt.Sprintf("Workflow signal %s delivered to %s — %s", signal, wfID, truncate(string(detail), 500)))
-	s.graphSync(tenant) // graph reflects status transitions (best-effort)
+	s.graphSync(tenant, id) // graph reflects status transitions (best-effort)
 	s.logAudit(r.Context(), tenant, id, "CASE_SIGNALED", map[string]any{
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "signal": signal, "workflow_id": wfID,
 	})
