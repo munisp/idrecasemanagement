@@ -445,7 +445,7 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lock := s.caseLockedForRequest(r, tenant, in.CaseID); lock != "" {
-		writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+		writeLockRefusal(w, lock)
 		return
 	}
 	// Two statements, not one writable-CTE combo: confirmed live on this
@@ -531,6 +531,10 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Body == "" {
 		http.Error(w, `{"error":"body required"}`, http.StatusBadRequest)
+		return
+	}
+	if strings.EqualFold(in.RecordType, "case") && !s.caseVisible(r.Context(), p, tenant, in.RecordID) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	// Notes streams (Field Criteria): default internal; validate against the
@@ -731,6 +735,23 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 				Kind: "document", ID: d.DocID, Label: label, Detail: d.Snippet, CaseID: d.CaseID,
 			})
 		}
+	}
+	// A Reviewer finds nothing of a case assigned to someone else: not the case, its documents, tasks or invoices.
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && reviewerScoped(p) {
+		var ids []string
+		for _, h := range out {
+			if h.CaseID != "" {
+				ids = append(ids, h.CaseID)
+			}
+		}
+		hidden := s.hiddenCaseIDs(r.Context(), p, tenant, ids)
+		kept := out[:0]
+		for _, h := range out {
+			if !hidden[h.CaseID] {
+				kept = append(kept, h)
+			}
+		}
+		out = kept
 	}
 	writeJSON(w, http.StatusOK, out)
 }

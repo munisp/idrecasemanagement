@@ -355,7 +355,10 @@ const Api = (() => {
       search: (q) => req("GET", `${t()}/search?q=${encodeURIComponent(q)}`),
     },
     cm: {
-      assign: (caseId, role, assignee, reason = "", action = "") => req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee, reason, action }),
+      // expected: the assignee the page showed ("" = unassigned); if it changed meanwhile the server answers 409.
+      assign: (caseId, role, assignee, reason = "", action = "", expected) =>
+        req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee, reason, action, ...(expected !== undefined ? { expected } : {}) }),
+      claim: (caseId, reason = "") => req("POST", `${t()}/cases/${caseId}/assign`, { action: "claim", reason }),
       assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
       assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),

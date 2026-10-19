@@ -1074,3 +1074,25 @@ tr.pkg-hist td{border-top:0;padding-top:0}
 .case-more-label{font-size:13px;font-weight:550;color:var(--text-primary)}
 .case-more-hint{font-size:12px;font-weight:400;color:var(--text-tertiary)}
 @media (prefers-reduced-motion: reduce){.case-more-caret{transition:none}}
+
+/* ---- Case assignment: who holds a case, the team's workload, the filters ---------------------------------- */
+.asg{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap}
+.asg-name{font-weight:550;color:var(--text-primary)}
+.asg-name.me{color:var(--accent-primary)}
+.asg-none{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;font-size:11.5px;font-weight:600;
+  color:var(--warning-fg);background:var(--warning-bg)}
+.asg-act{min-height:24px;padding:1px 9px;font-size:11.5px}
+.asg-acts{display:inline-flex;gap:6px;margin-left:8px;flex-wrap:wrap;vertical-align:middle}
+#case-assignee{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.workload{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
+.workload-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-tertiary);margin-right:4px}
+.wl-chip{min-height:26px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:500;background:var(--surface-raised);
+  color:var(--text-primary);border:1px solid var(--border-default)}
+.wl-chip b{margin-left:4px;font-variant-numeric:tabular-nums}
+.wl-chip:hover{background:var(--surface-sunken)}
+.wl-chip.active{background:var(--action-primary-bg);color:var(--action-primary-fg);border-color:transparent}
+.wl-none:not(.active){color:var(--warning-fg);border-color:var(--warning-fg)}
+.asg-filter{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-secondary);margin-right:10px}
+.dg .asg{flex-wrap:nowrap;white-space:nowrap}
+.empty-state{max-width:60ch;margin:48px auto;text-align:center}
+.empty-state p{line-height:1.55}

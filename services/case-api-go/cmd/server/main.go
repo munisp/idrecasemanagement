@@ -176,6 +176,9 @@ type Case struct {
 	PayerID          string    `json:"payer_id"`
 	TriageLane       string    `json:"triage_lane"`        // AUTO_REVIEW | STANDARD | COMPLEX
 	SLADaysRemaining int       `json:"sla_days_remaining"` // 30 statutory business days, approximated
+	AssignedTo       *string   `json:"assigned_to"`        // Keycloak user id; null = unassigned
+	AssignedRole     *string   `json:"assigned_role,omitempty"`
+	AssignedName     string    `json:"assigned_name,omitempty"` // the assignee's name, for the list
 }
 
 type InitiateRequest struct {
@@ -1337,6 +1340,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		// Status (its basic status stays PENDING_INTAKE), else the status.
 		whitelist := map[string]string{"opened_at": "c.opened_at", "case_number": "c.case_number",
 			"status": "coalesce(c.internal_status, c.status)", "qpa_cents": "c.qpa_cents", "service_line": "c.service_line",
+			"assigned": "NULLIF(NULLIF(c.assigned_to,''),'unassigned-pool')",
 			"disputed_amount_cents": "c.disputed_amount_cents", "sla": "c.opened_at"}
 		col, dir := s, "ASC"
 		if strings.HasPrefix(s, "-") {
@@ -1405,8 +1409,26 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	// mine=true: same convention as listTasks (crm.go) -- assigned_to is the
 	// Keycloak sub assignCase/the auto-assign queue already writes, so this
 	// is a real, populated filter, not a new concept.
+	caller := r.Context().Value(ctxPrincipal{}).(principal)
 	if q.Get("mine") == "true" {
-		add("c.assigned_to = $%d", r.Context().Value(ctxPrincipal{}).(principal).Subject)
+		add("c.assigned_to = $%d", caller.Subject)
+	}
+	// A Reviewer sees only unassigned cases and their own (casescope.go).
+	if cond, ok := caseScopeSQL(caller, "c", len(args)+1); ok {
+		args = append(args, caller.Subject)
+		where += cond
+	}
+	// Assignment filters: assigned=mine|unassigned|assigned, and (for those who see every case) assignee=<user id>.
+	switch q.Get("assigned") {
+	case "mine":
+		add("c.assigned_to = $%d", caller.Subject)
+	case "unassigned":
+		where += " AND (c.assigned_to IS NULL OR c.assigned_to = 'unassigned-pool')"
+	case "assigned":
+		where += " AND c.assigned_to IS NOT NULL AND c.assigned_to <> 'unassigned-pool'"
+	}
+	if who := strings.TrimSpace(q.Get("assignee")); who != "" && !reviewerScoped(caller) {
+		add("c.assigned_to = $%d", who)
 	}
 	// Triage lane filter (Lever 2): whitelisted, never interpolated raw.
 	if lane := q.Get("lane"); lane == "AUTO_REVIEW" || lane == "STANDARD" || lane == "COMPLEX" {
@@ -1429,7 +1451,8 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	}
 	query := fmt.Sprintf(`SELECT c.id, c.case_number, c.status, c.internal_status, c.agency_status,
 		                    coalesce(c.service_line,''), coalesce(c.qpa_cents,0), coalesce(c.disputed_amount_cents,0), c.opened_at,
-		                    c.batch_id::text, coalesce(c.payer_id,''), %s AS triage_lane, %s AS sla_days_remaining
+		                    c.batch_id::text, coalesce(c.payer_id,''), %s AS triage_lane, %s AS sla_days_remaining,
+		                    NULLIF(NULLIF(c.assigned_to,''),'unassigned-pool'), c.assigned_role
 		             %s WHERE true%s
 		             ORDER BY %s %s, c.id DESC LIMIT %d`, triageLaneSQL, slaDaysSQL, fromClause, where, sortCol, sortDir, limit+1)
 	if offsetMode {
@@ -1445,7 +1468,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c Case
 		var batchID *string
-		if err := rows.Scan(&c.ID, &c.CaseNumber, &c.Status, &c.InternalStatus, &c.AgencyStatus, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &batchID, &c.PayerID, &c.TriageLane, &c.SLADaysRemaining); err != nil {
+		if err := rows.Scan(&c.ID, &c.CaseNumber, &c.Status, &c.InternalStatus, &c.AgencyStatus, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &batchID, &c.PayerID, &c.TriageLane, &c.SLADaysRemaining, &c.AssignedTo, &c.AssignedRole); err != nil {
 			slog.Error("listCases scan failed — row silently dropped from the list", "tenant", tenant, "err", err)
 			continue
 		}
@@ -1463,6 +1486,21 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		} else {
 			last := out[len(out)-1]
 			next = last.OpenedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID
+		}
+	}
+	// The assignee's name on every row (one lookup per distinct person on the page).
+	var subs []string
+	for _, c := range out {
+		if c.AssignedTo != nil && !contains(subs, *c.AssignedTo) {
+			subs = append(subs, *c.AssignedTo)
+		}
+	}
+	if len(subs) > 0 {
+		names := s.resolveSubjectNames(r.Context(), subs)
+		for i := range out {
+			if out[i].AssignedTo != nil {
+				out[i].AssignedName = names[*out[i].AssignedTo]
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cases": out, "next_cursor": next, "total": total})

@@ -173,23 +173,36 @@ func (s *server) validAssignee(ctx context.Context, tenant, role, userID string)
 	return "", nil
 }
 
-// assignCase: POST /cases/{caseId}/assign {role, assignee?, reason?, action?: "unassign"}
-// The PM assigns and reassigns (SOP). A Reviewer still takes work with "Grab next"; it cannot route cases to others.
+// assignCase: POST /cases/{caseId}/assign {role, assignee?, reason?, expected?, action?: "unassign" | "claim"}
+// The PM and the Tenant Admin assign and reassign (SOP), to eligible staff or (Tenant Admin) to themselves. A
+// Reviewer claims an unassigned case for themselves ("claim") and can do nothing else here: they cannot route cases
+// to others or take a case someone holds. Every write is conditional on the assignment the caller saw, so two people
+// acting at once cannot both win: the second gets 409 with who holds the case now.
 func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: cases are assigned by the PM"}`, http.StatusForbidden)
-		return
-	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
-		Role     string `json:"role"`
-		Assignee string `json:"assignee"` // Keycloak user id; "" = least-loaded eligible staff member
-		Reason   string `json:"reason"`
-		Action   string `json:"action"` // "unassign"
+		Role     string  `json:"role"`
+		Assignee string  `json:"assignee"` // Keycloak user id; "" = least-loaded eligible staff member
+		Reason   string  `json:"reason"`
+		Action   string  `json:"action"`   // "unassign" | "claim"
+		Expected *string `json:"expected"` // the assignee the caller saw ("" = unassigned); a change since then is a 409
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	assigner := hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole)
+	if in.Action == "claim" {
+		if !assigner && !hasAnyRole(p, "CASE_MANAGER") {
+			http.Error(w, `{"error":"forbidden: only a Reviewer (or the PM / Tenant Admin) can take a case"}`, http.StatusForbidden)
+			return
+		}
+		s.claimCase(w, r, p, tenant, caseID, in.Reason)
+		return
+	}
+	if !assigner {
+		http.Error(w, `{"error":"forbidden: cases are assigned by the PM or the Tenant Admin; a Reviewer can take an unassigned case for themselves"}`, http.StatusForbidden)
+		return
+	}
 	in.Role, in.Reason = strings.ToUpper(strings.TrimSpace(in.Role)), strings.TrimSpace(in.Reason)
 	if in.Role == "" {
 		in.Role = "CASE_MANAGER"
@@ -210,6 +223,10 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	if prevTo != nil && *prevTo != "unassigned-pool" {
 		prev = *prevTo
 	}
+	if in.Expected != nil && *in.Expected != prev {
+		s.assignmentChanged(w, r, prev)
+		return
+	}
 	names := s.resolveSubjectNames(r.Context(), []string{prev, p.Subject})
 	byName := displayName(p)
 
@@ -218,8 +235,14 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"assigned_to": nil, "unchanged": true})
 			return
 		}
-		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=NULL, assigned_role=NULL, updated_at=now() WHERE id=$1`, t), caseID); err != nil {
+		tag, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=NULL, assigned_role=NULL, updated_at=now()
+			WHERE id=$1 AND assigned_to IS NOT DISTINCT FROM $2`, t), caseID, prevTo)
+		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			s.assignmentChanged(w, r, s.currentAssignee(r.Context(), tenant, caseID))
 			return
 		}
 		msg := fmt.Sprintf("Unassigned from %s by %s%s", names[prev], byName, withReason(in.Reason))
@@ -247,6 +270,9 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("no active %s on this tenant to assign to — add one on the Team page", assignableRoles[in.Role])})
 			return
 		}
+	} else if assignee == p.Subject && contains(p.Roles, "TENANT_ADMIN") || assignee == p.Subject && hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		// Taking ownership: a Tenant Admin (or a platform admin) may hold a case themselves, as its Reviewer.
+		assigneeName = displayName(p)
 	} else if !hasAnyRole(p, serviceRole) {
 		name, err := s.validAssignee(r.Context(), tenant, in.Role, assignee)
 		if err != nil {
@@ -263,9 +289,14 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "unchanged": true})
 		return
 	}
-	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now() WHERE id=$3`, t),
-		assignee, in.Role, caseID); err != nil {
+	tag, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now()
+		WHERE id=$3 AND assigned_to IS NOT DISTINCT FROM $4`, t), assignee, in.Role, caseID, prevTo)
+	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 { // someone else changed it between our read and this write
+		s.assignmentChanged(w, r, s.currentAssignee(r.Context(), tenant, caseID))
 		return
 	}
 	label := assignableRoles[in.Role]
@@ -282,6 +313,66 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 		"by": p.Subject, "assigned_to": assignee, "previous": prev, "role": in.Role, "manual": in.Assignee != "", "reason": in.Reason,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "role": in.Role, "previous": prev})
+}
+
+// claimCase: a person takes an unassigned case for themselves, as its Reviewer. The update only applies while the
+// case is still unassigned, so of two people claiming at once exactly one gets it.
+func (s *server) claimCase(w http.ResponseWriter, r *http.Request, p principal, tenant, caseID, reason string) {
+	t := sanitizeTenant(tenant)
+	var cn string
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role='CASE_MANAGER', updated_at=now()
+		WHERE id=$2 AND (assigned_to IS NULL OR assigned_to = 'unassigned-pool')
+		RETURNING case_number`, t), p.Subject, caseID).Scan(&cn)
+	if err != nil {
+		holder := s.currentAssignee(r.Context(), tenant, caseID)
+		if holder == p.Subject {
+			writeJSON(w, http.StatusOK, map[string]any{"assigned_to": p.Subject, "name": displayName(p), "unchanged": true})
+			return
+		}
+		if holder == "" { // no such case
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		// A Reviewer is not told who: the case is someone else's now, and out of their view.
+		msg := "Someone else took this case a moment ago."
+		out := map[string]any{"error": msg, "taken": true}
+		if !reviewerScoped(p) {
+			name := s.resolveSubjectNames(r.Context(), []string{holder})[holder]
+			out["error"], out["assigned_to"], out["name"] = "It is already assigned to "+name+".", holder, name
+		}
+		writeJSON(w, http.StatusConflict, out)
+		return
+	}
+	who := displayName(p)
+	s.logActivity(r.Context(), tenant, caseID, "MILESTONE", fmt.Sprintf("Taken by %s (Reviewer)%s", who, withReason(reason)))
+	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
+		"by": p.Subject, "assigned_to": p.Subject, "previous": "", "role": "CASE_MANAGER", "claim": true, "reason": reason,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"assigned_to": p.Subject, "name": who, "role": "CASE_MANAGER", "previous": ""})
+}
+
+// currentAssignee: who holds the case now ("" when unassigned or not found).
+func (s *server) currentAssignee(ctx context.Context, tenant, caseID string) string {
+	var to *string
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT assigned_to FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&to)
+	if v := deref(to); v != "unassigned-pool" {
+		return v
+	}
+	return ""
+}
+
+// assignmentChanged answers a write that lost a race (or was based on a stale page): 409, with who holds it now.
+func (s *server) assignmentChanged(w http.ResponseWriter, r *http.Request, holder string) {
+	name := "nobody (unassigned)"
+	if holder != "" {
+		name = s.resolveSubjectNames(r.Context(), []string{holder})[holder]
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":       "The assignment changed while you were choosing — it is now with " + name + ". Look again before changing it.",
+		"changed":     true,
+		"assigned_to": holder, "name": name,
+	})
 }
 
 // withReason: " — reason" for an activity line, or nothing when no reason was given.

@@ -178,7 +178,8 @@
   if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
-  if (!outside && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
+  // Hidden from a Reviewer who sees only their own cases: it answers from every case in the tenant.
+  if (!outside && !has("PARTY") && !Auth.reviewerScoped()) links.push(["#/ask", "✦", "Ask the graph"]);
   // Party workspace: an invited party's own disputes (party_accounts is the only source of access).
   if (has("PARTY") && feature("party_workspace")) links.push(["#/party", "⚭", "My disputes"]);
   // Specialty review queues: each specialist sees their own, the PM all three

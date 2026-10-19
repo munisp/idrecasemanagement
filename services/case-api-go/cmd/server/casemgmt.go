@@ -413,7 +413,7 @@ func (s *server) relateCases(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, id := range []string{in.CaseID, in.RelatedID} {
 		if lock := s.caseLockedForRequest(r, tenant, id); lock != "" {
-			writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+			writeLockRefusal(w, lock)
 			return
 		}
 	}

@@ -278,7 +278,11 @@ const Views = (() => {
     if (!can("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) { box.remove(); return; }
     let r;
     try { r = await Api.program.workflow(id); }
-    catch (e) { box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return; }
+    catch (e) {
+      // Reassigned to someone else while open: for a Reviewer the case is no longer theirs to see.
+      if (e.status === 404 && Auth.reviewerScoped()) { caseGone(); return; }
+      box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return;
+    }
     if (!r.programmed) { box.remove(); return; }
     const steps = r.steps || [];
     const next = steps.find((x) => x.state === "next");
@@ -322,6 +326,12 @@ const Views = (() => {
     };
     step(0);
   }
+  // The case was reassigned away from this Reviewer while they had it open.
+  function caseGone() {
+    clearInterval(wfPoll); clearTimeout(wfTimer); window._wf = null;
+    UI.toast("This case was reassigned to someone else and is no longer on your list.", { kind: "warn", duration: 9000 });
+    location.hash = "#/cases";
+  }
   function wfMoved(next) {
     if (!next) { UI.toast("All steps are done"); return; }
     UI.toast(next.can_act ? `Next: ${next.label} — it's yours` : `Next: ${next.label} — with the ${next.owner}`);
@@ -338,7 +348,7 @@ const Views = (() => {
         const r = await Api.program.workflow(w.id);
         const n = (r.steps || []).find((x) => x.state === "next");
         if ((n ? n.key : "") !== before) { await wfLoad(w.id, w.cfg); wfMoved(window._wf.next); }
-      } catch { /* the next round tries again */ }
+      } catch (e) { if (e.status === 404 && Auth.reviewerScoped()) caseGone(); /* else the next round tries again */ }
     }, 20000);
   }
   function wfApplyLocks() {
@@ -645,7 +655,7 @@ const Views = (() => {
 
   // Server-driven column sort, stored in the hash so it survives refresh and
   // is shareable: '#/cases?sort=-qpa_cents' (prefix '-' = descending).
-  const SORTABLE = new Set(["case_number", "status", "service_line", "qpa_cents", "opened_at", "sla"]);
+  const SORTABLE = new Set(["assigned", "case_number", "status", "service_line", "qpa_cents", "opened_at", "sla"]);
   // Lever 2/3/4: triage lane chip, signed SLA badge, batch group headers.
   const laneChip = (lane) => lane === "AUTO_REVIEW" ? `<span class="chip lane-auto" title="Everything needed for a one-click confirm is present">AUTO</span>`
     : lane === "COMPLEX" ? `<span class="chip lane-complex" title="Batched, duplicated, escalated, or high-dollar">COMPLEX</span>`
@@ -755,7 +765,7 @@ const Views = (() => {
     if (!rows.length) return `<p class="muted">No disputes.</p>`;
     const row = (c) => `<tr class="click" data-case="${c.id}">
         <td class="selcol"><input type="checkbox" class="sel-one" data-id="${c.id}" ${selection.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.case_number)}"></td>
-        <td class="mono">${esc(c.case_number)}</td><td>${caseBadge(c)}</td><td>${esc(c.service_line)}</td>
+        <td class="mono">${esc(c.case_number)}</td><td>${caseBadge(c)}</td><td>${assigneeCell(c)}</td><td>${esc(c.service_line)}</td>
         <td class="num">$${((c[amtField(prog)] || 0) / 100).toLocaleString()}</td>
         <td>${laneChip(c.triage_lane)}</td>
         <td>${caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining)}</td>
@@ -777,7 +787,7 @@ const Views = (() => {
       for (const [bid, members] of groups) {
         const sum = members.reduce((a, c) => a + (c[amtField(prog)] || 0), 0);
         const worst = Math.min(...members.map((c) => (c.sla_days_remaining ?? 9999)));
-        body += `<tr class="batch-head"><td colspan="10">▦ Batch ${esc(bid.slice(0, 8))} — ${members.length} disputes ·
+        body += `<tr class="batch-head"><td colspan="11">▦ Batch ${esc(bid.slice(0, 8))} — ${members.length} disputes ·
           $${(sum / 100).toLocaleString()} combined · ${slaBadge(worst)}
           <span class="muted">(review as one: same payer, same fact pattern)</span></td></tr>` +
           members.map((c) => row(c).replace('<tr class="click"', '<tr class="click batched"')).join("");
@@ -790,7 +800,7 @@ const Views = (() => {
     <div class="dg-wrap">
       <table class="dg"><thead><tr>
         <th class="selcol"><input type="checkbox" id="sel-all" aria-label="Select all"></th>
-        ${[["case_number", "Case #"], ["status", "Status"], ["service_line", "Service"], [amtField(prog), amtLabel(prog)]]
+        ${[["case_number", "Case #"], ["status", "Status"], ["assigned", "Assigned"], ["service_line", "Service"], [amtField(prog), amtLabel(prog)]]
           .map(([c, l]) => sortableTh(c, l, sort)).join("")}
         <th>Lane</th>${sortableTh("sla", "SLA", sort)}
         <th>Statutory clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
@@ -811,6 +821,7 @@ const Views = (() => {
         location.hash = `#/cases/${tr.dataset.case}`;
       }));
     document.querySelectorAll(".peek").forEach((b) => b.addEventListener("click", () => peek(b.dataset.id)));
+    bindAssignButtons(document.querySelector(".dg-wrap") || document);
   }
 
   function paintBulkBar() {
@@ -910,11 +921,17 @@ const Views = (() => {
       const lane = hq.get("lane") || "";
       const groupBatch = hq.get("batch") === "1";
       const search = (hq.get("q") || "").trim();
+      const assigned = ["mine", "unassigned", "assigned"].includes(hq.get("assigned")) ? hq.get("assigned") : "";
+      const assignee = canAssign() ? (hq.get("assignee") || "") : "";
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
-      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}) };
-      const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
+      const asgParams = { ...(assigned ? { assigned } : {}), ...(assignee ? { assignee } : {}) };
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...asgParams };
+      // The PM's and Tenant Admin's view of the team: each reviewer's open cases, and how many wait unassigned.
+      const team = canAssign() ? Api.cm.assignees("CASE_MANAGER").then((r) => r.assignees || []).catch(() => []) : Promise.resolve([]);
+      const unassignedN = canAssign() ? Api.cases.list({ limit: 1, assigned: "unassigned" }).then((r) => r.total).catch(() => null) : Promise.resolve(null);
+      const [page, clocks, prog, reviewers, waiting] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null), team, unassignedN]);
       let loaded = page.cases.slice();   // the rows of the page on screen
       // The default sort pages by keyset, so going back needs the cursor each
       // page started from: cursors[n] opens page n.
@@ -943,7 +960,10 @@ const Views = (() => {
               if (!tr) continue;
               const cells = tr.children;
               if (cells[2]) cells[2].innerHTML = caseBadge(c);
-              if (cells[6]) cells[6].innerHTML = caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining);
+              if (cells[3] && (cells[3].dataset.asg || "") !== (c.assigned_to || "")) {
+                cells[3].innerHTML = assigneeCell(c); cells[3].dataset.asg = c.assigned_to || ""; bindAssignButtons(cells[3]);
+              }
+              if (cells[7]) cells[7].innerHTML = caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining);
               const old = loaded.find((x) => x.id === c.id);
               if (old) Object.assign(old, c);
             }
@@ -975,6 +995,24 @@ const Views = (() => {
           const s = q.toString();
           location.hash = "#/cases" + (s ? "?" + s : "");
         }));
+        // Assignment filters, in the hash like the lane.
+        const setQ = (k, val) => {
+          const q = new URLSearchParams(location.hash.split("?")[1] || "");
+          val ? q.set(k, val) : q.delete(k);
+          const s = q.toString();
+          location.hash = "#/cases" + (s ? "?" + s : "");
+        };
+        $("#asg-filter")?.addEventListener("change", (e) => setQ("assigned", e.target.value));
+        $("#asg-person")?.addEventListener("change", (e) => setQ("assignee", e.target.value));
+        document.querySelectorAll("[data-workload]").forEach((b) => b.addEventListener("click", () => {
+          const q = new URLSearchParams(location.hash.split("?")[1] || "");
+          const w = b.dataset.workload;
+          if (w === "unassigned") { q.delete("assignee"); q.set("assigned", "unassigned"); }
+          else if (q.get("assignee") === w) q.delete("assignee");
+          else { q.delete("assigned"); q.set("assignee", w); }
+          const s = q.toString();
+          location.hash = "#/cases" + (s ? "?" + s : "");
+        }));
         $("#batch-tgl")?.addEventListener("click", () => {
           const q = new URLSearchParams(location.hash.split("?")[1] || "");
           groupBatch ? q.delete("batch") : q.set("batch", "1");
@@ -996,7 +1034,7 @@ const Views = (() => {
         };
         Pager.server($("#pg"), { total, shown: loaded.length }, async (limit, _offset, pg) => {
           if (pg === 0) cursors.length = 1; // also the page-size change path: old cursors are stale
-          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}) };
+          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...asgParams };
           const cursor = cursors[pg] || "";
           if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else if (cursor) more.cursor = cursor;
           const next = await Api.cases.list(more);
@@ -1023,7 +1061,22 @@ const Views = (() => {
             .map(([l, lab]) => `<button class="mini lane-tab${lane === l ? " active" : ""}" data-lane="${l}" role="tab" aria-selected="${lane === l}">${lab}</button>`).join("")}
           <button class="mini" id="batch-tgl" aria-pressed="${groupBatch}" title="Collapse batched disputes into one reviewable group">${groupBatch ? "▦ Batches: grouped" : "▦ Group batches"}</button>
         </p>
+        ${canAssign() && reviewers.length ? `<div class="workload" role="group" aria-label="Reviewer workload">
+          <span class="workload-label">Reviewers</span>
+          ${waiting != null ? `<button type="button" class="wl-chip wl-none${assigned === "unassigned" ? " active" : ""}" data-workload="unassigned"
+              title="Cases waiting for a reviewer">Unassigned <b>${waiting}</b></button>` : ""}
+          ${reviewers.map((a) => `<button type="button" class="wl-chip${assignee === a.id ? " active" : ""}" data-workload="${esc(a.id)}"
+              title="${esc(a.username)}: ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"} — show them">${esc(a.username)} <b>${a.open_cases}</b></button>`).join("")}
+        </div>` : ""}
         <p class="viewbar">
+          <label class="asg-filter">Assignment
+            <select id="asg-filter">
+              ${[["", "All"], ["unassigned", "Unassigned"], ["mine", "Assigned to me"], ...(canAssign() ? [["assigned", "Assigned"]] : [])]
+                .map(([k, l]) => `<option value="${k}"${assigned === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+          ${canAssign() ? `<label class="asg-filter">Reviewer
+            <select id="asg-person"><option value="">Anyone</option>
+              ${reviewers.map((a) => `<option value="${esc(a.id)}"${assignee === a.id ? " selected" : ""}>${esc(a.username)}</option>`).join("")}</select></label>` : ""}
+          ${Auth.reviewerScoped() ? `<span class="muted">You see unassigned cases and your own.</span>` : ""}
           <select onchange="location.hash='#/cases?view='+this.value" aria-label="Saved views">
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
@@ -1097,17 +1150,79 @@ const Views = (() => {
   const assigneeOptions = (list) => [["", "Auto — whoever has the fewest open cases"],
     ...list.map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`])];
 
-  // "Assigned to: <name> (Reviewer)" on the case page, plus Unassign for the PM.
+  // ---- Assignment: who holds a case, and who may change that --------------------------------------------------
+  // The PM and the Tenant Admin assign and reassign; a Tenant Admin can also take a case themselves. A Reviewer
+  // takes an unassigned case ("Take"); they cannot route cases to others. The server enforces all of it.
+  const canAssign = () => can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+  const canTakeOwn = () => (Auth.claims()?.roles || []).some((r) => ["TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].includes(r));
+  const canClaim = () => can("CASE_MANAGER") || canAssign();
+  const myId = () => Auth.claims()?.sub || "";
+  // The list's Assigned cell: the person, or Unassigned; with the one action this viewer has on it.
+  function assigneeCell(c) {
+    const id = c.assigned_to || "";
+    const who = id ? `<span class="asg-name${id === myId() ? " me" : ""}">${esc(id === myId() ? "You" : (c.assigned_name || "Staff"))}</span>`
+      : `<span class="asg-none">Unassigned</span>`;
+    let act = "";
+    if (!id && canClaim() && !canAssign()) act = `<button class="mini asg-act" data-claim="${esc(c.id)}" data-num="${esc(c.case_number)}">Take</button>`;
+    else if (canAssign()) act = `<button class="mini ghost asg-act" data-assign="${esc(c.id)}" data-cur="${esc(id)}">${id ? "Reassign" : "Assign"}</button>`;
+    return `<span class="asg">${who}${act}</span>`;
+  }
+  function bindAssignButtons(root = document) {
+    root.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); claim(b.dataset.claim, b.dataset.num); }));
+    root.querySelectorAll("[data-assign]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); assign(b.dataset.assign); }));
+  }
+  // An answer that lost a race: tell them plainly who has it now, and redraw.
+  function assignConflict(e) {
+    UI.toast(e.message || "The assignment changed — look again.", { kind: "warn", duration: 9000 });
+    App.rerender();
+  }
+
+  // "Assigned to" on the case page: the person (or Unassigned) and the actions this viewer has.
   async function loadCaseAssignee(caseId, isAssigner) {
     const el = document.getElementById("case-assignee");
     if (!el) return;
     try {
       const a = await Api.cm.assignment(caseId);
-      el.innerHTML = a.name
-        ? `Assigned to <b>${esc(a.name)}</b>${a.role_label ? ` <span class="muted">(${esc(a.role_label)})</span>` : ""}
-           ${isAssigner ? `<button class="mini" onclick="Views.unassign('${esc(caseId)}')">Unassign</button>` : ""}`
-        : `<span class="muted">Not assigned yet</span>`;
+      const mine = a.assigned_to && a.assigned_to === myId();
+      const acts = [];
+      if (!a.assigned_to && canClaim()) acts.push(`<button class="mini" onclick="Views.claim('${esc(caseId)}')">Take this case</button>`);
+      if (isAssigner) {
+        acts.push(`<button class="mini ghost" onclick="Views.assign('${esc(caseId)}')">${a.assigned_to ? "Reassign" : "Assign"}</button>`);
+        if (canTakeOwn() && !mine && a.assigned_to) acts.push(`<button class="mini ghost" onclick="Views.assignToMe('${esc(caseId)}')">Assign to me</button>`);
+        if (a.assigned_to) acts.push(`<button class="mini ghost" onclick="Views.unassign('${esc(caseId)}')">Unassign</button>`);
+      }
+      el.innerHTML = `<span class="asg">${a.assigned_to
+        ? `<span class="asg-name${mine ? " me" : ""}">${esc(mine ? "You" : a.name)}</span>${a.role_label ? ` <span class="muted">(${esc(a.role_label)})</span>` : ""}`
+        : `<span class="asg-none">Unassigned</span>`}</span>
+        ${acts.length ? `<span class="asg-acts">${acts.join("")}</span>` : ""}`;
+      el.dataset.assignee = a.assigned_to || "";
     } catch { el.innerHTML = ""; }
+  }
+
+  // A Reviewer (or the PM / Tenant Admin) takes an unassigned case. Only one person can win it; the other is told.
+  async function claim(caseId, caseNumber) {
+    const ok = await UI.modal({ title: "Take this case?", submitLabel: "Take it",
+      body: `${caseNumber ? `<b>${esc(caseNumber)}</b> ` : "It "}moves to your list as its Reviewer. Other reviewers will no longer see it.` });
+    if (!ok) return;
+    try {
+      const r = await Api.cm.claim(caseId);
+      UI.toast(r.unchanged ? "It's already yours" : `${caseNumber || "The case"} is yours now`);
+      App.rerender();
+    } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // A Tenant Admin takes ownership of a case someone else holds.
+  async function assignToMe(caseId) {
+    const cur = await Api.cm.assignment(caseId).catch(() => ({}));
+    const v = await UI.modal({ title: "Assign to me", submitLabel: "Take it over", danger: !!cur.name,
+      body: cur.name ? `It is with <b>${esc(cur.name)}</b> now; they'll be told it moved to you.` : "You become its Reviewer.",
+      fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }] });
+    if (!v) return;
+    try {
+      await Api.cm.assign(caseId, "CASE_MANAGER", myId(), v.reason || "", "", cur.assigned_to || "");
+      UI.toast("Assigned to you");
+      App.rerender();
+    } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
 
   // Assign or reassign: a real staff member of the chosen role, picked from a list showing each person's open
@@ -1117,12 +1232,17 @@ const Views = (() => {
       const cur = await Api.cm.assignment(caseId).catch(() => ({}));
       let role = ASSIGN_ROLES.some(([r]) => r === cur.assigned_role) ? cur.assigned_role : "CASE_MANAGER";
       const first = await Api.cm.assignees(role);
+      const people = (list) => {
+        const opts = assigneeOptions(list);
+        if (canTakeOwn() && !list.some((a) => a.id === myId())) opts.splice(1, 0, [myId(), "Me (take it myself)"]);
+        return opts;
+      };
       const v = await UI.modal({
         title: cur.name ? "Reassign case" : "Assign case",
         body: cur.name ? `Currently with <b>${esc(cur.name)}</b>${cur.role_label ? ` (${esc(cur.role_label)})` : ""}. They'll be told it moved.` : "Not assigned yet.",
         fields: [
           { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
-          { name: "assignee", label: "Person", options: assigneeOptions(first.assignees || []) },
+          { name: "assignee", label: "Person", options: people(first.assignees || []) },
           { name: "reason", label: "Reason", type: "textarea", placeholder: cur.name ? "Why it moves — kept on the case history" : "Optional — kept on the case history" },
         ],
         submitLabel: cur.name ? "Reassign" : "Assign",
@@ -1130,14 +1250,14 @@ const Views = (() => {
           if (vals.role === role) return; // only a role change reloads the people list
           role = vals.role;
           const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
-          setOptions("assignee", assigneeOptions(r.assignees || []));
+          setOptions("assignee", people(r.assignees || []));
         },
       });
       if (!v) return;
-      const r = await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "");
+      const r = await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "", "", cur.assigned_to || "");
       UI.toast(r.unchanged ? `Already assigned to ${r.name || "that person"}` : `Assigned to ${r.name || "staff"}`);
       App.rerender();
-    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function unassign(caseId) {
@@ -1145,8 +1265,9 @@ const Views = (() => {
       fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }],
       submitLabel: "Unassign", danger: true });
     if (!v) return;
-    try { await Api.cm.assign(caseId, "", "", v.reason || "", "unassign"); UI.toast("Unassigned"); App.rerender(); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    const cur = document.getElementById("case-assignee")?.dataset.assignee;
+    try { await Api.cm.assign(caseId, "", "", v.reason || "", "unassign", cur); UI.toast("Unassigned"); App.rerender(); }
+    catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function letter(caseId, template) {
@@ -1769,7 +1890,15 @@ const Views = (() => {
         });
       });
       return html;
-    } catch (e) { return err(e); }
+    } catch (e) {
+      // A Reviewer opening a case that is someone else's (a shared link, an old bookmark): say so plainly.
+      if (e.status === 404 && Auth.reviewerScoped()) {
+        return `<div class="empty-state"><h1>This case isn't on your list</h1>
+          <p class="muted">You see unassigned cases and the ones assigned to you. This one is with another reviewer, or it no longer exists.
+          Ask your PM if you need it.</p><p><a class="button" href="#/cases">Back to your disputes</a></p></div>`;
+      }
+      return err(e);
+    }
   }
 
   async function moveDoc(caseId, docId, folder, sel) {
@@ -9033,5 +9162,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { npiReviewDecideFn, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

@@ -102,10 +102,19 @@ const Auth = (() => {
       (roles.includes("TENANT_ADMIN") && rs.some((r) => STAFF_ROLES.includes(r)));
   }
 
+  // A Reviewer with nothing that sees every case: they see only unassigned cases and their own. Mirrors the
+  // backend's reviewerScoped (cmd/server/casescope.go) — exact roles, so a Tenant Admin is never scoped.
+  const SEE_ALL_ROLES = ["PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR",
+    "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR", "FINANCE"];
+  function reviewerScoped() {
+    const roles = Auth.claims()?.roles || [];
+    return roles.includes("CASE_MANAGER") && !SEE_ALL_ROLES.some((r) => roles.includes(r));
+  }
+
   function logout() {
     sessionStorage.clear();
     location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`;
   }
 
-  return { login, logout, handleCallback, token, claims, can };
+  return { login, logout, handleCallback, token, claims, can, reviewerScoped };
 })();
