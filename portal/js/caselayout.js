@@ -54,10 +54,43 @@ const CaseLayout = (() => {
     </header>`;
   }
 
+  // The More menu: occasional actions, grouped, each with an icon and a line saying what it does.
+  // acts: [label, run, {group, hint, icon}] — the third part is optional (ungrouped, no hint).
+  const MORE_ICON = {
+    assign: '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M4 20a8 8 0 0 1 16 0"/>',
+    review: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>',
+    escalate: '<path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/>',
+    link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+    withdraw: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+    inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13l3.5 7v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6Z"/>',
+    phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2Z"/>',
+    money: '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+    transfer: '<path d="M7 17h14"/><path d="m17 13 4 4-4 4"/><path d="M17 7H3"/><path d="m7 3-4 4 4 4"/>',
+    letter: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/>',
+    dot: '<circle cx="12" cy="12" r="3"/>',
+  };
+  const moreIcon = (k) => `<svg class="case-more-ico" viewBox="0 0 24 24" aria-hidden="true">${MORE_ICON[k] || MORE_ICON.dot}</svg>`;
   function moreMenu(acts) {
     if (!acts.length) return "";
-    return `<details class="case-more"><summary class="button">More ▾</summary><div class="case-more-menu" role="menu">
-      ${acts.map((a, i) => `<button type="button" role="menuitem" data-act="${i}">${esc(a[0])}</button>`).join("")}</div></details>`;
+    const groups = [];
+    acts.forEach((a, i) => {
+      const meta = a[2] || {};
+      const name = meta.group || "";
+      let g = groups.find((x) => x.name === name);
+      if (!g) groups.push(g = { name, items: [] });
+      g.items.push({ i, label: a[0], hint: meta.hint || "", icon: meta.icon || "dot" });
+    });
+    // The same order for everyone, whichever actions their role has.
+    const ORDER = ["Case", "Record what happened", "Money", "Federal IDR"];
+    const rank = (n) => (ORDER.includes(n) ? ORDER.indexOf(n) : ORDER.length);
+    groups.sort((a, b) => rank(a.name) - rank(b.name));
+    const body = groups.map((g) => `<div class="case-more-group" role="group"${g.name ? ` aria-label="${esc(g.name)}"` : ""}>
+        ${g.name ? `<div class="case-more-head">${esc(g.name)}</div>` : ""}
+        ${g.items.map((it) => `<button type="button" role="menuitem" data-act="${it.i}">${moreIcon(it.icon)}
+          <span class="case-more-text"><span class="case-more-label">${esc(it.label)}</span>${it.hint ? `<span class="case-more-hint">${esc(it.hint)}</span>` : ""}</span></button>`).join("")}
+      </div>`).join("");
+    return `<details class="case-more"><summary class="button" aria-haspopup="menu">More <span class="case-more-caret" aria-hidden="true">▾</span></summary>
+      <div class="case-more-menu" role="menu">${body}</div></details>`;
   }
 
   // ---- next step -------------------------------------------------------------------------------------------
@@ -214,8 +247,22 @@ const CaseLayout = (() => {
     // The More menu closes when a choice is made or the click is elsewhere.
     const more = document.querySelector(".case-more");
     if (more) {
+      const items = () => [...more.querySelectorAll("[data-act]")];
       more.addEventListener("click", (ev) => { if (ev.target.closest("[data-act]")) more.open = false; });
       document.addEventListener("click", (ev) => { if (!more.contains(ev.target)) more.open = false; }, { capture: true });
+      // Opening it puts the first action under the keyboard; arrows move, Esc closes and returns to the button.
+      more.addEventListener("toggle", () => { if (more.open) setTimeout(() => items()[0]?.focus(), 0); });
+      more.addEventListener("keydown", (ev) => {
+        const list = items(), at = list.indexOf(document.activeElement);
+        if (ev.key === "Escape" && more.open) { ev.preventDefault(); more.open = false; more.querySelector("summary").focus(); }
+        else if ((ev.key === "ArrowDown" || ev.key === "ArrowUp") && more.open && list.length) {
+          ev.preventDefault();
+          const n = ev.key === "ArrowDown" ? (at + 1) % list.length : (at - 1 + list.length) % list.length;
+          list[n].focus();
+        } else if ((ev.key === "Home" || ev.key === "End") && more.open && list.length) {
+          ev.preventDefault(); list[ev.key === "Home" ? 0 : list.length - 1].focus();
+        }
+      });
     }
   }
 

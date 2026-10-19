@@ -1058,3 +1058,19 @@ tr.pkg-hist td{border-top:0;padding-top:0}
 .prog-sec label .muted,.prog-sec label .dr-hint,.prog-sec .dr-hint,.prog-sec label small{font-weight:400}
 .prog-sec input[type=checkbox],.prog-sec input[type=radio]{min-width:0;flex-shrink:0}
 .prog-sec .field-grid+.field-grid{margin-top:12px}
+
+/* ---- Case page "More" menu: grouped actions, an icon and a line on what each does ---------------------------- */
+.case-more>summary{gap:6px;padding-inline:12px 10px}
+.case-more-caret{font-size:10px;opacity:.7;transition:transform .15s}
+.case-more[open] .case-more-caret{transform:rotate(180deg)}
+.case-more-menu{width:min(340px,calc(100vw - 32px));min-width:0;max-height:min(70vh,560px);overflow-y:auto;padding:6px;gap:2px}
+.case-more-group+.case-more-group{border-top:1px solid var(--border-subtle);margin-top:4px;padding-top:4px}
+.case-more-head{padding:8px 10px 4px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-tertiary)}
+.case-more-menu button{display:flex;align-items:flex-start;gap:10px;width:100%;min-height:0;padding:8px 10px;text-align:left;white-space:normal;line-height:1.3}
+.case-more-menu button:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px;background:var(--surface-sunken)}
+.case-more-ico{flex:none;width:16px;height:16px;margin-top:1px;fill:none;stroke:var(--text-secondary);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.case-more-menu button:hover .case-more-ico{stroke:var(--text-primary)}
+.case-more-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.case-more-label{font-size:13px;font-weight:550;color:var(--text-primary)}
+.case-more-hint{font-size:12px;font-weight:400;color:var(--text-tertiary)}
+@media (prefers-reduced-motion: reduce){.case-more-caret{transition:none}}

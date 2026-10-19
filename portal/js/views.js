@@ -1618,33 +1618,37 @@ const Views = (() => {
       // invites, batching, the federal letters) only exist on federal cases.
       const acts = [];
       if (!programmed) {
-        if (can("PARTY") && c.status === "INITIATED") acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
-        if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN" && App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
-        if (can("PARTY")) acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
-        if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
-        if (can("ARBITRATOR")) acts.push(["Issue determination", () => determinationForm(id)]);
-        if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
-        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
-        if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
-        if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status)) acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
+        if (can("PARTY") && c.status === "INITIATED") acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {}), { group: "Federal IDR", icon: "inbox", hint: "Record that your response has been filed" }]);
+        if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN" && App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id), { group: "Federal IDR", icon: "money", hint: "Your offer, sealed until the window closes" }]);
+        if (can("PARTY")) acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub }), { group: "Money", icon: "money", hint: "Record that your administrative fee is paid" }]);
+        if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }, { group: "Federal IDR", icon: "money", hint: "See and manage both parties' offers" }]);
+        if (can("ARBITRATOR")) acts.push(["Issue determination", () => determinationForm(id), { group: "Federal IDR", icon: "letter", hint: "Choose the winning offer and record why" }]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id), { group: "Federal IDR", icon: "assign", hint: "Give a party access to this dispute" }]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {}), { group: "Federal IDR", icon: "assign", hint: "Lock in the certified IDR entity" }]);
+        if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id), { group: "Case", icon: "link", hint: "Disputes that could be batched with this one" }]);
+        if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status)) acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents }), { group: "Money", icon: "money", hint: "Record the determination payment" }]);
         if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
-          acts.push(["Generate offer-window notice", () => Views.letter(id, "offer_window_notice")]);
-          acts.push(["Generate determination letter", () => Views.letter(id, "determination_letter")]);
+          acts.push(["Generate offer-window notice", () => Views.letter(id, "offer_window_notice"), { group: "Federal IDR", icon: "letter", hint: "The notice that opens the offer window" }]);
+          acts.push(["Generate determination letter", () => Views.letter(id, "determination_letter"), { group: "Federal IDR", icon: "letter", hint: "The letter announcing the determination" }]);
         }
       }
       const isAssigner = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
-      if (isAssigner) acts.push([c.assigned_to ? "Reassign" : "Assign", () => Views.assign(id)]);
+      if (isAssigner) acts.push([c.assigned_to ? "Reassign" : "Assign", () => Views.assign(id),
+        { group: "Case", icon: "assign", hint: c.assigned_to ? "Hand this case to another reviewer" : "Give this case to a reviewer" }]);
       if (programmed && can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        acts.push(["Provider asked to withdraw", () => Views.wfAnytime(id, "PROVIDER_WITHDRAW")]);
-        acts.push(["RFI response received", () => Views.wfAnytime(id, "RFI_RESPONSE_RECEIVED")]);
-        acts.push(["Outreach done (paid, no packet)", () => Views.wfAnytime(id, "OUTREACH_DONE")]);
+        acts.push(["Provider asked to withdraw", () => Views.wfAnytime(id, "PROVIDER_WITHDRAW"),
+          { group: "Record what happened", icon: "withdraw", hint: "Starts the withdrawal letter, due in one business day" }]);
+        acts.push(["RFI response received", () => Views.wfAnytime(id, "RFI_RESPONSE_RECEIVED"),
+          { group: "Record what happened", icon: "inbox", hint: "The party answered the request for information" }]);
+        acts.push(["Outreach done", () => Views.wfAnytime(id, "OUTREACH_DONE"),
+          { group: "Record what happened", icon: "phone", hint: "Paid but no packet yet: the filer has been contacted" }]);
       }
-      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
+      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id), { group: "Case", icon: "review", hint: "Ask a coder, clinician or attorney to look at it" }]);
       if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
-        acts.push(["Escalate", () => Views.escalate(id)]);
-        acts.push(["Link a related case", () => Views.relate(id)]);
+        acts.push(["Escalate", () => Views.escalate(id), { group: "Case", icon: "escalate", hint: "Notify supervisors that a deadline needs attention" }]);
+        acts.push(["Link a related case", () => Views.relate(id), { group: "Case", icon: "link", hint: "Connect it to another dispute (duplicate, same claim…)" }]);
       }
-      if (can("FINANCE")) acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
+      if (can("FINANCE")) acts.push(["Post fee transfer", () => Views.feeTransfer(id), { group: "Money", icon: "transfer", hint: "Admin fee, IDRE fee reserve, refund or settlement on the ledger" }]);
       html = html.replace("<!--case-more-->", CaseLayout.moreMenu(acts));
 
       // ---- Overview: steps (filled by wfLoad), deadlines (program panel), notes ----
