@@ -66,7 +66,7 @@ func (s *server) mailPace() {
 	limit := mailMaxPerSecond()
 	for i := 0; i < 50; i++ {
 		sec := time.Now().Unix()
-		n, err := s.rds.incrExpire(fmt.Sprintf("idre:mail:pace:%d", sec), 3)
+		n, err := s.rds.incrExpire(fmt.Sprintf("%s:mail:pace:%d", s.cfg.RedisPrefix, sec), 3)
 		if err != nil || n <= limit {
 			return
 		}

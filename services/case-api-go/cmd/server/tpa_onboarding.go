@@ -563,7 +563,7 @@ func (s *server) tpaCreatePackage(w http.ResponseWriter, r *http.Request) {
 // storePackageDoc seals + stores one package document and publishes the
 // validation event. Shared by discrete, merged, and ZIP bulk uploads.
 func (s *server) storePackageDoc(r *http.Request, tenant, tpaID, pkgID, slot, filename string, raw []byte) (string, error) {
-	if n, err := s.rds.incrExpire("idre:rl:tpadoc:"+tenant+":"+tpaID, 3600); err == nil && n > 400 {
+	if n, err := s.rds.incrExpire(s.cfg.RedisPrefix+":rl:tpadoc:"+tenant+":"+tpaID, 3600); err == nil && n > 400 {
 		return "", fmt.Errorf("upload rate limit exceeded (400/hour)")
 	}
 	if err := docPolicy(filename, raw); err != nil {

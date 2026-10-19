@@ -272,14 +272,14 @@ func allowedDocType(lowerName string, head []byte) error {
 // Fail-open for authenticated routes would be fine; for anonymous ShareBox
 // routes we fail-closed at the caller's discretion.
 func (s *server) rateLimit(key string, limit int64, windowSec int) bool {
-	res, err := s.rds.cmd("INCR", "idre:rl:"+key)
+	res, err := s.rds.cmd("INCR", s.cfg.RedisPrefix+":rl:"+key)
 	if err != nil {
 		return false // Redis down: treat as limited for public surfaces
 	}
 	var n int64
 	fmt.Sscanf(res, "%d", &n)
 	if n == 1 {
-		_, _ = s.rds.cmd("EXPIRE", "idre:rl:"+key, fmt.Sprintf("%d", windowSec))
+		_, _ = s.rds.cmd("EXPIRE", s.cfg.RedisPrefix+":rl:"+key, fmt.Sprintf("%d", windowSec))
 	}
 	return n <= limit
 }

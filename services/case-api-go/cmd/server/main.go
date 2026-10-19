@@ -60,6 +60,11 @@ type Config struct {
 	// ("<prefix>.<tenant>.<domain>"). Two deployments on one broker MUST
 	// use different prefixes or each consumes the other's events.
 	TopicPrefix     string
+	// RedisPrefix starts every Redis key this deployment writes. Deployments
+	// sharing one Redis keep their rate limits, idempotency keys and mail
+	// pacing apart by setting it (REDIS_KEY_PREFIX); dev and idre-prod keep
+	// the default and so share mail pacing, as they share one mail account.
+	RedisPrefix string
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
 	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
@@ -117,6 +122,7 @@ func configFromEnv() Config {
 		TBClusterID:   get("TIGERBEETLE_CLUSTER_ID", ""),
 		DaprHTTP:      get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
 		TopicPrefix:   get("TOPIC_PREFIX", "idre"),
+		RedisPrefix:   get("REDIS_KEY_PREFIX", "idre"),
 		VaultURL:      get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL: get("GRAPH_INTEL_URL", "http://localhost:8082"),
 		// The copilot shares the in-cluster ollama already serving doc-intel
@@ -494,14 +500,19 @@ func main() {
 	// JWKS via Redis: all replicas share one cache; Keycloak key rotation
 	// propagates within the TTL instead of hammering the certs endpoint.
 	var keys jwk.Set
-	if raw := rds.get("idre:jwks"); raw != "" {
+	// The cache is per signing-key URL: deployments on one Redis sign in on
+	// different realms, and a shared key handed a starting pod the other
+	// realm's keys (every login then failed until the cache expired).
+	sum := sha256.Sum256([]byte(cfg.KeycloakJWKS))
+	jwksKey := cfg.RedisPrefix + ":jwks:" + hex.EncodeToString(sum[:8])
+	if raw := rds.get(jwksKey); raw != "" {
 		keys, err = jwk.ParseString(raw)
 	}
 	if keys == nil {
 		keys, err = jwk.Fetch(ctx, cfg.KeycloakJWKS)
 		must(err)
 		if buf, merr := json.Marshal(keys); merr == nil {
-			rds.setex("idre:jwks", 300, string(buf))
+			rds.setex(jwksKey, 300, string(buf))
 		}
 	}
 	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer, workerToken: cfg.WorkerToken}
@@ -1145,7 +1156,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	// Idempotency (Redis): mobile/PWA retries replay the same key and get the
 	// original case back instead of a duplicate dispute.
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		rkey := fmt.Sprintf("idre:%s:idem:%s", tenant, key)
+		rkey := fmt.Sprintf("%s:%s:idem:%s", s.cfg.RedisPrefix, tenant, key)
 		if existing := s.rds.get(rkey); existing != "" {
 			writeJSON(w, http.StatusOK, map[string]any{"case_id": existing, "idempotent_replay": true})
 			return
@@ -1274,7 +1285,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
+		s.rds.setex(fmt.Sprintf("%s:%s:idem:%s", s.cfg.RedisPrefix, tenant, key), 86400, caseID)
 	}
 	s.graphSync(tenant, caseID) // the new case in the graph (best-effort)
 	s.logAudit(r.Context(), tenant, caseID, "CASE_INITIATED", map[string]any{

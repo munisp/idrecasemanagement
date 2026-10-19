@@ -118,7 +118,7 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	// compromised or careless account could flood MinIO + the doc-intel queue
 	// (every document triggers OCR + VLM work). Per-user ceiling, fail-open
 	// only if Redis is down (authenticated surface; ShareBox stays fail-closed).
-	if n, err := s.rds.incrExpire("idre:rl:up:"+tenant+":"+p.Subject, 3600); err == nil && n > 120 {
+	if n, err := s.rds.incrExpire(s.cfg.RedisPrefix+":rl:up:"+tenant+":"+p.Subject, 3600); err == nil && n > 120 {
 		http.Error(w, `{"error":"upload rate limit exceeded (120/hour) — try again later"}`, http.StatusTooManyRequests)
 		return
 	}

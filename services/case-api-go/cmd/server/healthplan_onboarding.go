@@ -798,7 +798,7 @@ func (s *server) hpCreatePackage(w http.ResponseWriter, r *http.Request) {
 // event with actor=healthplan (doc-intel's QPA floor applies to payer-side
 // OFFER_SUBSTANTIATION).
 func (s *server) hpStorePackageDoc(r *http.Request, tenant, planID, pkgID, slot, filename string, raw []byte) (string, error) {
-	if n, err := s.rds.incrExpire("idre:rl:hpdoc:"+tenant+":"+planID, 3600); err == nil && n > 400 {
+	if n, err := s.rds.incrExpire(s.cfg.RedisPrefix+":rl:hpdoc:"+tenant+":"+planID, 3600); err == nil && n > 400 {
 		return "", fmt.Errorf("upload rate limit exceeded (400/hour)")
 	}
 	if err := docPolicy(filename, raw); err != nil {
