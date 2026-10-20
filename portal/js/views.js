@@ -1147,6 +1147,7 @@ const Views = (() => {
 
   const ASSIGN_ROLES = [["CASE_MANAGER", "Reviewer"], ["ARBITRATOR", "Arbitrator"], ["CODER", "Coder"],
     ["NURSE_PHYSICIAN", "Clinical reviewer"], ["ATTORNEY", "Attorney"]];
+  const NEXT_IN_TURN = "__next";
   const assigneeOptions = (list) => [["", "Auto — whoever has the fewest open cases"],
     ...list.map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`])];
 
@@ -1232,9 +1233,12 @@ const Views = (() => {
       const cur = await Api.cm.assignment(caseId).catch(() => ({}));
       let role = ASSIGN_ROLES.some(([r]) => r === cur.assigned_role) ? cur.assigned_role : "CASE_MANAGER";
       const first = await Api.cm.assignees(role);
-      const people = (list) => {
+      const people = (res) => {
+        const list = res.assignees || [];
         const opts = assigneeOptions(list);
         if (canTakeOwn() && !list.some((a) => a.id === myId())) opts.splice(1, 0, [myId(), "Me (take it myself)"]);
+        // The role's rotation (Team page): the next person in turn, passing over whoever has the case now.
+        if (res.next_in_turn) opts.unshift([NEXT_IN_TURN, `Next in turn${res.next_in_turn.id !== cur.assigned_to ? ` — ${esc(res.next_in_turn.username)}` : ""}`]);
         return opts;
       };
       const v = await UI.modal({
@@ -1242,7 +1246,7 @@ const Views = (() => {
         body: cur.name ? `Currently with <b>${esc(cur.name)}</b>${cur.role_label ? ` (${esc(cur.role_label)})` : ""}. They'll be told it moved.` : "Not assigned yet.",
         fields: [
           { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
-          { name: "assignee", label: "Person", options: people(first.assignees || []) },
+          { name: "assignee", label: "Person", options: people(first) },
           { name: "reason", label: "Reason", type: "textarea", placeholder: cur.name ? "Why it moves — kept on the case history" : "Optional — kept on the case history" },
         ],
         submitLabel: cur.name ? "Reassign" : "Assign",
@@ -1250,11 +1254,13 @@ const Views = (() => {
           if (vals.role === role) return; // only a role change reloads the people list
           role = vals.role;
           const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
-          setOptions("assignee", people(r.assignees || []));
+          setOptions("assignee", people(r));
         },
       });
       if (!v) return;
-      const r = await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "", "", cur.assigned_to || "");
+      const r = v.assignee === NEXT_IN_TURN
+        ? await Api.cm.assignNext(caseId, v.role, v.reason || "", cur.assigned_to || "")
+        : await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "", "", cur.assigned_to || "");
       UI.toast(r.unchanged ? `Already assigned to ${r.name || "that person"}` : `Assigned to ${r.name || "staff"}`);
       App.rerender();
     } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
@@ -6170,10 +6176,24 @@ const Views = (() => {
   // row never gets action buttons -- the backend rejects self-suspend/
   // self-delete too, but hiding them here avoids a round-trip just to find
   // that out, and stops an admin from locking themselves out by accident.
+  // The tenant's staff roles, as the Team page shows and edits them (staffroles.go: staffEditableRoles).
+  const TEAM_ROLES = [["CASE_MANAGER", "Reviewer"], ["PM", "PM"], ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Clinical reviewer"],
+    ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"], ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"],
+    ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"], ["TENANT_ADMIN", "Tenant Admin"]];
+  const staffRoleLabel = (r) => (TEAM_ROLES.find(([k]) => k === r) || [r, r])[1];
+  const staffRolesOf = (m) => (m.roles || []).filter((r) => TEAM_ROLES.some(([k]) => k === r));
+  let teamStaff = [], staffRoleFilter = "";
+
   function staffTableHtml(members, scope, tenant) {
     if (!members.length) return `<p class="muted">No staff found.</p>`;
     const me = Auth.claims()?.name;
-    return `<table><thead><tr><th>Username</th><th>Email</th><th>Roles</th><th>Status</th><th></th></tr></thead><tbody>` +
+    const tenantScope = scope === "tenant";
+    const present = tenantScope ? TEAM_ROLES.filter(([r]) => members.some((m) => (m.roles || []).includes(r))) : [];
+    const filter = tenantScope ? `<div class="staff-filter"><label>Role
+        <select onchange="Views.staffFilter(this.value)"><option value="">All roles (${members.length})</option>
+        ${present.map(([r, l]) => `<option value="${r}" ${r === staffRoleFilter ? "selected" : ""}>${esc(l)} (${members.filter((m) => (m.roles || []).includes(r)).length})</option>`).join("")}
+        </select></label><span class="muted">Click a name to see or change what they do.</span></div>` : "";
+    return filter + `<table id="${tenantScope ? "staff-table" : ""}"><thead><tr><th>Username</th><th>Email</th><th>Roles</th><th>Status</th><th></th></tr></thead><tbody>` +
       members.map((m) => {
         const isSelf = m.username === me;
         const actions = isSelf ? '<span class="muted">(you)</span>' : (
@@ -6182,13 +6202,70 @@ const Views = (() => {
             : `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',true)">Reactivate</button>`) +
           ` <button class="mini" onclick="Views.deleteStaffMember('${scope}','${esc(tenant || "")}','${esc(m.username)}')">Delete</button>`
         );
-        return `<tr><td class="mono">${esc(m.username)}</td><td>${esc(m.email || "—")}</td>
-        <td>${(m.roles || []).map((r) => badge(r)).join(" ") || "—"}</td>
+        const roles = m.roles || [];
+        const hidden = tenantScope && staffRoleFilter && !roles.includes(staffRoleFilter) ? ' style="display:none"' : "";
+        const name = tenantScope ? `<button class="linkish mono" onclick="Views.staffOpen('${esc(m.username)}')">${esc(m.username)}</button>` : esc(m.username);
+        return `<tr data-roles="${esc(roles.join(" "))}"${hidden}><td class="mono">${name}</td><td>${esc(m.email || "—")}</td>
+        <td>${(tenantScope ? staffRolesOf(m) : roles).map((r) => `<span class="badge s-${esc(r).toLowerCase().replace(/_/g, "-")}">${esc(tenantScope ? staffRoleLabel(r) : r)}</span>`).join(" ") || "—"}</td>
         <td>${m.enabled ? '<span class="badge s-paid">enabled</span>' : '<span class="badge s-denied">disabled</span>'}</td>
         <td>${actions}</td></tr>`;
       }).join("") +
       `</tbody></table>`;
   }
+
+  function staffFilter(role) {
+    staffRoleFilter = role;
+    document.querySelectorAll("#staff-table tbody tr").forEach((tr) => {
+      tr.style.display = !role || tr.dataset.roles.split(" ").includes(role) ? "" : "none";
+    });
+  }
+
+  // One staff member: what they do, their open cases and the rotations they are in; the PM / Tenant Admin changes
+  // their roles here. Giving or taking away Tenant Admin stays with the platform admins; nobody edits their own.
+  async function staffOpen(username) {
+    const m = teamStaff.find((x) => x.username === username);
+    if (!m) return;
+    const isAdmin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const isSelf = m.username === Auth.claims()?.name;
+    const theirs = ASSIGN_ROLES.filter(([r]) => (m.roles || []).includes(r));
+    const rot = await Promise.all(theirs.map(([r]) => Api.cm.autoAssign(r).catch(() => null)));
+    let open = 0;
+    const rotLines = theirs.map(([r, label], i) => {
+      const a = rot[i];
+      const row = a && (a.people || []).find((x) => x.id === m.id);
+      if (row) open = Math.max(open, row.open_cases);
+      if (!a) return `<li>${esc(label)}: <span class="muted">unavailable</span></li>`;
+      const state = !row ? "not active" : !row.in_rotation ? "taken out of the rotation" : !a.enabled ? "rotation is off"
+        : a.next === m.id ? "in the rotation — <b>next in turn</b>" : "in the rotation";
+      return `<li>${esc(label)}: ${state}</li>`;
+    }).join("");
+    const boxes = TEAM_ROLES.map(([r, label]) => {
+      const has = (m.roles || []).includes(r);
+      const locked = isSelf || (r === "TENANT_ADMIN" && !isAdmin);
+      return `<label class="sr-role"><input type="checkbox" name="role_${r}" ${has ? "checked" : ""} ${locked ? "disabled" : ""} /> ${esc(label)}</label>`;
+    }).join("");
+    const v = await UI.modal({
+      title: esc(m.username), submitLabel: isSelf ? "Close" : "Save roles",
+      body: `${esc(m.email || "")}${m.enabled ? "" : " · <b>suspended</b>"} · ${open} open case${open === 1 ? "" : "s"}
+        ${rotLines ? `</p><ul class="sr-rot">${rotLines}</ul><p class="modal-body">` : "<br>"}
+        <span class="sr-head">Roles</span></p><div class="sr-roles">${boxes}</div><p class="mhint">
+        ${isSelf ? "You can't change your own roles — ask another PM or an admin." : "Changes apply the next time they sign in."}
+        ${!isAdmin ? " Tenant Admin is given or taken away by a platform admin." : ""}`,
+    });
+    if (!v || isSelf) return;
+    const roles = TEAM_ROLES.filter(([r]) => {
+      const locked = r === "TENANT_ADMIN" && !isAdmin;
+      return locked ? (m.roles || []).includes(r) : v["role_" + r] === "on";
+    }).map(([r]) => r);
+    if (!roles.length) { UI.toast("Keep at least one role — suspend the account instead to stop them working.", { kind: "warn" }); return; }
+    try {
+      const r = await Api.admin.setTenantStaffRoles(Api.getTenant(), m.username, roles);
+      const said = [...(r.added || []).map((x) => "+" + staffRoleLabel(x)), ...(r.removed || []).map((x) => "−" + staffRoleLabel(x))];
+      UI.toast(said.length ? `${m.username}: ${said.join(", ")}` : "No change");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
   async function teamAdmin() {
     if (!can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
       return `<div class="view-head"><h1>Team</h1></div><p class="muted">Your role doesn't have access to Team.</p>`;
@@ -6203,58 +6280,75 @@ const Views = (() => {
         Api.admin.listTenantStaff(tenant),
         isAdmin ? Api.admin.listFederalAdmins().catch(() => []) : Promise.resolve(null),
       ]);
+      teamStaff = staff;
       html += `<h2>Staff — tenant ${esc(tenant.toUpperCase())}</h2>${staffTableHtml(staff, "tenant", tenant)}`;
-      html += await autoAssignBox();
+      html += `<div id="aa-box">${await autoAssignBox()}</div>`;
       if (federal) html += `<h2>Federal / platform admins <span class="muted">cross-tenant</span></h2>${staffTableHtml(federal, "federal")}`;
       return html;
     } catch (e) { return html + err(e); }
   }
 
-  // Automatic assignment: new cases go to the Reviewers in turn. The PM / Tenant Admin turns it on or off and takes
-  // people out of the rotation; any assignment can still be changed by hand on the case.
+  // Automatic assignment: one rotation per role. Reviewers get new cases in turn as they come in; for every role the PM
+  // can hand a case to "Next in turn". The PM / Tenant Admin turns a rotation on or off and takes people out of it;
+  // any assignment can still be changed by hand on the case.
+  let aaRole = "CASE_MANAGER";
   async function autoAssignBox() {
     if (!canAssign()) return "";
     let a;
-    try { a = await Api.cm.autoAssign(); } catch (e) {
+    try { a = await Api.cm.autoAssign(aaRole); } catch (e) {
       return `<h2>Automatic assignment</h2><p class="muted">${esc(e.message)}</p>`;
     }
-    const people = a.reviewers || [];
+    const label = a.role_label || "Reviewer";
+    const people = a.people || [];
     const next = people.find((p) => p.id === a.next);
     const inTurn = people.filter((p) => p.in_rotation).length;
-    const status = !a.enabled
-      ? "Off — new cases wait in the unassigned pool for the PM to assign or a Reviewer to take."
-      : !inTurn ? "On, but nobody is in the rotation — new cases wait in the unassigned pool."
-      : `On — the next new case goes to <strong>${esc(next?.username || "—")}</strong>.`;
+    const status = a.new_cases
+      ? (!a.enabled ? "Off — new cases wait in the unassigned pool for the PM to assign or a Reviewer to take."
+        : !inTurn ? "On, but nobody is in the rotation — new cases wait in the unassigned pool."
+        : `On — the next new case goes to <strong>${esc(next?.username || "—")}</strong>.`)
+      : (!a.enabled ? `Off — cases are handed to a ${esc(label)} by name.`
+        : !inTurn ? `On, but nobody is in the rotation — hand cases to a ${esc(label)} by name.`
+        : `On — "Next in turn" gives the next case handed to a ${esc(label)} to <strong>${esc(next?.username || "—")}</strong>.`);
+    const tabs = ASSIGN_ROLES.map(([r, l]) =>
+      `<button type="button" class="tab ${r === aaRole ? "active" : ""}" onclick="Views.autoAssignRole('${r}')">${esc(l)}</button>`).join("");
     const rows = people.map((p) => `<tr>
-        <td>${esc(p.username)}${p.id === a.next && a.enabled ? ' <span class="badge s-paid">next</span>' : ""}</td>
+        <td><button class="linkish mono" onclick="Views.staffOpen('${esc(p.username)}')">${esc(p.username)}</button>${p.id === a.next && a.enabled ? ' <span class="badge s-paid">next</span>' : ""}</td>
         <td class="num">${p.open_cases}</td>
         <td><label class="aa-in"><input type="checkbox" ${p.in_rotation ? "checked" : ""}
           onchange="Views.autoAssignRotation('${esc(p.id)}', this.checked, this)" /> In rotation</label></td></tr>`).join("");
     return `<h2>Automatic assignment</h2>
+      <div class="tabs aa-tabs" role="tablist">${tabs}</div>
       <div class="card aa-card">
         <label class="aa-toggle"><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="Views.autoAssignToggle(this.checked, this)" />
-          Assign new cases to Reviewers automatically, in turn</label>
+          ${a.new_cases ? "Assign new cases to Reviewers automatically, in turn" : `Offer "Next in turn" when a case is handed to a ${esc(label)}`}</label>
         <p class="muted">${status} You can change who has any case on the case itself.${a.updated_by ? ` Last changed by ${esc(a.updated_by)}.` : ""}</p>
         ${people.length
-          ? `<table><thead><tr><th>Reviewer</th><th class="num">Open cases</th><th>Takes new cases</th></tr></thead><tbody>${rows}</tbody></table>`
-          : `<p class="muted">No active Reviewers on this tenant yet — add one above.</p>`}
+          ? `<table><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
+          : `<p class="muted">No active ${esc(label)} on this tenant yet — add one above, or give someone the role.</p>`}
       </div>`;
   }
 
+  async function aaRefresh() {
+    const box = document.getElementById("aa-box");
+    if (box) box.innerHTML = await autoAssignBox(); else App.rerender();
+  }
+
+  async function autoAssignRole(role) { aaRole = role; await aaRefresh(); }
+
   async function autoAssignToggle(on, el) {
     try {
-      await Api.cm.setAutoAssign({ enabled: on });
-      UI.toast(on ? "New cases will be assigned to Reviewers in turn" : "Automatic assignment is off");
-      App.rerender();
+      const a = await Api.cm.setAutoAssign({ role: aaRole, enabled: on });
+      UI.toast(on ? `${a.role_label} rotation is on` : `${a.role_label} rotation is off`);
+      await aaRefresh();
     } catch (e) { if (el) el.checked = !on; UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
   async function autoAssignRotation(id, inRotation, el) {
     try {
-      const a = await Api.cm.autoAssign();
-      const out = (a.reviewers || []).filter((p) => (p.id === id ? !inRotation : !p.in_rotation)).map((p) => p.id);
-      await Api.cm.setAutoAssign({ excluded: out });
-      App.rerender();
+      const a = await Api.cm.autoAssign(aaRole);
+      const out = (a.people || []).filter((p) => (p.id === id ? !inRotation : !p.in_rotation)).map((p) => p.id);
+      await Api.cm.setAutoAssign({ role: aaRole, excluded: out });
+      await aaRefresh();
     } catch (e) { if (el) el.checked = !inRotation; UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
@@ -9211,5 +9305,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

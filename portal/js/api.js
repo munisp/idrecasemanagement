@@ -244,6 +244,9 @@ const Api = (() => {
       listStaffNames: (tenant) => req("GET", `/v1/admin/tenant-staff?tenant=${encodeURIComponent(tenant)}&brief=1`),
       setTenantStaffEnabled: (tenant, username, enabled) =>
         req("PATCH", `/v1/admin/tenant-staff/${encodeURIComponent(username)}`, { tenant, enabled }),
+      // A staff member's full set of staff roles (PM / Tenant Admin, own tenant).
+      setTenantStaffRoles: (tenant, username, roles) =>
+        req("PUT", `/v1/admin/tenant-staff/${encodeURIComponent(username)}/roles`, { tenant, roles }),
       deleteTenantStaff: (tenant, username) =>
         req("DELETE", `/v1/admin/tenant-staff/${encodeURIComponent(username)}?tenant=${encodeURIComponent(tenant)}`),
       setFederalAdminEnabled: (username, enabled) =>
@@ -358,11 +361,14 @@ const Api = (() => {
       // expected: the assignee the page showed ("" = unassigned); if it changed meanwhile the server answers 409.
       assign: (caseId, role, assignee, reason = "", action = "", expected) =>
         req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee, reason, action, ...(expected !== undefined ? { expected } : {}) }),
+      // The next person in the role's rotation (Team page → Automatic assignment).
+      assignNext: (caseId, role, reason = "", expected) =>
+        req("POST", `${t()}/cases/${caseId}/assign`, { role, next: true, reason, ...(expected !== undefined ? { expected } : {}) }),
       claim: (caseId, reason = "") => req("POST", `${t()}/cases/${caseId}/assign`, { action: "claim", reason }),
       assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
       assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
-      // New cases to Reviewers in turn: { enabled, reviewers: [{id, username, open_cases, in_rotation}], next }.
-      autoAssign: () => req("GET", `${t()}/assignment/auto`),
+      // A role's rotation (Reviewer when none): { role, role_label, new_cases, enabled, people: [{id, username, open_cases, in_rotation}], next }.
+      autoAssign: (role = "CASE_MANAGER") => req("GET", `${t()}/assignment/auto?role=${encodeURIComponent(role)}`),
       setAutoAssign: (body) => req("PUT", `${t()}/assignment/auto`, body),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
       relate: (p) => req("POST", `${t()}/cases/relate`, p),

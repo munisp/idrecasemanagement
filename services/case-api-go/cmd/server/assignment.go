@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 )
 
 // Case assignment. The PM assigns and reassigns cases to real staff of the tenant (members of its Keycloak group
@@ -135,7 +137,8 @@ func (s *server) listAssignees(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "staff directory unavailable: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"role": role, "role_label": assignableRoles[role], "assignees": list})
+	writeJSON(w, http.StatusOK, map[string]any{"role": role, "role_label": assignableRoles[role], "assignees": list,
+		"next_in_turn": s.nextInTurnPreview(r.Context(), tenant, role)}) // nil when the role's rotation is off or empty
 }
 
 // caseAssignment: GET /cases/{caseId}/assignment — who holds the case, by name.
@@ -188,6 +191,7 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 		Reason   string  `json:"reason"`
 		Action   string  `json:"action"`   // "unassign" | "claim"
 		Expected *string `json:"expected"` // the assignee the caller saw ("" = unassigned); a change since then is a 409
+		Next     bool    `json:"next"`     // the next person in the role's rotation (autoassign.go), instead of Assignee
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	assigner := hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole)
@@ -254,7 +258,42 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	assignee, assigneeName := in.Assignee, ""
-	if assignee == "" {
+	viaTurn := false
+	if in.Next {
+		// The role's next person in turn; choosing them, the case update and recording the turn are one transaction.
+		changed := false
+		who, name, err := s.takeTurn(r.Context(), tenant, in.Role, prev, func(tx pgx.Tx, who string) (bool, error) {
+			if who == prev && prevRole != nil && *prevRole == in.Role {
+				return false, nil // the only one in the rotation, and they have it already
+			}
+			tag, err := tx.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now()
+				WHERE id=$3 AND assigned_to IS NOT DISTINCT FROM $4`, t), who, in.Role, caseID, prevTo)
+			if err != nil {
+				return false, err
+			}
+			changed = tag.RowsAffected() == 0
+			return !changed, nil
+		})
+		label := assignableRoles[in.Role]
+		switch {
+		case errors.Is(err, errRotationOff):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("the %s rotation is off — pick a person, or turn it on on the Team page", label)})
+			return
+		case errors.Is(err, errRotationEmpty):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("nobody is in the %s rotation — pick a person, or add one on the Team page", label)})
+			return
+		case err != nil:
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not take the next in turn: " + err.Error()})
+			return
+		case changed:
+			s.assignmentChanged(w, r, s.currentAssignee(r.Context(), tenant, caseID))
+			return
+		case who == "":
+			writeJSON(w, http.StatusOK, map[string]any{"assigned_to": prev, "name": names[prev], "unchanged": true})
+			return
+		}
+		assignee, assigneeName, viaTurn = who, name, true
+	} else if assignee == "" {
 		list, err := s.assigneesFor(r.Context(), tenant, in.Role)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "staff directory unavailable: " + err.Error()})
@@ -285,21 +324,26 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 		}
 		assigneeName = name
 	}
-	if assignee == prev && prevRole != nil && *prevRole == in.Role {
-		writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "unchanged": true})
-		return
-	}
-	tag, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now()
-		WHERE id=$3 AND assigned_to IS NOT DISTINCT FROM $4`, t), assignee, in.Role, caseID, prevTo)
-	if err != nil {
-		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-		return
-	}
-	if tag.RowsAffected() == 0 { // someone else changed it between our read and this write
-		s.assignmentChanged(w, r, s.currentAssignee(r.Context(), tenant, caseID))
-		return
+	if !viaTurn { // (a turn has already written the case)
+		if assignee == prev && prevRole != nil && *prevRole == in.Role {
+			writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "unchanged": true})
+			return
+		}
+		tag, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now()
+			WHERE id=$3 AND assigned_to IS NOT DISTINCT FROM $4`, t), assignee, in.Role, caseID, prevTo)
+		if err != nil {
+			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+			return
+		}
+		if tag.RowsAffected() == 0 { // someone else changed it between our read and this write
+			s.assignmentChanged(w, r, s.currentAssignee(r.Context(), tenant, caseID))
+			return
+		}
 	}
 	label := assignableRoles[in.Role]
+	if viaTurn {
+		label += ", next in turn"
+	}
 	var msg string
 	if prev != "" && prev != assignee {
 		msg = fmt.Sprintf("Reassigned from %s to %s (%s) by %s%s", names[prev], assigneeName, label, byName, withReason(in.Reason))
@@ -307,10 +351,11 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	} else {
 		msg = fmt.Sprintf("Assigned to %s (%s) by %s%s", assigneeName, label, byName, withReason(in.Reason))
 	}
-	s.notify(r, tenant, assignee, "ASSIGNMENT", fmt.Sprintf("You were assigned %s as %s by %s", cn, label, byName), "#/cases/"+caseID)
+	s.notify(r, tenant, assignee, "ASSIGNMENT", fmt.Sprintf("You were assigned %s as %s by %s", cn, assignableRoles[in.Role], byName), "#/cases/"+caseID)
 	s.logActivity(r.Context(), tenant, caseID, "MILESTONE", msg)
 	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
-		"by": p.Subject, "assigned_to": assignee, "previous": prev, "role": in.Role, "manual": in.Assignee != "", "reason": in.Reason,
+		"by": p.Subject, "assigned_to": assignee, "previous": prev, "role": in.Role, "manual": in.Assignee != "" && !viaTurn, "reason": in.Reason,
+		"rule": map[bool]string{true: "round_robin", false: ""}[viaTurn],
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "role": in.Role, "previous": prev})
 }

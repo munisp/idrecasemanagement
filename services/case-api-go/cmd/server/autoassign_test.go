@@ -37,3 +37,45 @@ func TestInRotation(t *testing.T) {
 		t.Error("nobody excluded: everyone is in")
 	}
 }
+
+func TestNextSkipping(t *testing.T) {
+	ids := []string{"a", "b", "c"}
+	if got := nextSkipping(ids, "a", "b"); got != "c" {
+		t.Errorf("a hand-off passes over whoever has the case: got %q", got)
+	}
+	if got := nextSkipping(ids, "a", ""); got != "b" {
+		t.Errorf("nobody to pass over: got %q", got)
+	}
+	if got := nextSkipping([]string{"a"}, "", "a"); got != "a" {
+		t.Errorf("the only one in the rotation: got %q", got)
+	}
+}
+
+func TestRotationRole(t *testing.T) {
+	if r, ok := rotationRole(""); r != "CASE_MANAGER" || !ok {
+		t.Errorf("default: %q %v", r, ok)
+	}
+	if r, ok := rotationRole(" coder "); r != "CODER" || !ok {
+		t.Errorf("coder: %q %v", r, ok)
+	}
+	if _, ok := rotationRole("PM"); ok {
+		t.Error("a case is not assigned to the PM role")
+	}
+}
+
+func TestRoleChanges(t *testing.T) {
+	cur := []string{"default-roles-idre", "CASE_MANAGER", "offline_access"}
+	add, remove := roleChanges(cur, []string{"CODER", "CASE_MANAGER", "CODER"})
+	if len(add) != 1 || add[0] != "CODER" || len(remove) != 0 {
+		t.Errorf("add a role: +%v -%v", add, remove)
+	}
+	add, remove = roleChanges(cur, []string{"ATTORNEY"})
+	if len(add) != 1 || add[0] != "ATTORNEY" || len(remove) != 1 || remove[0] != "CASE_MANAGER" {
+		t.Errorf("swap a role: +%v -%v", add, remove)
+	}
+	// Roles outside the staff set are never touched.
+	_, remove = roleChanges([]string{"PLATFORM_ADMIN", "CODER"}, []string{"CODER"})
+	if len(remove) != 0 {
+		t.Errorf("a platform role was removed: %v", remove)
+	}
+}

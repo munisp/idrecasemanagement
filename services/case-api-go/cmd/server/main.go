@@ -962,6 +962,7 @@ func main() {
 		r.Post("/tenant-staff", s.createTenantStaff)
 		r.Get("/tenant-staff", s.listTenantStaff)
 		r.Patch("/tenant-staff/{username}", s.updateTenantStaffStatus)
+		r.Put("/tenant-staff/{username}/roles", s.setTenantStaffRoles) // what a staff member does (staffroles.go)
 		r.Delete("/tenant-staff/{username}", s.deleteTenantStaff)
 	})
 
