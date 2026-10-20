@@ -845,30 +845,27 @@ const Views = (() => {
         selection.clear(); App.rerender();
       }, "Assigning…");
     };
-    // PM: route the whole selection to one person (e.g. when someone leaves or is overloaded).
+    // PM: route the whole selection, any roles at once (e.g. when someone leaves or is overloaded): the Reviewer holds
+    // each case, the specialists are added alongside. Rows left on "Keep" are not touched.
     const assignTo = $("#bk-assign-to");
     if (assignTo) assignTo.onclick = async (ev) => {
-      let role = "CASE_MANAGER";
-      const first = await Api.cm.assignees(role).catch((e) => { UI.toast(e.message, { kind: "warn" }); return null; });
-      if (!first) return;
-      const v = await UI.modal({ title: `Assign ${selection.size} dispute${selection.size === 1 ? "" : "s"}`, fields: [
-        { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true },
-        { name: "assignee", label: "Person", options: (first.assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`]), required: true },
-      ], submitLabel: "Assign selection",
-      onRefresh: async (vals, setOptions) => {
-        if (vals.role === role) return;
-        role = vals.role;
-        const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
-        setOptions("assignee", (r.assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`]));
-      } });
+      const lists = await Promise.all(ASSIGN_ROLES.map(([r]) => Api.cm.assignees(r).catch(() => ({ assignees: [] }))));
+      const fields = ASSIGN_ROLES.map(([r, label], i) => ({ name: "p_" + r, label: r === "CASE_MANAGER" ? `${label} — holds the case` : label, value: "",
+        options: [["", "Keep as it is"], ...(lists[i].assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`])] }));
+      const v = await UI.modal({ title: `People on ${selection.size} dispute${selection.size === 1 ? "" : "s"}`, wide: true, fields, submitLabel: "Assign selection" });
       if (!v) return;
+      const picks = ASSIGN_ROLES.filter(([r]) => v["p_" + r]);
+      if (!picks.length) { UI.toast("No changes"); return; }
       await UI.run(ev.currentTarget, async () => {
-        try {
-          const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection], role: v.role, assignee: v.assignee });
-          const ok = r.results.filter((x) => x.ok).length;
-          UI.toast(`Assigned ${ok} of ${r.results.length} disputes`);
-          selection.clear(); App.rerender();
-        } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        const said = [];
+        for (const [r, label] of picks) {
+          try {
+            const res = await Api.cm.bulk({ action: "assign", case_ids: [...selection], role: r, assignee: v["p_" + r] });
+            said.push(`${label}: ${res.results.filter((x) => x.ok).length} of ${res.results.length}`);
+          } catch (e) { said.push(`${label}: ${e.message}`); }
+        }
+        UI.toast(said.join(" · "), { duration: 9000 });
+        selection.clear(); App.rerender();
       }, "Assigning…");
     };
     $("#bk-status").onclick = async (ev) => {
@@ -1188,14 +1185,14 @@ const Views = (() => {
       const acts = [];
       if (!a.assigned_to && canClaim()) acts.push(`<button class="mini" onclick="Views.claim('${esc(caseId)}')">Take this case</button>`);
       if (isAssigner) {
-        acts.push(`<button class="mini ghost" onclick="Views.assign('${esc(caseId)}','CASE_MANAGER')">${a.assigned_to ? "Reassign" : "Assign"}</button>`);
+        acts.push(`<button class="mini ghost" onclick="Views.assign('${esc(caseId)}')">${a.assigned_to ? "Reassign" : "Assign"}</button>`);
         if (canTakeOwn() && !mine && a.assigned_to) acts.push(`<button class="mini ghost" onclick="Views.assignToMe('${esc(caseId)}')">Assign to me</button>`);
         if (a.assigned_to) acts.push(`<button class="mini ghost" onclick="Views.unassign('${esc(caseId)}')">Unassign</button>`);
       }
       // The specialists named alongside the Reviewer (helpers.go): one line each, changed or removed by the PM.
       const helpers = (a.helpers || []).map((h) => `<div class="asg-helper"><span class="muted">${esc(h.role_label)}</span>
           <span class="asg-name${h.id === myId() ? " me" : ""}">${esc(h.id === myId() ? "You" : (h.name || "Staff"))}</span>
-          ${isAssigner ? `<button class="mini ghost" onclick="Views.assign('${esc(caseId)}','${esc(h.role)}')">Change</button>
+          ${isAssigner ? `<button class="mini ghost" onclick="Views.assign('${esc(caseId)}')">Change</button>
             <button class="mini ghost" onclick="Views.unassignHelper('${esc(caseId)}','${esc(h.role)}','${esc(h.id)}')">Remove</button>` : ""}</div>`).join("");
       const missing = ASSIGN_ROLES.filter(([r]) => r !== "CASE_MANAGER" && !(a.helpers || []).some((h) => h.role === r));
       el.innerHTML = `<span class="asg">${a.assigned_to
@@ -1203,7 +1200,7 @@ const Views = (() => {
         : `<span class="asg-none">No Reviewer</span>`}</span>
         ${acts.length ? `<span class="asg-acts">${acts.join("")}</span>` : ""}
         ${helpers ? `<div class="asg-helpers">${helpers}</div>` : ""}
-        ${isAssigner && missing.length ? `<div class="asg-helpers"><button class="mini ghost" onclick="Views.assign('${esc(caseId)}','${missing[0][0]}')">＋ Add a specialist</button></div>` : ""}`;
+        ${isAssigner && missing.length ? `<div class="asg-helpers"><button class="mini ghost" onclick="Views.assign('${esc(caseId)}')">＋ Add a specialist</button></div>` : ""}`;
       el.dataset.assignee = a.assigned_to || "";
     } catch { el.innerHTML = ""; }
   }
@@ -1234,55 +1231,47 @@ const Views = (() => {
     } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
 
-  // Assign or reassign: a real staff member of the chosen role, picked from a list showing each person's open
-  // cases (least loaded first), "Next in turn", or "Auto". As Reviewer it sets who holds the case; as a specialist
-  // (Coder, Clinical reviewer, Attorney, Arbitrator) it names one alongside the Reviewer, who keeps the case.
-  async function assign(caseId, presetRole) {
+  // Assign the people on a case, every role at once: the Reviewer, who holds the case, and the specialists named
+  // alongside (Coder, Clinical reviewer, Attorney, Arbitrator). Each row offers "Next in turn" (the role's rotation),
+  // "Auto" (fewest open cases), a person from the list (least loaded first), or removing a specialist; a row left
+  // on "Keep" is not touched. Whoever loses a place is told.
+  const KEEP = "__keep", REMOVE = "__remove";
+  async function assign(caseId) {
     try {
       const cur = await Api.cm.assignment(caseId).catch(() => ({}));
       const holderOf = (r) => (r === "CASE_MANAGER" ? cur.assigned_to || "" : ((cur.helpers || []).find((h) => h.role === r) || {}).id || "");
       const nameOf = (r) => (r === "CASE_MANAGER" ? cur.name : ((cur.helpers || []).find((h) => h.role === r) || {}).name);
-      let role = ASSIGN_ROLES.some(([r]) => r === presetRole) ? presetRole : "CASE_MANAGER";
-      const first = await Api.cm.assignees(role);
-      const people = (res, r) => {
-        const list = res.assignees || [];
-        const opts = assigneeOptions(list);
-        if (r === "CASE_MANAGER" && canTakeOwn() && !list.some((a) => a.id === myId())) opts.splice(1, 0, [myId(), "Me (take it myself)"]);
-        // The role's rotation (Team page): the next person in turn, passing over whoever has the place now.
-        if (res.next_in_turn) opts.unshift([NEXT_IN_TURN, `Next in turn${res.next_in_turn.id !== holderOf(r) ? ` — ${esc(res.next_in_turn.username)}` : ""}`]);
-        return opts;
-      };
-      const intro = (r) => {
-        const n = nameOf(r), label = (ASSIGN_ROLES.find(([k]) => k === r) || [r, r])[1];
-        if (r === "CASE_MANAGER") return n ? `The case is with <b>${esc(n)}</b> (Reviewer). They'll be told it moved.` : "No Reviewer yet.";
-        return `${n ? `The ${esc(label)} now is <b>${esc(n)}</b>; they'll be told.` : `No ${esc(label)} on this case yet.`} The Reviewer${cur.name ? ` (${esc(cur.name)})` : ""} keeps the case.`;
-      };
-      const v = await UI.modal({
-        title: role === "CASE_MANAGER" ? (cur.name ? "Reassign case" : "Assign case") : "Specialist on this case",
-        body: intro(role),
-        fields: [
-          { name: "role", label: "Assign as", options: ASSIGN_ROLES, value: role, required: true,
-            hint: "Reviewer holds the case; a Coder, Clinical reviewer, Attorney or Arbitrator is added alongside." },
-          { name: "assignee", label: "Person", options: people(first, role) },
-          { name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" },
-        ],
-        submitLabel: "Assign",
-        onRefresh: async (vals, setOptions) => {
-          if (vals.role === role) return; // only a role change reloads the people list
-          role = vals.role;
-          const r = await Api.cm.assignees(role).catch(() => ({ assignees: [] }));
-          setOptions("assignee", people(r, role));
-          const b = document.querySelector(".modal-scrim .modal-body");
-          if (b) b.innerHTML = intro(role);
-        },
+      const lists = await Promise.all(ASSIGN_ROLES.map(([r]) => Api.cm.assignees(r).catch(() => ({ assignees: [] }))));
+      const fields = ASSIGN_ROLES.map(([r, label], i) => {
+        const res = lists[i], list = res.assignees || [], held = holderOf(r);
+        const opts = [[KEEP, held ? `Keep ${esc(nameOf(r) || "current")}` : (r === "CASE_MANAGER" ? "— nobody yet —" : "— none —")]];
+        if (res.next_in_turn && res.next_in_turn.id !== held) opts.push([NEXT_IN_TURN, `Next in turn — ${esc(res.next_in_turn.username)}`]);
+        if (list.length) opts.push(["", "Auto — whoever has the fewest open cases"]);
+        if (r === "CASE_MANAGER" && canTakeOwn() && myId() !== held && !list.some((a) => a.id === myId())) opts.push([myId(), "Me (take it myself)"]);
+        list.filter((a) => a.id !== held).forEach((a) => opts.push([a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`]));
+        if (held && r !== "CASE_MANAGER") opts.push([REMOVE, `Remove ${esc(nameOf(r) || "them")}`]);
+        return { name: "p_" + r, label: r === "CASE_MANAGER" ? `${label} — holds the case` : label, options: opts, value: KEEP,
+          hint: !list.length ? `No active ${label} on this tenant yet` : "" };
       });
+      fields.push({ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" });
+      const v = await UI.modal({ title: "People on this case", wide: true, fields, submitLabel: "Save",
+        body: "Change any row; rows on <b>Keep</b> stay as they are. The Reviewer holds the case; the others are added alongside." });
       if (!v) return;
-      const expected = holderOf(v.role);
-      const r = v.assignee === NEXT_IN_TURN
-        ? await Api.cm.assignNext(caseId, v.role, v.reason || "", expected)
-        : await Api.cm.assign(caseId, v.role, v.assignee || "", v.reason || "", "", expected);
-      const label = (ASSIGN_ROLES.find(([k]) => k === v.role) || [v.role, v.role])[1];
-      UI.toast(r.unchanged ? `Already ${r.name || "that person"}` : v.role === "CASE_MANAGER" ? `Assigned to ${r.name || "staff"}` : `${label}: ${r.name || "staff"}`);
+      const done = [], failed = [];
+      for (const [r, label] of ASSIGN_ROLES) {
+        const pick = v["p_" + r];
+        if (pick === undefined || pick === KEEP) continue;
+        const expected = holderOf(r);
+        try {
+          const res = pick === NEXT_IN_TURN ? await Api.cm.assignNext(caseId, r, v.reason || "", expected)
+            : pick === REMOVE ? await Api.cm.assign(caseId, r, "", v.reason || "", "unassign", expected)
+            : await Api.cm.assign(caseId, r, pick, v.reason || "", "", expected);
+          done.push(pick === REMOVE ? `${label} removed` : `${label}: ${res.name || "staff"}`);
+        } catch (e) { failed.push(`${label}: ${e.message}`); }
+      }
+      if (done.length) UI.toast(done.join(" · "), { duration: 8000 });
+      if (failed.length) UI.toast(failed.join(" · "), { kind: "warn", sticky: true });
+      if (!done.length && !failed.length) UI.toast("No changes");
       App.rerender();
     } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
