@@ -236,6 +236,19 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 			var prev *string
 			var cn string
 			_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number, assigned_to FROM tenant_%s.cases WHERE id=$1`, t), id).Scan(&cn, &prev)
+			if isHelperRole(role) { // a specialist is named alongside the Reviewer, who keeps the case (helpers.go)
+				was := s.caseHelpers(r.Context(), tenant, id)[role]
+				_, err = s.db.Exec(r.Context(), upsertHelperSQL, tenant, id, role, assignee, p.Subject)
+				if err == nil && was != assignee {
+					s.logActivity(r.Context(), tenant, id, "MILESTONE", fmt.Sprintf("%s: %s, added by %s (bulk)", assignableRoles[role], bulkAssigneeName, displayName(p)))
+					s.logAudit(r.Context(), tenant, id, "CASE_HELPER_ASSIGNED", map[string]any{"by": p.Subject, "role": role, "assigned_to": assignee, "previous": was, "bulk": true})
+					if was != "" {
+						s.notify(r, tenant, was, "ASSIGNMENT", fmt.Sprintf("%s's %s place went to %s (%s)", cn, assignableRoles[role], bulkAssigneeName, displayName(p)), "#/cases/"+id)
+					}
+					s.notify(r, tenant, assignee, "ASSIGNMENT", fmt.Sprintf("You are the %s on %s (%s)", assignableRoles[role], cn, displayName(p)), "#/cases/"+id)
+				}
+				break
+			}
 			_, err = s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now() WHERE id=$3`, t), assignee, role, id)
 			if err == nil {

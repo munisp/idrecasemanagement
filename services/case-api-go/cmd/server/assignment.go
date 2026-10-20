@@ -82,7 +82,7 @@ func (s *server) staffWithRole(ctx context.Context, tenant, role string) ([]staf
 const openCaseCond = `coalesce(status,'') NOT LIKE 'CLOSED%%' AND coalesce(internal_status,'') NOT IN
 	('Closed','Closed-Refunded','Dismissed','Withdrawn','Ineligible','Plan Opt-Out','Decided - Invoice Paid','Provider Closure Letter Issued')`
 
-// openCaseCounts: assigned_to → number of the tenant's open cases they hold.
+// openCaseCounts: user id → number of the tenant's open cases they hold, as Reviewer or as a specialist.
 func (s *server) openCaseCounts(ctx context.Context, tenant string) map[string]int {
 	out := map[string]int{}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
@@ -99,6 +99,9 @@ func (s *server) openCaseCounts(ctx context.Context, tenant string) map[string]i
 		if rows.Scan(&who, &n) == nil {
 			out[who] = n
 		}
+	}
+	for who, n := range s.helperCounts(ctx, tenant) { // and the cases they are on as a specialist (helpers.go)
+		out[who] += n
 	}
 	return out
 }
@@ -164,6 +167,7 @@ func (s *server) caseAssignment(w http.ResponseWriter, r *http.Request) {
 	if role != nil && *role != "" {
 		out["assigned_role"], out["role_label"] = *role, assignableRoles[*role]
 	}
+	out["helpers"] = s.helperView(r.Context(), tenant, caseID) // the specialists alongside the Reviewer
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -230,6 +234,10 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number, assigned_to, assigned_role FROM tenant_%s.cases WHERE id=$1`, t),
 		caseID).Scan(&cn, &prevTo, &prevRole); err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if isHelperRole(in.Role) { // a specialist is named alongside the Reviewer, who keeps the case (helpers.go)
+		s.assignHelper(w, r, p, tenant, caseID, cn, in.Role, in.Assignee, in.Reason, in.Action, in.Next, in.Expected)
 		return
 	}
 	prev := ""

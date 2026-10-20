@@ -1694,6 +1694,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 				"Clinical review asked for by the coder ("+displayName(p)+")"+map[bool]string{true: ": " + truncate(reviewNote, 300), false: "."}[reviewNote != ""], displayName(p))
 		}
 	}
+	s.ensureStepHelper(r, tenant, id) // a specialist's step next: the next one in turn (helpers.go)
 	return true
 }
 

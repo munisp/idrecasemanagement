@@ -107,11 +107,13 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 		       c.disputed_amount_cents, v.discipline, v.status AS review_status,
 		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at, v.completed_at,
 		       coalesce(c.details->>'diagnosis_codes','[]') AS diagnosis_codes,
-		       coalesce(c.details->>'bundling_suspected','') AS bundling_suspected
+		       coalesce(c.details->>'bundling_suspected','') AS bundling_suspected,
+		       h.user_id AS assigned_to, (h.user_id = $3) AS mine
 		FROM public.specialty_reviews v
 		JOIN tenant_%s.cases c ON c.id::text = v.case_id
+		LEFT JOIN public.case_helpers h ON h.tenant = v.tenant AND h.case_id = v.case_id AND h.role = $4
 		WHERE v.tenant=$1 AND v.discipline=$2`, sanitizeTenant(tenant))
-	args := []any{tenant, discipline}
+	args := []any{tenant, discipline, p.Subject, disciplineRole[discipline]} // the specialist named on each case (helpers.go)
 	if !showAll {
 		q += ` AND v.status <> 'COMPLETE'`
 	}
@@ -124,7 +126,7 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 		            OR c.details->>'disputed_issue' ILIKE '%bundl%'
 		            OR c.details->>'issue' ILIKE '%bundl%')`
 	}
-	q += ` ORDER BY v.requested_at LIMIT 500`
+	q += ` ORDER BY (h.user_id = $3) IS TRUE DESC, v.requested_at LIMIT 500` // your own cases first
 	rows, err := s.queryRows(r, q, args...)
 	if err != nil {
 		slog.Error("query failed", "handler", "queues.go", "err", err)

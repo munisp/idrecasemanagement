@@ -412,6 +412,7 @@ func (s *server) caseWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
+	s.ensureStepHelper(r, tenant, caseID) // cases already at a specialist's step get one too (helpers.go)
 	steps := buildWorkflowSteps(f)
 	for i := range steps {
 		steps[i].CanAct = steps[i].State == "next" && wfMayAct(p, steps[i])
