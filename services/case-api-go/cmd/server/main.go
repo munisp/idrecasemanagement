@@ -602,6 +602,8 @@ func main() {
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
 		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
+		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Reviewers in turn: on/off, the rotation, who is next
+		r.Put("/assignment/auto", s.setAutoAssign)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)
@@ -1261,6 +1263,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	}
 	// Case-management enrichment: stage checklists + duplicate detection + timeline.
 	s.ensureChecklist(r, tenant, caseID)
+	s.autoAssignNewCase(r, tenant, caseID, req.CaseNumber) // the next Reviewer in turn (autoassign.go)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
 		fmt.Sprintf("Dispute %s initiated (%s) — %s / %s, QPA $%d.%02d, workflow %s",
 			req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))

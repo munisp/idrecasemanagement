@@ -152,6 +152,9 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 	})
 
 	s.ensureChecklist(r, tenant, caseID)
+	// The next Reviewer in turn, on every intake path (autoassign.go) -- run on the way out, once the case is either open
+	// or waiting on its fee: an unpaid one is skipped here and assigned when the payment opens it (activatePaidIntakeFor).
+	defer s.autoAssignNewCase(r, tenant, caseID, caseNumber)
 
 	// Program escalation trigger (G6): auto-route over-threshold disputes
 	// to F&WA screening. initiateCase (the staff-only endpoint) already
@@ -312,6 +315,7 @@ func (s *server) activatePaidIntakeFor(r *http.Request, tenant, caseID string, t
 	if email != "" {
 		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
 	}
+	s.autoAssignNewCase(r, tenant, caseID, caseNumber) // paid, so it now takes its turn in the rotation (autoassign.go)
 	// The Reviewer is told the case now exists.
 	s.notify(r, tenant, "role:CASE_MANAGER", "AHCA_INTAKE",
 		fmt.Sprintf("Fee paid — case %s opened: confirm the filing packet", caseNumber), "#/cases/"+caseID)

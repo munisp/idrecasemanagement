@@ -361,6 +361,9 @@ const Api = (() => {
       claim: (caseId, reason = "") => req("POST", `${t()}/cases/${caseId}/assign`, { action: "claim", reason }),
       assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
       assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
+      // New cases to Reviewers in turn: { enabled, reviewers: [{id, username, open_cases, in_rotation}], next }.
+      autoAssign: () => req("GET", `${t()}/assignment/auto`),
+      setAutoAssign: (body) => req("PUT", `${t()}/assignment/auto`, body),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
       relate: (p) => req("POST", `${t()}/cases/relate`, p),
       relationships: (caseId) => req("GET", `${t()}/cases/${caseId}/relationships`),

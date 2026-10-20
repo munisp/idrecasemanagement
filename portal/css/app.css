@@ -1096,3 +1096,9 @@ tr.pkg-hist td{border-top:0;padding-top:0}
 .dg .asg{flex-wrap:nowrap;white-space:nowrap}
 .empty-state{max-width:60ch;margin:48px auto;text-align:center}
 .empty-state p{line-height:1.55}
+
+/* Team → Automatic assignment */
+.aa-card{display:flex;flex-direction:column;gap:10px;max-width:720px}
+.aa-card .aa-toggle{display:flex;align-items:center;gap:8px;font-weight:600}
+.aa-card table{margin-top:4px}
+.aa-in{display:inline-flex;align-items:center;gap:6px;font-weight:400}
