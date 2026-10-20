@@ -22,7 +22,7 @@ const Palette = (() => {
       { s: "Go", icon: "▨", label: "Calendar", page: "#/calendar" },
       { s: "Go", icon: "◫", label: "Reports", page: "#/reports" },
       { s: "Action", icon: "＋", label: "New dispute", kbd: "C", page: "#/new" },
-      { s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext, needs: "#/cases" },
+      ...(Auth.reviewerScoped() ? [] : [{ s: "Action", icon: "⇪", label: "Grab next from queue", run: grabNext, needs: "#/cases" }]),
       { s: "Action", icon: "✦", label: "Ask the dispute graph (KGQA)", page: "#/ask" },
       { s: "Action", icon: "⟳", label: "Sync dispute graph (Postgres → FalkorDB → lakehouse)", run: graphSync, needs: "#/ask" },
       { s: "Action", icon: "⌘", label: "Train GNN link predictor", run: graphTrain, needs: "#/ask" },

@@ -39,7 +39,7 @@ func TestCaseVisibleTo(t *testing.T) {
 		to   string
 		want bool
 	}{
-		{rev, "", true}, {rev, "unassigned-pool", true}, {rev, "me", true}, {rev, "someone-else", false},
+		{rev, "", false}, {rev, "unassigned-pool", false}, {rev, "me", true}, {rev, "someone-else", false},
 		{pm, "someone-else", true}, {pm, "", true},
 	} {
 		if got := caseVisibleTo(c.p, c.to); got != c.want {
@@ -103,7 +103,7 @@ func TestCaseScopeSQL(t *testing.T) {
 		t.Fatal("a PM's lists are not scoped")
 	}
 	cond, ok := caseScopeSQL(principal{Roles: []string{"CASE_MANAGER"}}, "c", 3)
-	if !ok || cond != " AND (c.assigned_to IS NULL OR c.assigned_to = 'unassigned-pool' OR c.assigned_to = $3)" {
+	if !ok || cond != " AND c.assigned_to = $3" {
 		t.Fatalf("reviewer scope: %q", cond)
 	}
 }

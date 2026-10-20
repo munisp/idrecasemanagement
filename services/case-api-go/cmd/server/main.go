@@ -604,6 +604,7 @@ func main() {
 		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
 		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Reviewers in turn: on/off, the rotation, who is next
 		r.Put("/assignment/auto", s.setAutoAssign)
+		r.Post("/assignment/auto/assign-open", s.assignOpenCases) // the unassigned backlog, in turn (autoassign.go)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)

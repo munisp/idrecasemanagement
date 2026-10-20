@@ -147,7 +147,7 @@ func filingDetails(details map[string]any) map[string]any {
 //	"allow"      carry on to the handler (which applies its own checks)
 //	"own-case"   allow only if the caller filed the case named in caseID
 //	"assigned-case" a Reviewer: allow only if the case named in caseID is
-//	             unassigned or theirs (casescope.go)
+//	             assigned to them (casescope.go)
 //	"qa-case" / "invoice-case"  the same, for the case a QA item or an
 //	             invoice belongs to (caseID then holds that item's id)
 //	"deny"       refuse, with reason
@@ -182,7 +182,7 @@ func accessDecision(p principal, method, rel string) (decision, caseID, reason s
 		// One question can draw on every case at once, and its answer is model-written text: it cannot be
 		// filtered to the cases a Reviewer may see. The assistant and each case's own copilot stay available.
 		if rel == "/graph/ask" || rel == "/graph/hints" {
-			return "deny", "", "Ask the graph covers every case in the tenant; a Reviewer works only their own and unassigned cases"
+			return "deny", "", "Ask the graph covers every case in the tenant; a Reviewer works only the cases assigned to them"
 		}
 	}
 	if method == http.MethodGet {

@@ -285,6 +285,10 @@ func (s *server) grabNext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
+	if reviewerScoped(p) { // see casescope.go: a Reviewer does not pick from the unassigned cases
+		http.Error(w, `{"error":"cases are given out in turn or by the PM — there is nothing to grab"}`, http.StatusForbidden)
+		return
+	}
 	t := sanitizeTenant(tenant)
 	var id, cn, status string
 	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`

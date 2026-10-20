@@ -76,13 +76,18 @@ func (s *server) staffWithRole(ctx context.Context, tenant, role string) ([]staf
 	return out, nil
 }
 
+// openCaseCond: an SQL condition on a cases row that is still being worked (not closed, decided-and-paid,
+// withdrawn…). Shared by the caseload counts and the unassigned backlog (autoassign.go). Always used through
+// fmt.Sprintf, hence the doubled %.
+const openCaseCond = `coalesce(status,'') NOT LIKE 'CLOSED%%' AND coalesce(internal_status,'') NOT IN
+	('Closed','Closed-Refunded','Dismissed','Withdrawn','Ineligible','Plan Opt-Out','Decided - Invoice Paid','Provider Closure Letter Issued')`
+
 // openCaseCounts: assigned_to → number of the tenant's open cases they hold.
 func (s *server) openCaseCounts(ctx context.Context, tenant string) map[string]int {
 	out := map[string]int{}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT assigned_to, count(*) FROM tenant_%s.cases
-		WHERE assigned_to IS NOT NULL AND coalesce(status,'') NOT LIKE 'CLOSED%%'
-		  AND coalesce(internal_status,'') NOT IN ('Closed','Closed-Refunded','Dismissed','Withdrawn','Ineligible','Plan Opt-Out','Decided - Invoice Paid','Provider Closure Letter Issued')
+		WHERE assigned_to IS NOT NULL AND `+openCaseCond+`
 		GROUP BY 1`, sanitizeTenant(tenant)))
 	if err != nil {
 		return out
@@ -196,6 +201,10 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	assigner := hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole)
 	if in.Action == "claim" {
+		if reviewerScoped(p) { // a Reviewer sees only their own cases: cases reach them by the rotation or the PM
+			http.Error(w, `{"error":"cases are given out in turn or by the PM — ask the PM for this one"}`, http.StatusForbidden)
+			return
+		}
 		if !assigner && !hasAnyRole(p, "CASE_MANAGER") {
 			http.Error(w, `{"error":"forbidden: only a Reviewer (or the PM / Tenant Admin) can take a case"}`, http.StatusForbidden)
 			return

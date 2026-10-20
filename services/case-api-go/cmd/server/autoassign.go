@@ -316,8 +316,12 @@ func (s *server) writeAutoAssign(w http.ResponseWriter, r *http.Request, rawRole
 	if cfg.Enabled {
 		next = pickNext(ids, counts, cfg.Last, "")
 	}
+	backlog := 0
+	if role == "CASE_MANAGER" {
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT count(*) FROM tenant_%s.cases WHERE `+backlogCond, sanitizeTenant(tenant))).Scan(&backlog)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"role": role, "role_label": assignableRoles[role], "new_cases": role == "CASE_MANAGER",
+		"role": role, "role_label": assignableRoles[role], "new_cases": role == "CASE_MANAGER", "unassigned_open": backlog,
 		"enabled": cfg.Enabled, "rule": "least_loaded_round_robin", "people": rows, "next": next,
 		"updated_by": cfg.UpdatedBy, "updated_at": cfg.UpdatedAt,
 	})
@@ -375,4 +379,78 @@ func (s *server) setAutoAssign(w http.ResponseWriter, r *http.Request) {
 		"by": p.Subject, "role": role, "enabled": enabled, "excluded": excluded, "was_enabled": cur.Enabled, "was_excluded": cur.Excluded,
 	})
 	s.writeAutoAssign(w, r, role)
+}
+
+// backlogCond: an open case nobody holds that the rotation can give out — not one waiting on its fee or found
+// ineligible (both are locked until something else happens).
+const backlogCond = `(assigned_to IS NULL OR assigned_to = 'unassigned-pool')
+	AND coalesce(status,'') NOT IN ('AWAITING_PAYMENT','INELIGIBLE') AND ` + openCaseCond
+
+// assignOpenCases: POST /assignment/auto/assign-open — give the open cases nobody holds (cases from before automatic
+// assignment, or filed while it was off) to the Reviewers, oldest first, by the same rule as new cases. Up to 500 per
+// call; the answer says how many are left. Each Reviewer is told once, with their count.
+func (s *server) assignOpenCases(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !canManageAssignment(p) {
+		http.Error(w, `{"error":"forbidden: the PM or the Tenant Admin assigns cases"}`, http.StatusForbidden)
+		return
+	}
+	ctx := r.Context()
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	t := sanitizeTenant(tenant)
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT id::text, case_number FROM tenant_%s.cases WHERE `+backlogCond+` ORDER BY opened_at LIMIT 500`, t))
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	type item struct{ id, number string }
+	var todo []item
+	for rows.Next() {
+		var it item
+		if rows.Scan(&it.id, &it.number) == nil {
+			todo = append(todo, it)
+		}
+	}
+	rows.Close()
+	by := displayName(p)
+	given, names := map[string]int{}, map[string]string{}
+	assigned := 0
+	for _, c := range todo {
+		who, name, err := s.takeTurn(ctx, tenant, "CASE_MANAGER", "", func(tx pgx.Tx, who string) (bool, error) {
+			tag, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role='CASE_MANAGER', updated_at=now()
+				WHERE id=$2 AND `+backlogCond, t), who, c.id)
+			return err == nil && tag.RowsAffected() > 0, err
+		})
+		switch {
+		case errors.Is(err, errRotationOff):
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "the Reviewer rotation is off — turn it on first", "assigned": assigned})
+			return
+		case errors.Is(err, errRotationEmpty):
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "nobody is in the Reviewer rotation — add someone first", "assigned": assigned})
+			return
+		case err != nil:
+			log.Printf("assign-open %s/%s: %v", tenant, c.number, err)
+			continue
+		case who == "":
+			continue // someone assigned it a moment ago
+		}
+		assigned++
+		given[who]++
+		names[who] = name
+		s.logActivity(ctx, tenant, c.id, "MILESTONE", fmt.Sprintf("Assigned to %s (Reviewer) in turn, from the unassigned cases, by %s", name, by))
+		s.logAudit(ctx, tenant, c.id, "CASE_ASSIGNED", map[string]any{
+			"by": p.Subject, "assigned_to": who, "previous": "", "role": "CASE_MANAGER", "auto": true,
+			"rule": "least_loaded_round_robin", "backlog": true,
+		})
+	}
+	people := []map[string]any{}
+	for who, n := range given {
+		s.notify(r, tenant, who, "ASSIGNMENT", fmt.Sprintf("You were given %d case%s from the unassigned cases (in turn, by %s)", n, map[bool]string{true: "", false: "s"}[n == 1], by), "#/cases?assigned=mine")
+		people = append(people, map[string]any{"id": who, "username": names[who], "cases": n})
+	}
+	sort.Slice(people, func(i, j int) bool { return people[i]["username"].(string) < people[j]["username"].(string) })
+	left := 0
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM tenant_%s.cases WHERE `+backlogCond, t)).Scan(&left)
+	s.logAudit(ctx, tenant, "", "BACKLOG_ASSIGNED", map[string]any{"by": p.Subject, "assigned": assigned, "remaining": left})
+	writeJSON(w, http.StatusOK, map[string]any{"assigned": assigned, "people": people, "remaining": left})
 }

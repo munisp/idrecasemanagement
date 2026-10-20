@@ -1025,7 +1025,7 @@ const Views = (() => {
           document.body.classList.toggle("density-compact", next === "compact");
           UI.toast(`Density: ${next}`);
         };
-        $("#grab").onclick = async (ev) => {
+        if ($("#grab")) $("#grab").onclick = async (ev) => {
           await UI.run(ev.currentTarget, async () => {
             const r = await Api.cm.grabNext();
             if (r.claimed) { UI.toast(`Claimed ${r.case_number} from the queue`); location.hash = `#/cases/${r.case_id}`; }
@@ -1054,7 +1054,7 @@ const Views = (() => {
           ${search ? `<button class="mini" id="case-search-clear" aria-label="Clear search">Clear</button>` : ""}</div>
 
         <span style="flex:1"></span>
-        <button class="mini" id="grab">⇪ Grab next</button>
+        ${Auth.reviewerScoped() ? "" : `<button class="mini" id="grab">⇪ Grab next</button>`}
         <button class="mini" id="density">Density: ${density}</button></div>
         <p class="lane-tabs" role="tablist" aria-label="Triage lanes">
           ${[["", "All"], ["AUTO_REVIEW", "Auto-review"], ["STANDARD", "Standard"], ["COMPLEX", "Complex"]]
@@ -1071,12 +1071,12 @@ const Views = (() => {
         <p class="viewbar">
           <label class="asg-filter">Assignment
             <select id="asg-filter">
-              ${[["", "All"], ["unassigned", "Unassigned"], ["mine", "Assigned to me"], ...(canAssign() ? [["assigned", "Assigned"]] : [])]
+              ${(Auth.reviewerScoped() ? [["", "All"]] : [["", "All"], ["unassigned", "Unassigned"], ["mine", "Assigned to me"], ...(canAssign() ? [["assigned", "Assigned"]] : [])])
                 .map(([k, l]) => `<option value="${k}"${assigned === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>
           ${canAssign() ? `<label class="asg-filter">Reviewer
             <select id="asg-person"><option value="">Anyone</option>
               ${reviewers.map((a) => `<option value="${esc(a.id)}"${assignee === a.id ? " selected" : ""}>${esc(a.username)}</option>`).join("")}</select></label>` : ""}
-          ${Auth.reviewerScoped() ? `<span class="muted">You see unassigned cases and your own.</span>` : ""}
+          ${Auth.reviewerScoped() ? `<span class="muted">You see the cases assigned to you. New ones are given out in turn by the PM's rotation.</span>` : ""}
           <select onchange="location.hash='#/cases?view='+this.value" aria-label="Saved views">
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
@@ -1156,7 +1156,7 @@ const Views = (() => {
   // takes an unassigned case ("Take"); they cannot route cases to others. The server enforces all of it.
   const canAssign = () => can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
   const canTakeOwn = () => (Auth.claims()?.roles || []).some((r) => ["TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].includes(r));
-  const canClaim = () => can("CASE_MANAGER") || canAssign();
+  const canClaim = () => canAssign(); // a Reviewer sees only their own cases (casescope.go): nothing to take
   const myId = () => Auth.claims()?.sub || "";
   // The list's Assigned cell: the person, or Unassigned; with the one action this viewer has on it.
   function assigneeCell(c) {
@@ -6323,6 +6323,9 @@ const Views = (() => {
         <label class="aa-toggle"><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="Views.autoAssignToggle(this.checked, this)" />
           ${a.new_cases ? "Assign new cases to Reviewers automatically, in turn" : `Offer "Next in turn" when a case is handed to a ${esc(label)}`}</label>
         <p class="muted">${status} Whoever in the rotation has the fewest open cases goes first; people with the same number take turns. You can change who has any case on the case itself.${a.updated_by ? ` Last changed by ${esc(a.updated_by)}.` : ""}</p>
+        ${a.new_cases && a.unassigned_open ? `<div class="aa-backlog"><span><strong>${a.unassigned_open}</strong> open case${a.unassigned_open === 1 ? "" : "s"}
+          nobody holds (from before automatic assignment, or filed while it was off). Reviewers can't see them until they're assigned.</span>
+          <button class="mini" onclick="Views.autoAssignBacklog(this)" ${!a.enabled || !inTurn ? "disabled" : ""}>Assign them now, in turn</button></div>` : ""}
         ${people.length
           ? `<table><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
           : `<p class="muted">No active ${esc(label)} on this tenant yet — add one above, or give someone the role.</p>`}
@@ -6335,6 +6338,29 @@ const Views = (() => {
   }
 
   async function autoAssignRole(role) { aaRole = role; await aaRefresh(); }
+
+  // The unassigned backlog to the Reviewers, by the same rule as new cases; 500 per round, repeated until done.
+  async function autoAssignBacklog(el) {
+    const a = await Api.cm.autoAssign("CASE_MANAGER").catch(() => null);
+    const n = a?.unassigned_open || 0;
+    if (!n || !(await UI.confirm(`Assign ${n} case${n === 1 ? "" : "s"} now?`,
+      "They go to the Reviewers in the rotation, oldest first: whoever has the fewest open cases goes first. Each Reviewer is told how many they got. Cases waiting on their fee stay as they are.",
+      "Assign them"))) return;
+    await UI.run(el, async () => {
+      let total = 0;
+      const per = {};
+      try {
+        for (let round = 0; round < 40; round++) {
+          const r = await Api.cm.assignOpen();
+          total += r.assigned;
+          (r.people || []).forEach((p) => { per[p.username] = (per[p.username] || 0) + p.cases; });
+          if (!r.remaining || !r.assigned) break;
+        }
+        UI.toast(`Assigned ${total} case${total === 1 ? "" : "s"}: ${Object.entries(per).map(([u, c]) => `${u} ${c}`).join(", ") || "none"}`, { duration: 9000 });
+      } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+      await aaRefresh();
+    }, "Assigning…");
+  }
 
   async function autoAssignToggle(on, el) {
     try {
@@ -9306,5 +9332,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
 })();

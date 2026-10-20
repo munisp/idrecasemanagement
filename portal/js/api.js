@@ -370,6 +370,8 @@ const Api = (() => {
       // A role's rotation (Reviewer when none): { role, role_label, new_cases, enabled, people: [{id, username, open_cases, in_rotation}], next }.
       autoAssign: (role = "CASE_MANAGER") => req("GET", `${t()}/assignment/auto?role=${encodeURIComponent(role)}`),
       setAutoAssign: (body) => req("PUT", `${t()}/assignment/auto`, body),
+      // The open cases nobody holds, to the Reviewers in turn (500 a call): { assigned, people: [{username, cases}], remaining }.
+      assignOpen: () => req("POST", `${t()}/assignment/auto/assign-open`),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
       relate: (p) => req("POST", `${t()}/cases/relate`, p),
       relationships: (caseId) => req("GET", `${t()}/cases/${caseId}/relationships`),

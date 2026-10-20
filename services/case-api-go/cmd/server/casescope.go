@@ -2,10 +2,11 @@ package main
 
 // casescope.go — which cases a Reviewer may see.
 //
-// A Reviewer (CASE_MANAGER) works the cases assigned to them and picks up new ones from the unassigned pool: they
-// see a case only when it is unassigned or assigned to them. A case assigned to anyone else does not exist for
-// them — the case list, search, the calendar, the per-case routes, everything answers as if it were not there (404,
-// never 403: a reviewer must not learn which case ids belong to others).
+// A Reviewer (CASE_MANAGER) works the cases assigned to them, and only those: cases are given out by the rotation
+// (autoassign.go) or by the PM, so there is no unassigned pool for a Reviewer to browse or take from. Any other case
+// — someone else's, or nobody's yet — does not exist for them: the case list, search, the calendar, the per-case
+// routes, everything answers as if it were not there (404, never 403: a reviewer must not learn which case ids
+// exist).
 //
 // The PM, Tenant Admin and the platform's admins see every case of the tenant, and so do the specialist roles
 // (coder, clinician, attorney, arbitrator, finance, auditor), whose own queues are built across every case. The
@@ -43,13 +44,13 @@ func reviewerScoped(p principal) bool {
 	return true
 }
 
-// caseVisibleTo is the rule itself, for a case whose assignee is known: unassigned (or the old placeholder
-// "unassigned-pool"), or assigned to the caller. Pure, so it is tested.
+// caseVisibleTo is the rule itself, for a case whose assignee is known: assigned to the caller. Pure, so it is
+// tested.
 func caseVisibleTo(p principal, assignedTo string) bool {
 	if !reviewerScoped(p) {
 		return true
 	}
-	return assignedTo == "" || assignedTo == "unassigned-pool" || assignedTo == p.Subject
+	return assignedTo != "" && assignedTo == p.Subject
 }
 
 // caseVisible looks the case up. A case that does not exist is "visible": the handler answers its own 404.
@@ -71,17 +72,17 @@ func caseScopeSQL(p principal, alias string, argN int) (string, bool) {
 	if !reviewerScoped(p) {
 		return "", false
 	}
-	return fmt.Sprintf(" AND (%[1]s.assigned_to IS NULL OR %[1]s.assigned_to = 'unassigned-pool' OR %[1]s.assigned_to = $%[2]d)", alias, argN), true
+	return fmt.Sprintf(" AND %[1]s.assigned_to = $%[2]d", alias, argN), true
 }
 
-// caseIDScopeSQL: the rule for rows of another table that point at a case (col holds the case id, as text or uuid);
-// rows that point at no case stay.
+// caseIDScopeSQL: the rule for rows of another table that point at a case (col holds the case id, as text or uuid):
+// rows that point at no case stay; rows that point at a case stay when it is the caller's.
 func caseIDScopeSQL(p principal, tenant, col string, argN int) (string, bool) {
 	if !reviewerScoped(p) {
 		return "", false
 	}
-	return fmt.Sprintf(` AND (%[1]s IS NULL OR NOT EXISTS (SELECT 1 FROM tenant_%[2]s.cases sc WHERE sc.id::text = %[1]s::text
-		AND sc.assigned_to IS NOT NULL AND sc.assigned_to <> 'unassigned-pool' AND sc.assigned_to <> $%[3]d))`,
+	return fmt.Sprintf(` AND (%[1]s IS NULL OR EXISTS (SELECT 1 FROM tenant_%[2]s.cases sc WHERE sc.id::text = %[1]s::text
+		AND sc.assigned_to = $%[3]d))`,
 		col, sanitizeTenant(tenant), argN), true
 }
 
@@ -100,7 +101,7 @@ func (s *server) hiddenCaseIDs(ctx context.Context, p principal, tenant string, 
 	}
 	out := map[string]bool{}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT id::text FROM tenant_%s.cases
-		WHERE id::text = ANY($1) AND assigned_to IS NOT NULL AND assigned_to <> 'unassigned-pool' AND assigned_to <> $2`,
+		WHERE id::text = ANY($1) AND assigned_to IS DISTINCT FROM $2`,
 		sanitizeTenant(tenant)), ids, p.Subject)
 	if err != nil {
 		// Fail closed: if the check cannot run, every named case is hidden from a Reviewer.
