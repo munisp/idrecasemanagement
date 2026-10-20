@@ -355,7 +355,7 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "MILESTONE", msg)
 	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
 		"by": p.Subject, "assigned_to": assignee, "previous": prev, "role": in.Role, "manual": in.Assignee != "" && !viaTurn, "reason": in.Reason,
-		"rule": map[bool]string{true: "round_robin", false: ""}[viaTurn],
+		"rule": map[bool]string{true: "least_loaded_round_robin", false: ""}[viaTurn],
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "role": in.Role, "previous": prev})
 }

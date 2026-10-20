@@ -1,11 +1,14 @@
 package main
 
-// autoassign.go — cases go to staff in turn (round robin), one rotation per tenant and role.
+// autoassign.go — cases go to whoever in the rotation holds the fewest open cases, ties taken in turn (round
+// robin), one rotation per tenant and role.
 //
 // Each tenant has a rotation for every role a case can be assigned as (public.case_auto_assign, scripts/auto_assign.sql):
 // who got the last case, the people the PM has taken out of it (on leave, part-time), and whether it is on at all. The
-// next case goes to the next person after the last one, in a fixed order (their Keycloak id), skipping anyone
-// suspended or taken out. On by default: a tenant with no row rotates.
+// next case goes to the person with the fewest open cases (all the cases they hold, whatever the role); among equals,
+// to the next after the last one in a fixed order (their Keycloak id). Strict turns alone would never catch up
+// someone who starts with fewer cases (cases also arrive by hand, by taking one, and leave by closing), so the load
+// comes first. Anyone suspended or taken out is skipped. On by default: a tenant with no row rotates.
 //
 //   - Reviewer: new cases are given out in turn as they are created (startAhcaCaseFull: the Florida intake in all its
 //     forms; initiateCase: the federal one), filling only a case nobody holds yet. A case waiting on its initial fee
@@ -49,14 +52,34 @@ func nextInRotation(ids []string, last string) string {
 	return sorted[0]
 }
 
-// nextSkipping: the next in turn, passing over `skip` (whoever holds the case now, so a hand-off always moves it)
-// unless they are the only one.
-func nextSkipping(ids []string, last, skip string) string {
-	who := nextInRotation(ids, last)
-	if who == skip && len(ids) > 1 {
-		who = nextInRotation(ids, who)
+// pickNext: who gets the next case — the fewest open cases (`load`), ties in turn after `last` — passing over `skip`
+// (whoever holds the case now, so a hand-off always moves it) unless they are the only one. Pure, so it is tested.
+func pickNext(ids []string, load map[string]int, last, skip string) string {
+	cand := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != skip {
+			cand = append(cand, id)
+		}
 	}
-	return who
+	if len(cand) == 0 {
+		cand = ids
+	}
+	if len(cand) == 0 {
+		return ""
+	}
+	least := load[cand[0]]
+	for _, id := range cand {
+		if load[id] < least {
+			least = load[id]
+		}
+	}
+	tied := []string{}
+	for _, id := range cand {
+		if load[id] == least {
+			tied = append(tied, id)
+		}
+	}
+	return nextInRotation(tied, last)
 }
 
 // inRotation: the people taking cases — eligible staff minus the ones taken out. Order is kept.
@@ -181,7 +204,8 @@ func (s *server) takeTurn(ctx context.Context, tenant, role, skip string, apply 
 	if !enabled {
 		return "", "", errRotationOff
 	}
-	who := nextSkipping(ids, deref(last), skip)
+	// Counted under the lock: the taker before us has committed its case, so the load is current.
+	who := pickNext(ids, s.openCaseCounts(ctx, tenant), deref(last), skip)
 	if ok, err := apply(tx, who); err != nil || !ok {
 		return "", "", err
 	}
@@ -212,7 +236,7 @@ func (s *server) autoAssignNewCase(r *http.Request, tenant, caseID, caseNumber s
 	}
 	s.logActivity(ctx, tenant, caseID, "MILESTONE", fmt.Sprintf("Assigned to %s (Reviewer) automatically, in turn", name))
 	s.logAudit(ctx, tenant, caseID, "CASE_ASSIGNED", map[string]any{
-		"by": "auto-assign", "assigned_to": who, "previous": "", "role": "CASE_MANAGER", "auto": true, "rule": "round_robin",
+		"by": "auto-assign", "assigned_to": who, "previous": "", "role": "CASE_MANAGER", "auto": true, "rule": "least_loaded_round_robin",
 	})
 	s.notify(r, tenant, who, "ASSIGNMENT", fmt.Sprintf("You were assigned %s (new case, your turn in the rotation)", caseNumber), "#/cases/"+caseID)
 	return who
@@ -225,7 +249,7 @@ func (s *server) nextInTurnPreview(ctx context.Context, tenant, role string) map
 	if err != nil || !cfg.Enabled || len(ids) == 0 {
 		return nil
 	}
-	who := nextInRotation(ids, cfg.Last)
+	who := pickNext(ids, s.openCaseCounts(ctx, tenant), cfg.Last, "")
 	return map[string]string{"id": who, "username": names[who]}
 }
 
@@ -290,11 +314,11 @@ func (s *server) writeAutoAssign(w http.ResponseWriter, r *http.Request, rawRole
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID }) // the rotation's own order
 	next := ""
 	if cfg.Enabled {
-		next = nextInRotation(ids, cfg.Last)
+		next = pickNext(ids, counts, cfg.Last, "")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"role": role, "role_label": assignableRoles[role], "new_cases": role == "CASE_MANAGER",
-		"enabled": cfg.Enabled, "rule": "round_robin", "people": rows, "next": next,
+		"enabled": cfg.Enabled, "rule": "least_loaded_round_robin", "people": rows, "next": next,
 		"updated_by": cfg.UpdatedBy, "updated_at": cfg.UpdatedAt,
 	})
 }

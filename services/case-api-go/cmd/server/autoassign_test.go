@@ -38,16 +38,35 @@ func TestInRotation(t *testing.T) {
 	}
 }
 
-func TestNextSkipping(t *testing.T) {
+func TestPickNext(t *testing.T) {
 	ids := []string{"a", "b", "c"}
-	if got := nextSkipping(ids, "a", "b"); got != "c" {
+	none := map[string]int{}
+	if got := pickNext(ids, map[string]int{"a": 6, "b": 4, "c": 5}, "b", ""); got != "b" {
+		t.Errorf("the fewest open cases goes first, even right after their turn: got %q", got)
+	}
+	if got := pickNext(ids, map[string]int{"a": 2, "b": 2, "c": 9}, "a", ""); got != "b" {
+		t.Errorf("among equals, in turn: got %q", got)
+	}
+	if got := pickNext(ids, none, "a", "b"); got != "c" {
 		t.Errorf("a hand-off passes over whoever has the case: got %q", got)
 	}
-	if got := nextSkipping(ids, "a", ""); got != "b" {
-		t.Errorf("nobody to pass over: got %q", got)
+	if got := pickNext(ids, map[string]int{"b": 0, "a": 3, "c": 3}, "", "b"); got != "a" {
+		t.Errorf("the least loaded holds the case already: the next least loaded, in turn: got %q", got)
 	}
-	if got := nextSkipping([]string{"a"}, "", "a"); got != "a" {
+	if got := pickNext([]string{"a"}, none, "", "a"); got != "a" {
 		t.Errorf("the only one in the rotation: got %q", got)
+	}
+	if got := pickNext(nil, none, "", ""); got != "" {
+		t.Errorf("nobody: got %q", got)
+	}
+	// Catching up: from 4/5/6, six cases bring everyone to 7 (simulated as each is given out).
+	load, last := map[string]int{"a": 6, "b": 4, "c": 5}, ""
+	for i := 0; i < 6; i++ {
+		last = pickNext(ids, load, last, "")
+		load[last]++
+	}
+	if load["a"] != 7 || load["b"] != 7 || load["c"] != 7 {
+		t.Errorf("did not even out: %v", load)
 	}
 }
 

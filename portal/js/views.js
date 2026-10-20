@@ -6288,7 +6288,8 @@ const Views = (() => {
     } catch (e) { return html + err(e); }
   }
 
-  // Automatic assignment: one rotation per role. Reviewers get new cases in turn as they come in; for every role the PM
+  // Automatic assignment: one rotation per role -- the fewest open cases first, ties in turn. Reviewers get new cases
+  // as they come in; for every role the PM
   // can hand a case to "Next in turn". The PM / Tenant Admin turns a rotation on or off and takes people out of it;
   // any assignment can still be changed by hand on the case.
   let aaRole = "CASE_MANAGER";
@@ -6321,7 +6322,7 @@ const Views = (() => {
       <div class="card aa-card">
         <label class="aa-toggle"><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="Views.autoAssignToggle(this.checked, this)" />
           ${a.new_cases ? "Assign new cases to Reviewers automatically, in turn" : `Offer "Next in turn" when a case is handed to a ${esc(label)}`}</label>
-        <p class="muted">${status} You can change who has any case on the case itself.${a.updated_by ? ` Last changed by ${esc(a.updated_by)}.` : ""}</p>
+        <p class="muted">${status} Whoever in the rotation has the fewest open cases goes first; people with the same number take turns. You can change who has any case on the case itself.${a.updated_by ? ` Last changed by ${esc(a.updated_by)}.` : ""}</p>
         ${people.length
           ? `<table><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
           : `<p class="muted">No active ${esc(label)} on this tenant yet — add one above, or give someone the role.</p>`}
