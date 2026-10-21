@@ -62,6 +62,7 @@ type Config struct {
 	TopicPrefix     string
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
+	DeidURL         string // http://deid:8083 ("" = de-identification disabled)
 	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
 	CopilotModel    string // local model name, e.g. qwen2.5:7b-instruct
 	OpenSearchURL   string // http://opensearch:9200 ("" = document full-text search disabled)
@@ -119,6 +120,7 @@ func configFromEnv() Config {
 		TopicPrefix:   get("TOPIC_PREFIX", "idre"),
 		VaultURL:      get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL: get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		DeidURL:       get("DEID_URL", ""),
 		// The copilot shares the in-cluster ollama already serving doc-intel
 		// extraction and graph-intel KGQA — a shared LOCAL instance with a
 		// known OOM history, so briefs are single bounded calls, never loops.
@@ -570,6 +572,14 @@ func main() {
 		r.Get("/entity360/lookup", s.entityLookupRef)
 		r.Get("/entity360/outreach", s.entityOutreach)
 		r.Get("/entity360/{entityId}/graph", s.entityGraph)
+		// De-identification (services/deid-py): audit trail, clinical layer,
+		// duplicate signal, redaction preview. Gated by DEID_URL + "deid" flag.
+		r.Get("/cases/{caseId}/deid-reports", s.deidReports)
+		r.Get("/cases/{caseId}/clinical", s.caseClinical)
+		r.Get("/cases/{caseId}/clinical/overlaps", s.clinicalOverlaps)
+		r.Post("/deid/deidentify", s.deidProxy)
+		r.Post("/internal/documents/{docId}/clinical", s.deidClinicalIngest) // worker-token: doc-intel
+		r.Post("/internal/deid/reports", s.deidInternalReport)               // worker-token: graph-intel lakehouse
 		r.Get("/entity360/{entityId}", s.entity360View)
 		r.Post("/contacts", s.createContact)
 		r.Get("/leads", s.listLeads)
@@ -741,20 +751,20 @@ func main() {
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)      // Attorney rules on a flagged AOR
 		// TPA onboarding (tpa_onboarding.go): profile -> payment -> 6-doc package.
 		r.Put("/tpa/clients/{clientId}/profile", s.tpaUpdateClientProfile)
-		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)            // bulk roster (CSV)
-		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment)     // CARD/ACH rail
+		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)        // bulk roster (CSV)
+		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment) // CARD/ACH rail
 		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
 		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)
-		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)        // one slot
-		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)   // one giant PDF
-		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)          // slot verdict grid
-		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                // ZIP of client folders
-		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                 // many disputes, each with its own six documents (ZIP)
-		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)            // my bulk dispute batches
-		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)    // per-row report: documents, case number
+		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)           // one slot
+		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)      // one giant PDF
+		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)             // slot verdict grid
+		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                   // ZIP of client folders
+		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                    // many disputes, each with its own six documents (ZIP)
+		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)               // my bulk dispute batches
+		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)       // per-row report: documents, case number
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
-		r.Get("/tpa/fees", s.orgFees("tpa"))            // what this TPA owes now
-		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout) // one payment for all unpaid fees
+		r.Get("/tpa/fees", s.orgFees("tpa"))                               // what this TPA owes now
+		r.Post("/tpa/fees/checkout", s.tpaFeesCheckout)                    // one payment for all unpaid fees
 		// Saved cards and bank accounts (ACH), the TPA's own and each client's;
 		// a Pay with {"source":"CLIENT"|"TPA"} charges them (tpa_saved_payments.go).
 		r.Post("/tpa/payment-methods/setup", s.tpaPaymentSetup)
@@ -765,8 +775,8 @@ func main() {
 		r.Post("/tpa/tasks", s.tpaTaskCreate)
 		r.Post("/tpa/tasks/{taskId}/done", s.tpaTaskDone)
 		r.Get("/tpa/fees/runs/{runId}", s.tpaFeeRun)
-		r.Get("/tpa/audit", s.orgAuditLog("tpa"))       // the TPA's own audit trail (orgaudit.go)
-		r.Get("/hp/audit", s.orgAuditLog("hp"))         // the plan's own audit trail
+		r.Get("/tpa/audit", s.orgAuditLog("tpa")) // the TPA's own audit trail (orgaudit.go)
+		r.Get("/hp/audit", s.orgAuditLog("hp"))   // the plan's own audit trail
 		// Document requests (document_requests.go): asked on the case, answered in the portal.
 		r.Get("/tpa/document-requests", s.orgDocRequests("tpa"))
 		r.Post("/tpa/document-requests/{reqId}/files", s.orgDocRequestUpload("tpa"))
@@ -789,10 +799,10 @@ func main() {
 		r.Get("/hp/disputes/{caseId}/fee", s.disputeFee("hp"))
 		r.Post("/hp/fees/checkout/{groupId}/confirm", s.checkoutConfirm("hp"))
 		r.Post("/hp/fees/checkout/{groupId}/cancel", s.checkoutCancel("hp"))
-		r.Get("/tpa/onboarding", s.tpaOnboardingBoard)                  // roster readiness
+		r.Get("/tpa/onboarding", s.tpaOnboardingBoard) // roster readiness
 		// Health plan onboarding (healthplan_onboarding.go): payer-side mirror.
 		r.Post("/hp/claim", s.claimHealthPlan)
-		r.Post("/hp/unlink", s.hpUnlink)                                // staff: stop acting for a plan
+		r.Post("/hp/unlink", s.hpUnlink) // staff: stop acting for a plan
 		// The other side of disputes (respondents.go): a plan answers the
 		// disputes filed against it (a TPA files; it does not answer).
 		r.Get("/hp/responding", s.respondingList("plan"))
@@ -801,9 +811,9 @@ func main() {
 		r.Post("/hp/responding/{caseId}/documents", s.respondingUpload("plan"))
 		r.Post("/hp/responding/{caseId}/submit", s.respondingSubmit("plan"))
 		r.Post("/hp/responding/{caseId}/opt-out", s.respondingOptOut)
-		r.Get("/onboarding/npi-reviews", s.npiReviews)                  // client NPIs the registry holds under another name
+		r.Get("/onboarding/npi-reviews", s.npiReviews) // client NPIs the registry holds under another name
 		r.Post("/onboarding/npi-reviews/{kind}/{id}", s.npiReviewDecide)
-		r.Get("/onboarding/reviews", s.onboardingReviews)               // documents doc-intel left for a person (both rails)
+		r.Get("/onboarding/reviews", s.onboardingReviews) // documents doc-intel left for a person (both rails)
 		r.Get("/onboarding/reviews/{kind}/{docId}/file", s.onboardingReviewFile)
 		r.Post("/onboarding/reviews/{kind}/{docId}", s.onboardingReviewDecide)
 		r.Get("/hp/me", s.hpMe)

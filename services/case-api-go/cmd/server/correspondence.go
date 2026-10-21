@@ -56,10 +56,10 @@ type CorrTemplate struct {
 
 	// Set for what the Templates screen manages (templates_admin.go); a
 	// program's own config carries none of these.
-	Name        string `json:"name,omitempty"`         // the name people see; the key when empty
-	Inactive    bool   `json:"inactive,omitempty"`     // retired: kept, no longer offered
-	Custom      bool   `json:"custom,omitempty"`       // added from the dashboard, not a standard template
-	Edited      bool   `json:"edited,omitempty"`       // a standard template whose wording was changed
+	Name        string `json:"name,omitempty"`     // the name people see; the key when empty
+	Inactive    bool   `json:"inactive,omitempty"` // retired: kept, no longer offered
+	Custom      bool   `json:"custom,omitempty"`   // added from the dashboard, not a standard template
+	Edited      bool   `json:"edited,omitempty"`   // a standard template whose wording was changed
 	UpdatedBy   string `json:"updated_by,omitempty"`
 	UpdatedAt   string `json:"updated_at,omitempty"`
 	ContentFrom string `json:"content_from,omitempty"` // the template whose content a usage rule put here
@@ -963,6 +963,15 @@ func (s *server) reviewerSends(r *http.Request, tenant string) bool {
 // follows a letter going out. It returns the delivery error text, "" on
 // success; a failure leaves the draft APPROVED so the send can be retried.
 func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub string, to, cc []string) (deliveryError string) {
+	// De-identification gate: nothing with direct identifiers leaves the
+	// building by mail. Fail-closed when deid is down (DEID_FAIL_OPEN=1
+	// downgrades to a logged release). The decision is always persisted to
+	// public.deid_reports.
+	if block := s.deidGateOutbound(r, tenant, caseID, artifact, qid, subject+"\n"+body); block != "" {
+		s.logActivity(r.Context(), tenant, caseID, "EMAIL_HELD_DEID",
+			fmt.Sprintf("Outbound %q held at send time: %s", subject, block))
+		return block
+	}
 	var sendErr error
 	if len(to) == 0 && len(cc) == 0 {
 		sendErr = fmt.Errorf("no recipient email address on this draft — enter one and send again")
