@@ -256,6 +256,8 @@ const TableSort = (() => {
 //   - Lists the server pages (disputes, CRM, intake, mail log, payments,
 //     checks) sit inside [data-serverpaged] and call Pager.server(), which
 //     fetches the next page instead of hiding rows.
+// A table may set its own page size (data-page-size="10": small lists such as the Team page's cards); its bar then
+// has no rows-per-page choice. A row a page's own filter hides carries .flt-out and is not counted or shown.
 // Search box for a list the SERVER pages (?q=): it sits outside the list's box, so the box can reload under it
 // without the box losing focus. SrvSearch.html(id, placeholder) renders it; SrvSearch.on(id, reload) is called
 // (debounced) with the term; SrvSearch.q(id) is the current term for the list's own fetches.
@@ -306,17 +308,18 @@ const Pager = (() => {
     scan();
   }
   // from/to are 1-based row positions; total < 0 means "unknown".
-  function barHtml(from, to, total, page, pages) {
+  function barHtml(from, to, total, page, pages, fixed) {
     const sz = size();
-    return `<label class="muted">Rows per page
-        <select class="tp-size" aria-label="Rows per page">${SIZES.map((n) => `<option ${n === sz ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+    return `${fixed ? "" : `<label class="muted">Rows per page
+        <select class="tp-size" aria-label="Rows per page">${SIZES.map((n) => `<option ${n === sz ? "selected" : ""}>${n}</option>`).join("")}</select></label>`}
       <span class="muted">${total ? `${from}–${to} of ${total}` : "0 rows"}</span>
       <span class="tp-nav"><button type="button" class="mini tp-prev" ${page <= 0 ? "disabled" : ""}>‹ Previous</button>
       <span class="muted">Page ${page + 1} of ${Math.max(1, pages)}</span>
       <button type="button" class="mini tp-next" ${page >= pages - 1 ? "disabled" : ""}>Next ›</button></span>`;
   }
   function wire(bar, onPage) {
-    bar.querySelector(".tp-size").onchange = (e) => setSize(Number(e.target.value));
+    const sel = bar.querySelector(".tp-size");
+    if (sel) sel.onchange = (e) => setSize(Number(e.target.value));
     bar.querySelector(".tp-prev").onclick = () => onPage(-1);
     bar.querySelector(".tp-next").onclick = () => onPage(1);
   }
@@ -329,6 +332,7 @@ const Pager = (() => {
     const out = [];
     let heads = [];
     for (const tr of body.rows) {
+      if (tr.classList.contains("flt-out")) continue; // filtered out by the page itself: not a record on any page
       if (tr.classList.contains("row-detail") && out.length) { out[out.length - 1].push(tr); continue; }
       if (/(^|\s)\S*-head(\s|$)/.test(tr.className)) { heads.push(tr); continue; }
       out.push(heads.concat(tr));
@@ -407,11 +411,12 @@ const Pager = (() => {
     const us = searchUnits(table, units(body));
     if (table.dataset.nopage !== undefined) return;
     const total = us.length;
-    if (total <= SIZES[0]) { // fits on the smallest page: nothing to page
+    const own = Number(table.dataset.pageSize) || 0;
+    if (total <= (own || SIZES[0])) { // fits on one page: nothing to page
       if (table._pgBar) { us.forEach((u) => u.forEach((tr) => { if (tr.hidden) tr.hidden = false; })); dropBar(table); }
       return;
     }
-    const sz = size();
+    const sz = own || size();
     const pages = Math.ceil(total / sz);
     const st = table._pg || (table._pg = { page: 0, total });
     if (st.total !== total) { st.page = 0; st.total = total; } // filtered or reloaded: back to the first page
@@ -430,7 +435,7 @@ const Pager = (() => {
     const sig = `${start}|${end}|${total}|${sz}`;
     if (bar._sig !== sig) {
       bar._sig = sig;
-      bar.innerHTML = barHtml(start + 1, end, total, st.page, pages);
+      bar.innerHTML = barHtml(start + 1, end, total, st.page, pages, !!own);
       wire(bar, (d) => { st.page += d; apply(table); table.scrollIntoView({ block: "nearest" }); });
     }
   }

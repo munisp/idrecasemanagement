@@ -6392,7 +6392,7 @@ const Views = (() => {
         ${chip("", "All staff", members.filter((m) => !isPortal(m)).length)}
         ${present.map(([r, l]) => chip(r, l, members.filter((m) => (m.roles || []).includes(r)).length)).join("")}
         ${members.some(isPortal) ? chip("__portal", "Portal sign-ins", members.filter(isPortal).length) : ""}</div>` : "";
-    return filter + `<div class="dg-wrap"><table id="${tenantScope ? "staff-table" : ""}" class="staff-tbl"><thead><tr><th>Name</th><th>Email</th><th>Roles</th>
+    return filter + `<div class="dg-wrap"><table id="${tenantScope ? "staff-table" : ""}" class="staff-tbl" data-page-size="15"><thead><tr><th>Name</th><th>Email</th><th>Roles</th>
         ${tenantScope ? `<th class="num">Open cases</th>` : ""}<th>Status</th><th></th></tr></thead><tbody>` +
       members.map((m) => {
         const isSelf = m.username === me;
@@ -6407,7 +6407,7 @@ const Views = (() => {
         const shown = !tenantScope || (staffRoleFilter === "__portal" ? portal : staffRoleFilter ? roles.includes(staffRoleFilter) : !portal);
         const name = tenantScope ? `<button class="linkish" onclick="Views.staffOpen('${esc(m.username)}')">${esc(m.username)}</button>` : esc(m.username);
         const open = teamOpen[m.id];
-        return `<tr data-roles="${esc(roles.join(" "))}" data-portal="${portal ? 1 : 0}"${shown ? "" : ' style="display:none"'}><td>${name}</td><td class="muted">${esc(m.email || "—")}</td>
+        return `<tr data-roles="${esc(roles.join(" "))}" data-portal="${portal ? 1 : 0}"${shown ? "" : ' class="flt-out"'}><td>${name}</td><td class="muted">${esc(m.email || "—")}</td>
         <td>${(tenantScope ? staffRolesOf(m) : roles).map((r) => `<span class="badge s-${esc(r).toLowerCase().replace(/_/g, "-")}">${esc(tenantScope ? staffRoleLabel(r) : r)}</span>`).join(" ") || '<span class="muted">portal sign-in</span>'}</td>
         ${tenantScope ? `<td class="num">${open != null ? `<a href="#/cases?assignee=${encodeURIComponent(m.id)}">${open.toLocaleString()}</a>` : '<span class="muted">—</span>'}</td>` : ""}
         <td>${m.enabled ? '<span class="badge s-paid">active</span>' : '<span class="badge s-denied">suspended</span>'}</td>
@@ -6422,8 +6422,11 @@ const Views = (() => {
     document.querySelectorAll("#staff-table tbody tr").forEach((tr) => {
       const portal = tr.dataset.portal === "1";
       const show = role === "__portal" ? portal : role ? tr.dataset.roles.split(" ").includes(role) : !portal;
-      tr.style.display = show ? "" : "none";
+      tr.classList.toggle("flt-out", !show); // the pager counts and pages only the rows the chip keeps
     });
+    const t = document.getElementById("staff-table");
+    if (t && t._pg) t._pg.page = 0;
+    Pager.scan();
     document.querySelectorAll("[data-staff-role]").forEach((b) => b.classList.toggle("active", b.dataset.staffRole === role));
   }
 
@@ -6526,7 +6529,7 @@ const Views = (() => {
         ? `<a class="load-unassigned" href="#/cases?assigned=unassigned">${a.unassigned_open.toLocaleString()} open case${a.unassigned_open === 1 ? "" : "s"} waiting for a Reviewer →</a>` : "";
       return `<div class="load-role"><h3>${esc(label)}s <span class="muted">${people.length} · ${total.toLocaleString()} open case${total === 1 ? "" : "s"}</span></h3>
         ${backlog}
-        ${people.length ? `<table class="load-tbl"><thead><tr><th>Person</th><th>Open cases</th><th class="num"></th><th>Rotation</th></tr></thead><tbody>${rows}</tbody></table>`
+        ${people.length ? `<table class="load-tbl" data-page-size="5" data-nosearch><thead><tr><th>Person</th><th>Open cases</th><th class="num"></th><th>Rotation</th></tr></thead><tbody>${rows}</tbody></table>`
           : `<p class="muted">Nobody active in this role.</p>`}</div>`;
     }).join("");
     return `<section class="team-sec"><h2>Workload</h2>
@@ -6573,7 +6576,7 @@ const Views = (() => {
           nobody holds (from before automatic assignment, or filed while it was off). Reviewers can't see them until they're assigned.</span>
           <button class="mini" onclick="Views.autoAssignBacklog(this)" ${!a.enabled || !inTurn ? "disabled" : ""}>Assign them now, in turn</button></div>` : ""}
         ${people.length
-          ? `<table><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
+          ? `<table data-page-size="10"><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
           : `<p class="muted">No active ${esc(label)} on this tenant yet — add one above, or give someone the role.</p>`}
       </div>`;
   }

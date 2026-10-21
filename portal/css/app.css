@@ -1156,3 +1156,8 @@ button.mini.ghost:hover{background:var(--surface-sunken)}
 /* Below 1600px the grid's eleven columns are packed closer, so a laptop shows all of them. */
 @media (max-width:1600px){.dg th,.dg td{padding-left:8px;padding-right:8px}.dg .asg .mini{padding:2px 8px}}
 @media (max-width:1400px){.dg th,.dg td{padding-left:6px;padding-right:6px}.dg td .badge{padding:2px 7px}}
+/* Rows a page's own filter takes out (Team role chips); the pager does not count them. */
+tr.flt-out{display:none}
+/* A card's pager sits inside the card, compact. */
+.load-role .pager.tp{margin:6px 0 0;font-size:12px}
+.load-role .pager.tp .tp-nav{margin-left:0}
