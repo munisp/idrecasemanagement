@@ -35,6 +35,7 @@ const Api = (() => {
       const err = new Error(msg); err.status = resp.status; err.data = data;
       if (typeof data === "object" && data.details) err.details = data.details;
       if (typeof data === "object" && Array.isArray(data.problems)) err.problems = data.problems;
+      if (typeof data === "object" && data.workflow_ended) err.workflowEnded = true;
       throw err;
     }
     // A change was saved: a case page that is open re-reads its steps (views.js, wfRefresh).

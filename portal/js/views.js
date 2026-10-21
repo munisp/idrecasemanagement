@@ -417,15 +417,18 @@ const Views = (() => {
     if (!r.programmed) { box.remove(); return; }
     const steps = r.steps || [];
     const next = steps.find((x) => x.state === "next");
-    window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin };
-    CaseLayout.nextStep(steps, next, next && next.can_act ? WF_BUTTON(next.action) : "");
+    // A workflow that has ended (finished, or stopped by an admin) can't take a step: say so instead of a button.
+    const ended = r.workflow_running === false && !!next;
+    window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin, ended };
+    CaseLayout.nextStep(steps, next, next && next.can_act && !ended ? WF_BUTTON(next.action) : "",
+      ended ? "This case's workflow has ended (it finished, or an admin stopped it), so its steps can't be moved. Reopen the case, or ask an admin." : "");
     const wasOpen = box.querySelector("details.wf-all")?.open;
     box.innerHTML = `<details class="wf-all"${wasOpen || box.classList.contains("wf-open") ? " open" : ""}><summary><b>All steps</b>
       <span class="muted">— ${steps.filter((x) => x.state === "done" || x.state === "skipped").length} of ${steps.length} done. Only the next step can be acted on, by its owner (or an admin).</span></summary>
       <ol class="wf">${steps.map((x) => `<li class="wf-${x.state}">
         <span class="wf-mark" aria-hidden="true">${WF_MARK[x.state] || ""}</span>
         <span class="wf-label">${esc(x.label)}</span> <span class="chip">${esc(x.owner)}</span>
-        ${x.state === "next" ? (x.can_act
+        ${x.state === "next" ? (ended ? `<span class="muted">workflow ended</span>` : x.can_act
           ? `<button type="button" class="mini" onclick="Views.wfAct('${esc(x.key)}')">${WF_BUTTON(x.action)}</button>`
           : `<span class="muted">waiting on the ${esc(x.owner)}</span>`) : ""}
         ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol></details>`;
@@ -517,7 +520,11 @@ const Views = (() => {
   }
   async function wfSend(id, signal, data, label) {
     try { await Api.cases.signal(id, signal, data || {}); UI.toast(label || "Recorded"); setTimeout(() => App.rerender(), 1200); }
-    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+    catch (e) {
+      UI.toast(e.message, { kind: "warn", duration: 9000 });
+      // The case's workflow has ended: redraw the steps, which then offer nothing to press.
+      if (e.workflowEnded && window._wf) wfLoad(window._wf.id, window._wf.cfg);
+    }
   }
   const WF_YESNO = [["", "choose…"], ["yes", "Yes"], ["no", "No"]];
   async function wfAct(key) {

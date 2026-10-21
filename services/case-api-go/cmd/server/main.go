@@ -1641,10 +1641,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	// that was always empty. Reading a program row (not the much heavier
 	// loadProgram-dependent callers elsewhere) is enough to tell which
 	// workflow this case belongs to.
-	wfID := fmt.Sprintf("IDR-%s-%s", strings.ToUpper(tenant), caseNumber)
-	if s.loadProgram(r, tenant) != nil {
-		wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-	}
+	wfID := s.caseWorkflowID(r, tenant, caseNumber)
 	// Statutory offer window (45 CFR 149.520(b)(2)): sealed offers are only
 	// accepted while the 10-business-day window is open — no late offers.
 	if signal == "OFFER_SUBMITTED" && status != "OFFER_WINDOW_OPEN" {
@@ -1654,6 +1651,12 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		return false
 	}
 	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", signal, data); err != nil {
+		if workflowEnded(err) {
+			// Not a server fault: the case's workflow is over (workflow_alive.go). Say so, so the page can stop offering steps.
+			forgetWorkflowRunning(wfID)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": endedWorkflowMsg, "workflow_ended": true})
+			return false
+		}
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return false
 	}

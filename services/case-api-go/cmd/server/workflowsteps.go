@@ -417,8 +417,21 @@ func (s *server) caseWorkflow(w http.ResponseWriter, r *http.Request) {
 	for i := range steps {
 		steps[i].CanAct = steps[i].State == "next" && wfMayAct(p, steps[i])
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"steps": steps, "programmed": true,
-		"closed": wfClosedStatuses[f.Internal], "is_admin": wfIsAdmin(p)})
+	out := map[string]any{"steps": steps, "programmed": true, "closed": wfClosedStatuses[f.Internal], "is_admin": wfIsAdmin(p)}
+	// Whether the case's workflow can still take its steps (workflow_alive.go); left out when Temporal can't be asked.
+	var caseNumber string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+	if caseNumber != "" {
+		if running, known := s.workflowRunning(r.Context(), s.caseWorkflowID(r, tenant, caseNumber)); known {
+			out["workflow_running"] = running
+			if !running {
+				for i := range steps {
+					steps[i].CanAct = false
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // stepGuard refuses an action that is not the case's next step, or that the

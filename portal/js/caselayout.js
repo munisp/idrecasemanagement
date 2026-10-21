@@ -94,7 +94,9 @@ const CaseLayout = (() => {
   }
 
   // ---- next step -------------------------------------------------------------------------------------------
-  function nextStep(steps, next, buttonLabel) {
+  // note: shown instead of the button (and of "waiting on") when the step can't be taken at all -- the case's
+  // workflow has ended.
+  function nextStep(steps, next, buttonLabel, note) {
     const box = document.getElementById("case-next");
     if (!box) return;
     const total = steps.length, done = steps.filter((x) => x.state === "done" || x.state === "skipped").length;
@@ -108,7 +110,7 @@ const CaseLayout = (() => {
         <div><span class="case-next-label">Next step · ${done + 1} of ${total}</span>
           <b class="case-next-title">${esc(next.label)}</b> <span class="chip">${esc(next.owner)}</span>
           ${next.hint ? `<div class="muted">${esc(next.hint)}</div>` : ""}</div>
-        <div class="case-next-act">${buttonLabel
+        <div class="case-next-act">${note ? `<span class="case-next-note">${esc(note)}</span>` : buttonLabel
           ? `<button type="button" class="primary" onclick="Views.wfAct('${esc(next.key)}')">${esc(buttonLabel)}</button>`
           : `<span class="muted">Waiting on the ${esc(next.owner)}</span>`}
           <a href="javascript:void(0)" onclick="CaseLayout.showSteps()">All steps</a></div>
