@@ -899,6 +899,13 @@ const Views = (() => {
     location.hash = "#/cases" + (s ? "?" + s : "");
   }
   let caseListPoll = null;
+  // The grid's Opened column: this year's dates without the year (the full date is the cell's tooltip).
+  const openedShort = (d) => {
+    const t = d ? new Date(d) : null;
+    if (!t || isNaN(t)) return fmtDate(d);
+    const sameYear = t.getFullYear() === new Date().getFullYear();
+    return t.toLocaleString(undefined, { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }), hour: "numeric", minute: "2-digit" });
+  };
   const caseTable = (rows, clocks = {}, sort = "", prog = null, groupBatch = false) => {
     if (!rows.length) return `<p class="muted">No disputes.</p>`;
     const row = (c) => `<tr class="click" data-case="${c.id}">
@@ -908,7 +915,7 @@ const Views = (() => {
         <td>${laneChip(c.triage_lane)}</td>
         <td>${caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining)}</td>
         <td>${clocks[c.id] && clocks[c.id].length ? clockChip(nearestClock(clocks[c.id])) : '<span class="muted">—</span>'}</td>
-        <td class="muted">${fmtDate(c.opened_at)}</td>
+        <td class="muted" title="${esc(fmtDate(c.opened_at))}">${openedShort(c.opened_at)}</td>
         <td><button class="mini peek" data-id="${c.id}" title="Peek without losing your place">▸</button></td></tr>`;
     let body = "";
     if (groupBatch) {
@@ -941,7 +948,7 @@ const Views = (() => {
         ${[["case_number", "Case #"], ["status", "Status"], ["assigned", "Assigned"], ["service_line", "Service"], [amtField(prog), amtLabel(prog)]]
           .map(([c, l]) => sortableTh(c, l, sort)).join("")}
         <th>Lane</th>${sortableTh("sla", "SLA", sort)}
-        <th>Statutory clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
+        <th title="The nearest statutory clock on the case">Clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
       body + `</tbody></table></div>`;
   };
 
@@ -1063,10 +1070,9 @@ const Views = (() => {
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
       const asgParams = { ...(assigned ? { assigned } : {}), ...(assignee ? { assignee } : {}) };
       const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...asgParams };
-      // The PM's and Tenant Admin's view of the team: each reviewer's open cases, and how many wait unassigned.
+      // The reviewers, for the Reviewer filter (their workload is on the Team page).
       const team = canAssign() ? Api.cm.assignees("CASE_MANAGER").then((r) => r.assignees || []).catch(() => []) : Promise.resolve([]);
-      const unassignedN = canAssign() ? Api.cases.list({ limit: 1, assigned: "unassigned" }).then((r) => r.total).catch(() => null) : Promise.resolve(null);
-      const [page, clocks, prog, reviewers, waiting] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null), team, unassignedN]);
+      const [page, clocks, prog, reviewers] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null), team]);
       let loaded = page.cases.slice();   // the rows of the page on screen
       // The default sort pages by keyset, so going back needs the cursor each
       // page started from: cursors[n] opens page n.
@@ -1139,15 +1145,6 @@ const Views = (() => {
         };
         $("#asg-filter")?.addEventListener("change", (e) => setQ("assigned", e.target.value));
         $("#asg-person")?.addEventListener("change", (e) => setQ("assignee", e.target.value));
-        document.querySelectorAll("[data-workload]").forEach((b) => b.addEventListener("click", () => {
-          const q = new URLSearchParams(location.hash.split("?")[1] || "");
-          const w = b.dataset.workload;
-          if (w === "unassigned") { q.delete("assignee"); q.set("assigned", "unassigned"); }
-          else if (q.get("assignee") === w) q.delete("assignee");
-          else { q.delete("assigned"); q.set("assignee", w); }
-          const s = q.toString();
-          location.hash = "#/cases" + (s ? "?" + s : "");
-        }));
         $("#batch-tgl")?.addEventListener("click", () => {
           const q = new URLSearchParams(location.hash.split("?")[1] || "");
           groupBatch ? q.delete("batch") : q.set("batch", "1");
@@ -1183,7 +1180,8 @@ const Views = (() => {
           return { total: grandTotal, shown: loaded.length };
         });
       });
-      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}</span>
+      // The whole width of the page: the grid has eleven columns. Who holds how many cases is on the Team page.
+      return `<div class="wide-view"><div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}</span>
         <div class="case-search"><input id="case-search" type="search" value="${esc(search)}" maxlength="100"
           placeholder="Search case number, provider, health plan, NPI, email…" aria-label="Search disputes" />
           ${search ? `<button class="mini" id="case-search-clear" aria-label="Clear search">Clear</button>` : ""}</div>
@@ -1196,13 +1194,6 @@ const Views = (() => {
             .map(([l, lab]) => `<button class="mini lane-tab${lane === l ? " active" : ""}" data-lane="${l}" role="tab" aria-selected="${lane === l}">${lab}</button>`).join("")}
           <button class="mini" id="batch-tgl" aria-pressed="${groupBatch}" title="Collapse batched disputes into one reviewable group">${groupBatch ? "▦ Batches: grouped" : "▦ Group batches"}</button>
         </p>
-        ${canAssign() && reviewers.length ? `<div class="workload" role="group" aria-label="Reviewer workload">
-          <span class="workload-label">Reviewers</span>
-          ${waiting != null ? `<button type="button" class="wl-chip wl-none${assigned === "unassigned" ? " active" : ""}" data-workload="unassigned"
-              title="Cases waiting for a reviewer">Unassigned <b>${waiting}</b></button>` : ""}
-          ${reviewers.map((a) => `<button type="button" class="wl-chip${assignee === a.id ? " active" : ""}" data-workload="${esc(a.id)}"
-              title="${esc(a.username)}: ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"} — show them">${esc(a.username)} <b>${a.open_cases}</b></button>`).join("")}
-        </div>` : ""}
         <p class="viewbar">
           <label class="asg-filter">Assignment
             <select id="asg-filter">
@@ -1216,7 +1207,7 @@ const Views = (() => {
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
           ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` +
-        `<div data-serverpaged>` + caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch) + `</div><div id="pg"></div>`;
+        `<div data-serverpaged>` + caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch) + `</div><div id="pg"></div></div>`;
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
@@ -6393,35 +6384,47 @@ const Views = (() => {
     const me = Auth.claims()?.name;
     const tenantScope = scope === "tenant";
     const present = tenantScope ? TEAM_ROLES.filter(([r]) => members.some((m) => (m.roles || []).includes(r))) : [];
-    const filter = tenantScope ? `<div class="staff-filter"><label>Role
-        <select onchange="Views.staffFilter(this.value)"><option value="">All roles (${members.length})</option>
-        ${present.map(([r, l]) => `<option value="${r}" ${r === staffRoleFilter ? "selected" : ""}>${esc(l)} (${members.filter((m) => (m.roles || []).includes(r)).length})</option>`).join("")}
-        </select></label><span class="muted">Click a name to see or change what they do.</span></div>` : "";
-    return filter + `<table id="${tenantScope ? "staff-table" : ""}"><thead><tr><th>Username</th><th>Email</th><th>Roles</th><th>Status</th><th></th></tr></thead><tbody>` +
+    // Staff have at least one staff role; the rest are portal sign-ins (TPA, health plan, party logins), kept apart.
+    const isPortal = (m) => tenantScope && !staffRolesOf(m).length;
+    const chip = (key, label, n) => `<button type="button" class="wl-chip${staffRoleFilter === key ? " active" : ""}" data-staff-role="${key}"
+        onclick="Views.staffFilter('${key}')">${esc(label)} <b>${n}</b></button>`;
+    const filter = tenantScope ? `<div class="staff-filter" role="group" aria-label="Filter by role">
+        ${chip("", "All staff", members.filter((m) => !isPortal(m)).length)}
+        ${present.map(([r, l]) => chip(r, l, members.filter((m) => (m.roles || []).includes(r)).length)).join("")}
+        ${members.some(isPortal) ? chip("__portal", "Portal sign-ins", members.filter(isPortal).length) : ""}</div>` : "";
+    return filter + `<div class="dg-wrap"><table id="${tenantScope ? "staff-table" : ""}" class="staff-tbl"><thead><tr><th>Name</th><th>Email</th><th>Roles</th>
+        ${tenantScope ? `<th class="num">Open cases</th>` : ""}<th>Status</th><th></th></tr></thead><tbody>` +
       members.map((m) => {
         const isSelf = m.username === me;
         const actions = isSelf ? '<span class="muted">(you)</span>' : (
           (m.enabled
-            ? `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',false)">Suspend</button>`
-            : `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',true)">Reactivate</button>`) +
-          ` <button class="mini" onclick="Views.deleteStaffMember('${scope}','${esc(tenant || "")}','${esc(m.username)}')">Delete</button>`
+            ? `<button class="mini ghost" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',false)">Suspend</button>`
+            : `<button class="mini ghost" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',true)">Reactivate</button>`) +
+          ` <button class="mini ghost danger-text" onclick="Views.deleteStaffMember('${scope}','${esc(tenant || "")}','${esc(m.username)}')">Delete</button>`
         );
         const roles = m.roles || [];
-        const hidden = tenantScope && staffRoleFilter && !roles.includes(staffRoleFilter) ? ' style="display:none"' : "";
-        const name = tenantScope ? `<button class="linkish mono" onclick="Views.staffOpen('${esc(m.username)}')">${esc(m.username)}</button>` : esc(m.username);
-        return `<tr data-roles="${esc(roles.join(" "))}"${hidden}><td class="mono">${name}</td><td>${esc(m.email || "—")}</td>
-        <td>${(tenantScope ? staffRolesOf(m) : roles).map((r) => `<span class="badge s-${esc(r).toLowerCase().replace(/_/g, "-")}">${esc(tenantScope ? staffRoleLabel(r) : r)}</span>`).join(" ") || "—"}</td>
-        <td>${m.enabled ? '<span class="badge s-paid">enabled</span>' : '<span class="badge s-denied">disabled</span>'}</td>
-        <td>${actions}</td></tr>`;
+        const portal = isPortal(m);
+        const shown = !tenantScope || (staffRoleFilter === "__portal" ? portal : staffRoleFilter ? roles.includes(staffRoleFilter) : !portal);
+        const name = tenantScope ? `<button class="linkish" onclick="Views.staffOpen('${esc(m.username)}')">${esc(m.username)}</button>` : esc(m.username);
+        const open = teamOpen[m.id];
+        return `<tr data-roles="${esc(roles.join(" "))}" data-portal="${portal ? 1 : 0}"${shown ? "" : ' style="display:none"'}><td>${name}</td><td class="muted">${esc(m.email || "—")}</td>
+        <td>${(tenantScope ? staffRolesOf(m) : roles).map((r) => `<span class="badge s-${esc(r).toLowerCase().replace(/_/g, "-")}">${esc(tenantScope ? staffRoleLabel(r) : r)}</span>`).join(" ") || '<span class="muted">portal sign-in</span>'}</td>
+        ${tenantScope ? `<td class="num">${open != null ? `<a href="#/cases?assignee=${encodeURIComponent(m.id)}">${open.toLocaleString()}</a>` : '<span class="muted">—</span>'}</td>` : ""}
+        <td>${m.enabled ? '<span class="badge s-paid">active</span>' : '<span class="badge s-denied">suspended</span>'}</td>
+        <td class="row-actions">${actions}</td></tr>`;
       }).join("") +
-      `</tbody></table>`;
+      `</tbody></table></div>`;
   }
 
+  // "" = every staff member (not portal sign-ins), "__portal" = the portal sign-ins, else one role.
   function staffFilter(role) {
     staffRoleFilter = role;
     document.querySelectorAll("#staff-table tbody tr").forEach((tr) => {
-      tr.style.display = !role || tr.dataset.roles.split(" ").includes(role) ? "" : "none";
+      const portal = tr.dataset.portal === "1";
+      const show = role === "__portal" ? portal : role ? tr.dataset.roles.split(" ").includes(role) : !portal;
+      tr.style.display = show ? "" : "none";
     });
+    document.querySelectorAll("[data-staff-role]").forEach((b) => b.classList.toggle("active", b.dataset.staffRole === role));
   }
 
   // One staff member: what they do, their open cases and the rotations they are in; the PM / Tenant Admin changes
@@ -6475,21 +6478,60 @@ const Views = (() => {
       return `<div class="view-head"><h1>Team</h1></div><p class="muted">Your role doesn't have access to Team.</p>`;
     const isAdmin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
     const tenant = Api.getTenant();
-    let html = `<div class="view-head"><h1>Team</h1>
-      <span class="muted">add staff accounts to ${isAdmin ? "any activated tenant" : "your own tenant"}</span></div>
-      <p><button onclick="Views.addTenantStaffFlow()">＋ Add tenant staff</button>
-      ${isAdmin ? ` <button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>` : ""}</p>`;
+    const head = (n) => `<div class="view-head"><h1>Team</h1>${n || ""}<span style="flex:1"></span>
+      <button class="mini" onclick="Views.addTenantStaffFlow()">＋ Add staff</button>
+      ${isAdmin ? `<button class="mini secondary" onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>` : ""}</div>`;
     try {
       const [staff, federal] = await Promise.all([
         Api.admin.listTenantStaff(tenant),
         isAdmin ? Api.admin.listFederalAdmins().catch(() => []) : Promise.resolve(null),
       ]);
       teamStaff = staff;
-      html += `<h2>Staff — tenant ${esc(tenant.toUpperCase())}</h2>${staffTableHtml(staff, "tenant", tenant)}`;
+      // Who does the case work: each assignable role that someone holds, with its rotation (open cases per person).
+      const held = ASSIGN_ROLES.filter(([r]) => staff.some((m) => (m.roles || []).includes(r)));
+      const rotations = await Promise.all(held.map(([r]) => Api.cm.autoAssign(r).catch(() => null)));
+      teamOpen = {};
+      rotations.forEach((a) => (a?.people || []).forEach((x) => { teamOpen[x.id] = x.open_cases; }));
+      const staffN = staff.filter((m) => staffRolesOf(m).length).length;
+      let html = head(`<span class="muted">${staffN} staff · ${staff.length - staffN} portal sign-ins · tenant ${esc(tenant.toUpperCase())}</span>`);
+      html += teamWorkloadHtml(held, rotations);
       html += `<div id="aa-box">${await autoAssignBox()}</div>`;
-      if (federal) html += `<h2>Federal / platform admins <span class="muted">cross-tenant</span></h2>${staffTableHtml(federal, "federal")}`;
-      return html;
-    } catch (e) { return html + err(e); }
+      html += `<section class="team-sec"><h2>People</h2>${staffTableHtml(staff, "tenant", tenant)}</section>`;
+      if (federal) html += `<section class="team-sec"><h2>Federal / platform admins <span class="muted">cross-tenant</span></h2>${staffTableHtml(federal, "federal")}</section>`;
+      return `<div class="wide-view team">${html}</div>`;
+    } catch (e) { return head() + err(e); }
+  }
+
+  // Workload: for each role that does case work, everyone holding it with their open cases (a bar against the
+  // busiest), where they stand in the rotation, and a link to their cases; for Reviewers, the cases nobody holds.
+  let teamOpen = {};
+  function teamWorkloadHtml(held, rotations) {
+    if (!held.length) return "";
+    const panels = held.map(([role, label], i) => {
+      const a = rotations[i];
+      if (!a) return `<div class="load-role"><h3>${esc(label)}s</h3><p class="muted">Workload unavailable.</p></div>`;
+      const people = (a.people || []).slice().sort((x, y) => y.open_cases - x.open_cases || x.username.localeCompare(y.username));
+      const max = Math.max(1, ...people.map((x) => x.open_cases));
+      const total = people.reduce((n, x) => n + x.open_cases, 0);
+      const state = (x) => !a.enabled ? `<span class="load-state">rotation off</span>`
+        : !x.in_rotation ? `<span class="load-state out">out of rotation</span>`
+        : a.next === x.id ? `<span class="load-state next">next in turn</span>` : `<span class="load-state">in rotation</span>`;
+      const rows = people.map((x) => `<tr>
+          <td><button class="linkish" onclick="Views.staffOpen('${esc(x.username)}')">${esc(x.username)}</button></td>
+          <td class="load-bar-cell"><a class="load-bar" href="#/cases?assignee=${encodeURIComponent(x.id)}" title="See ${esc(x.username)}'s open cases">
+            <span class="load-fill" style="width:${Math.round((x.open_cases / max) * 100)}%"></span></a></td>
+          <td class="num"><a href="#/cases?assignee=${encodeURIComponent(x.id)}">${x.open_cases.toLocaleString()}</a></td>
+          <td>${state(x)}</td></tr>`).join("");
+      const backlog = a.new_cases && a.unassigned_open
+        ? `<a class="load-unassigned" href="#/cases?assigned=unassigned">${a.unassigned_open.toLocaleString()} open case${a.unassigned_open === 1 ? "" : "s"} waiting for a Reviewer →</a>` : "";
+      return `<div class="load-role"><h3>${esc(label)}s <span class="muted">${people.length} · ${total.toLocaleString()} open case${total === 1 ? "" : "s"}</span></h3>
+        ${backlog}
+        ${people.length ? `<table class="load-tbl"><thead><tr><th>Person</th><th>Open cases</th><th class="num"></th><th>Rotation</th></tr></thead><tbody>${rows}</tbody></table>`
+          : `<p class="muted">Nobody active in this role.</p>`}</div>`;
+    }).join("");
+    return `<section class="team-sec"><h2>Workload</h2>
+      <p class="muted">Open cases each person holds. Click a number or a bar to see those cases; click a name to see or change their roles.</p>
+      <div class="load-grid">${panels}</div></section>`;
   }
 
   // Automatic assignment: one rotation per role -- the fewest open cases first, ties in turn. Reviewers get new cases

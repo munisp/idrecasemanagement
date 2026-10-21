@@ -1119,3 +1119,40 @@ tr.pkg-hist td{border-top:0;padding-top:0}
 .warn-list{background:var(--warning-bg);color:var(--warning-fg);border-radius:8px;padding:8px 12px 8px 28px;margin:6px 0;font-size:13px;max-width:90ch}
 .tbl.kv th{text-align:left;font-weight:500;color:var(--muted,inherit);white-space:nowrap;padding-right:16px;width:1%}
 .prewrap{white-space:pre-wrap;max-width:90ch}
+/* Pages with wide grids (Disputes, Team) use the page's whole width instead of the 1160px reading column. */
+#view > .wide-view{max-width:none}
+.wide-view > *{max-width:none}
+/* Disputes grid: every value on one line (the case number wrapped to two or three); only Service may wrap.
+   The wrapper scrolls sideways on a narrow window instead of cutting the last columns off. */
+.dg th{white-space:nowrap}
+.dg td:not(:nth-child(5)){white-space:nowrap}
+.dg-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* Team */
+.team-sec{margin:0 0 26px}
+.team-sec > h2{margin:0 0 4px}
+.team-sec > p.muted{margin:0 0 12px}
+.load-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px;align-items:start}
+.load-role{background:var(--surface-raised);border:1px solid var(--border-subtle);border-radius:var(--radius-card);padding:12px 14px;box-shadow:var(--shadow-1);min-width:0}
+.load-role h3{margin:0 0 8px;font-size:14px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.load-role h3 .muted{font-weight:400;font-size:12.5px}
+.load-unassigned{display:block;margin:0 0 8px;padding:6px 10px;border-radius:8px;background:var(--warning-bg);color:var(--warning-fg);font-size:12.5px;font-weight:600;text-decoration:none}
+.load-unassigned:hover{text-decoration:underline}
+.load-tbl{border:0;box-shadow:none;background:transparent;font-size:13px}
+.load-tbl th{background:transparent;padding:4px 6px;border-bottom:1px solid var(--border-subtle)}
+.load-tbl td{padding:0 6px;height:34px}
+.load-tbl td.num,.staff-tbl td.num,.staff-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}
+.load-bar-cell{width:45%}
+.load-bar{display:block;height:8px;border-radius:999px;background:var(--surface-sunken);overflow:hidden}
+.load-fill{display:block;height:100%;border-radius:999px;background:var(--accent-primary,var(--action-primary-bg));min-width:2px}
+.load-state{font-size:11.5px;color:var(--text-tertiary);white-space:nowrap}
+.load-state.next{color:var(--success-fg);font-weight:600}
+.load-state.out{color:var(--warning-fg)}
+.staff-filter .wl-chip b{font-weight:600}
+.staff-tbl td{white-space:nowrap}
+.staff-tbl td:nth-child(3){white-space:normal}
+button.mini.ghost{border-color:var(--border-default);color:var(--text-secondary)}
+button.mini.ghost.danger-text{color:var(--danger-fg)}
+button.mini.ghost:hover{background:var(--surface-sunken)}
+/* Below 1600px the grid's eleven columns are packed closer, so a laptop shows all of them. */
+@media (max-width:1600px){.dg th,.dg td{padding-left:8px;padding-right:8px}.dg .asg .mini{padding:2px 8px}}
+@media (max-width:1400px){.dg th,.dg td{padding-left:6px;padding-right:6px}.dg td .badge{padding:2px 7px}}
