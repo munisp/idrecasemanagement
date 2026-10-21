@@ -260,7 +260,14 @@ const Views = (() => {
   const PACKET_EDITORS = ["CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
   function sopPacketFormHtml(id, c) {
     const staff = can(...PACKET_EDITORS);
-    setTimeout(() => packetInit("p-packet", { details: c.details || {}, disputed_amount_cents: c.disputed_amount_cents }, { readOnly: !staff }), 0);
+    // Its own claims fetch: the program panel's wiring can run before this section is on the page.
+    setTimeout(async () => {
+      const values = { details: c.details || {}, disputed_amount_cents: c.disputed_amount_cents };
+      packetInit("p-packet", values, { readOnly: !staff });
+      const claims = (await Api.program.claims(id).catch(() => ({}))).claims || [];
+      const h = document.getElementById("p-packet");
+      if (h && claims.length && !PacketForm.touched(h)) packetInit("p-packet", { ...values, claims }, { readOnly: !staff });
+    }, 0);
     return `<details class="prog-sec" id="p-packet-details"><summary>Filing packet</summary>
       <p class="muted">The filing packet's sections — as the filer entered them, or as read from the uploaded packet.
         ${staff ? "Correct anything here and save: your values replace the case's." : "Kept by the Reviewer and the PM."}</p>
@@ -800,7 +807,9 @@ const Views = (() => {
     if (!view) return;
     const marker = view.querySelector(".case-lock");
     const allowed = (el) => {
-      if (el.closest(".case-lock, .tabs, .pager, .view-head")) return true;
+      // .case-tabs: the case page's own tab bar -- frozen with everything else, it kept staff from reaching the
+      // "Letters & email" tab the banner says is still open (payment reminders).
+      if (el.closest(".case-lock, .tabs, .case-tabs, .pager, .view-head")) return true;
       const sec = el.closest("details.prog-sec");
       if (sec) {
         const title = (sec.querySelector("summary")?.textContent || "").trim().toLowerCase();
@@ -3104,10 +3113,6 @@ const Views = (() => {
         const el = document.getElementById("p-claims-list");
         if (!el) return;
         const rows = r.claims || [];
-        const ph = document.getElementById("p-packet");
-        if (ph && rows.length && !PacketForm.touched(ph)) {
-          packetInit("p-packet", { details: det, disputed_amount_cents: c.disputed_amount_cents, claims: rows }, { readOnly: !can(...PACKET_EDITORS) });
-        }
         const usd = (x) => (x == null ? "—" : "$" + (Number(x) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }));
         const name = (x) => [x.patient_first_name, x.patient_last_name].filter(Boolean).join(" ") || "—";
         el.innerHTML = rows.length ? `<div class="tbl-scroll"><table class="tbl"><thead><tr><th>Claim #</th><th>Patient</th><th>Type of service</th>
