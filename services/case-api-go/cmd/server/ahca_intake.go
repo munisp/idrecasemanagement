@@ -43,18 +43,26 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // the filing packet form's positions can be long
 	var in struct {
-		Tenant              string `json:"tenant"`
-		Email               string `json:"email"`
-		Contact             string `json:"contact_name"`
-		Org                 string `json:"org"`
-		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
-		DisputedAmountCents int64  `json:"disputed_amount_cents"`
+		Tenant              string        `json:"tenant"`
+		Email               string        `json:"email"`
+		Contact             string        `json:"contact_name"`
+		Org                 string        `json:"org"`
+		FilingPartyType     string        `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
+		DisputedAmountCents int64         `json:"disputed_amount_cents"`
+		Packet              *filingPacket `json:"packet"` // the filing packet form, when the filer completed it
+		// The side the dispute is against and where its notices go -- the health plan when a provider files. The
+		// PDF packet has no plan email, so the filing page asks for it; the packet form's values fill blanks.
+		OtherPartyName  string `json:"other_party_name"`
+		OtherPartyEmail string `json:"other_party_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil ||
 		in.Tenant == "" || in.Email == "" || !strings.Contains(in.Email, "@") {
 		http.Error(w, `{"error":"tenant and a valid email are required"}`, http.StatusBadRequest)
+		return
+	}
+	if packetRejected(w, in.Packet) {
 		return
 	}
 	fpt := strings.ToUpper(strings.TrimSpace(in.FilingPartyType))
@@ -63,6 +71,15 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	if fpt != "PROVIDER" && fpt != "HEALTH_PLAN" {
 		http.Error(w, `{"error":"filing_party_type must be PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
+		return
+	}
+	rsp := in.Packet.otherParty(respondent{Side: otherSide(fpt), Name: in.OtherPartyName, Email: in.OtherPartyEmail})
+	if msg := rsp.check(); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
 	tenant := strings.ToLower(strings.TrimSpace(in.Tenant))
@@ -86,6 +103,8 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 		return
 	}
+	s.fileWithPacket(r, tenant, caseID, in.Packet, "the filer ("+in.Email+")")
+	s.recordRespondent(r, tenant, caseID, rsp)
 	// A payment-gated intake must not disclose the case identifiers to the
 	// public caller — the party learns the case number only in the
 	// post-payment email.

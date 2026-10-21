@@ -1,0 +1,363 @@
+<!-- image -->
+
+## Claim Information
+
+## Claim Details
+
+Transaction Group Number:
+
+Claim Status Code:
+
+Claim Charge Amount:
+
+Claim Paid Amount:
+
+3
+
+1 (Processed as Primary) 47,811.80
+
+0.00
+
+Patient Responsibility Amount:
+
+Claim Filing Indicator Code:
+
+MC (Medicaid)
+
+Payer Control Number:
+
+Facility Code Value:
+
+Diagnosis Related Group Code:
+
+Claim Frequency Type Code:
+
+Diagnosis Related Group Weight:
+
+Discharge Fraction:
+
+## Claim Entity Information
+
+Entity Type Y024FLE46676
+
+11
+
+6962
+
+1
+
+0
+
+ID Type
+
+Patient
+
+Additional Claim Information MR
+
+<!-- image -->
+
+## m Service Line Summary
+
+<!-- image -->
+
+Total Billed
+
+47,811.80
+
+Total Paid
+
+0.00
+
+Reason Code
+
+CO16
+
+Amount
+
+47,811.80
+
+## 三Service Line Information
+
+| 1 - Rev Code 0123        |           |      |          |
+|--------------------------|-----------|------|----------|
+| Billed                   | Paid      | Mods | Qty      |
+| 13,017.00                | 0.00      |      | 3        |
+| Reason Code              | Amount    |      | Svc Dt   |
+| CO16                     | 13,017.00 |      | 01/13/25 |
+| Remark Codes             |           |      |          |
+| M20                      |           |      |          |
+| Supplemental Information |           |      | V        |
+
+## 2 - Rev Code 0250
+
+| Billed      | Paid     | Mods   | Qty      |
+|-------------|----------|--------|----------|
+| 6,442.68    | 0.00     |        | 544      |
+| Reason Code | Amount   |        | Svc Dt   |
+| CO16        | 6,442.68 |        | 01/13/25 |
+
+<!-- image -->
+
+| Remark Codes M20         | Remark Codes M20         | Remark Codes M20   |
+|--------------------------|--------------------------|--------------------|
+| Supplemental Information | Supplemental Information |                    |
+| 3 - Rev Code 0255        | 3 - Rev Code 0255        |                    |
+| Billed Paid              | Mods                     | Qty                |
+| 6.12 0.00                |                          | 1                  |
+| Reason Code              | Amount                   | Svc Dt             |
+| CO16                     | 6.12                     | 01/13/25           |
+| Remark Codes M20         |                          |                    |
+| Supplemental Information |                          |                    |
+| 4 - Rev Code 0272        |                          |                    |
+|                          | Paid Mods                | Qty                |
+| Billed 696.00            | 0.00                     | 2                  |
+| Reason Code              | Amount                   | Svc Dt             |
+| CO16                     | 696.00                   | 01/13/25           |
+| Remark Codes             |                          |                    |
+| M20                      |                          |                    |
+| Supplemental Information |                          |                    |
+| Billed                   | Paid Mods                | Qty                |
+| 348.00                   | 0.00                     | 1                  |
+| Reason Code              | Amount                   | Svc Dt             |
+| CO16                     | 348.00                   | 01/13/25           |
+| Remark Codes M20         |                          |                    |
+| Supplemental Information |                          |                    |
+| Billed Paid              | Mods                     | Qty                |
+| 22.00                    | 0.00                     | 1                  |
+| Reason Code CO16         | Amount 22.00             | Svc Dt 01/13/25    |
+| Remark Codes M20         |                          |                    |
+| Supplemental Information |                          |                    |
+
+| 7 - Rev Code 0301            |           |      |          |
+|------------------------------|-----------|------|----------|
+| Billed                       | Paid      | Mods | Qty      |
+| 593.00                       | 0.00      |      | 10       |
+| Reason Code                  | Amount    |      | Svc Dt   |
+| CO16                         | 593.00    |      | 01/13/25 |
+| Remark Codes M20             |           |      |          |
+| Supplemental Information     |           |      |          |
+| 8 - Rev Code 0305            |           |      |          |
+| Billed                       | Paid      | Mods | Qty      |
+| 53.00                        | 0.00      |      | 1        |
+| Reason Code                  | Amount    |      | Svc Dt   |
+| CO16                         | 53.00     |      | 01/13/25 |
+| Remark Codes                 |           |      |          |
+| M20                          |           |      |          |
+| Supplemental Information     |           |      |          |
+| 9 - Rev Code 0324            |           |      |          |
+| Billed                       | Paid      | Mods | Qty      |
+| 280.00                       | 0.00      |      | 1        |
+| Reason Code                  | Amount    |      | Svc Dt   |
+| CO16                         | 280.00    |      | 01/13/25 |
+| Remark Codes                 |           |      |          |
+| M20 Supplemental Information |           |      |          |
+| 10 - Rev Code 0352           |           |      |          |
+| Billed                       | Paid 0.00 | Mods | Qty 1    |
+| 1,585.00                     | Amount    |      | Svc Dt   |
+| Reason Code CO16             | 1,585.00  |      | 01/13/25 |
+| Remark Codes                 |           |      |          |
+| M20                          |           |      |          |
+| Supplemental Information     |           |      |          |
+| 11 - Rev Code 0360           |           |      |          |
+| Billed                       | Paid      | Mods | Qty      |
+| 15,947.00                    | 0.00      |      | 119      |
+
+<!-- image -->
+
+| Reason Code                           | Amount         | Svc Dt     |
+|---------------------------------------|----------------|------------|
+| CO16                                  | 15,947.00      | 01/13/25   |
+| Remark Codes                          |                |            |
+| M20 Supplemental Information          |                |            |
+| 12 - Rev Code 0370                    | Mods           |            |
+| Billed                                | Paid           | Qty        |
+| 3,520.00                              | 0.00           | 97         |
+| Reason Code                           | Amount         | Svc Dt     |
+| CO16                                  | 3,520.00       | 01/13/25   |
+| Remark Codes                          |                |            |
+| M20 Supplemental Information          |                |            |
+| 13 - Rev Code 0471                    |                |            |
+| Billed                                | Paid Mods      | Qty        |
+| 1,635.00                              | 0.00           | 3          |
+| Reason Code                           | Amount         | Svc Dt     |
+| CO16                                  | 1,635.00       | 01/13/25   |
+| Remark Codes                          |                |            |
+| M20 Supplemental Information          |                |            |
+| 14 - Rev Code 0710                    |                |            |
+| Billed                                | Paid Mods      | Qty        |
+| 3,667.00                              | 0.00           | 62         |
+| Reason Code                           | Amount         | Svc Dt     |
+| CO16                                  | 3,667.00       | 01/13/25   |
+| Remark Codes                          |                |            |
+| M20                                   |                |            |
+|                                       |                | V          |
+| Supplemental Information              |                |            |
+| Provider Adjustment (PLB) Information |                |            |
+| Fisc Period Dt                        | Adj Identifier | Adj Amount |
+| Prov ID 166256 12/31/2025             | L6 - 20250129  | -16.18     |
+
+<!-- image -->
+
+Financial Information Source File
+
+/epic/home/HBremittance/gvl/load/univflorfl.68069.hb.20250131.rd3fgf12.835.univflorfl.68069.hb.20250131.rd3fgf12.8 35
+
+Remittance Option
+
+UF HB SUNSHINE HEALTH [308010404]
+
+Billing System:
+
+Hospital Billing
+
+Issue Date:
+
+01/29/2025
+
+Total Amount in File:
+
+205,657.73
+
+Tx Handling Code:
+
+一
+
+Tx Set Control Number:
+
+0004
+
+Transaction Type:
+
+Credit
+
+Payment Method:
+
+ACH
+
+Payment Format:
+
+CCP
+
+Payer Identifier:
+
+1208937577
+
+Payer Code:
+
+Sender DFI ID Qualifier:
+
+Sender DFI Identifier:
+
+Sender Account Qualifier:
+
+Sender Account Number:
+
+Receiver DFI ID Qualifier:
+
+01 000000000 Demand Deposit 0000000000
+
+01
+
+Receiver DFI Identifier:
+
+000000000
+
+Receiver Account Qualifier:
+
+Demand Deposit
+
+Receiver Account Number:
+
+000000000000
+
+<!-- image -->
+
+## Trace Information
+
+Trace Code Type:
+
+Check/EFT Trace Number:
+
+Payer Identifier: Payer Additional Code:
+
+Date/Time Qualifier:
+
+Production Date:
+
+Reference Information
+
+Reference ID Qualifier
+
+EV
+
+2U
+
+TJ
+
+1 0912811221
+
+1208937577
+
+Production 01/29/2025
+
+<!-- image -->
+
+<!-- image -->
+
+公
+
+<!-- image -->
+
+## Payer Information
+
+Name:
+
+Address:
+
+Payer Qualifier:
+
+SUNSHINE STATE HEALTH PLAN PO BOX 459089, SUITE 100 FORT LAUDERDALE, FL 33345
+
+XV
+
+Payer ID:
+
+68069
+
+<!-- image -->
+
+公
+
+## Payer Contact Information
+
+Function Code Name Comm Qualifier
+
+Payers Claim Office EDI SUPPORT DESK
+
+TE
+
+Technical Department EDI HELPDESK
+
+TE
+
+<!-- image -->
+
+## Payee Information
+
+Name:
+
+Address:
+
+Payee Qualifier:
+
+SHANDS UNIVERSITY OF FLORIDA HOSPITA P O BOX 100005 ATLANTA, GA 30348
+
+XX
+
+Payee ID:
+
+1699874248
+
+<!-- image -->
+
+公

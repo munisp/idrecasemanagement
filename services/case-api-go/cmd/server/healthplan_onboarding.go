@@ -1245,19 +1245,24 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		PartyID             string `json:"party_id"`
-		PackageID           string `json:"package_id"`
-		DisputedAmountCents int64  `json:"disputed_amount_cents"`
-		Notes               string `json:"notes"`
-		OtherPartyName      string `json:"other_party_name"`  // the provider the dispute is against
-		OtherPartyEmail     string `json:"other_party_email"` // where its notices go
-		OtherPartyNPI       string `json:"other_party_npi"`
+		PartyID             string        `json:"party_id"`
+		PackageID           string        `json:"package_id"`
+		DisputedAmountCents int64         `json:"disputed_amount_cents"`
+		Notes               string        `json:"notes"`
+		OtherPartyName      string        `json:"other_party_name"`  // the provider the dispute is against
+		OtherPartyEmail     string        `json:"other_party_email"` // where its notices go
+		OtherPartyNPI       string        `json:"other_party_npi"`
+		Packet              *filingPacket `json:"packet"` // the filing packet form (filing_packet.go)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PartyID == "" {
 		http.Error(w, `{"error":"party_id required"}`, http.StatusBadRequest)
 		return
 	}
-	rsp := respondent{Side: "PROVIDER", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NPI: in.OtherPartyNPI}
+	if packetRejected(w, in.Packet) {
+		return
+	}
+	// The packet form's provider name, email and NPI fill what the short form left blank.
+	rsp := in.Packet.otherParty(respondent{Side: "PROVIDER", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NPI: in.OtherPartyNPI})
 	if msg := rsp.check(); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
@@ -1349,6 +1354,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		s.attachPackageDocsToCase(r, tenant, onboardingKinds["hp"], in.PackageID, caseID, "health-plan:"+org.Name)
 	}
 	s.recordRespondent(r, tenant, caseID, rsp)
+	s.fileWithPacket(r, tenant, caseID, in.Packet, "health plan "+org.Name)
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = details || jsonb_build_object('filed_by_plan', $2::text) WHERE id=$1`, sanitizeTenant(tenant)), caseID, org.Name)
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,

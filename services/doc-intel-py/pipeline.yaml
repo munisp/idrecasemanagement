@@ -134,6 +134,10 @@ schemas:
              member_id, place_of_service, network_status,
              provider_street, provider_city, provider_state, provider_zip,
              line_of_business]
+  # The filing packet's facts are read from its form fields (packet_docs.py); the model only names the parties,
+  # so the claim-form schema's amounts never compete with the packet's own aggregated amount.
+  filing_packet:
+    fields: [provider_name, payer_name, provider_npi]
   determination_letter:
     fields: [case_number, idre_entity, prevailing_party, awarded_amount_usd,
              rationale_summary, signature_present, determination_date]

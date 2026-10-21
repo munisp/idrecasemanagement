@@ -34,6 +34,7 @@ const Api = (() => {
       const msg = typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`;
       const err = new Error(msg); err.status = resp.status; err.data = data;
       if (typeof data === "object" && data.details) err.details = data.details;
+      if (typeof data === "object" && Array.isArray(data.problems)) err.problems = data.problems;
       throw err;
     }
     // A change was saved: a case page that is open re-reads its steps (views.js, wfRefresh).
@@ -285,6 +286,7 @@ const Api = (() => {
       moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
       zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
+      filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       timeAdd: (id, p) => req("POST", `${t()}/cases/${id}/time`, p),

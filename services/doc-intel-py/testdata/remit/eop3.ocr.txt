@@ -1,0 +1,190 @@
+<!-- image -->
+
+## Claim Information
+
+## Claim Details
+
+| Transaction Group Number: Claim Status Code: Claim Charge Amount: Claim Paid Amount: Patient Responsibility Amount: Claim Filing Indicator Code: Payer Control Number: Facility Code Value: Claim Frequency Type Code: Diagnosis Related Group Code: Diagnosis Related Group Weight:   | 353 1 (Processed as Primary) 9,181.58 0.00 MC (Medicaid) X359FLE32025 11 1 0532 0   |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------|
+| Discharge Fraction:                                                                                                                                                                                                                                                                    |                                                                                     |
+| Claim Entity Information                                                                                                                                                                                                                                                               |                                                                                     |
+| Entity Type Patient                                                                                                                                                                                                                                                                    | ID Type MR                                                                          |
+| Additional Claim Inforration                                                                                                                                                                                                                                                           |                                                                                     |
+
+<!-- image -->
+
+| 三 Service Line Summary     | 三 Service Line Summary     | 三 Service Line Summary     | 三 Service Line Summary     |                             |
+|-----------------------------|-----------------------------|-----------------------------|-----------------------------|-----------------------------|
+| Total Billed                | Total Paid                  | Reason Code                 | Reason Code                 | Amount                      |
+| 9,181.58                    | 0.00                        | CO197                       | CO197                       | 9,181.58                    |
+| 三 Service Line Information | 三 Service Line Information | 三 Service Line Information | 三 Service Line Information | 三 Service Line Information |
+| 1 - Rev Code 0123           | 1 - Rev Code 0123           | 1 - Rev Code 0123           | 1 - Rev Code 0123           |                             |
+| Billed Paid                 | Billed Paid                 | Billed Paid                 | Mods                        | Qty                         |
+| 4,339.00 0.00               | 4,339.00 0.00               | 4,339.00 0.00               |                             | 1                           |
+| Reason Code Amount          | Reason Code Amount          | Reason Code Amount          |                             | Svc Dt                      |
+| CO197 4,339.00              | CO197 4,339.00              | CO197 4,339.00              |                             | 12/17/24                    |
+| Remark Codes                | Remark Codes                | Remark Codes                |                             |                             |
+| Supplemental Information    | Supplemental Information    | Supplemental Information    |                             | V                           |
+| 2 – Rev Code 0250           | 2 – Rev Code 0250           | 2 – Rev Code 0250           |                             |                             |
+| Billed Paid                 | Billed Paid                 | Billed Paid                 | Mods                        | Qty                         |
+| 37.58 0.00                  | 37.58 0.00                  | 37.58 0.00                  |                             | 2                           |
+| Reason Code Amount          | Reason Code Amount          | Reason Code Amount          |                             | Svc Dt                      |
+| CO197 37.58                 | CO197 37.58                 | CO197 37.58                 |                             | 12/17/24                    |
+
+Remark Codes
+
+Supplemental Information
+
+## 3 - Rev Code 0740
+
+| Billed                   | Paid     | Mods   | Qty      |
+|--------------------------|----------|--------|----------|
+| 4,805.00                 | 0.00     |        | 2        |
+| Reason Code              | Amount   |        | Svc Dt   |
+| CO197                    | 4,805.00 |        | 12/17/24 |
+| Remark Codes             |          |        |          |
+| Supplemental Information |          |        |          |
+
+<!-- image -->
+
+## Provider Adjustment (PLB) Information
+
+Prov ID
+
+Fisc Period Dt Adj Identifier Adj Amount
+
+166256
+
+12/31/2025
+
+L6 - 20250103
+
+-25.29
+
+<!-- image -->
+
+## Financial Information
+
+Source File
+
+/epic/home/HBremittance/gvl/load/univflorfl.68069.hb.20250104.rd3fad5p.835.univflorfl.68069.hb.20250104.rd3fad5p. 835
+
+Remittance Option UF HB SUNSHINE HEALTH [308010404]
+
+| Billing System:             | Hospital Billing   |
+|-----------------------------|--------------------|
+| Issue Date:                 | 01/03/2025         |
+| Total Amount in File:       | 291,932.36         |
+| Tx Handling Code:           | I                  |
+| Tx Set Control Number:      | 0003               |
+| Transaction Type:           | Credit             |
+| Payment Method:             | ACH                |
+| Payment Format:             | CCP                |
+| Payer Identifier:           | 1208937577         |
+| Payer Code:                 |                    |
+| Sender DFI ID Qualifier:    | 01                 |
+| Sender DFI Identifier:      | 000000000          |
+| Sender Account Qualifier:   | Demand Deposit     |
+| Sender Account Number:      | 0000000000         |
+| Receiver DFI ID Qualifier:  | 01                 |
+| Receiver DFI Identifier:    | 000000000          |
+| Receiver Account Qualifier: | Demand Deposit     |
+| Receiver Account Number:    | 000000000000       |
+
+<!-- image -->
+
+## Trace Information
+
+Trace Code Type:
+
+1
+
+Check/EFT Trace Number:
+
+0912587753
+
+Payer Identifier:
+
+1208937577
+
+Payer Additional Code:
+
+Date/Time Qualifier:
+
+Production Date:
+
+## Reference Information
+
+Reference ID Qualifier
+
+EV
+
+2U
+
+TJ
+
+Production 01/03/2025
+
+<!-- image -->
+
+## Payer Information
+
+Name:
+
+Address:
+
+Payer Qualifier:
+
+SUNSHINE STATE HEALTH PLAN PO BOX 459089, SUITE 100 FORT LAUDERDALE, FL 33345
+
+XV
+
+68069
+
+Payer ID:
+
+## Payer Contact Information
+
+Function Code Name
+
+Payers Claim Office EDI SUPPORT DESK
+
+Technical Department EDI HELPDESK
+
+<!-- image -->
+
+## Payee Information
+
+Name:
+
+Address:
+
+SHANDS UNIVERSITY OF FLORIDA HOSPITA
+
+P O BOX 100005
+
+Payee Qualifier:
+
+ATLANTA, GA 30348
+
+XX
+
+Payee ID:
+
+1699874248
+
+<!-- image -->
+
+Comm Qualifier
+
+TE
+
+TE
+
+<!-- image -->
+
+<!-- image -->
+
+<!-- image -->
+
+<!-- image -->

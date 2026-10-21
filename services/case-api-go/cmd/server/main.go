@@ -556,6 +556,7 @@ func main() {
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
+		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket) // the filing packet form (filing_packet.go)
 		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
 		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
 		r.Post("/deliverables/request", s.requestAdhocDeliverable)

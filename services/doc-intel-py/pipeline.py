@@ -86,7 +86,10 @@ def _model(key: tuple, factory) -> Any:
 TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
     "eob": {
         "strong": ["explanation of benefits", "remittance advice", "patient responsibility",
-                   "allowed amount", "adjustment amount", "claim adjustment reason"],
+                   "allowed amount", "adjustment amount", "claim adjustment reason",
+                   # an 835 remittance printout (Epic's "Claim Details" view): remit_docs.py
+                   "claim charge amount", "claim paid amount", "payer control number",
+                   "claim filing indicator", "service line summary"],
         "weak": ["claim number", "denial code", "coinsurance", "copay", "deductible",
                  "eob", "benefits", "covered", "not covered"],
     },
@@ -98,8 +101,9 @@ TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
                  "idre", "batched", "attest"],
     },
     "idr_claim": {
-        "strong": ["qualifying payment amount", "ub-04", "cms-1500", "hcpcs",
-                   "place of service", "taxonomy", "itemized bill"],
+        "strong": ["qualifying payment amount", "ub-04", "ub04", "cms-1500", "hcpcs",
+                   "place of service", "taxonomy", "itemized bill", "type of bill",
+                   "treatment authorization codes", "statement covers period"],
         "weak": ["cpt", "billed amount", "qpa", "service date", "npi", "diagnosis code",
                  "procedure code", "claim", "provider", "payer", "member id", "units",
                  "revenue code", "drg"],
@@ -108,6 +112,11 @@ TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
 # The office's own letters (decision report, cover letter, review invoice, IRO decision): letter_docs.py.
 import letter_docs as _letter_docs  # noqa: E402
 TYPE_SIGNALS.update(_letter_docs.TYPE_SIGNALS)
+# The program's filing packet (Capitol Bridge): packet_docs.py.
+import packet_docs as _packet_docs  # noqa: E402
+TYPE_SIGNALS.update(_packet_docs.TYPE_SIGNALS)
+# An 835 remittance printout, a payer's EOB and a UB-04, read for the claims table: remit_docs.py.
+import remit_docs as _remit_docs  # noqa: E402
 WEIGHT = {"strong": 3, "weak": 1}
 
 # Minimum score to accept a classification at all, and minimum lead over the
@@ -1218,6 +1227,38 @@ def stage_fields(ctx: dict, cfg: dict) -> dict:
     if letter:
         ex["letter"] = letter
         issues = issues + letter_issues
+    remit_key, remit, remit_issues = _remit_docs.extract(ctx.get("doc_type") or "", text, ctx.get("raw_bytes"))
+    if remit_key:
+        ex[remit_key] = remit
+        issues = issues + remit_issues
+        # The eligibility review's filing window and program-start checks read normalized service/determination
+        # dates (case-api deriveEligibilityInput); a remittance states both, so the model is not needed for them.
+        norm = ctx.setdefault("normalized", {})
+        claim = (remit.get("claims") or [{}])[0]
+        if not norm.get("service_date") and claim.get("date_of_service"):
+            norm["service_date"] = claim["date_of_service"]
+        if not norm.get("determination_date") and claim.get("date_of_denial"):
+            norm["determination_date"] = claim["date_of_denial"]
+    packet, packet_issues = _packet_docs.extract(ctx.get("doc_type") or "", text, ctx.get("raw_bytes"))
+    if packet:
+        ex["packet"] = packet
+        issues = issues + packet_issues
+    # A document a layout reader understood states its own claim number; the generic regex's guess (the first
+    # "claim/account/bill ..." word on the page) is replaced by it, or dropped when the reader found none. Its
+    # code lists are dropped too: on an 835 printout, a payer EOB, a UB-04 or the packet the regex reads zip
+    # codes, amounts and ICD-10 codes as CPT/HCPCS, and those would be lifted onto the case.
+    read_by_layout = [v for v in (ex.get("remit"), ex.get("ub04"), ex.get("packet")) if v]
+    if read_by_layout:
+        ids = ex.setdefault("identifiers", {})
+        number = next((c.get("claim_number") for v in read_by_layout for c in (v.get("claims") or []) if c.get("claim_number")), None)
+        if number:
+            ids["claim_number"] = number
+        else:
+            ids.pop("claim_number", None)
+        for key in ("cpt_codes", "hcpcs_codes", "diagnosis_codes"):
+            if ex.get(key):
+                ex.setdefault("codes_not_lifted", {})[key] = ex[key]
+                ex[key] = []
     ctx["extracted_fields"] = ex
     ctx["field_check_issues"] = issues
     return ctx

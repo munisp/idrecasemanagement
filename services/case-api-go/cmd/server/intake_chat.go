@@ -42,6 +42,9 @@ type intakeFields struct {
 	DisputedAmountCents int64  `json:"disputed_amount_cents,omitempty"`
 	QPACents            int64  `json:"qpa_cents,omitempty"`
 	Notes               string `json:"notes,omitempty"`
+	// The side the dispute is against and where its notices go (programmed tenants need both to file).
+	OtherPartyName  string `json:"other_party_name,omitempty"`
+	OtherPartyEmail string `json:"other_party_email,omitempty"`
 }
 
 type intakeConverseReply struct {
@@ -55,12 +58,14 @@ type intakeConverseReply struct {
 const intakeChatSystem = `You are the intake assistant inside a federal No Surprises Act IDRE case platform. A case worker is describing a new dispute intake in plain language. Your ONLY job is to extract structured fields and ask the next question.
 
 OUTPUT: strict JSON only, no prose, no markdown fences:
-{"fields":{"email":"","contact_name":"","org":"","filing_party_type":"","disputed_amount_cents":0,"qpa_cents":0,"notes":""},"reply":""}
+{"fields":{"email":"","contact_name":"","org":"","filing_party_type":"","disputed_amount_cents":0,"qpa_cents":0,"notes":"","other_party_name":"","other_party_email":""},"reply":""}
 
 RULES:
 - Extract ONLY what the worker actually stated across the conversation. Never guess emails, names, or amounts. Unknown strings stay "", unknown amounts stay 0.
 - filing_party_type is PROVIDER or HEALTH_PLAN only (infer from "provider dispute"/"plan filed"; else leave "").
 - Amounts are integer cents ($4,200 -> 420000). qpa_cents is the qualifying payment amount; disputed_amount_cents is the amount in dispute. If only one dollar figure is mentioned and it's the disputed amount, set disputed_amount_cents.
+- other_party_name is who the dispute is AGAINST (the health plan when a provider files, the provider when a plan files); other_party_email is where that party's dispute notices go. Never use the filer's own email for it.
+- STILL NEEDED (given below, computed by the platform) lists what must be asked for; ask for the first item on it.
 - notes: one sentence summarizing the situation in the worker's own terms, plus anything else they mentioned (dates, claim ids, urgency).
 - reply: if any of email, org/contact_name, or an amount is still unknown, ask ONE short conversational follow-up for the most important gap. If everything needed is present, reply with a one-sentence summary for the worker to confirm, ending with "File it?".
 - Keep prior extracted fields stable unless the worker corrects them.`
@@ -83,15 +88,35 @@ func intakeMissing(f intakeFields) []string {
 	return m
 }
 
+// intakeMissingFor adds the other side to what a programmed tenant needs before filing: createIntake records it as
+// the case's respondent, and the plan notification goes to its email.
+func intakeMissingFor(f intakeFields, needOtherParty bool) []string {
+	m := intakeMissing(f)
+	if needOtherParty {
+		if f.OtherPartyName == "" {
+			m = append(m, "the health plan (or provider) the dispute is against")
+		}
+		if !validMailbox(f.OtherPartyEmail) {
+			m = append(m, "that party's email for dispute notices")
+		}
+	}
+	return m
+}
+
 // validateIntakeFields is the trust boundary: model output becomes platform
 // data only through these checks. Anything malformed is silently dropped to
 // its zero value — the follow-up question will ask for it again.
 func validateIntakeFields(f intakeFields) intakeFields {
 	out := intakeFields{
-		Email:       truncate(strings.TrimSpace(f.Email), 254),
-		ContactName: truncate(strings.TrimSpace(f.ContactName), 200),
-		Org:         truncate(strings.TrimSpace(f.Org), 200),
-		Notes:       truncate(strings.TrimSpace(f.Notes), 2000),
+		Email:           truncate(strings.TrimSpace(f.Email), 254),
+		ContactName:     truncate(strings.TrimSpace(f.ContactName), 200),
+		Org:             truncate(strings.TrimSpace(f.Org), 200),
+		Notes:           truncate(strings.TrimSpace(f.Notes), 2000),
+		OtherPartyName:  truncate(strings.TrimSpace(f.OtherPartyName), 200),
+		OtherPartyEmail: truncate(strings.TrimSpace(f.OtherPartyEmail), 254),
+	}
+	if !validMailbox(out.OtherPartyEmail) || strings.EqualFold(out.OtherPartyEmail, out.Email) {
+		out.OtherPartyEmail = ""
 	}
 	if !strings.Contains(out.Email, "@") {
 		out.Email = ""
@@ -158,8 +183,12 @@ func (s *server) intakeConverse(w http.ResponseWriter, r *http.Request) {
 		convo.WriteString("Worker: " + truncate(h, 500) + "\n")
 	}
 	convo.WriteString("Worker: " + in.Message + "\n")
-	fieldsJSON, _ := json.Marshal(validateIntakeFields(in.Fields))
+	tenant, _ := r.Context().Value(ctxTenant{}).(string)
+	needOther := tenant != "" && s.loadProgram(r, tenant) != nil
+	current := validateIntakeFields(in.Fields)
+	fieldsJSON, _ := json.Marshal(current)
 	user := "CURRENT EXTRACTED FIELDS (JSON, keep stable unless corrected):\n" + string(fieldsJSON) +
+		"\n\nSTILL NEEDED: " + strings.Join(intakeMissingFor(current, needOther), "; ") +
 		"\n\nCONVERSATION SO FAR:\n" + convo.String()
 
 	raw, err := ollamaChat(r.Context(), s.cfg.CopilotEndpoint, s.cfg.CopilotModel,
@@ -173,7 +202,7 @@ func (s *server) intakeConverse(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"model output not usable — rephrase or use the form directly"}`, http.StatusBadGateway)
 		return
 	}
-	missing := intakeMissing(fields)
+	missing := intakeMissingFor(fields, needOther)
 	if len(missing) > 0 {
 		// Server wins on readiness — never let the model declare done early.
 	} else if reply == "" {

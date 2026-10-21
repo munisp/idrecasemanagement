@@ -442,14 +442,19 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
-		Email               string `json:"email"`
-		ContactName         string `json:"contact_name"`
-		Org                 string `json:"org"`
-		Notes               string `json:"notes"`
-		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
-		DisputedAmountCents int64  `json:"disputed_amount_cents"`
-		QPACents            int64  `json:"qpa_cents"`    // federal NSA tenants only — programmed tenants use disputed_amount_cents
-		ServiceLine         string `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
+		Email               string        `json:"email"`
+		ContactName         string        `json:"contact_name"`
+		Org                 string        `json:"org"`
+		Notes               string        `json:"notes"`
+		FilingPartyType     string        `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
+		DisputedAmountCents int64         `json:"disputed_amount_cents"`
+		QPACents            int64         `json:"qpa_cents"`    // federal NSA tenants only — programmed tenants use disputed_amount_cents
+		ServiceLine         string        `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
+		Packet              *filingPacket `json:"packet"`       // the filing packet form, when staff took the packet by phone/email (filing_packet.go)
+		// The side the dispute is against and where its notices go (the intake page requires them; the assistant's
+		// chat intake does not ask yet). Checked and recorded whenever given -- here or in the packet form.
+		OtherPartyName  string `json:"other_party_name"`
+		OtherPartyEmail string `json:"other_party_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
@@ -462,6 +467,21 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	if fpt != "PROVIDER" && fpt != "HEALTH_PLAN" {
 		http.Error(w, `{"error":"filing_party_type must be PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
 		return
+	}
+	if packetRejected(w, in.Packet) {
+		return
+	}
+	rsp := in.Packet.otherParty(respondent{Side: otherSide(fpt), Name: in.OtherPartyName, Email: in.OtherPartyEmail})
+	named := rsp.Name != "" || rsp.Email != ""
+	if named {
+		if msg := rsp.check(); msg != "" {
+			http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+			return
+		}
+		if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); msg != "" {
+			http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Programmed tenants (FL AHCA CDR today): the Filing Party has always
@@ -481,6 +501,11 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 			return
+		}
+		staff := r.Context().Value(ctxPrincipal{}).(principal)
+		s.fileWithPacket(r, tenant, caseID, in.Packet, displayName(staff))
+		if named {
+			s.recordRespondent(r, tenant, caseID, rsp)
 		}
 		// Reflect the payment gate honestly to staff: when the program
 		// charges an initial fee the case sits AWAITING_PAYMENT until the

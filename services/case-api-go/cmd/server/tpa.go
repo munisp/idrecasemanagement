@@ -487,11 +487,15 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		OtherPartyNAIC      string `json:"other_party_naic"`
 		// The filer's own answers to two eligibility questions the
 		// documents often don't state: "" = not sure, left to the documents.
-		ProviderType string `json:"provider_type"`
-		InNetwork    string `json:"in_network"` // yes | no | ""
+		ProviderType string        `json:"provider_type"`
+		InNetwork    string        `json:"in_network"` // yes | no | ""
+		Packet       *filingPacket `json:"packet"`     // the filing packet form (filing_packet.go)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.ClientID == "" {
 		http.Error(w, `{"error":"client_id required"}`, http.StatusBadRequest)
+		return
+	}
+	if packetRejected(w, in.Packet) {
 		return
 	}
 	answers, msg := s.filerEligibilityAnswers(r, tenant, in.ProviderType, in.InNetwork)
@@ -499,7 +503,8 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
-	rsp := respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC}
+	// The packet form's plan name and notice email fill what the short form left blank.
+	rsp := in.Packet.otherParty(respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC})
 	if msg := rsp.check(); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
@@ -566,6 +571,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		s.recordRespondent(r, tenant, caseID, rsp)
 		s.applyFilerEligibilityAnswers(r.Context(), tenant, caseID, answers)
+		s.fileWithPacket(r, tenant, caseID, in.Packet, "TPA "+org.Name)
 	}
 	if err != nil {
 		switch {

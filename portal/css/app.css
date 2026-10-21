@@ -1115,3 +1115,7 @@ tr.pkg-hist td{border-top:0;padding-top:0}
 .aa-backlog{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--surface-sunken,transparent)}
 .asg-helpers{display:flex;flex-direction:column;gap:4px;margin-top:6px}
 .asg-helper{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+/* Case information: what document analysis read from the filing packet / remittances */
+.warn-list{background:var(--warning-bg);color:var(--warning-fg);border-radius:8px;padding:8px 12px 8px 28px;margin:6px 0;font-size:13px;max-width:90ch}
+.tbl.kv th{text-align:left;font-weight:500;color:var(--muted,inherit);white-space:nowrap;padding-right:16px;width:1%}
+.prewrap{white-space:pre-wrap;max-width:90ch}

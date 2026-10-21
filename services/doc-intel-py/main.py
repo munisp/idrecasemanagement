@@ -481,7 +481,8 @@ def eligibility_conflicts(current: dict, found: dict, source: str, known: list |
     return out
 
 
-def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "", text: str = "") -> list[str]:
+def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "", text: str = "",
+                         claim_docs: dict | None = None) -> list[str]:
     """Fill a couple of case fields from analyzed-document facts so staff
     don't have to re-type what the document already states -- but only
     fields with an unambiguous semantic match, and only where the case
@@ -526,6 +527,18 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
     # {"amount": 1850}; service lines may be rows, strings or one string.
     qpa_usd = reading("the QPA", lambda: as_money(extracted.get("qpa_usd")))
     billed_amount_usd = reading("the billed amount", lambda: as_money(extracted.get("billed_amount_usd")))
+    # A document a layout reader understood (claim_docs: packet / remittance / UB-04) states its figures: its
+    # claim's billed charge replaces the model's reading (which took a $4.16 payment or the first line's charge
+    # for "billed"), and the packet's own aggregated amount is filled by fill_from_claim_docs, not from here.
+    # One claim's charge is not the case's disputed amount when the case has several claims, so no disputed-amount
+    # conflict is raised from such a document either.
+    claim_docs = claim_docs or {}
+    if claim_docs.get("packet"):
+        billed_amount_usd = None
+    elif claim_docs:
+        charge = next((c.get("billed_cents") for k in ("remit", "ub04") for c in ((claim_docs.get(k) or {}).get("claims") or [])
+                       if c.get("billed_cents")), None)
+        billed_amount_usd = charge / 100 if charge else None
     allowed_amount_usd = reading("the allowed amount", lambda: as_money(extracted.get("allowed_amount_usd")))
     service_lines = reading("the service lines", lambda: as_lines(extracted.get("service_lines")), [])
     codes = extracted.get("cpt_hcpcs_codes")
@@ -638,7 +651,7 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
         # never applied: the eligibility review reads this list and sends the
         # result for a second look.
         def record_conflicts():
-            billed_cents = round(billed_amount_usd * 100) if billed_amount_usd else None
+            billed_cents = round(billed_amount_usd * 100) if billed_amount_usd and not claim_docs else None
             known = details.get("eligibility_conflicts")
             known = known if isinstance(known, list) else []
             new_conflicts = eligibility_conflicts(
@@ -661,6 +674,144 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
                            ("report fields", fill_report_fields), ("claim count", count_claims),
                            ("conflicts", record_conflicts)):
             reading(what, step)
+    return changed
+
+
+# The documents read deterministically into case facts: the filing packet (packet_docs), an 835 remittance or a
+# payer's EOB printout (remit_docs) and a UB-04 (remit_docs). Each gives {"case": {...}, "claims": [...]}.
+CLAIM_DOC_KEYS = ("packet", "remit", "ub04")
+# Case facts that are columns or housekeeping, never copied into details as they are.
+_NOT_DETAILS = {"disputed_amount_cents", "provider_type_other", "plan_type_other", "type_of_service_other"}
+CLAIM_COLUMNS = ("cpt", "billed_cents", "paid_cents", "disputed_cents", "patient_first_name", "patient_last_name",
+                 "type_of_service", "denial_reason", "date_of_service", "date_claim_submitted", "date_of_denial",
+                 "date_of_final_determination", "provider_name", "facility_name", "evidence_location")
+# A claim figure two documents state differently is recorded, never chosen between.
+_CLAIM_CHECKED = ("billed_cents", "paid_cents", "date_of_service")
+
+
+def claim_doc_updates(details: dict, cur_disputed: int | None, ex: dict, source: str) -> tuple[dict, int | None, list[dict], list[str]]:
+    """What one analyzed document adds to the case: (details to set, disputed amount to set or None, eligibility
+    conflicts, what changed). Like every other auto-fill, only a field the case does not have yet is filled; an
+    eligibility input (provider type, contracted, disputed amount) the document states differently is a conflict.
+    Pure, so it is tested."""
+    found: dict = {}
+    for key in CLAIM_DOC_KEYS:
+        facts = (ex or {}).get(key) or {}
+        for k, v in (facts.get("case") or {}).items():
+            if v not in (None, "") and k not in found:
+                found[k] = v
+        for k in ("attestation", "documents_submitted", "representative"):
+            if facts.get(k) is not None:
+                found[f"packet_{k}"] = facts[k]
+    updates = {k: v for k, v in found.items() if k not in _NOT_DETAILS and k not in details}
+    if "contracted" in found and "out_of_network" not in details:
+        updates["out_of_network"] = "No" if found["contracted"] else "Yes"
+    disputed = found.get("disputed_amount_cents")
+    set_disputed = disputed if disputed and not cur_disputed else None
+    conflicts = eligibility_conflicts(
+        {"disputed_amount_cents": cur_disputed, "provider_type": details.get("provider_type"),
+         "contracted": details.get("contracted")},
+        {"disputed_amount_cents": disputed, "provider_type": found.get("provider_type"),
+         "contracted": found.get("contracted")},
+        source or "a document", details.get("eligibility_conflicts") if isinstance(details.get("eligibility_conflicts"), list) else [])
+    changed = [f"{k.replace('_', ' ')}" for k in updates if not k.startswith("packet_")]
+    if set_disputed:
+        changed.append(f"disputed amount ${set_disputed / 100:,.2f}")
+    return updates, set_disputed, conflicts, changed
+
+
+def merge_claim_rows(existing: dict, claims: list[dict], source: str) -> tuple[list[dict], list[dict]]:
+    """The claim rows to write and the disagreements. `existing` maps claim number -> the row the case already has.
+    A new claim is added; a known one only has its blank columns filled. Pure, so it is tested."""
+    rows, conflicts = [], []
+    for cl in claims:
+        num = str(cl.get("claim_number") or "").strip()
+        if not num and cl.get("match_billed_cents"):
+            # A claim form with no payer claim number (a UB-04) completes the one claim billed the same total.
+            same = [n for n, r in existing.items() if r.get("billed_cents") == cl["match_billed_cents"]]
+            same += [r["claim_number"] for r in rows if r.get("billed_cents") == cl["match_billed_cents"] and r["claim_number"] not in same]
+            num = same[0] if len(same) == 1 else ""
+        if not num:
+            continue
+        row = {k: cl.get(k) for k in CLAIM_COLUMNS if cl.get(k) not in (None, "")}
+        if source and "evidence_location" not in row:
+            row["evidence_location"] = source[:200]
+        have = existing.get(num) or {}
+        # A corrected or replacement claim (frequency 7) comes back under a new payer control number: the same
+        # service, date and charge as a claim already listed is flagged, not silently counted twice.
+        if not have and row.get("billed_cents") and row.get("date_of_service"):
+            twin = next((n for n, r in list(existing.items()) + [(r["claim_number"], r) for r in rows]
+                         if n != num and r.get("billed_cents") == row["billed_cents"]
+                         and str(r.get("date_of_service") or "") == row["date_of_service"]), None)
+            if twin:
+                conflicts.append({"claim_number": num, "field": "same_service_as", "case_value": twin,
+                                  "document_value": num, "document": source or "a document"})
+        for k in _CLAIM_CHECKED:
+            if have.get(k) not in (None, "") and row.get(k) not in (None, "") and str(have[k]) != str(row[k]):
+                conflicts.append({"claim_number": num, "field": k, "case_value": have[k], "document_value": row[k],
+                                  "document": source or "a document"})
+        rows.append({"claim_number": num, **row})
+    return rows, conflicts
+
+
+def fill_from_claim_docs(tenant: str, case_id: str, ex: dict, source: str = "") -> list[str]:
+    """Copy what the filing packet, a remittance or a UB-04 states onto the case: the details the Reviewer would
+    type, the disputed amount when the case has none, and the claims table (public.case_claims). Never overwrites."""
+    if not any((ex or {}).get(k) for k in CLAIM_DOC_KEYS):
+        return []
+    claims = [cl for k in CLAIM_DOC_KEYS for cl in (((ex or {}).get(k) or {}).get("claims") or [])]
+    changed: list[str] = []
+    with psycopg.connect(DSN, autocommit=True) as c:
+        row = c.execute(f"SELECT details, disputed_amount_cents FROM tenant_{tenant}.cases WHERE id=%s",
+                        (case_id,)).fetchone()
+        if not row:
+            return changed
+        details = row[0] if isinstance(row[0], dict) else {}
+        updates, set_disputed, conflicts, changed = claim_doc_updates(details, row[1], ex, source)
+        existing = {}
+        if claims:
+            for r in c.execute("SELECT claim_number, billed_cents, paid_cents, date_of_service::text FROM public.case_claims "
+                               "WHERE tenant=%s AND case_id=%s", (tenant, case_id)).fetchall():
+                existing[r[0]] = {"billed_cents": r[1], "paid_cents": r[2], "date_of_service": r[3]}
+        rows, claim_conflicts = merge_claim_rows(existing, claims, source)
+        if conflicts:
+            updates["eligibility_conflicts"] = (details.get("eligibility_conflicts") or []) + conflicts
+            changed.extend(f"CONFLICT on {cf['field'].replace('_', ' ')}: case has {cf['case_value']}, "
+                           f"{cf['document']} says {cf['document_value']} (case value kept)" for cf in conflicts)
+        if claim_conflicts:
+            known = details.get("claim_conflicts") if isinstance(details.get("claim_conflicts"), list) else []
+            seen = {(k.get("claim_number"), k.get("field"), str(k.get("document_value"))) for k in known}
+            fresh = [cf for cf in claim_conflicts if (cf["claim_number"], cf["field"], str(cf["document_value"])) not in seen]
+            if fresh:
+                updates["claim_conflicts"] = known + fresh
+                changed.extend(
+                    f"CHECK claim {cf['claim_number']}: same service, date and charge as claim {cf['case_value']} -- "
+                    f"a corrected/replacement claim? (both kept)" if cf["field"] == "same_service_as" else
+                    f"CONFLICT on claim {cf['claim_number']} {cf['field'].replace('_', ' ')}: claims table has "
+                    f"{cf['case_value']}, {cf['document']} says {cf['document_value']} (kept)" for cf in fresh)
+        if updates:
+            c.execute(f"UPDATE tenant_{tenant}.cases SET details = coalesce(details,'{{}}'::jsonb) || %s::jsonb WHERE id=%s",
+                      (json.dumps(updates), case_id))
+        if set_disputed:
+            c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s AND coalesce(disputed_amount_cents,0)=0",
+                      (set_disputed, case_id))
+        added = filled = 0
+        for r in rows:
+            cols = [k for k in CLAIM_COLUMNS if k in r]
+            sets = ", ".join(f"{k} = coalesce(case_claims.{k}, EXCLUDED.{k})" for k in cols) or "claim_number = EXCLUDED.claim_number"
+            cur = c.execute(
+                f"INSERT INTO public.case_claims (tenant, case_id, claim_number{''.join(', ' + k for k in cols)}) "
+                f"VALUES (%s, %s, %s{', %s' * len(cols)}) ON CONFLICT (tenant, case_id, claim_number) DO UPDATE SET {sets} "
+                f"RETURNING (xmax = 0)",
+                (tenant, case_id, r["claim_number"], *[r[k] for k in cols])).fetchone()
+            if cur and cur[0]:
+                added += 1
+            else:
+                filled += 1
+        if added:
+            changed.append(f"{added} claim(s) added to the claims table")
+        if filled and not added:
+            changed.append(f"claims table completed for {filled} claim(s)")
     return changed
 
 
@@ -937,13 +1088,22 @@ def persist(evt: dict, ctx: dict) -> None:
     # The analysis is already stored. Filling the case from it is a second
     # step: if it fails, the document stays analyzed and the failure is put
     # on the case timeline for a person, instead of marking the document ERROR.
+    # The deterministic reads (packet / remittance / UB-04) go first, so the
+    # values the form itself states win over the model's reading below.
     try:
-        changed = backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source,
-                                      str(ctx.get("text") or ctx.get("markdown") or ""))
+        changed = fill_from_claim_docs(evt["tenant"], case_id, ctx.get("extracted_fields") or {}, source)
+    except Exception as exc:  # noqa: BLE001
+        print(f"doc-intel: claim facts not filled from {evt.get('doc_id')}: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
+        changed = []
+    try:
+        ex_fields = ctx.get("extracted_fields") or {}
+        changed = changed + backfill_case_fields(evt["tenant"], case_id, ctx.get("extracted", {}), source,
+                                      str(ctx.get("text") or ctx.get("markdown") or ""),
+                                      claim_docs={k: ex_fields[k] for k in CLAIM_DOC_KEYS if ex_fields.get(k)})
     except Exception as exc:  # noqa: BLE001
         print(f"doc-intel: case fields not filled from {evt.get('doc_id')}: {type(exc).__name__}: {exc}",
               file=sys.stderr, flush=True)
-        changed = []
         try:
             with psycopg.connect(DSN, autocommit=True) as c:
                 c.execute(
