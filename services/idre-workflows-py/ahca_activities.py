@@ -79,9 +79,11 @@ async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, bo
             (tenant, case_id, typ, body),
         )
         for role in roles:
+            # Finance acts on a due refund from Financials' "Refunds due" list, not from the case page.
+            link = "#/finance" if typ == "REFUND_DUE" and role == "FINANCE" else f"#/cases/{case_id}"
             c.execute(
                 "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,%s,%s,%s,%s)",
-                (tenant, f"role:{role}", typ, f"Case {case_id}: {body}", f"#/cases/{case_id}"),
+                (tenant, f"role:{role}", typ, f"Case {case_id}: {body}", link),
             )
 
 

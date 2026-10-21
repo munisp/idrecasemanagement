@@ -277,28 +277,68 @@
   backdrop.addEventListener("click", closeRail);
   nav.addEventListener("click", (e) => { if (e.target.closest("a")) closeRail(); });
 
-  // Notifications
-  document.getElementById("bell").onclick = async () => {
-    const n = await Api.cm.notifications().catch(() => []);
-    const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
-    w.className = "notif-panel";
-    w.innerHTML = `<h3>Notifications${n.length ?
-        ` <a href="javascript:void(0)" class="notif-markall" onclick="Api.cm.readAllNotifs().then(()=>location.reload())">Mark all as read</a>` : ""
-      }</h3>` + (n.length ? n.map((x) =>
-      `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>{${
-        x.link ? `location.hash='${x.link}';location.reload()` : "location.reload()"
-      }})">
-         <b>${x.type}</b> — ${x.body} <span class="muted">${new Date(x.at).toLocaleString()}</span></div>`).join("")
-      : `<p class="muted">No notifications.</p>`);
-    document.body.appendChild(w);
-    setTimeout(() => document.addEventListener("click", (e) => { if (!w.contains(e.target) && e.target.id !== "bell") w.remove(); }, { once: true }), 0);
-  };
-  (async () => {
-    const n = await Api.cm.notifications().catch(() => []);
-    const unread = n.filter((x) => !x.read_at).length;
+  // Notifications: the bell's badge is the real unread total (GET /notifications/count -- counting the list capped it
+  // at its 50-row page, so it never moved), refreshed on load, every 30s, and after anything is read. The panel pages
+  // the unread list 10 at a time; reading one marks it read and opens its link without reloading the page.
+  const NOTIF_PAGE = 10;
+  const notifEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  let notifUnread = 0, notifPage = 0;
+  async function refreshBell() {
+    const r = await Api.cm.notifCount().catch(() => null);
+    if (!r) return;
+    notifUnread = r.unread || 0;
     const b = document.getElementById("bell-n");
-    if (unread) { b.textContent = unread; b.style.display = "block"; }
-  })();
+    b.textContent = notifUnread > 99 ? "99+" : String(notifUnread);
+    b.style.display = notifUnread ? "block" : "none";
+    document.getElementById("bell").setAttribute("aria-label", `Notifications, ${notifUnread} unread`);
+  }
+  async function drawNotifPanel() {
+    const w = window.__notifPanel;
+    if (!w || !w.isConnected) return;
+    await refreshBell();
+    const pages = Math.max(1, Math.ceil(notifUnread / NOTIF_PAGE));
+    notifPage = Math.max(0, Math.min(notifPage, pages - 1)); // reading the last one on a page moves back a page
+    const list = await Api.cm.notifications({ limit: NOTIF_PAGE, offset: notifPage * NOTIF_PAGE }).catch(() => []);
+    const from = notifPage * NOTIF_PAGE + 1, to = notifPage * NOTIF_PAGE + list.length;
+    w.innerHTML = `<h3>Notifications ${notifUnread ? `<span class="muted notif-n">${notifUnread} unread</span>
+        <a href="javascript:void(0)" class="notif-markall" data-act="all">Mark all as read</a>` : ""}</h3>
+      <div class="notif-list">${list.length ? list.map((x) => `<div class="notif unread" data-id="${notifEsc(x.id)}" data-link="${notifEsc(x.link || "")}" role="button" tabindex="0">
+          <b>${notifEsc(x.type)}</b> — ${notifEsc(x.body)} <span class="muted">${notifEsc(new Date(x.at).toLocaleString())}</span></div>`).join("")
+        : `<p class="muted">No unread notifications.</p>`}</div>
+      ${notifUnread > NOTIF_PAGE ? `<div class="notif-pager"><span class="muted">${from}–${to} of ${notifUnread}</span>
+        <span class="tp-nav"><button type="button" class="mini" data-act="prev" ${notifPage === 0 ? "disabled" : ""}>‹ Previous</button>
+        <span class="muted">Page ${notifPage + 1} of ${pages}</span>
+        <button type="button" class="mini" data-act="next" ${notifPage >= pages - 1 ? "disabled" : ""}>Next ›</button></span></div>` : ""}`;
+  }
+  async function openNotif(el) {
+    await Api.cm.readNotif(el.dataset.id).catch(() => {});
+    const link = el.dataset.link;
+    if (link) { window.__notifPanel.remove(); location.hash = link; refreshBell(); }
+    else drawNotifPanel();
+  }
+  document.getElementById("bell").onclick = async () => {
+    const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
+    if (w.isConnected) { w.remove(); return; }
+    w.className = "notif-panel";
+    w.innerHTML = `<p class="muted">Loading…</p>`;
+    notifPage = 0;
+    document.body.appendChild(w);
+    if (!w.dataset.wired) {
+      w.dataset.wired = "1";
+      w.addEventListener("click", async (e) => {
+        const act = e.target.closest("[data-act]")?.dataset.act;
+        if (act === "prev" || act === "next") { notifPage += act === "next" ? 1 : -1; drawNotifPanel(); return; }
+        if (act === "all") { await Api.cm.readAllNotifs().catch(() => {}); notifPage = 0; drawNotifPanel(); return; }
+        const n = e.target.closest(".notif[data-id]");
+        if (n) openNotif(n);
+      });
+      w.addEventListener("keydown", (e) => { const n = e.target.closest(".notif[data-id]"); if (n && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNotif(n); } });
+      document.addEventListener("click", (e) => { if (w.isConnected && !w.contains(e.target) && !e.target.closest("#bell")) w.remove(); });
+    }
+    drawNotifPanel();
+  };
+  refreshBell();
+  setInterval(refreshBell, 30000);
 
   // Identity. The avatar doubles as the sign-out control on narrow
   // viewports, where .who-txt (and the #lo link inside it) is hidden by

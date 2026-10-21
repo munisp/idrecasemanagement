@@ -445,7 +445,7 @@ class AhcaDisputeWorkflow:
                         notify_roles,
                         args=[tenant, case_id, ["FINANCE", "CASE_MANAGER"], "REFUND_DUE",
                               "No complete filing packet 7 days after outreach — case closed. Finance: refund the initial fee "
-                              "(Financials → the case's invoice → Refund)."],
+                              "(Financials → Refunds due → Refund)."],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
                 self.closed_early = True

@@ -1163,3 +1163,11 @@ tr.flt-out{display:none}
 .load-role .pager.tp .tp-nav{margin-left:0}
 /* The next-step banner when the case's workflow has ended: a plain note in place of the step button. */
 .case-next-note{display:inline-block;max-width:46ch;font-size:12.5px;color:var(--warning-fg);background:var(--warning-bg);border-radius:8px;padding:6px 10px}
+/* Financials: the refunds the workflow ordered and Finance has not made yet */
+.fin-refunds{margin:6px 0 22px}
+.fin-refunds > h2{display:flex;align-items:center;gap:10px}
+/* Notification panel: unread total and pages */
+.notif-panel h3 .notif-n{font-weight:400;font-size:12px;margin-right:auto;margin-left:6px}
+.notif-pager{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 2px 2px;font-size:12px}
+.notif-pager .tp-nav{display:inline-flex;align-items:center;gap:6px;margin-left:auto}
+.notif:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px}

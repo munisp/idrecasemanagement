@@ -3258,6 +3258,31 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
+  // Refunds due: cases the workflow closed "Closed-Refunded" (no complete packet 7 days after outreach) whose
+  // initial fee is still paid. Refund here does what the case page's Billing tab does (settleInvoice REFUND): a
+  // Stripe refund for a card payment, otherwise the invoice is marked refunded and the money goes back outside.
+  function refundsDueHtml(d, usd) {
+    if (!d) return "";
+    const rows = d.refunds || [];
+    const when = (t) => (t ? fmtDate(t) : "—");
+    const head = `<h2 id="refunds-due">Refunds due ${rows.length ? `<span class="badge warn">${rows.length} · ${usd(d.total_cents)}</span>` : ""}</h2>`;
+    if (!rows.length) return `<section class="fin-refunds">${head}<p class="muted">No refunds due. Cases the workflow closes for a refund (no complete filing packet 7 days after outreach) appear here until their initial fee is refunded.</p></section>`;
+    return `<section class="fin-refunds">${head}
+      <p class="muted">Cases closed because no complete filing packet arrived within 7 days of outreach. The filer has been told; refund the initial fee.
+        A card payment goes back through Stripe; anything else is marked refunded here and the money is returned outside the platform.</p>
+      <div class="dg-wrap"><table id="refunds-due-tb" data-page-size="10"><thead><tr><th>Case</th><th>Filer</th><th>Bill to</th><th class="num">Amount</th><th>Paid</th>
+        <th>Paid via</th><th>Refund ordered</th><th class="num">Waiting</th><th></th></tr></thead><tbody>` +
+      rows.map((x) => `<tr><td class="mono"><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td>
+        <td>${esc(x.filer || "—")}${x.filer_email ? `<br><span class="muted">${esc(x.filer_email)}</span>` : ""}</td>
+        <td>${esc(x.party === "HEALTH_PLAN" ? "Health plan" : "Provider")}</td>
+        <td class="num">${usd(x.amount_cents)}</td><td>${when(x.paid_at)}</td>
+        <td>${x.by_card ? '<span class="badge s-paid">card — Stripe refund</span>' : '<span class="badge">check / ACH / other</span>'}</td>
+        <td>${when(x.ordered_at)}</td>
+        <td class="num">${x.days_waiting >= 3 ? `<span class="badge warn">${x.days_waiting} days</span>` : `${x.days_waiting} day${x.days_waiting === 1 ? "" : "s"}`}</td>
+        <td>${d.can_refund ? `<button class="mini" onclick="Views.settleInvoice('${esc(x.invoice_id)}','REFUND',this)">Refund ${usd(x.amount_cents)}</button>` : '<span class="muted">Finance refunds</span>'}</td></tr>`).join("") +
+      `</tbody></table></div></section>`;
+  }
+
   async function settleInvoice(invId, action, el) {
     let ref = "";
     if (action === "PAY") {
@@ -3784,10 +3809,11 @@ const Views = (() => {
       return `<div class="view-head"><h1>Financials</h1></div><p class="muted">Requires PM, FINANCE, or admin.</p>`;
     try {
       const FIN_PAGE = Pager.size();
-      const [fin, pays, chks] = await Promise.all([
+      const [fin, pays, chks, due] = await Promise.all([
         Api.program.financial(),
         Api.program.payments(null, { limit: FIN_PAGE, ...SrvSearch.params("fin-pay") }).catch(() => ({ payments: [] })),
         Api.program.checks("", { limit: FIN_PAGE, ...SrvSearch.params("fin-ck") }).catch(() => ({ checks: [] })),
+        Api.program.refundsDue().catch(() => null),
       ]);
       // first page of each server-paged list
       finPager = {
@@ -3805,6 +3831,7 @@ const Views = (() => {
           <div class="kpi"><span class="kpi-n">${usd(k.refunded_cents)}</span><span class="kpi-l">Refunded</span></div>
           <div class="kpi"><span class="kpi-n">${esc(String(k.payments_count ?? 0))}</span><span class="kpi-l">Payments settled</span></div>
         </div>`;
+      html += refundsDueHtml(due, usd);
 
       // Receivables + aging
       const rec = fin.receivables || [];

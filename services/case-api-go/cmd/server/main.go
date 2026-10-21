@@ -637,6 +637,7 @@ func main() {
 		r.Get("/tpa/documents.zip", s.orgDocumentsZip("tpa"))
 		r.Get("/hp/documents.zip", s.orgDocumentsZip("hp"))
 		r.Get("/notifications", s.listNotifications)
+		r.Get("/notifications/count", s.countNotifications) // the bell's unread total
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Post("/notifications/read-all", s.readAllNotifications)
 		r.Get("/views", s.listSavedViews)
@@ -914,6 +915,7 @@ func main() {
 		r.Get("/payments", s.listPayments)                     // payment history (tenant)
 		r.Get("/cases/{caseId}/payments", s.listPayments)      // payment history (case)
 		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
+		r.Get("/reports/refunds-due", s.refundsDue)            // refunds the workflow ordered, not yet made (refunds_due.go)
 		r.Get("/reports/fl/weekly", s.flWeeklyReport)          // contract 2.4.2: 16-col A-P CSV
 		r.Get("/reports/fl/monthly", s.flMonthlyReport)        // contract 2.4.3: 33-field CSV
 		r.Get("/reports/fl/adhoc", s.flAdhocReport)            // contract 2.4.4: chosen columns, period, statuses

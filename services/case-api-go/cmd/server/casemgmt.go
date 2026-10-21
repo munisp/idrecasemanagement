@@ -288,6 +288,22 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// countNotifications: GET /notifications/count — the caller's unread total, for the bell's badge. The list is paged
+// (50 at most per call), so counting its rows capped the badge at 50 and it never moved while more were unread.
+func (s *server) countNotifications(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	var n int
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT count(*) FROM public.notifications
+		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL`,
+		tenant, s.notifTargetsFor(r.Context(), tenant, p)).Scan(&n); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"unread": n})
+}
+
 func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
