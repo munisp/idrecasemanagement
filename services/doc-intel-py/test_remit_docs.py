@@ -198,3 +198,16 @@ class ClaimNumberAndCodes(unittest.TestCase):
         self.assertEqual(ex.get("cpt_codes"), [])  # zip codes and amounts are not procedure codes
         ctx = pipeline.stage_fields({"doc_type": "idr_claim", "text": ocr("ub04")}, {})
         self.assertNotIn("claim_number", ctx["extracted_fields"].get("identifiers", {}))  # a UB-04 prints none
+
+
+class ModelVerdict(unittest.TestCase):
+    def test_a_layout_read_document_is_not_turned_unrelated_by_the_model(self):
+        ctx = pipeline.stage_fields({"doc_type": "eob", "text": ocr("eop1")}, {})
+        ctx.update({"in_domain": False, "extracted": {}, "findings": []})
+        ctx = pipeline.stage_validate(ctx, {}, None)
+        self.assertEqual(ctx["doc_type"], "eob")
+        self.assertFalse(any("not related" in str(f.get("issue")) for f in ctx.get("findings", [])))
+
+    def test_an_unread_document_still_is(self):
+        ctx = {"doc_type": "eob", "text": "Lunch menu", "in_domain": False, "extracted": {}, "findings": [], "extracted_fields": {}}
+        self.assertEqual(pipeline.stage_validate(ctx, {}, None)["doc_type"], "unrelated")

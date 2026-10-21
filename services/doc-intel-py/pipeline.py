@@ -1447,7 +1447,13 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # this document is treated as case evidence.
     ex_fields = {k: v for k, v in ex.items() if v not in (None, "", [], {})}
     unreadable = bool(ctx.get("scan_quality_poor") or ctx.get("ocr_low_confidence"))
-    if unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
+    # A layout reader that recognised the page (an 835 printout, a payer EOB, a UB-04, the filing packet) is
+    # firmer evidence than the model's relevance vote, which sometimes calls a plain EOB "not medical billing":
+    # the document keeps its type instead of becoming "unrelated, possible mis-upload".
+    layout_read = any((ctx.get("extracted_fields") or {}).get(k) for k in ("remit", "ub04", "packet"))
+    if layout_read:
+        pass
+    elif unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
         # The model saw too little legible text to recognise the page. That is
         # a page nobody could read, not a page about something else -- and
         # "unrelated, possible mis-upload" sends a person looking for the
