@@ -1394,6 +1394,7 @@ const Views = (() => {
         const a = na && na.next_action;
         const box = document.getElementById("next-action");
         if (!a || !box) return;
+        if (window.Telemetry) Telemetry.track("next_action_shown", a.action_id, { confidence: a.confidence, basis: na.confidence_basis });
         box.innerHTML = `<div class="sla-cluster"><div class="sla-card" style="border-left:3px solid var(--accent,#3b82f6)">
           <button id="na-go" class="primary">${esc(a.label)}</button>
           <span class="lbl">Suggested next step · ${esc(a.reason)}</span></div></div>`;
@@ -2831,6 +2832,23 @@ const Views = (() => {
         <b>PENDING</b> — the named role reviews the exact subject, body, recipients, and any secure links, then
         approves (email is delivered and logged) or rejects with a note back to the drafter. Ungated templates
         never appear here. An empty queue simply means no gated draft is waiting right now.</p></details>`;
+      let dqHtml = "";
+      // Phase 3-lite panel: which templates produce drafts reviewers send
+      // untouched. Staff-only, advisory — no model, just graded decisions.
+      if (can("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        try {
+          const dq = await Api.qaDraftQuality(90);
+          if (dq.templates && dq.templates.length) {
+            dqHtml = `<h2>Draft quality (last ${dq.days} days)</h2>
+              <p class="muted">An untouched approval means the template produced text a reviewer sent as-is; edit ratio is how much of the draft the reviewer rewrote.</p>
+              <table><thead><tr><th>Template</th><th>Channel</th><th>Drafts</th><th>Approved</th><th>Untouched</th><th>Rejected</th><th>Avg edit ratio</th></tr></thead><tbody>` +
+              dq.templates.map((x) => `<tr><td>${esc(x.artifact)}</td><td>${esc(x.channel)}</td><td>${x.drafts}</td>
+                <td>${x.approved}</td><td>${x.approved_unedited} (${x.drafts ? Math.round(100 * x.approved_unedited / x.drafts) : 0}%)</td>
+                <td>${x.rejected}</td><td>${x.avg_edit_ratio == null ? "—" : Math.round(x.avg_edit_ratio * 100) + "%"}</td></tr>`).join("") +
+              `</tbody></table>`;
+          }
+        } catch { /* stats are advisory */ }
+      }
       const recentHtml = recent.length
         ? `<h2>Recently decided</h2><table><thead><tr><th>Subject</th><th>Status</th><th>Reviewed by</th><th>When</th></tr></thead><tbody>` +
           recent.map((i) => `<tr><td>${esc(i.subject)}</td><td>${badge(i.status)}</td>
@@ -2839,7 +2857,7 @@ const Views = (() => {
       if (!q.length)
         return `<div class="view-head"><h1>QA gate</h1>
           <span class="muted">nothing reaches a party without approval on gated templates</span></div>
-          ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}`;
+          ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}${dqHtml}`;
       const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
             <td>${esc(i.drafted_by)}</td>
             <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
@@ -2849,7 +2867,7 @@ const Views = (() => {
         <span class="muted">nothing reaches a party without approval on gated templates</span></div>
         ${intro}<h2>Awaiting review (${q.length})</h2>
         <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead>
-        <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}`;
+        <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}${dqHtml}`;
     } catch (e) { return err(e); }
   }
 
