@@ -538,7 +538,7 @@ const Views = (() => {
           [c.intake_steps_due, "#/intake", `intake steps due${c.intake_overdue ? ` (${c.intake_overdue} overdue)` : ""}`],
           [c.statutory_due_72h, "#/cases", "statutory clocks < 72h"],
           [c.statutory_overdue, "#/cases", "statutory clocks overdue"],
-          [c.stalled_cases, "#/cases", "stalled cases (no activity 7d+)"],
+          [c.stalled_cases, "#/cases?stalled=1", "stalled cases (no activity 7d+)"],
         ].filter(([n]) => n > 0);
         if (!chips.length) { qs.remove(); return; }
         qs.innerHTML = `<div class="sla-cluster">` + chips.map(([n, href, lbl]) => `
@@ -829,7 +829,8 @@ const Views = (() => {
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
-      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+      const stalled = hq.get("stalled") === "1";
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(stalled ? { stalled: "true" } : {}) };
       const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
       let loaded = page.cases.slice();   // the rows of the page on screen
       // The default sort pages by keyset, so going back needs the cursor each
@@ -885,7 +886,7 @@ const Views = (() => {
           return { total: grandTotal, shown: loaded.length };
         });
       });
-      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total</span>
+      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total${stalled ? ' · <span class="badge warn">stalled filter</span> <a href="#/cases">clear</a>' : ""}</span>
 
         <span style="flex:1"></span>
         <button class="mini" id="grab">⇪ Grab next</button>
