@@ -43,6 +43,44 @@ func TestRecommendNextActionIneligbleLock(t *testing.T) {
 	}
 }
 
+// Every rule's confidence must equal its entry in nextActionPriors — the
+// stats endpoint reports the map, so drift between the two would make the
+// dashboard lie about what the recommender believes.
+func TestRuleConfidencesMatchPriorsTable(t *testing.T) {
+	inputs := []nextActionInput{
+		{Lock: "AWAITING_PAYMENT"},
+		{Lock: "INELIGIBLE"},
+		{PendingQA: 1, IsReviewer: true},
+		{UnreadDocs: 1},
+		{HasOverlaps: true},
+		{OfferWindowOpen: true, CanDecide: true},
+		{ChecklistDue: 2},
+		{Status: "OPEN_NEGOTIATION"},
+		{Status: "INITIATED"},
+		{Status: "DETERMINED"},
+	}
+	seen := map[string]bool{}
+	for _, in := range inputs {
+		rec := recommendNextAction(in, "case-x")
+		prior, ok := nextActionPriors[rec.ActionID]
+		if !ok {
+			t.Errorf("rule emitted %q with no priors-table entry", rec.ActionID)
+			continue
+		}
+		if rec.Confidence != prior {
+			t.Errorf("%s: rule confidence %v != priors table %v", rec.ActionID, rec.Confidence, prior)
+		}
+		seen[rec.ActionID] = true
+	}
+	// And the reverse: no orphan priors for actions the rules never emit —
+	// the stats endpoint would show a 0-shown row that can never calibrate.
+	for id := range nextActionPriors {
+		if !seen[id] {
+			t.Errorf("priors-table entry %q is never emitted by any rule", id)
+		}
+	}
+}
+
 func TestCalibrateConfidence(t *testing.T) {
 	// Below threshold: prior stands, basis says so.
 	c, b := calibrateConfidence(0.7, 29, 29)
