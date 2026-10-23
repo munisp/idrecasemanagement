@@ -192,6 +192,7 @@
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
+    if (has("CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/doc-review", "◉", "Doc review"]);
   }
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/intake", "⇥", "Intake"]);
@@ -417,6 +418,7 @@
     [/^#\/assistant$/, () => Views.assistant("")],
     [/^#\/assistant\/([\w-]+)$/, (m) => Views.assistant(m[1])],
     [/^#\/qa$/, Views.qaQueue],
+    [/^#\/doc-review$/, Views.docReview],
     [/^#\/intake$/, Views.intake],
     [/^#\/deliverables$/, Views.deliverables],
     [/^#\/finance$/, Views.finance],
