@@ -21,15 +21,15 @@ import (
 // ---- Statutory clock projection -------------------------------------------------
 
 type ClockView struct {
-	Clock     string `json:"clock"`      // NEGOTIATION_30BD | OFFER_WINDOW_10BD | DETERMINATION_30BD | PAYMENT_30CD
-	Label     string `json:"label"`      // human label
-	Basis     string `json:"basis"`      // business | calendar
-	TotalDays int    `json:"total_days"` // statutory length
-	Remaining int    `json:"remaining"`  // days remaining (negative = breach)
-	Due       string `json:"due"`        // YYYY-MM-DD
-	State     string `json:"state"`      // ok | watch | risk | breach | closed | paused
-	Cite      string `json:"cite"`       // 45 CFR citation
-	BasisNote string `json:"basis_note"` // provenance of the start timestamp
+	Clock     string `json:"clock"`              // NEGOTIATION_30BD | OFFER_WINDOW_10BD | DETERMINATION_30BD | PAYMENT_30CD
+	Label     string `json:"label"`              // human label
+	Basis     string `json:"basis"`              // business | calendar
+	TotalDays int    `json:"total_days"`         // statutory length
+	Remaining int    `json:"remaining"`          // days remaining (negative = breach)
+	Due       string `json:"due"`                // YYYY-MM-DD
+	State     string `json:"state"`              // ok | watch | risk | breach | closed | paused
+	Cite      string `json:"cite"`               // 45 CFR citation
+	BasisNote string `json:"basis_note"`         // provenance of the start timestamp
 	HardDue   string `json:"hard_due,omitempty"` // contract hard limit, when later than Due (state "late" in between)
 }
 
@@ -60,9 +60,9 @@ func clockState(remaining, total int) string {
 }
 
 type clockRow struct {
-	id, status            string
-	openedAt, updatedAt   time.Time
-	negEnd, offerEnds     *time.Time
+	id, status          string
+	openedAt, updatedAt time.Time
+	negEnd, offerEnds   *time.Time
 }
 
 func projectClocks(c clockRow, today time.Time) []ClockView {
@@ -220,9 +220,11 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		case "status":
+			oldStatus := s.caseStatusNow(r.Context(), tenant, id)
 			_, err = s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET status=$1, updated_at=now() WHERE id=$2`, t), in.Status, id)
 			if err == nil {
+				s.recordTransition(r.Context(), tenant, id, axisLifecycle, oldStatus, in.Status, p.Subject, "bulk")
 				s.logActivity(r.Context(), tenant, id, "STATUS_CHANGE", fmt.Sprintf("Status changed to %s (bulk) by %s", in.Status, p.Subject))
 				s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
 					"by": p.Subject, "status": in.Status, "bulk": true,

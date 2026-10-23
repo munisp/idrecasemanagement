@@ -149,6 +149,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 		"case_number": caseNumber, "requester_email": email, "requester_org": org,
 		"disputed_amount_cents": disputedAmountCents,
 	})
+	s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "", "PENDING_INTAKE", "", "intake")
 
 	s.ensureChecklist(r, tenant, caseID)
 
@@ -213,9 +214,12 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 	// cannot reach the docket before payment by any path.
 	if cfg.Fees.InitialFeeCents > 0 && batchPay {
 		if _, ierr := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents); ierr == nil {
-			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
+			if res, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
 				sanitizeTenant(tenant)), caseID); uerr == nil {
+				if res.RowsAffected() > 0 {
+					s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "PENDING_INTAKE", "AWAITING_PAYMENT", "", "intake")
+				}
 				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
 					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents, "paid_with": "bulk batch checkout",
 				})
@@ -226,9 +230,12 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 	if cfg.Fees.InitialFeeCents > 0 && !batchPay {
 		checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
 		if cerr == nil {
-			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
+			if res, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', updated_at=now() WHERE id=$1`,
 				sanitizeTenant(tenant)), caseID); uerr == nil {
+				if res.RowsAffected() > 0 {
+					s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "PENDING_INTAKE", "AWAITING_PAYMENT", "", "intake")
+				}
 				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
 					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents,
 				})
@@ -285,6 +292,7 @@ func (s *server) activatePaidIntakeFor(r *http.Request, tenant, caseID string, t
 	if err != nil || res.RowsAffected() == 0 {
 		return // not payment-gated, or already activated
 	}
+	s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "AWAITING_PAYMENT", "PENDING_INTAKE", "", "intake")
 	// "Date Received" is the date the dispute was opened by payment -- not
 	// the day someone asked how to file. The 60-day clock runs from it.
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(

@@ -537,8 +537,9 @@ func main() {
 		r.Get("/telemetry/paths", s.telemetryPaths)                // per-workflow transitions + abandonment
 		r.Get("/telemetry/action-stats", s.telemetryActionStats)   // per-action calibration: prior vs observed
 		r.Get("/telemetry/prefill-stats", s.telemetryPrefillStats) // per-field prefill accept rates
-		r.Post("/fees/transfer", s.postFeeTransfer)                // escrow/admin/IDRE fee double-entry
-		r.Post("/cases/{caseId}/signal", s.signalCase)             // e.g. response filed, fees paid
+		r.Get("/analytics/transitions", s.analyticsTransitions)
+		r.Post("/fees/transfer", s.postFeeTransfer)    // escrow/admin/IDRE fee double-entry
+		r.Post("/cases/{caseId}/signal", s.signalCase) // e.g. response filed, fees paid
 
 		// Documents: encrypted upload, authorized download, analysis status.
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
@@ -1207,6 +1208,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"insert"}`, http.StatusInternalServerError)
 		return
 	}
+	s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "", initialStatus, r.Context().Value(ctxPrincipal{}).(principal).Subject, "initiation")
 
 	// Transactional outbox — published to Kafka by the outbox relay.
 	payload, _ := json.Marshal(map[string]any{
