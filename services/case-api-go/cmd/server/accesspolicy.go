@@ -65,6 +65,7 @@ var outsideShellPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/upload-policy$`),     // what may be uploaded, and how big
 	regexp.MustCompile(`^/uploads(/|$)`),       // the caller's own resumable uploads
 	regexp.MustCompile(`^/presence/ping$`),
+	regexp.MustCompile(`^/telemetry/events$`), // the caller's own portal-use counts (telemetry.go; never what is typed)
 }
 
 // partyOpenPaths: an invited party's own workspace, and the sealed offers of a

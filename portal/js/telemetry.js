@@ -18,6 +18,11 @@ const Telemetry = (() => {
     if (h.startsWith("#/cases/")) return "case_detail";
     if (h.startsWith("#/crm")) return "crm";
     if (h === "#/" || h.startsWith("#/dashboard")) return "dashboard";
+    if (h.startsWith("#/tpa")) return "tpa_portal";
+    if (h.startsWith("#/healthplan")) return "health_plan_portal";
+    if (h.startsWith("#/document-requests")) return "document_requests";
+    if (h.startsWith("#/calendar")) return "calendar";
+    if (h.startsWith("#/reports")) return "reports";
     return "other";
   };
   const track = (action, target, meta) => {
