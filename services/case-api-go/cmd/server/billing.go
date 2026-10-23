@@ -225,7 +225,7 @@ func (s *server) generateInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sql := `
-		SELECT case_id, role, sum(minutes) FILTER (WHERE billable) AS billable_minutes
+		SELECT case_id, role, entry_date::text AS entry_date, sum(minutes) FILTER (WHERE billable) AS billable_minutes
 		FROM public.time_entries
 		WHERE tenant=$1 AND entry_date >= $2::date AND entry_date < $3::date`
 	args := []any{tenant, from, to}
@@ -233,13 +233,14 @@ func (s *server) generateInvoice(w http.ResponseWriter, r *http.Request) {
 		sql += ` AND case_id=$4`
 		args = append(args, in.CaseID)
 	}
-	sql += ` GROUP BY case_id, role HAVING sum(minutes) FILTER (WHERE billable) > 0 ORDER BY case_id, role`
+	// By day: each day's time is priced at the rate in force that day (a rate change mid-period splits the line).
+	sql += ` GROUP BY case_id, role, entry_date HAVING sum(minutes) FILTER (WHERE billable) > 0 ORDER BY case_id, role, entry_date`
 	rows, err := s.queryRows(r, sql, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	rates := s.timeRateMap(r, tenant)
+	rates := s.timeRateBook(r, tenant)
 
 	type line struct {
 		CaseID, Role string
@@ -247,17 +248,30 @@ func (s *server) generateInvoice(w http.ResponseWriter, r *http.Request) {
 		Rate         int64
 	}
 	byCase := map[string][]line{}
+	unratedAt := map[string]int{} // case|role -> index in unrated
 	var unrated []map[string]any
 	for _, row := range rows {
 		cid, _ := row["case_id"].(string)
 		role, _ := row["role"].(string)
+		day, _ := row["entry_date"].(string)
 		mins := toInt64(row["billable_minutes"])
-		rate, ok := rates[role]
+		rate, ok := rates.at(role, day)
 		if !ok {
-			unrated = append(unrated, map[string]any{"case_id": cid, "role": role, "billable_minutes": mins})
+			if i, seen := unratedAt[cid+"|"+role]; seen {
+				unrated[i]["billable_minutes"] = toInt64(unrated[i]["billable_minutes"]) + mins
+			} else {
+				unratedAt[cid+"|"+role] = len(unrated)
+				unrated = append(unrated, map[string]any{"case_id": cid, "role": role, "billable_minutes": mins})
+			}
 			continue
 		}
-		byCase[cid] = append(byCase[cid], line{cid, role, mins, rate})
+		ls := byCase[cid]
+		if n := len(ls); n > 0 && ls[n-1].Role == role && ls[n-1].Rate == rate {
+			ls[n-1].Minutes += mins // same role, same rate: one line
+		} else {
+			ls = append(ls, line{cid, role, mins, rate})
+		}
+		byCase[cid] = ls
 	}
 	if len(unrated) > 0 && blockUnrated {
 		writeJSON(w, http.StatusConflict, map[string]any{

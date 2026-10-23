@@ -114,25 +114,27 @@ func (s *server) tpaBulkSample(w http.ResponseWriter, r *http.Request) {
 	}
 	merged := r.URL.Query().Get("layout") == "merged"
 	// Pre-fill with the TPA's own ready clients, so party_name already matches its roster; staff get example names.
-	parties := []string{}
+	// Each with its provider group, so provider_group shows how a provider is placed.
+	parties, groups := []string{}, []string{}
 	if org, err := s.tpaForPrincipal(r, tenant); err == nil {
 		// Ready to file, the same rule as the disputes.csv template: active, profile and payment done, no hold.
-		rows, err := s.db.Query(r.Context(), `SELECT party_name FROM public.tpa_clients
-			WHERE tenant=$1 AND tpa_id=$2 AND status='ACTIVE' AND onboarding_status IN ('READY','DOCS_PENDING')
-			ORDER BY (onboarding_status='READY') DESC, party_name LIMIT 2`, tenant, org.ID)
+		rows, err := s.db.Query(r.Context(), `SELECT c.party_name, coalesce(g.name,'') FROM public.tpa_clients c
+			LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
+			WHERE c.tenant=$1 AND c.tpa_id=$2 AND c.status='ACTIVE' AND c.onboarding_status IN ('READY','DOCS_PENDING')
+			ORDER BY (c.onboarding_status='READY') DESC, c.party_name LIMIT 2`, tenant, org.ID)
 		if err == nil {
 			for rows.Next() {
-				var n string
-				if rows.Scan(&n) == nil {
-					parties = append(parties, n)
+				var n, g string
+				if rows.Scan(&n, &g) == nil {
+					parties, groups = append(parties, n), append(groups, g)
 				}
 			}
 			rows.Close()
 		}
 	}
-	for _, ex := range []string{"Gulf Coast Clinic", "Bay Imaging Center"} {
+	for i, ex := range []string{"Gulf Coast Clinic", "Bay Imaging Center"} {
 		if len(parties) < 2 {
-			parties = append(parties, ex)
+			parties, groups = append(parties, ex), append(groups, []string{"Gulf Coast Medical Group", ""}[i])
 		}
 	}
 
@@ -144,7 +146,7 @@ func (s *server) tpaBulkSample(w http.ResponseWriter, r *http.Request) {
 	}
 	var csvBuf bytes.Buffer
 	cw := csv.NewWriter(&csvBuf)
-	_ = cw.Write([]string{"dispute_ref", "party_name", "disputed_amount", "other_party_name", "other_party_email", "other_party_naic", "contact_name", "notes"})
+	_ = cw.Write([]string{"dispute_ref", "provider_group", "party_name", "disputed_amount", "other_party_name", "other_party_email", "other_party_naic", "contact_name", "notes"})
 	examples := [][]string{
 		{"Sunshine Health", "disputes@sunshine-health.example", "12345", "Dr Lee", "ER visit 08/14 - replace with your dispute"},
 		{"Bay Health Plan", "claims@bayhealth.example", "", "", "MRI 07/02 - replace with your dispute"},
@@ -152,24 +154,31 @@ func (s *server) tpaBulkSample(w http.ResponseWriter, r *http.Request) {
 	amounts := []string{"1980.00", "2450.00"}
 	for i, party := range parties {
 		ref := fmt.Sprintf("CLAIM-%03d", i+1)
-		_ = cw.Write(append([]string{ref, party, amounts[i]}, examples[i]...))
+		_ = cw.Write(append([]string{ref, groups[i], party, amounts[i]}, examples[i]...))
+		who := party
+		if groups[i] != "" {
+			who = party + " (" + groups[i] + ")"
+		}
 		if merged {
 			pages := [][]string{}
 			for _, d := range sampleDocs {
-				pages = append(pages, samplePage(d, ref, party))
+				pages = append(pages, samplePage(d, ref, who))
 			}
 			put(ref+"/merged.pdf", simplePDF(pages))
 		} else {
 			for _, d := range sampleDocs {
-				put(ref+"/"+d.file, simplePDF([][]string{samplePage(d, ref, party)}))
+				put(ref+"/"+d.file, simplePDF([][]string{samplePage(d, ref, who)}))
 			}
 		}
 	}
 	cw.Flush()
 	put("disputes.csv", csvBuf.Bytes())
-	layout := "Each dispute folder holds the six documents as separate PDFs, named exactly as here."
+	layout := "Each dispute folder holds its documents as separate files. The six named here are the usual ones, not a\r\n" +
+		"   limit: add every other document the dispute relies on (claim forms, denials, license, contract,\r\n" +
+		"   medical records...) under any name, and leave out any that don't apply."
 	if merged {
-		layout = "Each dispute folder holds ONE merged.pdf with all six documents, one after another."
+		layout = "Each dispute folder holds ONE merged.pdf with the dispute's documents, one after another, plus any\r\n" +
+			"   other files the dispute relies on."
 	}
 	put("README.txt", []byte(strings.Join([]string{
 		"Sample bulk filing - how to use it",
@@ -177,9 +186,13 @@ func (s *server) tpaBulkSample(w http.ResponseWriter, r *http.Request) {
 		"1. disputes.csv lists the disputes, one row each. party_name must be one of your clients that is ready",
 		"   (profile and payment method done). other_party_name / other_party_email are the health plan the",
 		"   dispute is against and where its notices go. Replace the example rows with your own.",
+		"   provider_group is the provider group the client is in on your Clients tab (optional). Fill it in",
+		"   when two of your providers share a name; a provider in a different group than the one given is",
+		"   refused, so a dispute is never filed for the wrong provider.",
 		"2. One folder per dispute, named exactly like its dispute_ref (CLAIM-001, ...).",
 		"   " + layout,
-		"3. Replace every sample PDF with the real document. The samples say what each one must show.",
+		"3. Replace every sample PDF with the real document. The samples say what each one usually shows.",
+		"   Every document is read and flagged for the reviewer if it doesn't look like its name; none is refused.",
 		"   A ZIP that still contains a sample document is refused, so nothing is filed by mistake.",
 		"4. Zip the CSV and the folders together (disputes.csv at the top level) and upload it on",
 		"   'File many disputes at once'. Up to 500 disputes per ZIP, 512 MB at most.",

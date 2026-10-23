@@ -159,7 +159,7 @@ func TestTimeReportFilterFromIgnoresJunk(t *testing.T) {
 }
 
 func TestSummarizeTimeTotalsAndMoney(t *testing.T) {
-	rates := map[string]int64{"CASE_MANAGER": 6000, "ATTORNEY": 30000} // cents per hour; CODER has no rate
+	rates := flatRates(map[string]int64{"CASE_MANAGER": 6000, "ATTORNEY": 30000}) // cents per hour; CODER has no rate
 	r := summarizeTime(timeFixture(), rates, true)
 	if r["total_minutes"].(int64) != 255 || r["billable_minutes"].(int64) != 210 {
 		t.Errorf("totals: %v / %v", r["total_minutes"], r["billable_minutes"])
@@ -193,5 +193,63 @@ func TestTimeReportRangeLabelNamesItsLastDay(t *testing.T) {
 	from, to, label, err := timeReportPeriod("", "", "2026-10-01", "2026-11-01")
 	if err != nil || from != "2026-10-01" || to != "2026-11-01" || label != "2026-10-01 to 2026-10-31" {
 		t.Errorf("got %s %s %q %v", from, to, label, err)
+	}
+}
+
+// flatRates: one rate per role, in force from the start.
+func flatRates(m map[string]int64) rateBook {
+	b := rateBook{}
+	for role, c := range m {
+		b[role] = []FeeStep{{EffectiveFrom: "2000-01-01", Cents: c}}
+	}
+	return b
+}
+
+// A new rate prices time from its day on; time worked before keeps the old rate.
+func TestRateBookByDay(t *testing.T) {
+	b := rateBook{"CODER": {{EffectiveFrom: "2000-01-01", Cents: 6000}, {EffectiveFrom: "2027-01-01", Cents: 7200}}}
+	for day, want := range map[string]int64{"2026-12-31": 6000, "2027-01-01": 7200, "2027-06-30": 7200} {
+		if got, _ := b.at("CODER", day); got != want {
+			t.Errorf("CODER on %s = %d, want %d", day, got, want)
+		}
+	}
+	if _, ok := b.at("ATTORNEY", "2027-01-01"); ok {
+		t.Error("a role with no rate is unrated")
+	}
+}
+
+func TestFeeOnSchedule(t *testing.T) {
+	sch := []FeeStep{{EffectiveFrom: "2027-01-01", Cents: 12900}, {EffectiveFrom: "2026-01-01", Cents: 12359}}
+	for day, want := range map[string]int64{"2026-10-22": 12359, "2027-01-01": 12900} {
+		if got, ok := feeOn(sch, day); !ok || got != want {
+			t.Errorf("fee on %s = %d, want %d", day, got, want)
+		}
+	}
+	if _, ok := feeOn(sch, "2025-12-31"); ok {
+		t.Error("before the first entry the schedule does not apply")
+	}
+}
+
+func TestBilledRoleFor(t *testing.T) {
+	np := principal{Subject: "n", Roles: []string{"NURSE_PHYSICIAN"}}
+	for _, c := range []struct {
+		p          principal
+		asked, def string
+		role       string
+		refused    bool
+	}{
+		{np, "", timeEntryRole(np), "", true},  // a Nurse/Physician must say which
+		{np, "Nurse/Physician", "", "", true},  // ...and can't log both at once
+		{np, "nurse", "", "NURSE", false},      // as a Nurse
+		{np, "Physician", "", "DOCTOR", false}, // as a Physician (the physician expert rate)
+		{np, "CODER", "", "", true},            // not a role they hold
+		{principal{Roles: []string{"CASE_MANAGER"}}, "Reviewer", "", "CASE_MANAGER", false},
+		{principal{Roles: []string{"DOCTOR"}}, "", "DOCTOR", "DOCTOR", false},
+		{principal{Roles: []string{"NURSE"}}, "physician", "", "", true}, // a Nurse alone can't bill as a Physician
+	} {
+		role, why := billedRoleFor(c.p, c.asked, c.def)
+		if (why != "") != c.refused || (!c.refused && role != c.role) {
+			t.Errorf("%v asked %q: got %q (%s)", c.p.Roles, c.asked, role, why)
+		}
 	}
 }

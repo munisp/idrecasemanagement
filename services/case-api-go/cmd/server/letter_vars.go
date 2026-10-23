@@ -284,21 +284,36 @@ func (s *server) putTemplateVariables(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "changed": changed})
 }
 
+// letterNames: what the case knows for the bracketed fill-ins of the standard templates.
+type letterNames struct {
+	Provider, Plan, ProviderContact, PlanContact, DueDate string
+	Filer                                                 string // the filing party as the letter greets it: its contact, else its name
+	Estimate                                              string // the Full Review cost estimate, "$1,500.00" ("" not yet estimated)
+}
+
 // fillInNames replaces the bracketed fill-ins the standard templates carry ("[Plan name]", "[Provider Contact
-// Name]"...) with the case's own names, when the case knows them. One it does not know is left for the drafter.
-func fillInNames(text, provider, plan, providerContact string) string {
-	pairs := []string{}
-	if plan != "" {
-		pairs = append(pairs, "[Plan name]", plan, "[plan name]", plan, "[PLAN NAME]", strings.ToUpper(plan))
+// Name]"...) with the case's own names. A contact the case doesn't know becomes a courteous title -- never a bracket
+// left in a letter that goes out. A party name or due date it doesn't know is left for the drafter to see in QA.
+func fillInNames(text string, n letterNames) string {
+	pairs := []string{
+		"[Provider Contact Name]", orWord(n.ProviderContact, "Provider Representative"),
+		"[Health Plan Contact Name]", orWord(n.PlanContact, "Health Plan Representative"),
 	}
-	if provider != "" {
-		pairs = append(pairs, "[Provider Name]", provider, "[provider name]", provider, "[PROVIDER NAME]", strings.ToUpper(provider))
+	if n.Plan != "" {
+		pairs = append(pairs, "[Plan name]", n.Plan, "[plan name]", n.Plan, "[PLAN NAME]", strings.ToUpper(n.Plan))
 	}
-	if providerContact != "" {
-		pairs = append(pairs, "[Provider Contact Name]", providerContact)
+	if n.Provider != "" {
+		pairs = append(pairs, "[Provider Name]", n.Provider, "[provider name]", n.Provider, "[PROVIDER NAME]", strings.ToUpper(n.Provider))
 	}
-	if len(pairs) == 0 {
-		return text
+	if n.DueDate != "" {
+		pairs = append(pairs, "[due date]", n.DueDate)
+	}
+	if n.Filer != "" {
+		pairs = append(pairs, "[Filing Party full name]", n.Filer, "[Filing party full name]", n.Filer, "[filing party full name]", n.Filer)
+	}
+	if n.Estimate != "" {
+		// The templates write "$[insert amount]"; the amount carries its own dollar sign.
+		pairs = append(pairs, "$[insert amount]", n.Estimate, "[insert amount]", n.Estimate)
 	}
 	return strings.NewReplacer(pairs...).Replace(text)
 }

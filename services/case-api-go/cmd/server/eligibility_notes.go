@@ -93,7 +93,7 @@ func (s *server) addEligibilityNote(w http.ResponseWriter, r *http.Request) {
 func (s *server) eligibilityNotesByReview(r *http.Request, tenant, caseID string) map[string][]map[string]any {
 	rows, err := s.queryRows(r, `
 		SELECT id, review_id::text AS review_id, body, author, author_role, created_at
-		FROM public.eligibility_review_notes WHERE tenant=$1 AND case_id=$2 ORDER BY created_at`, tenant, caseID)
+		FROM public.eligibility_review_notes WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC`, tenant, caseID)
 	out := map[string][]map[string]any{}
 	if err != nil {
 		return out // notes are additive: a missing table (database not migrated yet) must not break the history

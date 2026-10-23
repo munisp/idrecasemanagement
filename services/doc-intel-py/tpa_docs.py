@@ -193,7 +193,8 @@ def _audit_package(conn, tenant: str, package_id: str, prefix: str, status: str)
 
 
 def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") -> str:
-    """Package status from its slot verdicts. READY iff all six ACCEPTED."""
+    """Package status from its documents: READY once every one has been read. A document that doesn't match its
+    slot is flagged for the Reviewer (case-api attaches it with the rest and says so); it never holds the set."""
     # Lock the package first: two workers finishing two of its documents at
     # once each counted the other's verdict as not there yet (uncommitted),
     # and the package stayed VALIDATING with all six accepted.
@@ -204,10 +205,8 @@ def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") ->
         f"SELECT slot, status FROM public.{prefix}_package_docs WHERE tenant=%s AND package_id=%s",
         (tenant, package_id)).fetchall()
     by_slot = {r[0]: r[1] for r in rows}
-    if all(by_slot.get(s) == "ACCEPTED" for s in SLOTS):
+    if by_slot and not any(v in ("PENDING", "ANALYZING") for v in by_slot.values()):
         status = "READY"
-    elif any(v == "REJECTED" for v in by_slot.values()):
-        status = "REJECTED"
     else:
         status = "VALIDATING"
     conn.execute(

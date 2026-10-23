@@ -179,8 +179,23 @@ class CaseFill(unittest.TestCase):
                                       "document_value": "Z149MP5A1008", "document": "eop1.pdf"}])
 
 
-if __name__ == "__main__":
-    unittest.main()
+class CaseFillWhoseDocument(unittest.TestCase):
+    # The filer's own name is never replaced by the name a document prints; the document's name is kept aside.
+    def test_filer_name_kept(self):
+        d = {"requester_org": "E2E Shands Test Clinic", "filing_party_type": "PROVIDER"}
+        self.assertEqual(main.protect_filer_names(d, {"provider_org": "Bayfront Medical Center", "health_plan": "X"}),
+                         {"provider_org_on_documents": "Bayfront Medical Center", "health_plan": "X"})
+        self.assertEqual(main.protect_filer_names({"requester_org": "Harbor", "filing_party_type": "HEALTH_PLAN"},
+                                                  {"health_plan": "Other Plan"}), {"health_plan_on_documents": "Other Plan"})
+        self.assertEqual(main.protect_filer_names({}, {"provider_org": "Bayfront"}), {"provider_org": "Bayfront"})
+
+    # The other side's uploads are its response: never applied to the case.
+    def test_responding_party_upload(self):
+        self.assertTrue(main.from_responding_party("respondent:TEST UI Plan", "PARTY_UPLOADS"))
+        self.assertFalse(main.from_responding_party("tpa:TEST UI3", "INTAKE"))
+        self.assertFalse(main.from_responding_party("", "INTAKE"))
+
+
 
 
 class ClaimNumberAndCodes(unittest.TestCase):
@@ -211,3 +226,7 @@ class ModelVerdict(unittest.TestCase):
     def test_an_unread_document_still_is(self):
         ctx = {"doc_type": "eob", "text": "Lunch menu", "in_domain": False, "extracted": {}, "findings": [], "extracted_fields": {}}
         self.assertEqual(pipeline.stage_validate(ctx, {}, None)["doc_type"], "unrelated")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -247,7 +248,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 		}
 	}
 	if cfg.Fees.InitialFeeCents > 0 && !batchPay {
-		checkoutURL, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
+		cardURL, bankURL, cardFee, cerr := s.issueInitialFeeCheckout(r, tenant, caseID, caseNumber, cfg.Fees.InitialFeeCents)
 		if cerr == nil {
 			if _, uerr := s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET status='AWAITING_PAYMENT', program_dates = coalesce(program_dates,'{}'::jsonb) - 'received_at', updated_at=now() WHERE id=$1`,
@@ -255,14 +256,12 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 				s.logAudit(r.Context(), tenant, caseID, "INTAKE_AWAITING_PAYMENT", map[string]any{
 					"case_number": caseNumber, "fee_cents": cfg.Fees.InitialFeeCents,
 				})
-				body := fmt.Sprintf(
-					"Thank you for contacting us regarding the claims dispute resolution program.\n\n"+
-						"One step remains before your dispute is opened: payment of the initial review fee ($%d.%02d).\n\n"+
-						"Pay securely here: %s\n\n"+
-						"Once your payment is confirmed you will receive your case number, the filing "+
-						"instructions and packet, and your secure document-upload link. Documents cannot "+
-						"be accepted before payment.",
-					cfg.Fees.InitialFeeCents/100, cfg.Fees.InitialFeeCents%100, checkoutURL)
+				body := "Thank you for contacting us regarding the claims dispute resolution program.\n\n" +
+					"One step remains before your dispute is opened: payment of the initial review fee (" + usd(cfg.Fees.InitialFeeCents) + ").\n\n" +
+					payLinksText(cfg.Fees.InitialFeeCents, cardFee, cardURL, bankURL) + "\n\n" +
+					"Once your payment is confirmed you will receive your case number, the filing " +
+					"instructions and packet, and your secure document-upload link. Documents cannot " +
+					"be accepted before payment."
 				if merr := s.sendMail([]string{email}, nil, "Claims dispute — payment required to open your case", body); merr == nil {
 					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake")
 				} else {
@@ -410,11 +409,26 @@ func (s *server) issueInitialFeeInvoice(r *http.Request, tenant, caseID, caseNum
 	return invID, nil
 }
 
-func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (string, error) {
+// The filer is offered both ways to pay (card_fee.go): a page for a card, which adds the card fee, and one for a
+// bank account. It returns the two pages' links; the bank page's is "" when it could not be opened.
+func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNumber string, amountCents int64) (cardURL, bankURL string, cardFee int64, err error) {
 	invID, err := s.issueInitialFeeInvoice(r, tenant, caseID, caseNumber, amountCents)
 	if err != nil {
-		return "", err
+		return "", "", 0, err
 	}
+	_, cardFee = s.cardFees(r.Context(), tenant, []string{invID})
+	if cardURL, err = s.initialFeeSession(r, tenant, caseID, caseNumber, invID, amountCents, payByCard, cardFee); err != nil {
+		return "", "", 0, err
+	}
+	if bankURL, err = s.initialFeeSession(r, tenant, caseID, caseNumber, invID, amountCents, payByBank, 0); err != nil {
+		slog.Warn("bank payment page not opened", "case", caseNumber, "err", err)
+		bankURL = ""
+	}
+	return cardURL, bankURL, cardFee, nil
+}
+
+// initialFeeSession opens one Stripe page for an initial fee, paid one way.
+func (s *server) initialFeeSession(r *http.Request, tenant, caseID, caseNumber, invID string, amountCents int64, method string, cardFee int64) (string, error) {
 	form := url.Values{}
 	form.Set("mode", "payment")
 	form.Set("success_url", s.cfg.PortalBaseURL+"/#/cases/"+caseID+"?paid=1")
@@ -429,6 +443,9 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 	form.Set("metadata[case_id]", caseID)
 	form.Set("payment_intent_data[metadata][invoice_id]", invID)
 	form.Set("payment_intent_data[metadata][tenant]", tenant)
+	if err := s.checkoutFor(form, method, cardFee, 1); err != nil {
+		return "", err
+	}
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		return "", err
@@ -437,9 +454,9 @@ func (s *server) issueInitialFeeCheckout(r *http.Request, tenant, caseID, caseNu
 	checkoutURL, _ := sess["url"].(string)
 	raw, _ := json.Marshal(sess)
 	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, raw)
-		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (session_id) DO UPDATE SET updated_at=now()`,
-		tenant, caseID, invID, sessID, amountCents, raw)
+		INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, raw, card_fee_cents)
+		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (session_id) DO UPDATE SET updated_at=now()`,
+		tenant, caseID, invID, sessID, amountCents, raw, cardFee)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amountCents, "PROVIDER", sessID, "system:ahca-intake")
 	return checkoutURL, nil
 }

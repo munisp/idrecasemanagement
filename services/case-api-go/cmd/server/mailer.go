@@ -51,8 +51,8 @@ func (s *server) sendMail(to, cc []string, subject, body string) error {
 	from := cfg.SMTPFrom
 	var b strings.Builder
 	writeMailHeaders(&b, from, to, cc, subject)
-	b.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
-	b.WriteString(body)
+	b.WriteString("MIME-Version: 1.0\r\n")
+	writeAlternative(&b, body) // plain text + the same text as HTML (mailbody.go)
 	return s.deliver(from, to, cc, []byte(b.String()))
 }
 
@@ -69,7 +69,8 @@ func (s *server) sendMailWithAttachment(to, cc []string, subject, body, filename
 	var b strings.Builder
 	writeMailHeaders(&b, from, to, cc, subject)
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", boundary, body)
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
+	writeAlternative(&b, body)
 	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/csv; name=%q\r\nContent-Disposition: attachment; filename=%q\r\nContent-Transfer-Encoding: base64\r\n\r\n",
 		boundary, filename, filename)
 	enc := base64.StdEncoding.EncodeToString(content)
@@ -90,7 +91,9 @@ func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject 
 	if len(cc) > 0 {
 		fmt.Fprintf(b, "Cc: %s\r\n", strings.Join(cc, ", "))
 	}
-	fmt.Fprintf(b, "Subject: %s\r\n", subject)
+	fmt.Fprintf(b, "Subject: %s\r\n", headerText(subject))
+	fmt.Fprintf(b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	fmt.Fprintf(b, "Message-ID: %s\r\n", messageID(from))
 }
 
 // smtpDeliver runs the SMTP transaction for an already-composed message (deliver, in mailqueue.go, paces and

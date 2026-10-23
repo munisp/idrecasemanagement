@@ -9,10 +9,11 @@ package main
 // checkout on Stripe-hosted page -> Stripe calls /api/webhooks/stripe ->
 // signature verified -> invoice marked PAID with the payment intent as
 // remittance ref -> financial_events row written -> activity timeline entry.
-// Refunds via the same webhook (charge.refunded) or POST /v1/refunds when
-// staff settles an invoice REFUND with a card payment on file.
+// Refunds: refunds.go (POST /v1/refunds for this fee's amount when staff refunds a card-paid
+// invoice; refund.* and charge.refunded webhooks confirm it).
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -77,12 +78,21 @@ var stripeHTTP = &http.Client{Timeout: 30 * time.Second}
 
 // stripePost calls the Stripe API with form-encoded params.
 func (s *server) stripePost(path string, form url.Values) (map[string]any, error) {
+	return s.stripePostIdem(path, form, "")
+}
+
+// stripePostIdem is stripePost with an Idempotency-Key: a retry of the same request (a timeout, a double submit)
+// gets Stripe's first answer back instead of doing it twice.
+func (s *server) stripePostIdem(path string, form url.Values, idemKey string) (map[string]any, error) {
 	if s.cfg.StripeSecret == "" {
 		return nil, fmt.Errorf("card payments not configured (STRIPE_SECRET_KEY unset)")
 	}
 	req, err := http.NewRequest("POST", "https://api.stripe.com"+path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
 	}
 	req.SetBasicAuth(s.cfg.StripeSecret, "")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -155,6 +165,18 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 	form.Set("line_items[0][price_data][unit_amount]", strconv.FormatInt(amount, 10))
 	form.Set("line_items[0][price_data][product_data][name]",
 		fmt.Sprintf("IDRE %s — invoice %s (%s)", strings.ReplaceAll(kind, "_", " "), invoiceNo, party))
+	// An initial fee is paid one way (?method=card, the default, or bank): by card with its card fee (card_fee.go).
+	var cardFee int64
+	if q := r.URL.Query().Get("method"); kind == "INITIAL_FEE" || q != "" {
+		method := payMethodOf(q)
+		if method == payByCard {
+			_, cardFee = s.cardFees(r.Context(), tenant, []string{invID})
+		}
+		if err := s.checkoutFor(form, method, cardFee, 1); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusFailedDependency)
+			return
+		}
+	}
 	form.Set("metadata[invoice_id]", invID)
 	form.Set("metadata[tenant]", tenant)
 	form.Set("metadata[case_id]", caseID)
@@ -175,10 +197,10 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 	raw, _ := json.Marshal(sess)
 	var payID string
 	_ = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, raw)
-		VALUES ($1,$2,$3,$4,$5,$6)
+		INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, raw, card_fee_cents)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		ON CONFLICT (session_id) DO UPDATE SET updated_at=now()
-		RETURNING id`, tenant, caseID, invID, sessID, amount, raw).Scan(&payID)
+		RETURNING id`, tenant, caseID, invID, sessID, amount, raw, cardFee).Scan(&payID)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_INITIATED", "NONE", amount, party, sessID,
 		displayName(r.Context().Value(ctxPrincipal{}).(principal)))
 	s.logAudit(r.Context(), tenant, caseID, "CHECKOUT_CREATED", map[string]any{
@@ -186,7 +208,7 @@ func (s *server) createCheckout(w http.ResponseWriter, r *http.Request) {
 		"invoice_id": invID, "payment_id": payID, "session_id": sessID, "amount_cents": amount,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"payment_id": payID, "checkout_url": checkoutURL, "session_id": sessID,
+		"payment_id": payID, "checkout_url": checkoutURL, "session_id": sessID, "amount_cents": amount + cardFee, "card_fee_cents": cardFee,
 	})
 }
 
@@ -312,29 +334,9 @@ func (s *server) stripeWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "charge.refunded":
-		var ch struct {
-			PaymentIntent  string `json:"payment_intent"`
-			AmountRefunded int64  `json:"amount_refunded"`
-		}
-		if json.Unmarshal(evt.Data.Object, &ch) == nil && ch.PaymentIntent != "" {
-			var tenant, caseID, invID string
-			var amount int64
-			if err := s.db.QueryRow(r.Context(), `
-				UPDATE public.payments SET status='REFUNDED', raw=$2, updated_at=now()
-				WHERE payment_intent=$1 RETURNING tenant, case_id, invoice_id, amount_cents`,
-				ch.PaymentIntent, evt.Data.Object).Scan(&tenant, &caseID, &invID, &amount); err == nil {
-				_, _ = s.db.Exec(r.Context(), `
-					UPDATE public.invoices SET status='REFUNDED' WHERE tenant=$1 AND id=$2`, tenant, invID)
-				s.finEvent(r, tenant, caseID, invID, "REFUND_ISSUED", "OUT", ch.AmountRefunded, "", ch.PaymentIntent, "stripe-webhook")
-				s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
-					"by": "stripe-webhook", "invoice_id": invID, "action": "REFUND", "status": "REFUNDED",
-					"amount_cents": ch.AmountRefunded, "remittance_ref": ch.PaymentIntent,
-				})
-				s.postPaymentLedger(tenant, caseID, ch.PaymentIntent, "", uint64(ch.AmountRefunded), true) // escrow → clearing
-				s.logActivity(r.Context(), tenant, caseID, "REFUND_ISSUED",
-					fmt.Sprintf("Stripe refund of $%d.%02d issued (%s) — ledger reversal posted", ch.AmountRefunded/100, ch.AmountRefunded%100, ch.PaymentIntent))
-			}
-		}
+		s.chargeRefundedEvent(r.Context(), evt.Data.Object) // refunds.go
+	case "refund.created", "refund.updated", "refund.failed":
+		s.stripeRefundEvent(r.Context(), evt.Data.Object)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"received": evt.Type})
 }
@@ -375,23 +377,6 @@ func verifyStripeSig(payload []byte, header, secret string) bool {
 	return false
 }
 
-// refundCardPayment issues a Stripe refund for an invoice settled by card.
-// Called from settleInvoice when action=REFUND and a PAID payment exists.
-func (s *server) refundCardPayment(r *http.Request, tenant, invID string) error {
-	var pi string
-	err := s.db.QueryRow(r.Context(), `
-		SELECT payment_intent FROM public.payments
-		WHERE tenant=$1 AND invoice_id=$2 AND status='PAID' ORDER BY created_at DESC LIMIT 1`,
-		tenant, invID).Scan(&pi)
-	if err != nil || pi == "" {
-		return nil // no card payment — manual refund path
-	}
-	form := url.Values{}
-	form.Set("payment_intent", pi)
-	_, err = s.stripePost("/v1/refunds", form)
-	return err
-}
-
 // listPayments: payment history for a case or the whole tenant.
 func (s *server) listPayments(w http.ResponseWriter, r *http.Request) {
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, financialReadRoles...) {
@@ -430,11 +415,15 @@ func (s *server) listPayments(w http.ResponseWriter, r *http.Request) {
 }
 
 // finEvent appends to the unified financial event stream.
+// The record of money is written even if the request that moved it is cancelled part-way (the client gave up,
+// a slow step after it timed out): the money moved, so its event must exist. A failure is logged, never dropped.
 func (s *server) finEvent(r *http.Request, tenant, caseID, invID, kind, direction string, amount int64, party, ref, actor string) {
-	_, _ = s.db.Exec(r.Context(), `
+	if _, err := s.db.Exec(context.WithoutCancel(r.Context()), `
 		INSERT INTO public.financial_events (tenant, case_id, invoice_id, kind, direction, amount_cents, party, ref, actor)
 		VALUES ($1,$2,nullif($3,'')::uuid,$4,$5,$6,$7,$8,$9)`,
-		tenant, caseID, invID, kind, direction, amount, party, ref, actor)
+		tenant, caseID, invID, kind, direction, amount, party, ref, actor); err != nil {
+		slog.Error("financial event NOT recorded", "tenant", tenant, "case", caseID, "invoice", invID, "kind", kind, "amount_cents", amount, "err", err)
+	}
 }
 
 // financialReport powers the finance dashboard: money in/out by period,
@@ -449,9 +438,10 @@ func (s *server) financialReport(w http.ResponseWriter, r *http.Request) {
 	kpis, err := s.queryRows(r, `
 		SELECT
 		  sum(amount_cents) FILTER (WHERE kind='PAYMENT_PAID')                       AS collected_cents,
-		  sum(amount_cents) FILTER (WHERE kind='REFUND_ISSUED')                      AS refunded_cents,
+		  coalesce(sum(amount_cents) FILTER (WHERE kind='REFUND_ISSUED'),0) - coalesce(sum(amount_cents) FILTER (WHERE kind='REFUND_REVERSED'),0) AS refunded_cents,
 		  sum(amount_cents) FILTER (WHERE kind='PAYMENT_PAID' AND created_at > now() - interval '30 days') AS collected_30d_cents,
-		  count(*) FILTER (WHERE kind='PAYMENT_PAID')                                AS payments_count
+		  count(*) FILTER (WHERE kind='PAYMENT_PAID')                                AS payments_count,
+		  coalesce(sum(amount_cents) FILTER (WHERE kind='PAYMENT_UNAPPLIED'),0) - coalesce(sum(amount_cents) FILTER (WHERE kind IN ('UNAPPLIED_RETURNED','UNAPPLIED_APPLIED')),0) AS unapplied_cents
 		FROM public.financial_events WHERE tenant=$1`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -462,7 +452,7 @@ func (s *server) financialReport(w http.ResponseWriter, r *http.Request) {
 		FROM public.invoices WHERE tenant=$1 GROUP BY status, party ORDER BY status, party`, tenant)
 	aging, _ := s.queryRows(r, `
 		SELECT CASE
-		         WHEN due_date >= now()::date THEN 'current'
+		         WHEN due_date IS NULL OR due_date >= now()::date THEN 'current'
 		         WHEN due_date >= now()::date - 30 THEN '1-30'
 		         WHEN due_date >= now()::date - 60 THEN '31-60'
 		         ELSE '60+' END AS bucket,
@@ -474,7 +464,17 @@ func (s *server) financialReport(w http.ResponseWriter, r *http.Request) {
 		FROM public.financial_events WHERE tenant=$1 ORDER BY created_at DESC LIMIT 100`, tenant)
 	byMethod, _ := s.queryRows(r, `
 		SELECT provider, status, count(*) AS n, sum(amount_cents) AS total_cents
-		FROM public.payments WHERE tenant=$1 GROUP BY provider, status`, tenant)
+		FROM public.payments WHERE tenant=$1 GROUP BY provider, status
+		UNION ALL
+		-- Fees recorded as paid by hand (check / ACH / other, settleInvoice PAY): no payment record of their own,
+		-- but in Collected -- so the rails add up to it. A fee paid from money held as not applied is not new money
+		-- (it arrived with its check, already in that rail), so it is left out here.
+		SELECT 'manual', 'PAID', count(*), coalesce(sum(e.amount_cents),0)
+		FROM public.financial_events e
+		WHERE e.tenant=$1 AND e.kind='PAYMENT_PAID' AND coalesce(e.ref,'') NOT LIKE 'unapplied:%'
+		  AND NOT EXISTS (SELECT 1 FROM public.payments p WHERE p.tenant=e.tenant AND p.invoice_id::text=e.invoice_id::text
+		                  AND p.status IN ('PAID','REFUNDED','REFUND_DUE'))
+		HAVING count(*) > 0`, tenant)
 
 	kpi := map[string]any{}
 	if len(kpis) > 0 {

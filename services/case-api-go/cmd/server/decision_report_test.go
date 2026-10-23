@@ -69,14 +69,23 @@ func TestDecisionSectionsHaveOwners(t *testing.T) {
 }
 
 func TestFillInNames(t *testing.T) {
-	got := fillInNames("Dear [Provider Contact Name], [Plan name] declined. AGAINST [PLAN NAME]. [Health Plan Contact Name]",
-		"Gulf Clinic", "Bay Plan", "Pat Doe")
-	want := "Dear Pat Doe, Bay Plan declined. AGAINST BAY PLAN. [Health Plan Contact Name]"
+	got := fillInNames("Dear [Provider Contact Name], [Plan name] declined. AGAINST [PLAN NAME]. [Health Plan Contact Name]. Due [due date].",
+		letterNames{Provider: "Gulf Clinic", Plan: "Bay Plan", ProviderContact: "Pat Doe", DueDate: "November 21, 2026"})
+	want := "Dear Pat Doe, Bay Plan declined. AGAINST BAY PLAN. Health Plan Representative. Due November 21, 2026."
 	if got != want {
 		t.Errorf("got %q", got)
 	}
-	if fillInNames("[Plan name]", "", "", "") != "[Plan name]" {
-		t.Error("an unknown name is left for the drafter")
+	if fillInNames("[Plan name]", letterNames{}) != "[Plan name]" {
+		t.Error("an unknown party name is left for the drafter")
+	}
+	if got := fillInNames("Dear [Health Plan Contact Name],", letterNames{PlanContact: "Jo Lee"}); got != "Dear Jo Lee," {
+		t.Errorf("plan contact: %q", got)
+	}
+	if got := fillInNames("Dear [Filing Party full name], the fee is $[insert amount].", letterNames{Filer: "Pat Doe", Estimate: "$1,500.00"}); got != "Dear Pat Doe, the fee is $1,500.00." {
+		t.Errorf("filer and estimate: %q", got)
+	}
+	if got := fillInNames("$[insert amount]", letterNames{}); got != "$[insert amount]" {
+		t.Errorf("no estimate yet: the fill-in stays for QA to see, got %q", got)
 	}
 }
 

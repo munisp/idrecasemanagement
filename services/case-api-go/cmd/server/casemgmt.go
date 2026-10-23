@@ -647,10 +647,14 @@ func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 	// case_id travels alongside the task id now so the calendar can link a
 	// task straight to its case -- previously only OFFER_WINDOW rows linked
 	// anywhere; every TASK row was plain, unclickable text.
+	// Done tasks stay on the calendar, ticked, for a while (the system's own ones tick themselves: step_tasks.go).
 	tasks, _ := s.queryRows(r, `
 		SELECT id::text AS ref, 'TASK' AS kind, subject AS label,
-		       to_char(due_date,'YYYY-MM-DD') AS due, coalesce(case_id,'') AS case_id
-		FROM public.tasks WHERE tenant=$1 AND status='OPEN' AND due_date IS NOT NULL`, tenant)
+		       to_char(due_date,'YYYY-MM-DD') AS due, coalesce(case_id,'') AS case_id,
+		       status='DONE' AS done, to_char(completed_at,'YYYY-MM-DD"T"HH24:MI') AS done_at,
+		       created_by IN ('system','system:deadlines') AS automatic
+		FROM public.tasks WHERE tenant=$1 AND due_date IS NOT NULL
+		  AND (status='OPEN' OR (status='DONE' AND completed_at > now() - interval '45 days'))`, tenant)
 	writeJSON(w, http.StatusOK, append(deadlines, tasks...))
 }
 

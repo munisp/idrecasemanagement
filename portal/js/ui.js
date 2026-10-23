@@ -93,7 +93,7 @@ const UI = (() => {
   // onRefresh(vals, setOptions): optional live hook — fires (debounced) as
   // the user types so a modal can offer search-as-you-type selects;
   // setOptions(name, [[value,label],...]) re-renders one select's options.
-  function modal({ title, body = "", fields = [], submitLabel = "Save", danger = false, wide = false, onRefresh = null }) {
+  function modal({ title, body = "", html = "", fields = [], submitLabel = "Save", danger = false, wide = false, onRefresh = null }) {
     return new Promise((resolve) => {
       const prev = document.activeElement;
       const scrim = document.createElement("div");
@@ -104,15 +104,17 @@ const UI = (() => {
             <button class="icon-btn modal-x" aria-label="Close dialog">✕</button></div>
           <form class="modal-b" novalidate>
             ${body ? `<p class="modal-body">${body}</p>` : ""}
+            ${html ? `<div class="modal-body">${html}</div>` : ""}
             ${fields.map((f) => `
-              <label class="mfield">${f.label}${f.required ? ' <span class="req">*</span>' : ""}
+              <label class="mfield"><span>${f.label}${f.required ? ' <span class="req">*</span>' : ""}</span>
                 ${f.options
                   ? `<select name="${f.name}" ${f.required ? "required" : ""}>${f.options.map((o) =>
                       `<option value="${o[0]}" ${o[0] === f.value ? "selected" : ""}>${o[1]}</option>`).join("")}</select>`
                   : f.type === "textarea"
                     ? `<textarea name="${f.name}" rows="3" placeholder="${f.placeholder || ""}" ${f.required ? "required" : ""}>${f.value || ""}</textarea>`
                     : `<input name="${f.name}" type="${f.type || "text"}" value="${f.value || ""}"
-                        placeholder="${f.placeholder || ""}" ${f.required ? "required" : ""} ${f.step ? `step="${f.step}"` : ""} />`}
+                        placeholder="${f.placeholder || ""}" ${f.required ? "required" : ""} ${f.step ? `step="${f.step}"` : ""}
+                        ${f.min ? `min="${f.min}"` : ""} ${f.max ? `max="${f.max}"` : ""} ${f.accept ? `accept="${f.accept}"` : ""} />`}
                 ${f.hint ? `<span class="mhint">${f.hint}</span>` : ""}
               </label>`).join("")}
             <div class="modal-f">
@@ -151,9 +153,17 @@ const UI = (() => {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(e.target));
         for (const f of fields) {
-          if (f.required && !String(data[f.name] || "").trim()) {
+          const missing = f.type === "file" ? !(data[f.name] instanceof File && data[f.name].size > 0) : !String(data[f.name] || "").trim();
+          if (f.required && missing) {
             e.target.querySelector(`[name="${f.name}"]`).focus();
             toast(`Enter ${f.label.toLowerCase()} to continue.`, { kind: "warn" });
+            return;
+          }
+          // A date outside its range (e.g. one in the future for something that has already happened).
+          const dv = String(data[f.name] || "");
+          if (f.type === "date" && dv && ((f.max && dv > f.max) || (f.min && dv < f.min))) {
+            e.target.querySelector(`[name="${f.name}"]`).focus();
+            toast(f.max && dv > f.max ? `${f.label} can't be later than ${f.max}.` : `${f.label} can't be earlier than ${f.min}.`, { kind: "warn" });
             return;
           }
         }
@@ -247,7 +257,7 @@ const TableSort = (() => {
   return { scan };
 })();
 
-// Pages for every table in the portal: a "Rows per page" choice (default 100,
+// Pages for every table in the portal: a "Rows per page" choice (default 25,
 // remembered per browser) with Previous / Next.
 //
 // Two kinds of table share the one bar:
@@ -300,7 +310,7 @@ const Pager = (() => {
   const KEY = "idre.pageSize";
   function size() {
     try { const n = Number(localStorage.getItem(KEY)); if (SIZES.includes(n)) return n; } catch {}
-    return 100;
+    return 25;
   }
   function setSize(n) {
     try { localStorage.setItem(KEY, String(n)); } catch {}
@@ -378,7 +388,7 @@ const Pager = (() => {
     });
     input.addEventListener("keydown", (e) => { if (e.key === "Escape" && input.value) { input.value = ""; input.dispatchEvent(new Event("input")); } });
     table._sfBar = bar;
-    (table.closest(".dg-wrap") || table).insertAdjacentElement("beforebegin", bar);
+    (table.closest(".dg-wrap,.tbl-auto") || table).insertAdjacentElement("beforebegin", bar);
   }
   // records that match the table's search term (all of them when there is none); the rest are marked out
   function searchUnits(table, all) {
@@ -430,7 +440,7 @@ const Pager = (() => {
       bar._table = table;
       table._pgBar = bar;
       bars.add(bar);
-      (table.closest(".dg-wrap") || table).insertAdjacentElement("afterend", bar);
+      (table.closest(".dg-wrap,.tbl-auto") || table).insertAdjacentElement("afterend", bar);
     }
     const sig = `${start}|${end}|${total}|${sz}`;
     if (bar._sig !== sig) {
@@ -444,7 +454,17 @@ const Pager = (() => {
     queued = false;
     bars.forEach((b) => { if (!b._table.isConnected) { b.remove(); bars.delete(b); } });
     document.querySelectorAll(".tsearch").forEach((b) => { if (!b.nextElementSibling || !(b.nextElementSibling.matches("table") || b.nextElementSibling.querySelector("table"))) b.remove(); });
-    document.querySelectorAll("table").forEach(apply);
+    document.querySelectorAll("table").forEach((t) => { contain(t); apply(t); });
+  }
+  // A wide table scrolls inside its own box: wrap any table not already in a scrolling container (or opted out).
+  function contain(table) {
+    if (table._contained || !table.parentElement) return;
+    table._contained = true;
+    if (table.closest(".dg-wrap,.tbl-wrap,.tbl-scroll,.tbl-auto,[data-nocontain],.modal")) return;
+    const box = document.createElement("div");
+    box.className = "tbl-auto";
+    table.parentElement.insertBefore(box, table);
+    box.appendChild(table);
   }
   new MutationObserver(() => { if (!queued) { queued = true; setTimeout(scan, 60); } })
     .observe(document.body, { childList: true, subtree: true });
@@ -481,3 +501,159 @@ const Pager = (() => {
   }
   return { size, server, scan, SIZES };
 })();
+
+// Building blocks for list pages, so every list reads the same way: a row of summary figures, segmented filters
+// (an option can carry its count), and a toolbar. Plain strings of HTML, like the rest of the views.
+const ListUI = (() => {
+  const esc = (x) => String(x ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const fmt = (n) => (typeof n === "number" ? n.toLocaleString() : esc(n));
+  return {
+    // tiles: [{label, value, sub?, tone?: "warn"|"bad"|"good"}]
+    summary: (tiles) => `<div class="sum-row">${tiles.filter(Boolean).map((t) =>
+      `<div class="sum-tile${t.tone ? " is-" + t.tone : ""}"><span class="sum-l">${esc(t.label)}</span><span class="sum-n">${fmt(t.value)}</span>${t.sub ? `<span class="sum-s">${esc(t.sub)}</span>` : ""}</div>`).join("")}</div>`,
+    // items: [{value, label, count?, href?}] -- an href makes the option a link (filters kept in the address),
+    // otherwise onclick calls `fn('<value>')`.
+    segs: (label, items, current, fn) => `<div class="segs" role="group" aria-label="${esc(label)}">${items.map((it) => {
+      const on = (it.value || "") === (current || "");
+      const n = it.count == null ? "" : `<span class="seg-n">${fmt(it.count)}</span>`;
+      return it.href
+        ? `<a class="seg ${on ? "on" : ""}" href="${esc(it.href)}" aria-current="${on}">${esc(it.label)}${n}</a>`
+        : `<button type="button" class="seg ${on ? "on" : ""}" aria-pressed="${on}" onclick="${fn}('${esc(it.value || "")}')">${esc(it.label)}${n}</button>`;
+    }).join("")}</div>`,
+  };
+})();
+window.ListUI = ListUI;
+
+// Tips: what a column, chip or figure means, on hover or keyboard focus, across the whole portal.
+// Three sources, in order: an element's own data-tip; the glossary below, matched on its text (table headers,
+// status and lane chips, summary labels); and a few patterns ("41bd left"). Known headers get a dotted underline
+// so people can tell there is something to read. Plain text only; a tip never blocks a click.
+const Tips = (() => {
+  const G = {
+    // ---- disputes / case columns
+    "LANE": "Triage lane — how much review a dispute needs. Auto-review: simple and low-value, decided on the documents. Standard: the normal review. Complex: high value, many claims or escalated, so it gets the most review.",
+    "SLA": "Business days left on the statutory clock for a decision (bd = business days). Amber: a week or less. Red: 3 days or less, or overdue.",
+    "CLOCK": "The nearest program deadline on the case — for example the plan's response or the determination — and how long is left.",
+    "DISPUTED": "The amount in dispute: what was billed minus what the plan paid, across the claims in this dispute.",
+    "QPA": "Qualifying payment amount — the plan's median contracted rate for the service, the federal benchmark for out-of-network payment.",
+    "STATUS": "Where the item stands now. Hover a status chip for what it means.",
+    "ASSIGNED": "The Reviewer who owns the case. An unassigned case waits for the PM's rotation or for someone to take it.",
+    "ASSIGNEE": "The person the item is assigned to.",
+    "SERVICE": "The service line of the disputed claims, e.g. emergency, anesthesia, radiology, lab.",
+    "OPENED": "When the dispute was filed.",
+    "CASE #": "The program's case number. Click a row to open the case.",
+    "FILED": "When the dispute was filed.",
+    "FEE": "The initial review fee for this dispute.",
+    "PAYMENT": "Whether the initial fee has been paid.",
+    "RESPONSE DUE": "The last day to send your response. After it, the review goes ahead with what is on file.",
+    "FILING PARTY": "Who filed the dispute: the provider, or the health plan.",
+    "OUTREACH": "When the filer was sent the submission instructions and upload link.",
+    "PACKET COMPLETE": "When the filing packet was complete, which starts the review clock.",
+    "REVIEW": "The specialist review's own status: Requested (waiting to be claimed), In review, or Complete.",
+    "REQUESTED": "When the review was asked for.",
+    // ---- money
+    "COURTESY": "The check amount written in figures.",
+    "LEGAL (ICR)": "The check amount written in words, read by handwriting recognition. It must match the figures.",
+    "CONF": "How sure the reader is of what it read off the check: high, medium or low.",
+    "MATCH": "The invoice the check was matched to.",
+    "ROUTING · ACCOUNT": "The bank routing and account numbers read from the check's MICR line.",
+    "BILL TO": "Which party the fee was billed to.",
+    "PAID VIA": "How the fee was paid: by card through Stripe, or by check / ACH / another way.",
+    "REFUND ORDERED": "When the workflow closed the case for a refund (no complete filing packet 7 days after outreach).",
+    "WAITING": "Days since the refund was ordered.",
+    "SETTLED": "Payments that went through.",
+    "PENDING": "Payments started and not yet confirmed.",
+    "FAILED / EXPIRED": "Payments that failed, or checkouts left unpaid until they expired.",
+    "REFUNDED": "Money returned to the payer.",
+    "DIRECTION": "In: money received. Out: money paid back.",
+    "STRIPE REF": "Stripe's reference for the payment (payment intent or checkout session).",
+    // ---- chips: lanes, statuses
+    "COMPLEX": "Complex lane — high value, many claims or escalated; gets the most review.",
+    "STANDARD": "Standard lane — the normal review.",
+    "AUTO_REVIEW": "Auto-review lane — simple and low-value, decided on the documents.",
+    "AUTO-REVIEW": "Auto-review lane — simple and low-value, decided on the documents.",
+    "AWAITING_PAYMENT": "The initial fee isn't paid yet. Nothing but correspondence happens on the case until it is.",
+    "PENDING_INTAKE": "Filed and paid; waiting for the filing packet and documents before the review starts.",
+    "CLOSED-REFUNDED": "Closed because no complete filing packet arrived within 7 days of outreach; the initial fee is refunded.",
+    "REFUND_PENDING": "A card refund was sent to Stripe and is waiting for Stripe to confirm it.",
+    "IN_REVIEW": "Being reviewed.",
+    "COMPLETE": "Done.",
+    "OPEN": "Not paid or not done yet.",
+    "PAID": "Paid in full.",
+    "VOID": "Cancelled; nothing is owed.",
+    "MATCHED": "Matched to an invoice; waiting for a person to confirm the funds cleared.",
+    "CLEARED": "The funds cleared; the invoice is settled.",
+    "UNASSIGNED": "Nobody owns this yet.",
+    // ---- summary labels
+    "COLLECTED": "Fee money received: card payments, cleared checks and fees recorded as paid by hand. Gross — refunds are shown separately, and money that pays no fee is under Not applied.",
+    "LAST 30 DAYS": "Fee money received in the last 30 days.",
+    "NOT APPLIED": "Money received that pays no fee: a check for more than its fee, or a payment for a fee already paid. Refund it or apply it to another fee.",
+    "OUTSTANDING": "Open invoices not yet paid.",
+    "OVERDUE": "Open invoices past their due date.",
+    "STAGES IN USE": "Stages that have at least one dispute in them.",
+    "AWAITING REVIEW": "Drafts held at the QA gate until the named role approves them.",
+    "WAITING FOR A REVIEWER": "Paid disputes nobody is assigned to yet. The PM's rotation gives them out in turn; unpaid filings are not counted — they are given out once their fee is paid.",
+    "AWAITING PAYMENT": "Filed, but the initial fee isn't paid yet. Nothing but correspondence happens on these until it is.",
+    "READY TO SEND": "Approved drafts back with the person who drafted them, to check the addresses and send.",
+  };
+  const PATTERNS = [
+    [/^(\d+)\s*bd left$/i, (m) => `${m[1]} business days left on the statutory clock.`],
+    [/^(\d+)\s*bd overdue$/i, (m) => `The statutory clock ran out ${m[1]} business days ago.`],
+    [/^(\d+)d left$/i, (m) => `${m[1]} business days left on the statutory clock.`],
+    [/^due today$/i, () => "The statutory clock runs out today."],
+  ];
+  const norm = (t) => String(t || "").replace(/[↑↓↕]/g, "").replace(/\s+/g, " ").trim().toUpperCase();
+  function lookup(el) {
+    if (el.dataset.tip) return el.dataset.tip;
+    const text = (el.matches("th") ? el.childNodes[0]?.textContent || el.textContent : el.textContent) || "";
+    const key = norm(text);
+    let tip = G[key] || "";
+    if (!tip) for (const [re, f] of PATTERNS) { const m = text.trim().replace(/^◷\s*/, "").match(re); if (m) { tip = f(m); break; } }
+    // A native title becomes the same tip (one look everywhere, and no second browser tooltip on top of ours).
+    // A detailed title (a clock's name, rule and day basis) says more than a generic pattern does.
+    if (el.title) { if (!tip || (!G[key] && el.title.length > 40)) tip = el.title; el.removeAttribute("title"); }
+    if (tip) el.dataset.tip = tip;
+    return tip;
+  }
+  const SEL = "[data-tip], th, .badge, .chip, .kc-tag, .sla, .kc-sla, .sum-l, .ps-l, .fin-kpi-l";
+  let box = null, cur = null;
+  function show(el) {
+    const tip = lookup(el);
+    if (!tip) return;
+    if (!box) { box = document.createElement("div"); box.className = "tip"; box.setAttribute("role", "tooltip"); box.id = "tip"; document.body.appendChild(box); }
+    box.textContent = tip;
+    box.style.display = "block";
+    const r = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+    let top = r.bottom + 8, left = Math.min(Math.max(8, r.left + r.width / 2 - b.width / 2), innerWidth - b.width - 8);
+    if (top + b.height > innerHeight - 8) top = r.top - b.height - 8;
+    box.style.top = top + "px"; box.style.left = left + "px";
+    el.setAttribute("aria-describedby", "tip");
+    cur = el;
+  }
+  function hide() {
+    if (box) box.style.display = "none";
+    if (cur) cur.removeAttribute("aria-describedby");
+    cur = null;
+  }
+  let timer;
+  document.addEventListener("mouseover", (e) => {
+    const el = e.target.closest && e.target.closest(SEL);
+    if (el === cur) return;
+    clearTimeout(timer); hide();
+    if (el) timer = setTimeout(() => show(el), 250);
+  });
+  document.addEventListener("focusin", (e) => { const el = e.target.closest && e.target.closest(SEL); if (el) { hide(); show(el); } });
+  document.addEventListener("focusout", hide);
+  addEventListener("scroll", hide, true);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hide(); });
+  // Mark the headers that have something to say (dotted underline), as pages draw.
+  function mark() {
+    document.querySelectorAll("th:not([data-tipmark])").forEach((th) => {
+      th.dataset.tipmark = "1";
+      if (lookup(th)) th.classList.add("has-tip");
+    });
+  }
+  new MutationObserver(() => { clearTimeout(mark._t); mark._t = setTimeout(mark, 120); }).observe(document.body, { childList: true, subtree: true });
+  return { glossary: G };
+})();
+window.Tips = Tips;

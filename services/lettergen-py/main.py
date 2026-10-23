@@ -31,6 +31,7 @@ import tempfile
 from datetime import date
 
 import builtin_letters
+import office_letters
 import httpx
 import otel_setup
 import psycopg
@@ -245,18 +246,42 @@ def uploaded_template(tenant: str, key: str) -> bytes | None:
 
 
 def docx_preview(docx_bytes: bytes) -> str:
-    """The letter's words for the QA queue, tables included (an invoice's amounts live in tables)."""
+    """The letter's words for the QA queue, laid out as the letter is: paragraphs in order, a blank line between
+    paragraphs of running text (an address block or a heading stays on consecutive lines), line breaks kept, and
+    each table row on its own line where the table stands (an invoice's amounts live in tables)."""
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
     doc = Document(io.BytesIO(docx_bytes))
-    parts = [p.text for p in doc.paragraphs if p.text.strip()]
-    for t in doc.tables:
-        for row in t.rows:
-            seen = []
-            for cell in row.cells:
-                if cell.text.strip() and cell.text not in seen:
-                    seen.append(cell.text)
-            if seen:
-                parts.append(" | ".join(seen))
-    return re.sub(r"\s+", " ", " ".join(parts))[:4000]
+    blocks: list[tuple[str, str]] = []  # (kind, text): "p" paragraph, "t" table
+    for el in doc.element.body.iterchildren():
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            text = "\n".join(re.sub(r"[ \t]+", " ", ln).strip() for ln in Paragraph(el, doc).text.splitlines())
+            if text.strip():
+                blocks.append(("p", text.strip()))
+        elif tag == "tbl":
+            rows = []
+            for row in Table(el, doc).rows:
+                seen: list[str] = []
+                for cell in row.cells:
+                    t = re.sub(r"\s+", " ", cell.text).strip()
+                    if t and t not in seen:
+                        seen.append(t)
+                if seen:
+                    rows.append(" | ".join(seen))
+            if rows:
+                blocks.append(("t", "\n".join(rows)))
+    out = ""
+    for i, (kind, b) in enumerate(blocks):
+        if i:
+            pkind, prev = blocks[i - 1]
+            # Short lines in a run (date, addressee, "RE:" lines) stay together; running text, a table and the
+            # greeting get a blank line around them.
+            tight = (kind == pkind == "p" and len(b) <= 60 and len(prev) <= 60 and "\n" not in b
+                     and not b.startswith("Dear "))
+            out += "\n" if tight else "\n\n"
+        out += b
+    return out[:20000]
 
 
 def handle(evt: dict) -> None:
@@ -267,17 +292,25 @@ def handle(evt: dict) -> None:
     if key == "determination_letter" and features_for(tenant).get("letter_citation", True):
         fields.update(load_citations(tenant, case_id))
 
-    # An uploaded template wins (the office's own wording, replaceable without a deploy); without one -- or with
-    # the "content pending" placeholder -- the built-in letter in the program's layout is built from the case.
+    # An uploaded template wins (replaceable without a deploy); then the office's own Word letter, filled from the
+    # case (office_letters); then the letter built in code (builtin_letters).
     template = uploaded_template(tenant, key)
+    office = office_letters.build(DSN, tenant, case_id, key) if template is None and office_letters.has_template(key) else None
     if template is not None:
         merged = merge_docx(template, fields)
+    elif office is not None:
+        merged, kind, extra = office
+        fields.update(extra)
     elif builtin_letters.has_builder(key):
         merged, extra = builtin_letters.build(DSN, minio, TEMPLATE_BUCKET, tenant, case_id, key)
         fields.update(extra)
     else:
         raise KeyError(f"no template {tenant}/{key}.docx uploaded and no built-in letter for {key}")
-    pdf = to_pdf(merged)
+    if office is not None and office[1] == "pdf":  # the office's PDF form goes out as it is
+        pdf = merged
+        merged = None
+    else:
+        pdf = to_pdf(merged)
 
     filename = tpl.get("filename", "{case_number}.pdf").format(**fields)
     object_key = f"{tenant}/{case_id}/{key}-{date.today().isoformat()}.pdf"
@@ -294,7 +327,7 @@ def handle(evt: dict) -> None:
              tpl.get("folder", "CORRESPONDENCE")),
         )
         # Every letter goes through QA before it is mailed (G4).
-        body_preview = docx_preview(merged)
+        body_preview = docx_preview(merged) if merged is not None else "The office's FL Plan Packet (PDF form) for the health plan to complete."
         c.execute(
             """INSERT INTO public.qa_reviews
                  (tenant, case_id, artifact, channel, subject, body, status, drafted_by)

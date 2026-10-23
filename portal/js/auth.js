@@ -2,7 +2,7 @@
 const Auth = (() => {
   const cfg = window.IDRE_CONFIG;
   const base = `${cfg.keycloakUrl}/realms/${cfg.realm}/protocol/openid-connect`;
-  const K = { token: "idre.token", refresh: "idre.refresh", verifier: "idre.verifier", returnHash: "idre.returnHash" };
+  const K = { token: "idre.token", refresh: "idre.refresh", verifier: "idre.verifier", returnHash: "idre.returnHash", idToken: "idre.id_token" };
 
   const b64url = (buf) =>
     btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -41,6 +41,7 @@ const Auth = (() => {
     const tok = await resp.json();
     sessionStorage.setItem(K.token, tok.access_token);
     sessionStorage.setItem(K.refresh, tok.refresh_token);
+    if (tok.id_token) sessionStorage.setItem(K.idToken, tok.id_token); // Keycloak's sign-out needs it to end the session without asking
     const returnHash = sessionStorage.getItem(K.returnHash) || "";
     sessionStorage.removeItem(K.returnHash);
     history.replaceState(null, "", location.pathname + returnHash);
@@ -65,6 +66,7 @@ const Auth = (() => {
     const fresh = await resp.json();
     sessionStorage.setItem(K.token, fresh.access_token);
     sessionStorage.setItem(K.refresh, fresh.refresh_token);
+    if (fresh.id_token) sessionStorage.setItem(K.idToken, fresh.id_token);
     return fresh.access_token;
   }
 
@@ -111,9 +113,13 @@ const Auth = (() => {
     return roles.includes("CASE_MANAGER") && !SEE_ALL_ROLES.some((r) => roles.includes(r));
   }
 
+  // Sign out of Keycloak too. With the ID token as id_token_hint the session ends at once; without it Keycloak asks
+  // "Do you want to log out?" and, if that page is left, the session stays and the portal signs straight back in.
   function logout() {
+    const hint = sessionStorage.getItem(K.idToken);
     sessionStorage.clear();
-    location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`;
+    location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`
+      + (hint ? `&id_token_hint=${encodeURIComponent(hint)}` : "");
   }
 
   return { login, logout, handleCallback, token, claims, can, reviewerScoped };

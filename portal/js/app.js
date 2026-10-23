@@ -139,7 +139,23 @@
   // next reload — the server gate applies immediately.
   let FEATURES = {};
   let BRAND = "Capitol Bridge";
-  try { const pr0 = await Api.program.get(); FEATURES = pr0.features || {}; BRAND = pr0.brand_name || BRAND; } catch { FEATURES = {}; }
+  // The menu is drawn from the program (its switches, and whether the tenant runs a program at all). One slow or
+  // failed read used to draw it as if every switch were on and no program were set -- the wrong pages. The read is
+  // retried, and the last one that worked (per tenant) is used until a fresh one arrives.
+  const programKey = "idre.program." + Api.getTenant();
+  async function readProgram() {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const pr = await Api.program.get();
+        try { localStorage.setItem(programKey, JSON.stringify({ features: pr.features || {}, brand_name: pr.brand_name || "", programmed: !!pr.config })); } catch { /* private window */ }
+        return { features: pr.features || {}, brand_name: pr.brand_name || "", programmed: !!pr.config, fresh: true };
+      } catch { await new Promise((ok) => setTimeout(ok, 800 * (i + 1))); }
+    }
+    try { const c = JSON.parse(localStorage.getItem(programKey) || "null"); if (c) return { ...c, fresh: false }; } catch { /* none */ }
+    return null;
+  }
+  const PROGRAM0 = await readProgram();
+  if (PROGRAM0) { FEATURES = PROGRAM0.features || {}; BRAND = PROGRAM0.brand_name || BRAND; }
   // The portal's name for this tenant (tenant_labels.brand_name; editable on the Rules page).
   const brandMark = BRAND.split(/\s+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "CB";
   document.querySelectorAll(".rail-word").forEach((el) => { el.textContent = BRAND; });
@@ -147,6 +163,21 @@
   document.title = BRAND + " Portal";
   window.APP_BRAND = BRAND;
   const feature = (n) => FEATURES[n] !== false;
+  // The switches change while people are signed in (a tenant admin's Feature toggles): read them again as
+  // pages open, at most every 15 seconds, and at once after a change (App.featuresChanged()).
+  let featuresAt = Date.now();
+  async function refreshFeatures(force) {
+    if (!force && Date.now() - featuresAt < 15000) return;
+    featuresAt = Date.now();
+    let pr;
+    try { pr = await Api.program.get(); } catch { return; /* keep what we have */ }
+    const next = pr.features || FEATURES, nextProgrammed = !!pr.config;
+    const changed = JSON.stringify(next) !== JSON.stringify(FEATURES) || nextProgrammed !== programmed;
+    FEATURES = next; programmed = nextProgrammed;
+    try { localStorage.setItem(programKey, JSON.stringify({ features: FEATURES, brand_name: BRAND, programmed })); } catch { /* private window */ }
+    // A switch turned on or off changes the menu: draw it again, and what may be opened with it.
+    if (changed) { buildLinks(); paintNav(); }
+  }
 
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
   const has = (...rs) => Auth.can(...rs);
@@ -158,8 +189,25 @@
   // uploaded packet, never typed in up front). Showing New dispute to a
   // programmed tenant's case managers was pure confusion: a form whose
   // required fields don't apply to any case they'd ever open.
-  const programmed = !!(await Api.program.get().catch(() => null))?.config;
-  const links = [["#/dashboard", "▤", "Home"]];
+  let programmed = PROGRAM0 ? !!PROGRAM0.programmed : false;
+  // Every money screen is a tab of Financials: one menu item, opening the first tab this account may see.
+  // Each tab keeps its own roles (the same the screen and its API check).
+  const finTabs = [
+    ["finance", "Overview", ["FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"]],
+    ["payments", "Payments", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"]],
+    ["billing", "Billing", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"]],
+    ["arap", "AR / AP", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"]],
+    ["recon", "Reconciliation", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"]],
+  ].filter(([, , roles]) => has(...roles));
+  const finPages = new Set(finTabs.map(([pg]) => pg));
+  // The menu from this account's roles and the program's current switches (buildLinks), drawn into the rail
+  // (paintNav). Both run again whenever the switches change.
+  let links = [];
+  let menu = new Set();
+  const outside = has("TPA") || (has("HEALTH_PLAN", "PARTY") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
+    "NURSE", "ATTORNEY", "ARBITRATOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"));
+  function buildLinks() {
+  links = [["#/dashboard", "▤", "Home"]];
   // TPA deliberately excluded from the generic CRM/case screens -- those
   // show the WHOLE tenant's cases/accounts/leads/tasks with no per-caller
   // scoping, but a TPA only has standing to see the disputes it filed
@@ -168,8 +216,6 @@
   // listTasks TPA exclusion.
   // An outside organization's login (a TPA, or a health plan without a
   // staff role) gets its own page, never the tenant-wide screens.
-  const outside = has("TPA") || (has("HEALTH_PLAN", "PARTY") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
-    "NURSE", "ATTORNEY", "ARBITRATOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"));
   if (!outside) {
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
       ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
@@ -201,7 +247,7 @@
   // CASE_MANAGER deliberately excluded -- Financials is a standalone
   // dashboard, not case-detail info; matches the backend's
   // financialReadRoles (access-control follow-up).
-  if (has("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
+  if (finTabs.length) links.push(["#/" + finTabs[0][0], "◍", "Financials"]);
   if (has("PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/ops", "◔", "Ops"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
@@ -220,23 +266,17 @@
   // CASE_MANAGER deliberately excluded from all four -- standalone finance
   // screens, not case-detail info; matches billingViewRoles/arapReadRoles/
   // reconReadRoles/financialReadRoles (access-control follow-up).
-  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-    links.push(["#/billing", "🧾", "Billing"]);
-    links.push(["#/arap", "⚖", "AR / AP"]);
-    links.push(["#/recon", "⇄", "Reconciliation"]);
-    links.push(["#/checks", "◧", "Checks"]);
-  }
   if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
   if (feature("healthplan_onboarding") && has("HEALTH_PLAN", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/healthplan", "⛃", "Health plan"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "FINANCE")) links.push(["#/configuration", "⚒", "Configuration"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/rules", "§", "Rules"]);
-  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
   if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/team", "⚉", "Team"]);
   if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   // Payment rails and OFAC screening: money screens, so the money roles (the page itself checks too).
-  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/payments", "🏦", "Payments"]);
   // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
   // Audit trails, isolated: the whole program's for admins and the state
@@ -248,8 +288,36 @@
   else if (outside && has("TPA", "HEALTH_PLAN")) links.push(["#/org-audit", "⌘", "Audit log"]);
   else links.push(["#/my-activity", "⌘", "Audit log"]);
   if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);
-  nav.innerHTML = links.map(([h, i, l]) =>
-    `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
+  menu = new Set(links.map(([h]) => h.slice(2)));
+  }
+  buildLinks();
+  // The rail in sections, so a long menu reads at a glance. Only the order and the headings change: the menu
+  // (and so what each account may open) is the same list of links.
+  const NAV_GROUPS = [
+    ["", ["dashboard"]],
+    ["Disputes", ["cases", "new", "pipeline", "intake", "qa", "deliverables", "queues/CODING", "queues/CLINICAL", "queues/LEGAL", "queues/pm", "party", "calendar"]],
+    ["Organizations", ["tpa", "healthplan", "onboarding", "crm/accounts", "crm/leads", "crm/tasks", "crm/360"]],
+    ["Money & reports", ["finance", "payments", "billing", "arap", "recon", "reports", "ops", "insights", "time"]],
+    ["Tools", ["assistant", "ask", "voice", "mail", "templates", "timesheet", "document-requests"]],
+    ["Admin", ["configuration", "team", "rules", "features", "audit", "org-audit", "my-activity"]],
+  ];
+  const linkHtml = ([h, i, l]) => `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`;
+  function paintNav() {
+  const placed = new Set();
+  const sections = NAV_GROUPS.map(([label, routes]) => {
+    const mine = links.filter(([h]) => routes.includes(h.slice(2)));
+    mine.forEach(([h]) => placed.add(h));
+    return [label, mine];
+  });
+  const rest = links.filter(([h]) => !placed.has(h)); // anything not yet given a section goes last, never lost
+  if (rest.length) sections.push(["More", rest]);
+  // A short menu (an outside organization's) needs no headings.
+  const grouped = links.length > 8;
+  nav.innerHTML = sections.filter(([, l]) => l.length).map(([label, l]) =>
+    (grouped && label ? `<div class="nav-group" role="presentation">${label}</div>` : "") + l.map(linkHtml).join("")).join("");
+  markActive();
+  }
+  paintNav();
 
   // Floating assistant launcher: lives outside the router's #view swap (a
   // real DOM element appended once to <body>) so it survives every route
@@ -439,6 +507,7 @@
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/cases\/([\w-]+)\/offers$/, (m) => Views.caseOffers(m[1])],
     [/^#\/features$/, Views.featuresAdmin],
+    [/^#\/configuration$/, ConfigViews.page],
     [/^#\/queues\/pm$/, Views.pmQueueView],
     [/^#\/queues\/(CODING|CLINICAL|LEGAL)(\?.*)?$/, (m) => Views.queueView(m[1])],
     [/^#\/insights$/, Views.insightsView],
@@ -490,14 +559,16 @@
   // a page opens only if this account's menu offers it. The menu used to be
   // the only thing that knew, so a hidden page still opened by its address.
   // This is for a clear answer on screen; the API refuses the data itself.
-  const menu = new Set(links.map(([h]) => h.slice(2)));
-  const pageOf = (h) => {
+  function pageOf(h) {
     const parts = h.replace(/^#\//, "").split("?")[0].split("/");
     return parts[0] === "crm" || parts[0] === "queues" ? parts.slice(0, 2).join("/") : parts[0];
-  };
+  }
   function canOpen(h) {
     const page = pageOf(h);
     if (menu.has(page)) return true;
+    // The tabs of Financials (and the old Checks address, now a section of its Overview).
+    if (finPages.has(page)) return true;
+    if (page === "checks") return finPages.has("finance");
     // Pages reached from another page rather than from the menu.
     if (page === "search") return menu.has("cases");
     // Your own actions: always yours to see (bookmarks of the old "My activity").
@@ -511,16 +582,29 @@
     if (page === "crm/360") return menu.has("crm/accounts") && feature("entity360");
     return false;
   }
+  // The Financials tab strip, on top of each of its screens.
+  function finTabsHtml(h) {
+    const page = pageOf(h);
+    if (!finPages.has(page) || finTabs.length < 2) return "";
+    return `<nav class="fin-tabs" aria-label="Financials">${finTabs.map(([pg, label]) =>
+      `<a href="#/${pg}" class="${pg === page ? "on" : ""}"${pg === page ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
+  }
   const noAccess = () => `<div class="view-head"><h1>No access</h1></div>
     <p class="muted">Your account doesn't include this page. If you think it should, ask your program manager or administrator.</p>
     <p><a href="#/dashboard">Back to Home</a></p>`;
 
-  async function render() {
+  function markActive() {
     const h = location.hash || "#/dashboard";
     nav.querySelectorAll("a").forEach((a) => {
       const r = a.dataset.route;
-      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || h.startsWith("#/" + r + "?") || (r === "cases" && h.startsWith("#/new")));
+      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || h.startsWith("#/" + r + "?") || (r === "cases" && h.startsWith("#/new"))
+        || (finPages.has(r) && finPages.has(pageOf(h))));
     });
+  }
+  async function render() {
+    await refreshFeatures();
+    const h = location.hash || "#/dashboard";
+    markActive();
     // A route may carry ?... (Stripe's return to "#/tpa?paid=1"): routes that
     // don't take a query match without it, instead of showing "Not found".
     const hBare = h.split("?")[0];
@@ -535,11 +619,12 @@
         // function itself -- that always runs as an earlier microtask
         // than this assignment (confirmed empirically), so every listener
         // it tried to attach found nothing yet and silently no-op'd.
+        const tabs = finTabsHtml(h);
         if (result && typeof result === "object" && "html" in result) {
-          view.innerHTML = result.html;
+          view.innerHTML = tabs + result.html;
           result.wire?.();
         } else {
-          view.innerHTML = result;
+          view.innerHTML = tabs + result;
         }
         view.classList.remove("view-in");
         void view.offsetWidth; // restart the enter animation on every render
@@ -552,7 +637,7 @@
   }
   // Soft refresh: re-render the current route without a full page reload
   // (no Keycloak round-trip, no shell flash, preserves rail/scroll context).
-  window.App = { rerender: render, canOpen, feature };
+  window.App = { rerender: render, canOpen, feature, featuresChanged: () => refreshFeatures(true) };
   // Last-resort feedback net: any async handler that still throws without its
   // own try/catch surfaces as an error toast instead of failing silently.
   addEventListener("unhandledrejection", (e) => {

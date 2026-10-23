@@ -35,6 +35,9 @@ type ClockView struct {
 	ExtendedDays int              `json:"extended_days,omitempty"`
 	Extensions   []map[string]any `json:"extensions,omitempty"`
 	Extendable   bool             `json:"extendable,omitempty"`
+	// MetOn: the day the step this clock times was done (state met / met_late); the clock no longer counts.
+	MetOn  string `json:"met_on,omitempty"`
+	Target bool   `json:"target,omitempty"` // a working target, not a deadline (state over_target when passed)
 }
 
 // addBusinessDays returns the date n business days after start (weekend-aware;

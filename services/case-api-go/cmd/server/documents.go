@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -109,7 +110,8 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	caseID := chi.URLParam(r, "caseId")
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	// RBAC: auditors and external viewers never write to the docket.
-	if !hasAnyRole(p, "PARTY", "CASE_MANAGER", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	// The PM and the Attorney may file the decision report they edit; a tenant admin has full access in-tenant.
+	if !hasAnyRole(p, "PARTY", "CASE_MANAGER", "PM", "ATTORNEY", "ARBITRATOR", "FINANCE", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"role may not upload documents"}`, http.StatusForbidden)
 		return
 	}
@@ -258,9 +260,13 @@ func (s *server) downloadDocument(w http.ResponseWriter, r *http.Request) {
 	docID := chi.URLParam(r, "docId")
 	var key, ct, fname string
 	var sealed bool
+	// The document must belong to the case in the address: access is checked on that case, so a document of
+	// another case is "not found" here (it used to be served to anyone who could see any case). An outside
+	// organization never gets the office's internal papers.
+	hide := s.outsideDocFilter(r, tenant)
 	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT object_key, content_type, sealed, coalesce(filename,'') FROM tenant_%s.documents WHERE id=$1`,
-		sanitizeTenant(tenant)), docID).Scan(&key, &ct, &sealed, &fname)
+		SELECT d.object_key, d.content_type, d.sealed, coalesce(d.filename,'') FROM tenant_%s.documents d WHERE d.id=$1 AND d.case_id::text=$2`+hide,
+		sanitizeTenant(tenant)), docID, chi.URLParam(r, "caseId")).Scan(&key, &ct, &sealed, &fname)
 	if err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
@@ -340,15 +346,55 @@ func (s *server) moveDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"folder": in.Folder})
 }
 
-// listDocuments + analysis status.
+// outsideCaller: a TPA, health plan or party login with no staff role -- someone outside the office.
+func outsideCaller(p principal) bool {
+	staff := append(append([]string{}, caseStaffRoles...), "FINANCE", "ARBITRATOR", "STATE_AUDITOR", "TENANT_ADMIN")
+	return hasAnyRole(p, "TPA", "HEALTH_PLAN", "PARTY") && !hasAnyRole(p, staff...)
+}
+
+// officeDocSQL matches the office's own documents (alias d): the letters it generates and what it files under
+// Correspondence and Determination -- the decision report, the cover letter, invoices, AHCA's Final Order.
+const officeDocSQL = `(d.uploaded_by LIKE 'lettergen:%%' OR coalesce(d.folder,'') IN ('CORRESPONDENCE','DETERMINATION'))`
+
+var orgRefRe = regexp.MustCompile(`^(tpa|plan):[0-9a-fA-F-]{36}$`)
+
+// outsideDocFilter: what an outside organization's login sees of a case's documents (alias d) -- never the
+// office's internal papers, and an office document only once it was sent to that organization (a letter waiting
+// in QA, a draft decision report, an invoice to the other side stay the office's). "" for staff.
+func (s *server) outsideDocFilter(r *http.Request, tenant string) string {
+	if !outsideCaller(r.Context().Value(ctxPrincipal{}).(principal)) {
+		return ""
+	}
+	orgs := []string{}
+	for _, kind := range []string{"tpa", "hp"} {
+		if py, err := s.payerFor(r, tenant, kind); err == nil && orgRefRe.MatchString(py.org()) {
+			orgs = append(orgs, "'"+py.org()+"'")
+		}
+	}
+	sent := "false"
+	if len(orgs) > 0 {
+		sent = fmt.Sprintf(`d.id IN (SELECT pd.doc_id FROM public.party_documents pd WHERE pd.tenant='%s' AND pd.org IN (%s))`,
+			sanitizeTenant(tenant), strings.Join(orgs, ","))
+	}
+	return " AND NOT " + internalDocSQL + " AND (NOT " + officeDocSQL + " OR " + sent + ")"
+}
+
+// internalDocSQL matches documents only the office sees (alias d): the platform's own working papers, such as the
+// Eligibility Checklist filed with each review (it carries the verdict, the evidence and the reviewer's notes).
+// (No "%" in it: it is spliced into fmt format strings.)
+const internalDocSQL = `(d.content_type = 'text/html' AND left(coalesce(d.filename,''), 22) = 'Eligibility Checklist ')`
+
+// listDocuments + analysis status. An outside organization's login sees the case's documents less the office's
+// internal ones.
 func (s *server) listDocuments(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
 	limit, offset := pageParams(r, 200, 1000)
 	t := sanitizeTenant(tenant)
+	hide := s.outsideDocFilter(r, tenant)
 	var total int
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
-		`SELECT count(*) FROM tenant_%s.documents WHERE case_id=$1`, t), caseID).Scan(&total); err != nil {
+		`SELECT count(*) FROM tenant_%s.documents d WHERE d.case_id=$1`+hide, t), caseID).Scan(&total); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
@@ -359,7 +405,7 @@ func (s *server) listDocuments(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(d.scan_status,'PENDING'), COALESCE(d.uploaded_by,'')
 		FROM tenant_%s.documents d
 		LEFT JOIN public.doc_analysis a ON a.doc_id = d.id
-		WHERE d.case_id=$1 ORDER BY d.folder, d.created_at DESC, d.id DESC
+		WHERE d.case_id=$1`+hide+` ORDER BY d.folder, d.created_at DESC, d.id DESC
 		LIMIT %d OFFSET %d`, t, limit, offset),
 		caseID)
 	if err != nil {

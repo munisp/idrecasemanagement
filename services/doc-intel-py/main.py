@@ -481,6 +481,27 @@ def eligibility_conflicts(current: dict, found: dict, source: str, known: list |
     return out
 
 
+def from_responding_party(uploaded_by: str, folder: str) -> bool:
+    """A document the other side of the dispute uploaded (its response). Pure, so it is tested."""
+    return (uploaded_by or "").startswith("respondent:")
+
+
+def protect_filer_names(details: dict, updates: dict) -> dict:
+    """The filer's own name is never replaced by a name a document prints.
+
+    A public or TPA filing records the filer's organization as requester_org; the provider (or plan) name an EOB
+    prints went into provider_org (health_plan), which the case title prefers -- so a document renamed the filer
+    ("Bayfront Medical Center v. …"). When the filer named itself, a document's name for that side is kept for
+    reference under *_on_documents instead. Pure, so it is tested."""
+    if not (details.get("requester_org") or "").strip():
+        return updates
+    side = "health_plan" if details.get("filing_party_type") == "HEALTH_PLAN" else "provider_org"
+    if side in updates and side not in details:
+        updates = dict(updates)
+        updates[side + "_on_documents"] = updates.pop(side)
+    return updates
+
+
 def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str = "", text: str = "",
                          claim_docs: dict | None = None) -> list[str]:
     """Fill a couple of case fields from analyzed-document facts so staff
@@ -629,9 +650,12 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
             issue = disputed_issue_from(billed_amount_usd, allowed_amount_usd, extracted.get("denial_codes"))
             if issue and "disputed_issue" not in details:
                 extra["disputed_issue"] = issue
+            extra = protect_filer_names(details, extra)
             if extra:
                 set_details(extra)
                 labels = {"out_of_network": "out-of-network", "provider_org": "provider", "health_plan": "health plan",
+                          "provider_org_on_documents": "provider as printed (the filer's name is kept)",
+                          "health_plan_on_documents": "health plan as printed (the filer's name is kept)",
                           "provider_street": "street", "provider_city": "city", "provider_state": "state",
                           "provider_postal": "postal code", "line_of_business": "line of business",
                           "disputed_issue": "disputed issue"}
@@ -703,7 +727,7 @@ def claim_doc_updates(details: dict, cur_disputed: int | None, ex: dict, source:
         for k in ("attestation", "documents_submitted", "representative"):
             if facts.get(k) is not None:
                 found[f"packet_{k}"] = facts[k]
-    updates = {k: v for k, v in found.items() if k not in _NOT_DETAILS and k not in details}
+    updates = protect_filer_names(details, {k: v for k, v in found.items() if k not in _NOT_DETAILS and k not in details})
     if "contracted" in found and "out_of_network" not in details:
         updates["out_of_network"] = "No" if found["contracted"] else "Yes"
     disputed = found.get("disputed_amount_cents")
@@ -1078,13 +1102,22 @@ def persist(evt: dict, ctx: dict) -> None:
                VALUES (%s,%s,'ANALYSIS_COMPLETE',%s)""",
             (evt["tenant"], case_id, summary[:2000]),
         )
-    source = ""
+    source, uploaded_by, folder = "", "", ""
     try:
         with psycopg.connect(DSN, autocommit=True) as c:
-            row = c.execute(f"SELECT filename FROM tenant_{evt['tenant']}.documents WHERE id=%s", (evt["doc_id"],)).fetchone()
-            source = (row[0] if row and row[0] else "") or ""
+            row = c.execute(f"SELECT filename, coalesce(uploaded_by,''), coalesce(folder,'') FROM tenant_{evt['tenant']}.documents WHERE id=%s",
+                            (evt["doc_id"],)).fetchone()
+            if row:
+                source, uploaded_by, folder = (row[0] or ""), row[1], row[2]
     except Exception:
         source = ""  # the name only labels a conflict; never worth failing the analysis for
+    # The other side's documents are its response: read for the Reviewer, never written onto the case (a plan's EOB
+    # filled the filer's provider name, claims and amounts as if the filer had stated them).
+    if from_responding_party(uploaded_by, folder):
+        with psycopg.connect(DSN, autocommit=True) as c:
+            c.execute("INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,'ANALYSIS_NOT_APPLIED',%s)",
+                      (evt["tenant"], case_id, f"{source or 'A document'} is the responding party's: read for the Reviewer, not applied to the case"))
+        return
     # The analysis is already stored. Filling the case from it is a second
     # step: if it fails, the document stays analyzed and the failure is put
     # on the case timeline for a person, instead of marking the document ERROR.

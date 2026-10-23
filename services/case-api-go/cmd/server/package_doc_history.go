@@ -109,6 +109,8 @@ func (s *server) tpaRemoveDoc(w http.ResponseWriter, r *http.Request) {
 	payload := s.packageDocAudit(r, tenant, org.ID, pkgID, slot)
 	payload["filename"], payload["status_when_removed"] = prev.filename, prev.status
 	s.logAudit(r.Context(), tenant, "", "PACKAGE_DOC_REMOVED", payload)
-	s.packageDocReplaced(r, tenant, onboardingKinds["tpa"], pkgID)
+	if moreDocKind(slot) == "" { // taking out an additional document leaves the six as they were
+		s.packageDocReplaced(r, tenant, onboardingKinds["tpa"], pkgID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "removed", "slot": slot, "filename": prev.filename})
 }

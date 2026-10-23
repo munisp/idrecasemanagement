@@ -20,9 +20,9 @@ func TestDaysSince(t *testing.T) {
 	}
 }
 
-// The list is the workflow's refund closures whose initial fee is still paid -- not open or already-refunded ones.
+// The list is the workflow's refund closures whose initial fee is still paid (or being refunded) -- not open or already-refunded ones.
 func TestRefundsDueSQLScope(t *testing.T) {
-	for _, want := range []string{"internal_status = 'Closed-Refunded'", "i.kind='INITIAL_FEE'", "i.status='PAID'",
+	for _, want := range []string{"internal_status = 'Closed-Refunded'", "i.kind='INITIAL_FEE'", "i.status IN ('PAID','REFUND_PENDING')",
 		"a.type='REFUND_DUE'", "p.status='PAID'"} {
 		if !strings.Contains(refundsDueSQL, want) {
 			t.Errorf("refundsDueSQL is missing %q", want)

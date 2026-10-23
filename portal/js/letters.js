@@ -70,8 +70,8 @@ const Letters = (() => {
     const tpls = (cfg && cfg.letter_templates) || [];
     const label = (t) => (t.filename || t.key).replace(/\s*\{case_number\}|\s*\{invoice_number\}/g, "").replace(/\.pdf$/i, "").replace(/\s+-\s*$/, "");
     return `<details class="prog-sec" id="p-dr-details" data-tab="review"><summary>Decision report</summary>
-      <p class="muted">What the Review Rationale and Letter, the cover letter and the invoices say. Each part is written by
-        the reviewer who owns it; the Reviewer and the PM may edit all of it. Generated letters go to the QA queue.</p>
+      <p class="muted">The decision (outcome, amounts, who reviewed it), which the cover letter and the invoices print, and
+        the Review Rationale and Letter itself: pasted here, or uploaded as the finished document. Both go to the QA queue.</p>
       <div id="dr-body"><p class="muted">Loading…</p></div></details>
       ${tpls.length ? `<details class="prog-sec" id="p-letters-details" data-tab="mail"><summary>Generate a letter <span class="muted">— most are drafted by their step; use this for anything else</span></summary>
       <p class="muted">Each letter is built from the case in the program’s layout (unless your office uploaded its own
@@ -106,15 +106,6 @@ const Letters = (() => {
     const outcome = r.outcome || "";
     const startOutcome = !r.outcome && c.outcome ? `<p class="muted">The recorded case outcome (“${esc(c.case_outcome)}”) suggests <b>${esc(OUTCOMES.find((o) => o[0] === c.outcome)?.[1] || c.outcome)}</b>.</p>` : "";
     const aw = r.awarded_cents ?? null, paid = r.already_paid_cents ?? null;
-    const sections = iro ? IRO_SECTIONS : CLAIM_SECTIONS;
-    const secHtml = sections.map(([k, label, who, hint, kind]) => {
-      const v = (r.sections || {})[k] || "";
-      const input = kind === "date" ? `<input type="date" data-sec="${k}" value="${esc(v)}"${dis(k)} />`
-        : kind === "line" ? `<input data-sec="${k}" value="${esc(v)}" maxlength="20000"${dis(k)} />`
-          : `<textarea data-sec="${k}" rows="${v.length > 400 ? 8 : 4}" maxlength="20000"${dis(k)}>${esc(v)}</textarea>`;
-      return `<label class="dr-sec"><span><b>${esc(label)}</b> <span class="chip">${esc(who)}</span>${by(k)}</span>
-        ${input}${hint ? `<span class="muted dr-hint">${esc(hint)}</span>` : ""}</label>`;
-    }).join("");
     box.innerHTML = `
       <div class="dr-grid">
         <label>Report<select data-f="report_type"${dis("decision")}>
@@ -123,28 +114,20 @@ const Letters = (() => {
         <label>Outcome<select data-f="outcome"${dis("decision")}>${OUTCOMES.map(([v, l]) => `<option value="${v}"${v === outcome ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
         ${iro ? "" : `<label>Amount awarded ($)<input data-f="awarded_cents" inputmode="decimal" value="${esc(dollars(aw))}" placeholder="${esc(dollars(c.awarded_cents))}"${dis("decision")} /></label>
         <label>Already paid to the provider ($)<input data-f="already_paid_cents" inputmode="decimal" value="${esc(dollars(paid))}" placeholder="${esc(dollars(c.already_paid_cents))}"${dis("decision")} /></label>
-        <label>Percent awarded<input data-f="percent_awarded" inputmode="decimal" value="${r.percent_awarded ?? ""}" placeholder="${c.disputed_cents && aw != null ? (100 * aw / c.disputed_cents).toFixed(0) : ""}"${dis("decision")} /></label>`}
+        <label>Amount owed to the provider ($)<input id="dr-owed" value="${esc(owedText(aw, paid))}" readonly tabindex="-1" title="The amount awarded less what was already paid" /></label>`}
       </div>
       ${startOutcome}
       ${iro ? "" : `<p class="muted" id="dr-balance">${balanceText(aw, paid, c.disputed_cents)}</p>`}
       <fieldset class="dr-reviewers"><legend>Reviewed by (named in the cover letter)</legend>
         ${(data.reviewer_kinds || []).map((k) => `<label><input type="checkbox" data-rev="${esc(k)}"${(r.reviewers || []).includes(k) ? " checked" : ""}${dis("decision")} /> ${esc(REVIEWER_LABEL[k] || k)}</label>`).join("")}
       </fieldset>
-      <div class="dr-secs">${secHtml}</div>
-      ${iro ? "" : `<h4>Claims table <span class="chip">Coder</span>${by("claims")}</h4>
-        <p class="muted">Billed, UCR pricing, the lesser of the two, paid and reimbursement, per claim line. Shown in the
-          Coding Consultant Review with a total row.</p>
-        ${gridHtml("claims", CLAIM_COLS, r.claims || [], ce.claims)}
-        ${ce.claims && !(r.claims || []).length && (c.claims || []).length ? `<button type="button" class="mini" onclick="Letters.fromCase()">Start from the case’s ${c.claims.length} claim line(s)</button>` : ""}
-        <h4>Disallowed charges <span class="chip">Coder</span>${by("disallowed")}</h4>
-        <p class="muted">Charges that remain denied, grouped by denial reason with a total per reason.</p>
-        ${gridHtml("disallowed", DIS_COLS, r.disallowed || [], ce.claims)}`}
+      ${reportHtml(r, data, ce)}
       <div class="actions">
         <button type="button" onclick="Letters.save()">Save the decision report</button>
         <span class="muted" id="dr-saved">${r.updated_at ? `Saved ${new Date(r.updated_at).toLocaleString()} by ${esc(r.updated_by || "")}` : "Not saved yet"}</span>
       </div>
       <div class="actions">
-        <button type="button" class="mini" onclick="Letters.gen('${esc(state.id)}','final_order_rationale', true)">Generate the decision report</button>
+        ${mode(r, data) === "paste" ? `<button type="button" class="mini" onclick="Letters.gen('${esc(state.id)}','final_order_rationale', true)">Generate the decision report</button>` : ""}
         ${iro ? "" : `<button type="button" class="mini" onclick="Letters.gen('${esc(state.id)}','cover_letter_final_notice', true)">Generate the cover letter</button>
         <button type="button" class="mini" onclick="Letters.gen('${esc(state.id)}','invoice_health_plan', true)">Generate the health plan invoice</button>
         <button type="button" class="mini" onclick="Letters.gen('${esc(state.id)}','invoice_provider', true)">Generate the provider invoice</button>`}
@@ -153,10 +136,53 @@ const Letters = (() => {
     box.onchange = onInput;
   }
 
+  // The report itself: pasted whole, or the finished document uploaded. (The sectioned form it replaced is still
+  // read by lettergen for reports written that way.)
+  const mode = (r, data) => (r.sections || {}).report_mode || (data.report_file ? "upload" : "paste");
+  function reportHtml(r, data, ce) {
+    const m = mode(r, data), dis = ce.full_report ? "" : " disabled", f = data.report_file;
+    const text = (r.sections || {}).full_report || "";
+    return `<fieldset class="dr-mode"><legend>The report</legend>
+        <label><input type="radio" name="dr-mode" value="paste"${m === "paste" ? " checked" : ""}${dis} onchange="Letters.setMode('paste')" /> Paste the report</label>
+        <label><input type="radio" name="dr-mode" value="upload"${m === "upload" ? " checked" : ""}${dis} onchange="Letters.setMode('upload')" /> Upload the finished report</label>
+      </fieldset>
+      ${m === "paste" ? `<label class="dr-sec dr-full"><span><b>Review Rationale and Letter</b> <span class="chip">Reviewer</span>${(r.section_authors || {}).full_report ? `<span class="muted"> — last edited by ${esc(r.section_authors.full_report)}</span>` : ""}</span>
+          <textarea data-sec="full_report" rows="${text.length > 2000 ? 24 : 14}" maxlength="200000"${dis} placeholder="Paste the whole report as it should read: the summary, the rationale, the reviews and the claims.">${esc(text)}</textarea>
+          <span class="muted dr-hint">Blank lines start new paragraphs. “Generate the decision report” prints it on the letterhead, files it under Documents and sends it to the QA gate.</span></label>`
+        : `<div class="dr-upload">
+          ${f ? `<p>Uploaded: <b>${esc(f.filename)}</b> <span class="muted">· ${new Date(f.uploaded_at).toLocaleString()}</span></p>` : `<p class="muted">No report uploaded yet.</p>`}
+          ${ce.full_report ? `<label class="dr-sec"><span><b>${f ? "Replace it" : "The report"}</b> <span class="muted">— PDF or Word</span></span>
+            <input type="file" id="dr-file" accept=".pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword" /></label>
+            <button type="button" class="mini" onclick="Letters.upload(this)">Upload the report</button>
+            <span class="muted dr-hint">It is filed under Documents as the Review Rationale and Letter and goes to the QA gate.</span>` : ""}
+        </div>`}`;
+  }
+  function setMode(m) {
+    if (!state) return;
+    state.report.sections = { ...(state.report.sections || {}), report_mode: m };
+    markDirty("sections");
+    render();
+  }
+  async function upload(btn) {
+    const file = document.getElementById("dr-file")?.files?.[0];
+    if (!file) { UI.toast("Choose the report file first", { kind: "warn" }); return; }
+    if (state.dirty && !(await save(true))) return;
+    await UI.run(btn, async () => {
+      try {
+        const up = await Api.cases.upload(state.id, file, false, "DETERMINATION");
+        await Api.letters.attachReport(state.id, up.doc_id || up.id);
+        UI.toast("Decision report uploaded — it is under Documents and in the QA queue");
+        await load(state.id);
+      } catch (e) { UI.toast(`The report could not be uploaded: ${e.message}`, { kind: "warn", duration: 9000 }); }
+    }, "Uploading…");
+  }
+
+  // The amount owed: the award less what the plan already paid (never below zero).
+  const owedCents = (aw, paid) => (aw == null ? null : Math.max(aw - (paid || 0), 0));
+  const owedText = (aw, paid) => (aw == null ? "" : dollars(owedCents(aw, paid)));
   function balanceText(aw, paid, disputed) {
-    if (aw == null) return "Enter the amount awarded; the balance owed is the award less what was already paid.";
-    const bal = Math.max(aw - (paid || 0), 0);
-    return `Balance owed to the provider: <b>${usd(bal)}</b>${disputed ? ` · ${(100 * aw / disputed).toFixed(0)}% of the ${usd(disputed)} in dispute` : ""}.`;
+    if (aw == null) return "Enter the amount awarded; the amount owed is the award less what was already paid.";
+    return `Amount owed to the provider: <b>${usd(owedCents(aw, paid))}</b>${disputed ? ` · of the ${usd(disputed)} in dispute` : ""}.`;
   }
 
   function gridHtml(name, cols, rows, editable) {
@@ -196,11 +222,12 @@ const Letters = (() => {
     if (!f) return;
     if (f === "report_type") { r.report_type = el.value; markDirty(f); render(); return; }
     if (f === "outcome") r.outcome = el.value || null;
-    else if (f === "percent_awarded") r.percent_awarded = el.value.trim() === "" ? null : parseFloat(el.value);
     else r[f] = cents(el.value);
     markDirty(f);
     const b = document.getElementById("dr-balance");
     if (b) b.innerHTML = balanceText(r.awarded_cents, r.already_paid_cents, state.data.case?.disputed_cents);
+    const o = document.getElementById("dr-owed");
+    if (o) o.value = owedText(r.awarded_cents, r.already_paid_cents);
   }
 
   function markDirty(part) {
@@ -221,7 +248,7 @@ const Letters = (() => {
   // The parts that changed and that the caller may write: the server refuses anything else.
   function body() {
     const ce = state.data.can_edit || {}, r = state.report, ch = state.changed || new Set(), out = {};
-    for (const f of ["report_type", "outcome", "awarded_cents", "already_paid_cents", "percent_awarded", "reviewers"])
+    for (const f of ["report_type", "outcome", "awarded_cents", "already_paid_cents", "reviewers"])
       if (ch.has(f) && ce.decision) out[f] = r[f] ?? null;
     if (ch.has("sections")) {
       const secs = {};
@@ -249,10 +276,31 @@ const Letters = (() => {
 
   async function gen(id, key, fromReport) {
     if (fromReport && state && state.dirty && !(await save(true))) return;
+    // A partially accepted case: first which of its claims are ineligible, and why (the letter names both).
+    if (key === "partial_acceptance_letter" && !(await partialClaims(id))) return;
     try {
       await Api.cases.lettergen(id, key);
       UI.toast("Generating — the letter appears under Documents and in the QA queue in a few seconds. If something it needs is missing, the case’s activity says what.", { duration: 8000 });
     } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
+
+  async function partialClaims(id) {
+    let claims = [];
+    try { const r = await Api.cases.claims(id); claims = r.claims || r || []; } catch (e) { UI.toast(e.message, { kind: "warn" }); return false; }
+    const nums = claims.map((c) => c.claim_number).filter(Boolean);
+    if (nums.length < 2) { UI.toast("A partial acceptance needs at least two claims on the case: one accepted, one not.", { kind: "warn", duration: 8000 }); return false; }
+    const marked = claims.filter((c) => c.status === "INELIGIBLE").map((c) => c.claim_number);
+    const v = await UI.modal({ title: "Partial acceptance", submitLabel: "Save and generate",
+      body: `Claims on this case: <b>${nums.map(esc).join(", ")}</b>. Name the ones that are not eligible; the rest are accepted for review.`,
+      fields: [{ name: "ineligible", label: "Ineligible claims (claim numbers, separated by commas)", required: true, value: marked.join(", ") },
+        { name: "reason", label: "Why they are ineligible", type: "textarea", required: true,
+          value: esc((claims.find((c) => c.status === "INELIGIBLE") || {}).reason || ""),
+          hint: "Goes in the letter after the claim numbers, e.g. “were filed more than 12 months after the final determination.”" }] });
+    if (!v) return false;
+    try {
+      await Api.cases.claimEligibility(id, { ineligible: v.ineligible.split(/[,;\s]+/).filter(Boolean), reason: v.reason.trim() });
+      return true;
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); return false; }
   }
 
   // ---- letterhead & invoice details (Billing and Templates pages) --------------------------------------------
@@ -367,5 +415,5 @@ const Letters = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
   }
 
-  return { caseSecHtml, gen, save, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
+  return { caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
 })();

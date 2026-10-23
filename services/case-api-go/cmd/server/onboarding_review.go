@@ -39,9 +39,9 @@ var onboardingKinds = map[string]onboardingKind{
 // Reviewer owns intake, the PM is the QA gate.
 var onboardingReviewRoles = []string{"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
-// refreshOnboardingPackage recomputes a package's status from its slots
-// (READY only when all six are ACCEPTED) and then its owner's onboarding
-// status. The same rule doc-intel applies after each verdict.
+// refreshOnboardingPackage recomputes a package's status from its documents
+// (READY once all of them are read) and then its owner's onboarding status.
+// The same rule doc-intel applies after each verdict.
 func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onboardingKind, pkgID string) string {
 	var owner, current string
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
@@ -49,17 +49,16 @@ func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onbo
 		tenant, pkgID).Scan(&owner, &current); err != nil || current == "FILED" {
 		return current
 	}
-	var accepted, rejected int
+	// READY once every document has been read (packageFileable): a flagged one is the Reviewer's to look at, and
+	// never holds the set back.
+	var docs, reading int
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT count(*) FILTER (WHERE status='ACCEPTED'), count(*) FILTER (WHERE status='REJECTED')
+		SELECT count(*), count(*) FILTER (WHERE status IN ('PENDING','ANALYZING'))
 		FROM public.%s_package_docs WHERE tenant=$1 AND package_id=$2`, k.prefix),
-		tenant, pkgID).Scan(&accepted, &rejected)
+		tenant, pkgID).Scan(&docs, &reading)
 	status := "VALIDATING"
-	switch {
-	case accepted >= len(tpaSlots):
+	if docs > 0 && reading == 0 {
 		status = "READY"
-	case rejected > 0:
-		status = "REJECTED"
 	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
 		`UPDATE public.%s_packages SET status=$3, updated_at=now() WHERE tenant=$1 AND id=$2`, k.prefix),

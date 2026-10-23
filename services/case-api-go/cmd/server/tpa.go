@@ -175,8 +175,9 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id) VALUES ($1,$2,$3)`,
-		tenant, userID, id); err != nil {
+		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id, team_role, full_name, email, username, added_by)
+		VALUES ($1,$2,$3,'ADMIN',nullif($4,''),$5,$6,'registration')`,
+		tenant, userID, id, in.ContactName, strings.ToLower(in.ContactEmail), username); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "organization and login were created, but linking them failed — sign in and use claim code " + code + " (Profile → Claim TPA) to finish linking",
 		})
@@ -383,9 +384,14 @@ func (s *server) tpaAddClient(w http.ResponseWriter, r *http.Request) {
 		PartyName    string `json:"party_name"`
 		PartyType    string `json:"party_type"` // PROVIDER | HEALTH_PLAN
 		ContactEmail string `json:"contact_email"`
+		GroupID      string `json:"group_id"` // the provider group it belongs to ("" = none)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PartyName == "" {
 		http.Error(w, `{"error":"party_name required"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := s.tpaGroupUsable(r, tenant, org.ID, in.GroupID); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
 	pt := strings.ToUpper(strings.TrimSpace(in.PartyType))
@@ -398,8 +404,8 @@ func (s *server) tpaAddClient(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.tpa_clients (tenant, tpa_id, party_name, party_type, contact_email)
-		VALUES ($1,$2,$3,$4,$5) RETURNING id`, tenant, org.ID, in.PartyName, pt, in.ContactEmail).Scan(&id)
+		INSERT INTO public.tpa_clients (tenant, tpa_id, party_name, party_type, contact_email, group_id)
+		VALUES ($1,$2,$3,$4,$5,nullif($6,'')::uuid) RETURNING id`, tenant, org.ID, in.PartyName, pt, in.ContactEmail, in.GroupID).Scan(&id)
 	if err != nil {
 		http.Error(w, `{"error":"client already exists for this TPA"}`, http.StatusConflict)
 		return
@@ -425,8 +431,10 @@ func (s *server) tpaListClients(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, _ := s.queryRows(r, `
 		SELECT c.id, c.party_name, c.party_type, c.contact_email, c.status, c.created_at,
-		       (SELECT count(*) FROM public.case_origin o WHERE o.client_id=c.id) AS case_count
-		FROM public.tpa_clients c WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY c.party_name`, tenant, org.ID)
+		       (SELECT count(*) FROM public.case_origin o WHERE o.client_id=c.id) AS case_count,
+		       coalesce(c.group_id::text,'') AS group_id, coalesce(g.name,'') AS group_name
+		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
+		WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY lower(coalesce(g.name,'~')), c.party_name`, tenant, org.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"clients": rows})
 }
 
@@ -530,19 +538,12 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, "this dispute can't be filed yet: "+why), http.StatusConflict)
 		return
 	}
-	// Onboarding gate (tpa_onboarding): when the client has completed
-	// onboarding the filing must reference its READY package — six ACCEPTED
-	// slots + a verified payment rail. Clients that never started onboarding
-	// (no profile, no packages) keep the legacy ungated path so existing
-	// flows don't break mid-flight.
+	// Onboarding gate (tpa_onboarding): optional unless the tenant turns on
+	// onboarding_required, which makes every filing reference a READY package
+	// and a verified payment rail. A package named on a filing must be READY.
 	if s.featureEnabled(r, tenant, "tpa_onboarding") {
-		var onboarded int
-		_ = s.db.QueryRow(r.Context(), `
-			SELECT count(*) FROM public.tpa_clients
-			WHERE tenant=$1 AND id=$2 AND (npi IS NOT NULL OR
-			  EXISTS (SELECT 1 FROM public.tpa_packages p WHERE p.tenant=$1 AND p.client_id=$2))`,
-			tenant, in.ClientID).Scan(&onboarded)
-		if onboarded > 0 || s.featureEnabled(r, tenant, "onboarding_required") {
+		required := s.featureEnabled(r, tenant, "onboarding_required")
+		if required || in.PackageID != "" {
 			if in.PackageID == "" {
 				http.Error(w, `{"error":"filings must reference this client's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)
 				return
@@ -552,8 +553,8 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 				SELECT status FROM public.tpa_packages
 				WHERE tenant=$1 AND tpa_id=$2 AND client_id=$3 AND id=$4`,
 				tenant, org.ID, in.ClientID, in.PackageID).Scan(&pkgStatus)
-			if err != nil || pkgStatus != "READY" {
-				http.Error(w, `{"error":"package not found or not READY (all six documents must be ACCEPTED)"}`, http.StatusConflict)
+			if ok, _ := s.packageFileable(r.Context(), tenant, "tpa", in.PackageID); err != nil || !ok {
+				http.Error(w, `{"error":"these documents can't be filed yet: every one of the six that was started must be accepted first (or file without them)"}`, http.StatusConflict)
 				return
 			}
 			var verified int
@@ -561,7 +562,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 				SELECT count(*) FROM public.tpa_payment_methods
 				WHERE tenant=$1 AND client_id=$2 AND verified AND status='ACTIVE'`,
 				tenant, in.ClientID).Scan(&verified)
-			if verified == 0 {
+			if verified == 0 && required {
 				http.Error(w, `{"error":"no verified payment method for this client"}`, http.StatusConflict)
 				return
 			}

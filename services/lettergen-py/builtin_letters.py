@@ -116,7 +116,7 @@ def _addr_lines(addr: dict | None) -> list[str]:
 
 def _party(c, tenant: str, side: str, account_id: str | None, fallback_name: str, details: dict) -> dict:
     """The provider or the health plan as the letters address it: name, contact, address, email."""
-    out = {"name": "", "contact": "", "email": "", "address": []}
+    out = {"name": "", "contact": "", "title": "", "email": "", "address": []}
     r = c.execute(
         """SELECT name, coalesce(email,''), account_id::text FROM public.case_respondents
            WHERE tenant=%s AND case_id=%s AND side=%s ORDER BY created_at LIMIT 1""",
@@ -133,12 +133,13 @@ def _party(c, tenant: str, side: str, account_id: str | None, fallback_name: str
             out["name"] = out["name"] or a[0] or ""
             out["address"] = _addr_lines(a[1] if isinstance(a[1], dict) else None)
         ct = c.execute(
-            "SELECT name, coalesce(email,'') FROM public.contacts WHERE tenant=%s AND account_id::text=%s ORDER BY created_at LIMIT 1",
+            "SELECT name, coalesce(email,''), coalesce(role_title,'') FROM public.contacts WHERE tenant=%s AND account_id::text=%s ORDER BY created_at LIMIT 1",
             (tenant, account_id),
         ).fetchone()
         if ct:
             out["contact"] = ct[0] or ""
             out["email"] = out["email"] or ct[1]
+            out["title"] = ct[2]
     out["name"] = out["name"] or fallback_name or ("the Provider" if side == "PROVIDER" else "the Health Plan")
     if side == "PROVIDER":
         out["contact"] = out["contact"] or details.get("requester_contact_name") or ""
@@ -512,8 +513,25 @@ def _claim_no(ctx: dict, rep: dict) -> str:
     return "ALL" if nums else ""
 
 
+def pasted_report(rep: dict | None) -> str:
+    """The report pasted whole on the case's Decision report ("paste"), or "" when it is written in sections."""
+    sec = (rep or {}).get("sections") or {}
+    if sec.get("report_mode", "paste") != "paste":
+        return ""
+    return (sec.get("full_report") or "").strip()
+
+
+def build_pasted_report(ctx: dict, text: str, logo: bytes | None) -> Letter:
+    """The pasted report on the letterhead, as the Reviewer wrote it."""
+    d = Letter(ctx, header_line=ctx["case_number"], logo=logo)
+    d.text_block(text)
+    return d
+
+
 def build_decision_report(ctx: dict, logo: bytes | None) -> Letter:
     rep = _decision(ctx)
+    if pasted_report(rep):
+        return build_pasted_report(ctx, pasted_report(rep), logo)
     if rep.get("report_type") == "IRO":
         return build_iro_decision(ctx, rep, logo)
     L, sec = ctx["letters"], rep.get("sections") or {}
@@ -601,11 +619,11 @@ def build_decision_report(ctx: dict, logo: bytes | None) -> Letter:
                 d.para(f"{org} has found that {money(total)} of disallowed charges will remain denied.")
 
     closing = "Based on the foregoing, " + rec
-    pa = rep.get("percent_awarded")
-    if pa is None and rep.get("awarded_cents") is not None and ctx.get("disputed_cents"):
-        pa = round(100 * rep["awarded_cents"] / ctx["disputed_cents"], 2)
-    if rep["outcome"] == "PARTIALLY_OVERTURNED" and pa is not None:
-        closing += f" {org} is awarding {money(rep.get('awarded_cents'))} or {pct(pa)} of the disputed charge to the Provider."
+    aw = rep.get("awarded_cents")
+    if rep["outcome"] == "PARTIALLY_OVERTURNED" and aw is not None:
+        # The amount owed: the award less what the health plan already paid.
+        owed = max(aw - (rep.get("already_paid_cents") or 0), 0)
+        closing += f" {org} is awarding {money(aw)} of the disputed charge; {money(owed)} is owed to the Provider."
     elif rep["outcome"] == "OVERTURNED":
         closing += f" 100% of the {counted(ctx['num_claims'], 'claim')} reviewed have been overturned." \
             if ctx["num_claims"] > 1 else ""
@@ -881,6 +899,12 @@ def _contact_close(d: Letter):
     d.sign_off()
 
 
+def estimate_declined(details: dict) -> bool:
+    """The filer said no cost estimate is wanted (the packet's answer); unknown counts as not declined."""
+    v = (details or {}).get("fee_estimate_requested")
+    return v is False or str(v).strip().lower() in ("no", "false")
+
+
 def build_acceptance(ctx, logo):
     L, org = ctx["letters"], ctx["letters"]["org_short"]
     d = _stage_letter(ctx, logo, ctx["provider"], "Results of Preliminary Review")
@@ -890,10 +914,14 @@ def build_acceptance(ctx, logo):
     amt = f" The amount in dispute is {money(ctx['disputed_cents'])}." if ctx.get("disputed_cents") else ""
     d.para(f"The dispute concerns {counted(ctx['num_claims'], 'claim')} for services rendered to members of "
            f"{ctx['plan']['name']}.{amt}")
-    d.para(f"{org} will now notify the Health Plan of the dispute. The Health Plan has 15 calendar days from that "
-           f"notice to respond with all supporting documentation. If you received an estimated cost of the Full "
-           f"Review, please respond to that email within 15 calendar days of its receipt so {org} may proceed; if no "
-           f"response is received, {org} will close the dispute request and no further action will be taken.")
+    notice = (f"{org} will now notify the Health Plan of the dispute. The Health Plan has 15 calendar days from that "
+              f"notice to respond with all supporting documentation.")
+    # Without a cost estimate requested there is no estimate to answer: the letter says nothing about one.
+    if not estimate_declined(ctx["details"]):
+        notice += (f" If you received an estimated cost of the Full Review, please respond to that email within 15 "
+                   f"calendar days of its receipt so {org} may proceed; if no response is received, {org} will close "
+                   f"the dispute request and no further action will be taken.")
+    d.para(notice)
     _contact_close(d)
     return d
 

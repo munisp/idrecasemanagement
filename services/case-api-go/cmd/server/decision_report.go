@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -23,6 +24,7 @@ import (
 
 const (
 	drSectionMax    = 20000
+	drFullReportMax = 200000 // a whole report pasted in one piece
 	drClaimsMax     = 500
 	drDisallowedMax = 200
 )
@@ -38,6 +40,10 @@ var (
 
 // drSections: every section a report may carry, and who writes it.
 var drSections = map[string][]string{
+	// The report pasted whole ("paste") or uploaded as a finished document ("upload": attachDecisionReport); the
+	// sections below are the older way of writing it, still read when neither is given.
+	"full_report": drReviewerRoles,
+	"report_mode": drReviewerRoles,
 	// The claim dispute report (FL 408.7057).
 	"claim_summary":      drReviewerRoles,
 	"dispute_issue":      drReviewerRoles,
@@ -141,11 +147,11 @@ func validDrDisallowed(ds []drDisallowed) string {
 // drOutcomeFromCase maps the recorded case outcome to the report's wording.
 func drOutcomeFromCase(caseOutcome string) string {
 	switch caseOutcome {
-	case "Provider Full Award", "Provider Default Award":
+	case "Full Award", "Default Award", "Provider Full Award", "Provider Default Award":
 		return "OVERTURNED"
-	case "Provider Partial Award":
+	case "Partial Award", "Provider Partial Award":
 		return "PARTIALLY_OVERTURNED"
-	case "Provider No Award":
+	case "No Award", "Provider No Award":
 		return "UPHELD"
 	}
 	return ""
@@ -203,8 +209,18 @@ func (s *server) getDecisionReport(w http.ResponseWriter, r *http.Request) {
 	for k, roles := range drSections {
 		canEdit[k] = drCan(p, roles)
 	}
+	// The uploaded report, by name, for the form to show.
+	var reportFile any
+	var fileID, fileName string
+	var fileAt time.Time
+	if s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT d.id::text, coalesce(d.filename,''), d.created_at FROM public.decision_reports x
+		JOIN tenant_%s.documents d ON d.id::text = x.sections->>'report_file'
+		WHERE x.tenant=$1 AND x.case_id=$2`, sanitizeTenant(tenant)), tenant, caseID).Scan(&fileID, &fileName, &fileAt) == nil {
+		reportFile = map[string]any{"doc_id": fileID, "filename": fileName, "uploaded_at": fileAt}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"report": report,
+		"report": report, "report_file": reportFile,
 		"case": map[string]any{
 			"case_number": caseNumber, "case_outcome": caseOutcome, "disputed_cents": disputed,
 			"awarded_cents": awarded, "already_paid_cents": paid, "accepted_on": accepted,
@@ -369,8 +385,16 @@ func (s *server) putDecisionReport(w http.ResponseWriter, r *http.Request) {
 					forbid(sk)
 					return
 				}
-				if !drShort(sv, drSectionMax) {
-					bad(fmt.Sprintf("%s is longer than %d characters", sk, drSectionMax))
+				max := drSectionMax
+				if sk == "full_report" {
+					max = drFullReportMax
+				}
+				if !drShort(sv, max) {
+					bad(fmt.Sprintf("%s is longer than %d characters", strings.ReplaceAll(sk, "_", " "), max))
+					return
+				}
+				if sk == "report_mode" && sv != "paste" && sv != "upload" {
+					bad("report_mode must be paste or upload")
 					return
 				}
 				secs[sk] = strings.TrimSpace(sv)
@@ -604,4 +628,75 @@ func (s *server) putLetterSettings(w http.ResponseWriter, r *http.Request) {
 	// The audit names what changed, never the bank numbers themselves.
 	s.logAudit(r.Context(), tenant, "", "LETTER_SETTINGS_UPDATED", map[string]any{"by": p.Subject, "groups": groups})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "groups": groups})
+}
+
+// attachDecisionReport: POST /cases/{caseId}/decision-report/file {"doc_id"} -- the finished Review Rationale and
+// Letter, written outside the platform and uploaded to the case (POST /cases/{caseId}/documents), becomes the
+// decision report: filed under Determination by the letter's name and sent to the QA gate like a generated one.
+func (s *server) attachDecisionReport(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !drCan(p, drReviewerRoles) {
+		http.Error(w, `{"error":"forbidden: the Reviewer or the PM uploads the decision report"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	var in struct {
+		DocID string `json:"doc_id"`
+	}
+	if json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in) != nil || in.DocID == "" {
+		http.Error(w, `{"error":"doc_id of the uploaded report is required"}`, http.StatusBadRequest)
+		return
+	}
+	t := sanitizeTenant(tenant)
+	var caseNumber, fn string
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT c.case_number, coalesce(d.filename,'') FROM tenant_%s.documents d JOIN tenant_%s.cases c ON c.id = d.case_id
+		WHERE d.id::text=$1 AND d.case_id::text=$2`, t, t), in.DocID, caseID).Scan(&caseNumber, &fn); err != nil {
+		http.Error(w, `{"error":"that document is not on this case"}`, http.StatusNotFound)
+		return
+	}
+	name := drReportFileName(caseNumber, fn)
+	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.documents SET folder='DETERMINATION', filename=$3
+		WHERE id::text=$1 AND case_id::text=$2`, t), in.DocID, caseID, name); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	secs, _ := json.Marshal(map[string]string{"report_file": in.DocID, "report_mode": "upload"})
+	authors, _ := json.Marshal(map[string]string{"report_file": displayName(p)})
+	if _, err := s.db.Exec(r.Context(), `
+		INSERT INTO public.decision_reports AS d (tenant, case_id, sections, section_authors, updated_by)
+		VALUES ($1,$2,$3::jsonb,$4::jsonb,$5)
+		ON CONFLICT (tenant, case_id) DO UPDATE SET sections = d.sections || $3::jsonb,
+		  section_authors = d.section_authors || $4::jsonb, updated_by = $5, updated_at = now()`,
+		tenant, caseID, string(secs), string(authors), displayName(p)); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	// The same QA record a generated letter gets: the PM checks it before it goes in the Final Order package.
+	var qid string
+	_ = s.db.QueryRow(r.Context(), `
+		INSERT INTO public.qa_reviews (tenant, case_id, artifact, channel, subject, body, status, drafted_by, requested_by_sub)
+		VALUES ($1,$2,'final_order_rationale','letter',$3,$4,'PENDING',$5,$6) RETURNING id`,
+		tenant, caseID, "Review Rationale and Letter "+caseNumber,
+		fmt.Sprintf("Uploaded by %s: %s", displayName(p), name), displayName(p), p.Subject).Scan(&qid)
+	s.notify(r, tenant, "role:PM", "QA_REVIEW",
+		fmt.Sprintf("Decision report uploaded for case %s — awaiting QA", caseNumber), "#/qa")
+	s.logActivity(r.Context(), tenant, caseID, "DECISION_REPORT_UPLOADED",
+		fmt.Sprintf("Decision report uploaded by %s: %s, queued for QA", displayName(p), name))
+	s.logAudit(r.Context(), tenant, caseID, "DECISION_REPORT_UPLOADED", map[string]any{"by": p.Subject, "doc_id": in.DocID, "qa_id": qid})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "attached", "doc_id": in.DocID, "filename": name, "qa_id": qid})
+}
+
+// drReportFileName: an uploaded report goes by the letter's own name, keeping the file's type.
+func drReportFileName(caseNumber, uploaded string) string {
+	base := "Review Rationale and Letter " + caseNumber
+	if strings.HasPrefix(uploaded, base) {
+		return uploaded
+	}
+	ext := ""
+	if i := strings.LastIndex(uploaded, "."); i > 0 && len(uploaded)-i <= 6 {
+		ext = strings.ToLower(uploaded[i:])
+	}
+	return base + ext
 }

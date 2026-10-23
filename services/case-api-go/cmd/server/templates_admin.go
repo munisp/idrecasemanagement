@@ -58,6 +58,7 @@ var templateEventLabels = map[string]string{
 	"documentation_not_received": "Documents not received by the deadline",
 	"final_order":                "Final Order package to the Agency",
 	"final_order_rationale_copy": "Rationale copy to both parties",
+	"invoice":                    "Invoice to the party billed (drafted when it passes QA)",
 	"payment_reminder":           "Invoice coming due (drafted automatically)",
 	"past_due_reminder":          "Invoice past due (drafted automatically)",
 	"refund":                     "Case closed and fee refunded",

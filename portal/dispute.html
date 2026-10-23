@@ -165,6 +165,7 @@
     document.getElementById("dispute-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const msg = document.getElementById("f-msg"), btn = document.getElementById("f-submit");
+      let filed = false;
       msg.className = "form-msg"; msg.textContent = "";
       const amount = document.getElementById("f-amount").value;
       const body = {
@@ -208,6 +209,8 @@
           }
           e.target.reset();
           PacketForm.fill(pkHost, {}, { partyFixed: party.value });
+          filed = true; // the button stays "Filed" until the next filing is typed, so a second click can't file it twice
+          e.target.addEventListener("input", () => { filed = false; btn.disabled = false; btn.textContent = "Start my dispute"; }, { once: true });
         } else {
           msg.classList.add("err");
           msg.textContent = data.error ? `Could not open your dispute: ${data.error}${data.problems ? " — " + data.problems.join("; ") : ""}` : `Submission failed (${resp.status}). Please try again later.`;
@@ -215,7 +218,8 @@
       } catch {
         msg.classList.add("err"); msg.textContent = "Network error — please try again.";
       } finally {
-        btn.disabled = false; btn.textContent = "Start my dispute";
+        if (filed) { btn.disabled = true; btn.textContent = "Filed — check your email"; }
+        else { btn.disabled = false; btn.textContent = "Start my dispute"; }
       }
     });
     // Two separate tasks, one visible at a time. The tab is in the URL

@@ -642,6 +642,21 @@ func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = visible
 	}
+	// Who wrote each note, by name (author is the Keycloak subject).
+	var authors []string
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if a := fmt.Sprint(row["author"]); a != "" && !seen[a] {
+			seen[a] = true
+			authors = append(authors, a)
+		}
+	}
+	if len(authors) > 0 {
+		names := s.resolveSubjectNames(r.Context(), authors)
+		for _, row := range rows {
+			row["author_name"] = names[fmt.Sprint(row["author"])]
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"notes": rows})
 }
 
@@ -674,7 +689,9 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		{"case", fmt.Sprintf(`SELECT id, case_number, status, id::text FROM tenant_%s.cases
 			WHERE case_number ILIKE $1 OR provider_id ILIKE $1 OR payer_id ILIKE $1
 			   OR details->>'provider_name' ILIKE $1 OR details->>'payer_name' ILIKE $1
-			   OR details->>'patient_name' ILIKE $1 LIMIT 10`, sanitizeTenant(tenant))},
+			   OR details->>'patient_name' ILIKE $1
+			   OR details->>'requester_org' ILIKE $1 OR details->>'provider_org' ILIKE $1 OR details->>'health_plan' ILIKE $1
+			   OR details->>'requester_email' ILIKE $1 LIMIT 10`, sanitizeTenant(tenant))},
 		{"account", `SELECT id::text, legal_name, type, '' FROM public.accounts
 			WHERE tenant=$1 AND legal_name ILIKE $2 LIMIT 10`},
 		{"contact", `SELECT id::text, name, COALESCE(role_title,''), '' FROM public.contacts

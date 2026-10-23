@@ -33,6 +33,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -66,7 +67,34 @@ func ssnFormOK(t string) bool {
 	return area != "000" && area != "666" && area[0] != '9' && t[3:5] != "00" && t[5:] != "0000"
 }
 
-// tinProblem: why this TIN cannot be real, or "".
+// normTIN is a TIN as its 9 digits: 12-3456789 and 123 45 6789 are written either way.
+func normTIN(t string) string {
+	return strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(t))
+}
+
+var (
+	einWritten = regexp.MustCompile(`^\d{2}-\d{7}$`)             // 12-3456789: an EIN
+	ssnWritten = regexp.MustCompile(`^\d{3}[- ]\d{2}[- ]\d{4}$`) // 123-45-6789: a Social Security number
+)
+
+// tinCheck is a TIN as taken: its 9 digits, and why it cannot be real ("" when it can). How it is written says
+// which kind it is: 12-3456789 must be a possible EIN, 123-45-6789 a possible SSN; bare digits may be either.
+func tinCheck(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	t := normTIN(raw)
+	if msg := tinProblem(t); msg != "" {
+		return t, msg
+	}
+	switch {
+	case einWritten.MatchString(raw) && !einFormOK(t):
+		return t, "TIN " + raw + " is written as an EIN, but no EIN starts with " + t[:2]
+	case ssnWritten.MatchString(raw) && !ssnFormOK(t):
+		return t, "TIN " + raw + " is written as a Social Security number, but it isn't a valid one"
+	}
+	return t, ""
+}
+
+// tinProblem: why this TIN (9 digits, see normTIN) cannot be real, or "". The one rule for every TIN taken.
 func tinProblem(t string) string {
 	switch {
 	case !isDigits(t, 9):

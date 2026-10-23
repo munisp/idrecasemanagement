@@ -33,7 +33,8 @@ const CaseLayout = (() => {
       ...(d.line_of_business ? [["Line of business", d.line_of_business]] : []),
       ["Opened", fmtDate(c.opened_at)],
     ];
-    const chips = (clocks || []).filter((cl) => cl.state !== "done" && cl.remaining !== undefined).map((cl) => {
+    // Running deadlines only: a met step's clock has stopped, and a working target is not a deadline.
+    const chips = (clocks || []).filter((cl) => !["done", "met", "met_late"].includes(cl.state) && !cl.target && cl.remaining !== undefined).map((cl) => {
       const late = cl.remaining < 0;
       const txt = late ? `${Math.abs(cl.remaining)} days overdue` : cl.remaining === 0 ? "due today" : `${cl.remaining} days left`;
       return `<span class="case-clock ${late ? "late" : cl.remaining <= 3 ? "soon" : ""}" title="${esc(cl.cite || "")} — due ${esc(cl.due || "")}">
@@ -46,12 +47,71 @@ const CaseLayout = (() => {
           ${programmed && c.agency_status ? `<span class="muted" title="What the Agency sees">Agency: ${esc(c.agency_status)}</span>` : ""}</div>
         <!--case-more-->
       </div>
-      <p class="case-parties"><b>${esc(provider)}</b> <span class="muted">v.</span> <b>${esc(plan)}</b>
+      <p class="case-parties"><b>${esc(provider)}</b> <span class="case-v">v.</span> <b>${esc(plan)}</b>
         ${d.filing_party_type ? `<span class="chip">Filed by the ${d.filing_party_type === "HEALTH_PLAN" ? "health plan" : "provider"}</span>` : ""}</p>
-      <dl class="case-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}
-        <div><dt>Assigned to</dt><dd id="case-assignee" data-case="${esc(c.id)}"><span class="muted">…</span></dd></div></dl>
+      <div class="case-main">
+        <div class="case-main-left">
+          <div class="case-story" id="case-story" data-case="${esc(c.id)}" aria-live="polite"><p class="muted">Summarising the case…</p></div>
+          <dl class="case-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+        </div>
+        <aside class="case-team" aria-label="Case team"><h4>Case team</h4>
+          <div id="case-assignee" data-case="${esc(c.id)}"><span class="muted">…</span></div></aside>
+      </div>
       ${chips ? `<div class="case-clocks">${chips}</div>` : ""}
     </header>`;
+  }
+
+  // The case in words (GET /cases/{id}/summary): built from the case's current data each time the page is drawn, so
+  // it says what the dispute is and where it stands now -- and, once decided, the result and the money.
+  async function story(caseId) {
+    const el = document.getElementById("case-story");
+    if (!el) return;
+    try {
+      const s = await Api.cases.summary(caseId);
+      const dec = s.decision;
+      const pct = s.steps_total ? Math.round(100 * s.steps_done / s.steps_total) : 0;
+      const cap = (t) => String(t || "").replace(/^./, (x) => x.toUpperCase());
+      // Stage, eligibility and progress on one line.
+      const stage = s.decided ? '<span class="case-story-tag done">Decided</span>' : s.closed ? '<span class="case-story-tag">Closed</span>'
+        : s.stage ? `<span class="case-story-tag">${esc(s.stage)}</span>` : "";
+      const elig = { ELIGIBLE: ["ok", "Eligible"], INELIGIBLE: ["bad", "Ineligible"], HOLD_AOR: ["warn", "On hold — representation"] }[s.eligibility?.result];
+      const progress = s.steps_total ? `<span class="case-story-prog" title="${s.steps_done} of ${s.steps_total} steps done">
+          <span class="case-story-bar"><span style="width:${pct}%"></span></span>${s.steps_done}/${s.steps_total} steps</span>` : "";
+      // The highlighted box: the result once decided, else where the case is now.
+      let box = "";
+      if (dec) {
+        const tiles = [
+          ...(dec.awarded_cents != null ? [["Awarded to the provider", usd(dec.awarded_cents)]] : []),
+          ...(dec.already_paid_cents ? [["Already paid by the plan", usd(dec.already_paid_cents)]] : []),
+          ...(dec.owed_cents != null ? [["Still owed", usd(dec.owed_cents)]] : []),
+          ...(dec.review_costs_billed_to ? [["Review costs billed to", cap(dec.review_costs_billed_to.replace(/^the /, ""))]] : []),
+        ];
+        box = `<div class="case-callout done"><div class="case-callout-head"><span class="case-callout-label">Result</span>
+            ${dec.final_order_sent ? `<span class="muted">final order sent ${esc(dec.final_order_sent)}</span>` : ""}</div>
+          <p class="case-callout-main">${esc(cap(dec.result || sentence(dec.outcome)))}</p>
+          ${tiles.length ? `<dl class="case-callout-tiles">${tiles.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>` : ""}</div>`;
+      } else if (s.next?.label) {
+        box = `<div class="case-callout"><span class="case-callout-label">Now</span>
+          <p class="case-callout-main">${esc(s.next.label)} <span class="chip">${esc(s.next.owner)}</span></p></div>`;
+      } else if (s.now) {
+        box = `<div class="case-callout"><span class="case-callout-label">Status</span><p class="case-callout-main">${esc(s.now)}</p></div>`;
+      }
+      // What has been billed and whether it is paid.
+      const fees = (s.money || []).length ? `<table class="case-fees" data-nosearch><thead><tr><th>Fee</th><th>Billed to</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>
+          ${s.money.map((m) => `<tr><td>${esc(m.label)}</td><td>${esc(cap((m.party || "").toLowerCase().replace("_", " ")) || "—")}</td>
+            <td class="num">${usd(m.amount_cents)}</td>
+            <td>${m.status === "PAID" ? `<span class="badge s-paid">Paid</span>${m.paid_on ? ` <span class="muted">${esc(m.paid_on)}</span>` : ""}`
+              : m.status === "OPEN" ? `<span class="badge warn">Unpaid</span>${m.due_on ? ` <span class="muted">due ${esc(m.due_on)}</span>` : ""}`
+              : `<span class="badge">${esc(sentence(m.status))}</span>`}</td></tr>`).join("")}</tbody>
+          ${s.billed_cents ? `<tfoot><tr><td colspan="2">Paid so far</td><td class="num">${usd(s.paid_cents)} of ${usd(s.billed_cents)}</td><td></td></tr></tfoot>` : ""}</table>` : "";
+      el.innerHTML = `<div class="case-story-top">${stage}${elig ? `<span class="case-story-elig ${elig[0]}">${esc(elig[1])}</span>` : ""}${progress}</div>
+        <p class="case-story-lead">${esc(s.what || (s.story || [])[0] || "")}</p>
+        ${s.outcome?.name ? `<p class="case-outcome"><span class="case-callout-label">Outcome</span>${s.outcome.group ? ` <span class="chip">${esc(s.outcome.group)}</span>` : ""} <b>${esc(s.outcome.name)}</b>${s.outcome.definition ? ` — ${esc(s.outcome.definition)}` : ""}${!s.outcome.recorded && !s.outcome.name.startsWith("TBD") ? ' <span class="muted">(from the case; not recorded yet)</span>' : ""}</p>` : ""}
+        ${box}
+        ${fees}`;
+      // A decided or closed case has no deadlines running: its countdowns would only mislead.
+      if (s.decided || s.closed) document.querySelector(".case-head .case-clocks")?.remove();
+    } catch (e) { el.innerHTML = `<p class="muted">The summary could not be loaded (${esc(e.message)}).</p>`; }
   }
 
   // The More menu: occasional actions, grouped, each with an icon and a line saying what it does.
@@ -96,7 +156,7 @@ const CaseLayout = (() => {
   // ---- next step -------------------------------------------------------------------------------------------
   // note: shown instead of the button (and of "waiting on") when the step can't be taken at all -- the case's
   // workflow has ended.
-  function nextStep(steps, next, buttonLabel, note) {
+  function nextStep(steps, next, buttonLabel, note, doc) {
     const box = document.getElementById("case-next");
     if (!box) return;
     const total = steps.length, done = steps.filter((x) => x.state === "done" || x.state === "skipped").length;
@@ -106,9 +166,13 @@ const CaseLayout = (() => {
         <span class="muted">Nothing further is due on this case.</span></div></div>${bar}`;
       return;
     }
+    // The document's step the next task belongs to, with its countdown; the task itself under it.
     box.innerHTML = `<div class="case-next-body">
-        <div><span class="case-next-label">Next step · ${done + 1} of ${total}</span>
-          <b class="case-next-title">${esc(next.label)}</b> <span class="chip">${esc(next.owner)}</span>
+        <div>${doc ? `<span class="case-next-label">${esc(doc.heading)}</span>
+          <b class="case-next-title">${esc(doc.title)}</b>${doc.detail ? ` <span class="muted">— ${esc(doc.detail)}</span>` : ""} ${doc.clock || ""}
+          <div>Next: ${esc(next.label)} <span class="chip">${esc(next.owner)}</span></div>`
+          : `<span class="case-next-label">Next step · ${done + 1} of ${total}</span>
+          <b class="case-next-title">${esc(next.label)}</b> <span class="chip">${esc(next.owner)}</span>`}
           ${next.hint ? `<div class="muted">${esc(next.hint)}</div>` : ""}</div>
         <div class="case-next-act">${note ? `<span class="case-next-note">${esc(note)}</span>` : buttonLabel
           ? `<button type="button" class="primary" onclick="Views.wfAct('${esc(next.key)}')">${esc(buttonLabel)}</button>`
@@ -146,11 +210,12 @@ const CaseLayout = (() => {
       return `<span class="muted">${esc(sentence(d.analysis_status))}</span>`;
     };
     const rows = (items) => items.map((d) => `<tr>
-      <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')" class="doc-name">${d.sealed ? "🔒 " : ""}${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</a>
+      <td><a href="javascript:void(0)" onclick="Views.previewCaseDoc('${id}','${d.doc_id}', this.dataset.name)" data-name="${esc(d.filename || "")}" class="doc-name" title="View it here">${d.sealed ? "🔒 " : ""}${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</a>
         <div class="muted">${esc((d.content_type || "").split("/").pop().toUpperCase())} · ${size(d.size_bytes || 0)}${d.scan_status && d.scan_status !== "CLEAN" ? ` · <span class="badge warn">${esc(sentence(d.scan_status))}</span>` : ""}</div></td>
       <td>${who(d.uploaded_by)}<div class="muted">${fmtDate(d.uploaded_at)}</div></td>
       <td>${analysis(d)}</td>
-      <td class="doc-acts">${!d.sealed && !String(d.uploaded_by || "").startsWith("lettergen:") ? `<a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">What was read</a>` : ""}
+      <td class="doc-acts"><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')">Download</a>
+        ${!d.sealed && !String(d.uploaded_by || "").startsWith("lettergen:") ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">What was read</a>` : ""}
         ${/\.(txt|835|edi|x12)$/i.test(d.filename || "") ? ` · <a href="javascript:void(0)" onclick="Views.era835Fn('${id}','${d.doc_id}')">835 → table</a>` : ""}
         ${mayMove ? `<select class="mini" aria-label="Move to folder" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">Move…</option>
           ${FOLDERS.filter((f) => f !== (d.folder || "GENERAL")).map((f) => `<option value="${f}">${folderName(f)}</option>`).join("")}</select>` : ""}</td></tr>`).join("");
@@ -268,5 +333,5 @@ const CaseLayout = (() => {
     }
   }
 
-  return { header, moreMenu, nextStep, showSteps, documents, toggleUpload, timeline, tabs, select, reveal, distribute, markTabs, bind };
+  return { header, story, moreMenu, nextStep, showSteps, documents, toggleUpload, timeline, tabs, select, reveal, distribute, markTabs, bind };
 })();

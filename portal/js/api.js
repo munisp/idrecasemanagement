@@ -70,6 +70,21 @@ const Api = (() => {
     return URL.createObjectURL(await resp.blob());
   }
 
+  // A file as a Blob, with the name the server gives it (the document viewer).
+  async function fetchBlob(path) {
+    const tok = await Auth.token();
+    if (!tok) throw new Error("unauthenticated");
+    const resp = await fetch(window.IDRE_CONFIG.apiBase + path, { headers: { Authorization: `Bearer ${tok}` } });
+    if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
+    if (!resp.ok) {
+      let why = `HTTP ${resp.status}`;
+      try { const j = JSON.parse(await resp.text()); if (j.error) why = j.error; } catch { /* keep the status */ }
+      throw new Error(`the document could not be opened — ${why}`);
+    }
+    const cd = resp.headers.get("content-disposition") || "";
+    return { blob: await resp.blob(), name: (cd.match(/filename="?([^"]+)"?/) || [])[1] || "" };
+  }
+
   async function download(path, fallbackName) {
     const tok = await Auth.token();
     if (!tok) throw new Error("unauthenticated");
@@ -203,7 +218,7 @@ const Api = (() => {
     return s ? `?${s}` : "";
   };
   return {
-    setTenant, getTenant, download,
+    setTenant, getTenant, download, fetchBlob,
     analytics: {
       payers: () => req("GET", `${t()}/analytics/payers`),
       fraudSignals: () => req("GET", `${t()}/analytics/fraud-signals`),
@@ -265,13 +280,14 @@ const Api = (() => {
     cases: {
       // Keyset-paginated: {cases, next_cursor, total}. Legacy bare-array
       // responses are normalized so older backends still work.
-      pipelineCounts: (by) => req("GET", `${t()}/cases/pipeline/counts?by=${encodeURIComponent(by || "internal_status")}`),
+      pipelineCounts: (by, opts = {}) => req("GET", `${t()}/cases/pipeline/counts?${new URLSearchParams({ by: by || "internal_status", ...opts })}`),
       list: (params = {}) => {
         const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
         return req("GET", `${t()}/cases${qs ? "?" + qs : ""}`)
           .then((r) => (Array.isArray(r) ? { cases: r, next_cursor: "", total: r.length } : r));
       },
       get: (id) => req("GET", `${t()}/cases/${id}`),
+      summary: (id) => req("GET", `${t()}/cases/${id}/summary`),
       initiate: (payload) => req("POST", `${t()}/cases/initiate`, payload),
       signal: (id, signal, data) => req("POST", `${t()}/cases/${id}/signal`, { signal, data }),
       benchmarks: (id) => req("GET", `${t()}/cases/${id}/benchmarks`),
@@ -286,6 +302,9 @@ const Api = (() => {
       },
       moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
       zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
+      // How a letter will read before it is sent (mail_preview.go); body as for a draft.
+      mailTracker: (id) => req("GET", `${t()}/cases/${id}/mail-tracker`),
+      corrPreview: (id, body) => req("POST", `${t()}/cases/${id}/correspondence/preview`, body),
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
       filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
@@ -389,6 +408,8 @@ const Api = (() => {
       saveView: (p) => req("POST", `${t()}/views`, p),
       clocks: (id) => req("GET", `${t()}/cases/${id}/clocks`),
       extendClock: (id, clock, days, reason) => req("POST", `${t()}/cases/${id}/clocks/${encodeURIComponent(clock)}/extend`, { days, reason }),
+      // Ask the TPA / health plan to agree to more time (body: {days, reason, side, due_days}).
+      requestExtension: (id, clock, body) => req("POST", `${t()}/cases/${id}/clocks/${encodeURIComponent(clock)}/extension-request`, body),
       allClocks: () => req("GET", `${t()}/cases/clocks`),
       bulk: (p) => req("POST", `${t()}/cases/bulk`, p),
       grabNext: () => req("POST", `${t()}/queues/grab-next`),
@@ -409,6 +430,9 @@ const Api = (() => {
     },
     program: {
       get: () => req("GET", `${t()}/program`),
+      configuration: () => req("GET", `${t()}/program/configuration`),
+      configurationSave: (section, body) => req("PUT", `${t()}/program/configuration/${section}`, body),
+      setFeatures: (features) => req("PUT", `${t()}/features`, { features }), // a tenant admin's own tenant
       setLabel: (label) => req("PUT", `${t()}/program/label`, { label }),
       setBrand: (brand_name) => req("PUT", `${t()}/program/brand`, { brand_name }),
       tenantLabels: () => req("GET", `${t()}/admin/tenant-labels`),
@@ -449,14 +473,16 @@ const Api = (() => {
       shareLink: (caseId, kind, days) => req("POST", `${t()}/cases/${caseId}/share-links`, { kind, days_ttl: days }),
       invoices: (caseId) => req("GET", `${t()}/cases/${caseId}/invoices`),
       issueInvoice: (caseId, p) => req("POST", `${t()}/cases/${caseId}/invoices`, p),
-      settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
+      settleInvoice: (invId, action, ref, refundMethod) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref, refund_method: refundMethod || "" }),
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
+      unapplied: () => req("GET", `${t()}/reports/unapplied`),
+      resolveUnapplied: (id, body) => req("POST", `${t()}/finance/unapplied/${id}/resolve`, body),
       refundsDue: () => req("GET", `${t()}/reports/refunds-due`),
       timeReport: (opts) => req("GET", `${t()}/reports/time${qs(opts || {})}`),
       timeReportSend: (p) => req("POST", `${t()}/time/report/send`, p),
       timeRates: () => req("GET", `${t()}/reports/time/rates`),
-      timeRateSet: (role, rate_cents_per_hour) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour }),
+      timeRateSet: (role, rate_cents_per_hour, effective_from) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour, effective_from }),
       opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
       caseFinancials: (caseId) => req("GET", `${t()}/cases/${caseId}/financials`),
       // Service-fee invoicing engine
@@ -502,6 +528,14 @@ const Api = (() => {
       tpaMe: () => req("GET", `${t()}/tpa/me`),
       tpaClients: () => req("GET", `${t()}/tpa/clients`),
       tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),
+      tpaTeam: () => req("GET", `${t()}/tpa/team`),
+      tpaTeamAdd: (body) => req("POST", `${t()}/tpa/team`, body),
+      tpaTeamRole: (sub, role) => req("PATCH", `${t()}/tpa/team/${encodeURIComponent(sub)}`, { team_role: role }),
+      tpaTeamRemove: (sub) => req("DELETE", `${t()}/tpa/team/${encodeURIComponent(sub)}`),
+      tpaGroups: () => req("GET", `${t()}/tpa/groups`),
+      tpaGroupAdd: (body) => req("POST", `${t()}/tpa/groups`, body),
+      tpaGroupUpdate: (id, body) => req("PATCH", `${t()}/tpa/groups/${id}`, body),
+      tpaClientGroup: (clientId, groupId) => req("PUT", `${t()}/tpa/clients/${clientId}/group`, { group_id: groupId }),
       tpaClientStatus: (id, status) => req("POST", `${t()}/tpa/clients/${id}/status`, { status }),
       tpaIntake: (body) => req("POST", `${t()}/tpa/intake`, body),
       tpaEditDispute: (caseId, body) => req("PATCH", `${t()}/tpa/disputes/${caseId}`, body),
@@ -561,7 +595,7 @@ const Api = (() => {
       checkoutConfirm: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/confirm`),
       checkoutCancel: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/cancel`),
       hpFees: () => req("GET", `${t()}/hp/fees`),
-      hpFeesCheckout: () => req("POST", `${t()}/hp/fees/checkout`),
+      hpFeesCheckout: (body) => req("POST", `${t()}/hp/fees/checkout`, body || {}),
       // An organization's own disputes' documents in one ZIP: {case_id:[..]} | {client_id} | {batch_id} | {party_id} | {} (all).
       orgDocsZip: (kind, params) => {
         const q = new URLSearchParams();
@@ -576,12 +610,17 @@ const Api = (() => {
       caseDocRequests: (caseId) => req("GET", `${t()}/cases/${caseId}/document-requests`),
       createDocRequest: (caseId, body) => req("POST", `${t()}/cases/${caseId}/document-requests`, body),
       closeDocRequest: (caseId, reqId, action) => req("POST", `${t()}/cases/${caseId}/document-requests/${reqId}/close`, { action }),
+      // The letters sent to the organization and the documents they carried (party_documents.go).
+      sentRecord: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
+      sentDocPath: (k, docId) => `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`,
+      disputeSummary: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/disputes/${caseId}/summary`),
+      sentDocGet: (k, docId, name) => download(`${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`, name || "document"),
       orgDocRequests: (k) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests`),
       orgDocRequestUpload: (k, reqId, file) => {
         const fd = new FormData(); fd.append("file", file);
         return req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/files`, fd, true);
       },
-      orgDocRequestSubmit: (k, reqId, note) => req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/submit`, { note }),
+      orgDocRequestSubmit: (k, reqId, note, decision) => req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/submit`, { note, decision }),
       respondGet: (k, id) => req("GET", k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`),
       respondFile: (k, id, doc) => blobURL((k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + `/documents/${doc}/file`),
       respondUpload: (k, id, file) => {
@@ -647,6 +686,7 @@ const Api = (() => {
       payments: (caseId, opts) => req("GET", (caseId ? `${t()}/cases/${caseId}/payments` : `${t()}/payments`) + qs(opts || {})),
       checkout: (invId) => req("POST", `${t()}/invoices/${invId}/checkout`),
       claims: (caseId) => req("GET", `${t()}/cases/${caseId}/claims`),
+      claimEligibility: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/claims/eligibility`, body),
       importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
       qaQueue: (caseId) => req("GET", `${t()}/qa${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
@@ -705,6 +745,7 @@ const Api = (() => {
     letters: {
       report: (caseId) => req("GET", `${t()}/cases/${caseId}/decision-report`),
       saveReport: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/decision-report`, body),
+      attachReport: (caseId, docId) => req("POST", `${t()}/cases/${caseId}/decision-report/file`, { doc_id: docId }),
       settings: () => req("GET", `${t()}/letter-settings`),
       saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
       variables: () => req("GET", `${t()}/template-variables`),

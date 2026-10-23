@@ -5,7 +5,9 @@ package main
 //
 // One ZIP:
 //
-//	disputes.csv          dispute_ref,party_name,disputed_amount,contact_name,notes
+//	disputes.csv          dispute_ref,provider_group,party_name,disputed_amount,other_party_name,
+//	                      other_party_email,... (provider_group: optional, the TPA's group the
+//	                      provider belongs to -- it tells apart two providers of the same name)
 //	<dispute_ref>/...     that dispute's six documents (eob.pdf, itemized_bill.pdf,
 //	                      proof_of_coverage.pdf, open_negotiation_notice.pdf,
 //	                      offer_substantiation.pdf, idre_attestation.pdf)
@@ -146,10 +148,10 @@ func (s *server) fillTPAPackage(r *http.Request, tenant, tpaID, pkgID string, me
 		return []string{"merged.pdf"}, nil
 	}
 	for _, e := range discrete {
+		// A file that is none of the six is one more of the dispute's documents, of the kind its name suggests.
 		slot := tpaSlotFromFilename(baseName(e.name))
 		if slot == "" {
-			errs = append(errs, e.name+": the file name does not say which of the six documents it is")
-			continue
+			slot = newMoreSlot(moreKindFromFilename(baseName(e.name)))
 		}
 		rc, err := e.zf.Open()
 		if err != nil {
@@ -172,25 +174,49 @@ func (s *server) fillTPAPackage(r *http.Request, tenant, tpaID, pkgID string, me
 // checked. The stored (sealed) object is shared, not copied.
 func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboardingKind, pkgID, caseID, uploadedBy string) int {
 	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
-		SELECT slot, object_key, coalesce(filename,''), coalesce(fields,'{}'::jsonb) FROM public.%s_package_docs
-		WHERE tenant=$1 AND package_id=$2 AND status='ACCEPTED' AND object_key IS NOT NULL
+		SELECT slot, object_key, coalesce(filename,''), coalesce(fields,'{}'::jsonb), status, coalesce(reasons::text,'[]') FROM public.%s_package_docs
+		WHERE tenant=$1 AND package_id=$2 AND object_key IS NOT NULL
 		ORDER BY slot`, k.prefix), tenant, pkgID)
 	if err != nil {
 		slog.Error("attach package documents: query", "package", pkgID, "err", err)
 		return 0
 	}
 	type doc struct {
-		slot, key, filename string
-		fields              []byte
+		slot, key, filename, status, reasons string
+		fields                               []byte
 	}
+	// Every document of the set goes onto the case -- flagged ones too (the Reviewer is told which) -- each file once.
 	var docs []doc
+	seenKey := map[string]bool{}
+	var flagged []string
 	for rows.Next() {
 		var d doc
-		if rows.Scan(&d.slot, &d.key, &d.filename, &d.fields) == nil {
+		if rows.Scan(&d.slot, &d.key, &d.filename, &d.fields, &d.status, &d.reasons) == nil && !seenKey[d.key] {
+			seenKey[d.key] = true
 			docs = append(docs, d)
+			if d.status != "ACCEPTED" {
+				why := ""
+				var rs []map[string]any
+				if json.Unmarshal([]byte(d.reasons), &rs) == nil && len(rs) > 0 {
+					if v, ok := rs[0]["detail"].(string); ok {
+						why = v
+					} else if v, ok := rs[0]["code"].(string); ok {
+						why = v
+					}
+				}
+				if why != "" {
+					why = " (" + why + ")"
+				}
+				flagged = append(flagged, strings.ReplaceAll(strings.ToLower(d.slot), "_", " ")+": "+d.filename+why)
+			}
 		}
 	}
 	rows.Close()
+	if len(flagged) > 0 {
+		defer s.logActivity(r.Context(), tenant, caseID, "FILING_DOCS_FLAGGED",
+			fmt.Sprintf("%d document%s filed with this dispute did not match what the automatic check expected — look at them when confirming the filing packet: %s",
+				len(flagged), map[bool]string{true: "", false: "s"}[len(flagged) == 1], truncate(strings.Join(flagged, "; "), 1500)))
+	}
 	n := 0
 	for _, d := range docs {
 		var size int64
@@ -198,6 +224,9 @@ func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboa
 			size = st.Size
 		}
 		label := strings.ReplaceAll(strings.ToLower(d.slot), "_", " ")
+		if k := moreDocKind(d.slot); k != "" {
+			label = strings.ReplaceAll(strings.ToLower(k), "_", " ")
+		}
 		filename := label + " — " + d.filename
 		docID := newUUID()
 		if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
@@ -294,6 +323,9 @@ func packageCaseFacts(slots []packageSlotFacts) map[string]any {
 
 // packageDocType names an accepted slot in doc-intel's document types.
 func packageDocType(slot string) string {
+	if k := moreDocKind(slot); k != "" {
+		return strings.ToLower(k)
+	}
 	switch slot {
 	case "EOB":
 		return "eob"
@@ -450,7 +482,7 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, need := range []string{"dispute_ref", "party_name", "disputed_amount", "other_party_name", "other_party_email"} {
 		if _, ok := col[need]; !ok {
-			http.Error(w, fmt.Sprintf(`{"error":"disputes.csv must have the columns dispute_ref, party_name, disputed_amount, other_party_name, other_party_email (missing %s); other_party_naic, contact_name, notes, provider_type and in_network (yes/no) are optional"}`, need), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf(`{"error":"disputes.csv must have the columns dispute_ref, party_name, disputed_amount, other_party_name, other_party_email (missing %s); provider_group, other_party_naic, contact_name, notes, provider_type and in_network (yes/no) are optional"}`, need), http.StatusBadRequest)
 			return
 		}
 	}
@@ -512,13 +544,9 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		answersJSON, _ := json.Marshal(answers)
-		var clientID, cstatus string
-		var npi, tin, addr *string
-		if err := s.db.QueryRow(r.Context(), `
-			SELECT id::text, status, npi, tin, address FROM public.tpa_clients
-			WHERE tenant=$1 AND tpa_id=$2 AND lower(party_name)=lower($3)`,
-			tenant, org.ID, row.Party).Scan(&clientID, &cstatus, &npi, &tin, &addr); err != nil {
-			fail("no client with this party_name on your roster — add it (or import the roster) first")
+		clientID, cstatus, npi, tin, addr, why := s.bulkClient(r.Context(), tenant, org.ID, row.Party, get(rec, "provider_group"))
+		if why != "" {
+			fail(why)
 			continue
 		}
 		if cstatus != "ACTIVE" {
@@ -637,7 +665,7 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.queryRows(r, fmt.Sprintf(`
-		SELECT i.row_no, i.dispute_ref, coalesce(c.party_name,'') AS party, i.status, coalesce(i.error,'') AS error,
+		SELECT i.row_no, i.dispute_ref, coalesce(c.party_name,'') AS party, coalesce(pg.name,'') AS provider_group, i.status, coalesce(i.error,'') AS error,
 		       coalesce(i.notes,'') AS notes,
 		       coalesce(rs.name, i.other_party_name, '') AS other_party, coalesce(rs.response_status,'') AS response_status,
 		       coalesce(cs.program_dates->>'date_health_plan_response_due','') AS response_due,
@@ -660,6 +688,7 @@ func (s *server) tpaBulkDisputeBatch(w http.ResponseWriter, r *http.Request) {
 		FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_dispute_batches b ON b.id=i.batch_id
 		LEFT JOIN public.tpa_clients c ON c.id=i.client_id
+		LEFT JOIN public.tpa_provider_groups pg ON pg.id=c.group_id
 		LEFT JOIN public.tpa_packages pk ON pk.id=i.package_id
 		LEFT JOIN tenant_%s.cases cs ON cs.id::text=i.case_id
 		LEFT JOIN public.case_respondents rs ON rs.tenant=i.tenant AND rs.case_id=i.case_id
@@ -699,13 +728,16 @@ func (s *server) fileReadyBulkDisputes() int {
 	s.healStuckPackages(ctx)
 	s.sweepExpiredUploads(ctx)
 	s.reconcileOpenFeeCheckouts(ctx)
+	s.reconcilePendingRefunds(ctx)
 	s.reconcilePendingSetups(ctx)
 	s.recheckClientNPIs(ctx)
 	s.startVerificationSweep()
 	rows, err := s.db.Query(ctx, `
 		SELECT i.id::text FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_packages pk ON pk.id=i.package_id
-		WHERE i.status='WAITING_DOCS' AND pk.status='READY'
+		WHERE i.status='WAITING_DOCS' AND pk.status<>'FILED'
+		  AND EXISTS (SELECT 1 FROM public.tpa_package_docs d WHERE d.package_id=pk.id)
+		  AND NOT EXISTS (SELECT 1 FROM public.tpa_package_docs d WHERE d.package_id=pk.id AND d.status IN ('PENDING','ANALYZING'))
 		ORDER BY i.created_at LIMIT 50`)
 	if err != nil {
 		return 0
@@ -790,9 +822,7 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	if rails == 0 {
 		return "", fmt.Errorf("the client has no verified payment method any more")
 	}
-	var pkgStatus string
-	_ = s.db.QueryRow(ctx, `SELECT status FROM public.tpa_packages WHERE tenant=$1 AND id::text=$2`, tenant, pkgID).Scan(&pkgStatus)
-	if pkgStatus != "READY" {
+	if ok, pkgStatus := s.packageFileable(ctx, tenant, "tpa", pkgID); !ok {
 		return "", fmt.Errorf("the package is %s, not READY", pkgStatus)
 	}
 	caseID, caseNumber, _, err := s.fileTPADisputeOpt(r, tenant, &org, clientID, partyName, partyType, pkgID, contact, notes, amount, true)
@@ -817,7 +847,7 @@ func (s *server) healStuckPackages(ctx context.Context) {
 		SELECT i.tenant, i.package_id::text FROM public.tpa_dispute_batch_items i
 		JOIN public.tpa_packages pk ON pk.id=i.package_id
 		WHERE i.status='WAITING_DOCS' AND pk.status='VALIDATING'
-		  AND (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=pk.id AND d.status='ACCEPTED') >= $1`, len(tpaSlots))
+		  AND (SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=pk.id AND d.status='ACCEPTED' AND d.slot = ANY($2)) >= $1`, len(tpaSlots), tpaSlots)
 	if err != nil {
 		return
 	}
@@ -839,4 +869,59 @@ func (s *server) healStuckPackages(ctx context.Context) {
 			slog.Info("package recounted to READY", "package", x.pkg)
 		}
 	}
+}
+
+// bulkClient: the roster client a disputes.csv row names -- by party_name, within its provider_group when the row
+// gives one. Two providers of the same name in different groups need the group to tell them apart. why != "":
+// refused, with why.
+func (s *server) bulkClient(ctx context.Context, tenant, tpaID, party, group string) (id, status string, npi, tin, addr *string, why string) {
+	type cand struct {
+		id, status, group string
+		npi, tin, addr    *string
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT c.id::text, c.status, c.npi, c.tin, c.address, coalesce(g.name,'')
+		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
+		WHERE c.tenant=$1 AND c.tpa_id=$2 AND lower(c.party_name)=lower($3)`, tenant, tpaID, party)
+	if err != nil {
+		return "", "", nil, nil, nil, "the roster could not be read — try again"
+	}
+	var all []cand
+	for rows.Next() {
+		var c cand
+		if rows.Scan(&c.id, &c.status, &c.npi, &c.tin, &c.addr, &c.group) == nil {
+			all = append(all, c)
+		}
+	}
+	rows.Close()
+	if len(all) == 0 {
+		return "", "", nil, nil, nil, "no client with this party_name on your roster — add it (or import the roster) first"
+	}
+	pick := all
+	if group = strings.TrimSpace(group); group != "" {
+		var exists bool
+		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.tpa_provider_groups WHERE tenant=$1 AND tpa_id=$2 AND lower(name)=lower($3))`,
+			tenant, tpaID, group).Scan(&exists)
+		if !exists {
+			return "", "", nil, nil, nil, "no provider group named " + group + " — check the name on the Clients tab, or leave provider_group empty"
+		}
+		pick = nil
+		for _, c := range all {
+			if strings.EqualFold(c.group, group) {
+				pick = append(pick, c)
+			}
+		}
+		if len(pick) == 0 {
+			in := all[0].group
+			if in == "" {
+				return "", "", nil, nil, nil, party + " is not in the provider group " + group + " (it is in no group)"
+			}
+			return "", "", nil, nil, nil, party + " is in the provider group " + in + ", not " + group
+		}
+	}
+	if len(pick) > 1 {
+		return "", "", nil, nil, nil, "more than one client is named " + party + " — say which with provider_group"
+	}
+	c := pick[0]
+	return c.id, c.status, c.npi, c.tin, c.addr, ""
 }

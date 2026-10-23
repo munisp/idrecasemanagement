@@ -86,8 +86,24 @@ class DecisionWording(unittest.TestCase):
         for want in ("CAPITOL BRIDGE LLC.", "CASE NO: FL26-000216", "CLAIM NO: C1", "Provider’s Position:",
                      "Health Plan’s Position:", "Independent Physician Review:", "Coding Consultant Review:",
                      "UCR Pricing", "$1,500.00", "-20", "$300.00 of disallowed charges will remain denied",
-                     "or 92% of the disputed charge", "On February 2, 2026, Capitol Bridge notified Gulf Coast Clinic"):
+                     "$40,000.00 of the disputed charge; $30,000.00 is owed to the Provider", "On February 2, 2026, Capitol Bridge notified Gulf Coast Clinic"):
             self.assertIn(want, w)
+
+    def test_pasted_report_prints_as_written(self):
+        text = "CAPITOL BRIDGE REVIEW\n\nThe Provider is owed $30,000.00.\nSecond line kept.\n\nSincerely,"
+        r = report(sections={"full_report": text, "provider_position": "Not printed."})
+        letter = bl.build_decision_report(ctx(report=r), None)
+        w = words(letter)
+        for want in ("CAPITOL BRIDGE REVIEW", "The Provider is owed $30,000.00.\nSecond line kept.", "Sincerely,"):
+            self.assertIn(want, w)
+        self.assertIn("FL26-000216", "\n".join(p.text for p in letter.doc.sections[0].header.paragraphs))
+        self.assertNotIn("Not printed.", w)
+        self.assertNotIn("Claim Summary:", w)
+
+    def test_upload_mode_ignores_pasted_text(self):
+        r = report(sections={"full_report": "Old paste", "report_mode": "upload"})
+        self.assertEqual(bl.pasted_report(r), "")
+        self.assertIn("Claim Summary:", words(bl.build_decision_report(ctx(report=r), None)))
 
     def test_iro_variant(self):
         r = report(report_type="IRO", outcome="OVERTURNED", awarded_cents=None, sections={
@@ -174,3 +190,11 @@ class StageLetters(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AcceptanceEstimate(unittest.TestCase):
+    def test_no_estimate_language_without_an_estimate(self):
+        self.assertTrue(bl.estimate_declined({"fee_estimate_requested": False}))
+        self.assertTrue(bl.estimate_declined({"fee_estimate_requested": "No"}))
+        self.assertFalse(bl.estimate_declined({"fee_estimate_requested": True}))
+        self.assertFalse(bl.estimate_declined({}))

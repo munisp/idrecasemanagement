@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -203,6 +205,13 @@ func (s *server) assignHelper(w http.ResponseWriter, r *http.Request, p principa
 		"by": p.Subject, "role": role, "assigned_to": who, "previous": prev, "reason": reason,
 		"rule": map[bool]string{true: "least_loaded_round_robin", false: ""}[viaTurn],
 	})
+	// The work goes with the case: a review the previous specialist had claimed is now the new one's, and a case
+	// already at this specialist's step is in their queue even if nothing had opened it yet.
+	if disc := helperRoles[role]; disc != "" && prev != "" {
+		_, _ = s.db.Exec(ctx, `UPDATE public.specialty_reviews SET reviewer=$4
+			WHERE tenant=$1 AND case_id=$2 AND discipline=$3 AND status='IN_REVIEW'`, tenant, caseID, disc, name)
+	}
+	s.ensureStepHelper(r, tenant, caseID)
 	writeJSON(w, http.StatusOK, map[string]any{"role": role, "assigned_to": who, "name": name, "previous": prev})
 }
 
@@ -262,30 +271,44 @@ func (s *server) ensureStepHelper(r *http.Request, tenant, caseID string) {
 			break
 		}
 	}
-	if role == "" || s.caseHelpers(ctx, tenant, caseID)[role] != "" {
-		return
-	}
-	who, name, err := s.takeTurn(ctx, tenant, role, "", func(tx pgx.Tx, who string) (bool, error) {
-		tag, err := tx.Exec(ctx, `INSERT INTO public.case_helpers (tenant, case_id, role, user_id, assigned_by, assigned_at)
-			VALUES ($1,$2,$3,$4,'auto-assign',now()) ON CONFLICT DO NOTHING`, tenant, caseID, role, who)
-		return err == nil && tag.RowsAffected() > 0, err // someone named one a moment ago: no turn used
-	})
-	if err != nil && !errors.Is(err, errRotationOff) && !errors.Is(err, errRotationEmpty) {
-		log.Printf("step helper %s/%s %s: %v", tenant, caseID, role, err)
-	}
-	if who == "" {
+	if role == "" {
 		return
 	}
 	var cn string
 	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&cn)
 	label := assignableRoles[role]
-	s.logActivity(ctx, tenant, caseID, "MILESTONE", fmt.Sprintf("%s: %s, automatically in turn (the case reached their step)", label, name))
-	s.logAudit(ctx, tenant, caseID, "CASE_HELPER_ASSIGNED", map[string]any{
-		"by": "auto-assign", "role": role, "assigned_to": who, "previous": "", "auto": true, "rule": "least_loaded_round_robin",
-	})
-	s.notify(r, tenant, who, "ASSIGNMENT", fmt.Sprintf("You are the %s on %s — it's at your step (your turn in the rotation)", label, cn), "#/cases/"+caseID)
-	if disc := helperRoles[role]; disc != "" {
-		s.openReview(r, tenant, caseID, cn, disc, fmt.Sprintf("The case reached the %s step; %s has it in turn.", label, name), "auto-assign")
+	disc := helperRoles[role]
+	// Who works it: the specialist named on the case, else the next one in turn (when the rotation is on).
+	named := s.caseHelpers(ctx, tenant, caseID)[role]
+	name := ""
+	if named == "" {
+		who, n, err := s.takeTurn(ctx, tenant, role, "", func(tx pgx.Tx, who string) (bool, error) {
+			tag, err := tx.Exec(ctx, `INSERT INTO public.case_helpers (tenant, case_id, role, user_id, assigned_by, assigned_at)
+				VALUES ($1,$2,$3,$4,'auto-assign',now()) ON CONFLICT DO NOTHING`, tenant, caseID, role, who)
+			return err == nil && tag.RowsAffected() > 0, err // someone named one a moment ago: no turn used
+		})
+		if err != nil && !errors.Is(err, errRotationOff) && !errors.Is(err, errRotationEmpty) {
+			log.Printf("step helper %s/%s %s: %v", tenant, caseID, role, err)
+		}
+		if who != "" {
+			name = n
+			s.logActivity(ctx, tenant, caseID, "MILESTONE", fmt.Sprintf("%s: %s, automatically in turn (the case reached their step)", label, name))
+			s.logAudit(ctx, tenant, caseID, "CASE_HELPER_ASSIGNED", map[string]any{
+				"by": "auto-assign", "role": role, "assigned_to": who, "previous": "", "auto": true, "rule": "least_loaded_round_robin",
+			})
+			s.notify(r, tenant, who, "ASSIGNMENT", fmt.Sprintf("You are the %s on %s — it's at your step (your turn in the rotation)", label, cn), "#/cases/"+caseID)
+		}
+	} else {
+		name = s.resolveSubjectNames(ctx, []string{named})[named]
+	}
+	// The case goes in that discipline's queue whether or not anyone could be given it: the queue is where the
+	// specialists find work, and a case at their step must be there (a no-op while it already has an open review).
+	if disc != "" {
+		note := fmt.Sprintf("The case reached the %s step; %s has it.", label, orDash(name))
+		if name == "" {
+			note = fmt.Sprintf("The case reached the %s step; nobody is named yet — claim it from the queue.", label)
+		}
+		s.openReview(r, tenant, caseID, cn, disc, note, "auto-assign")
 	}
 }
 
@@ -307,4 +330,65 @@ func (s *server) helperCounts(ctx context.Context, tenant string) map[string]int
 		}
 	}
 	return out
+}
+
+// catchUpStepQueues: once at start, every open case at its review stage with no open specialty review is checked,
+// so a case the workflow had already moved to a specialist's step (before setDualStatus opened queue items itself)
+// is put in that queue and given its specialist. Paced, so a large tenant is never one burst of queries.
+func (s *server) catchUpStepQueues(stop <-chan struct{}) {
+	ctx := context.Background()
+	rows, err := s.db.Query(ctx, `SELECT tenant FROM public.program_rules`)
+	if err != nil {
+		return
+	}
+	var tenants []string
+	for rows.Next() {
+		var t string
+		if rows.Scan(&t) == nil {
+			tenants = append(tenants, t)
+		}
+	}
+	rows.Close()
+	opened := 0
+	for _, tenant := range tenants {
+		crows, err := s.db.Query(ctx, fmt.Sprintf(`
+			SELECT c.id::text FROM tenant_%s.cases c
+			WHERE `+openCaseCond+` AND c.internal_status IN ('Review In Progress','Plan - No Response',
+			      'RFI Pending Provider Response','RFI Pending Plan Response','QA Final Determination')
+			  AND NOT EXISTS (SELECT 1 FROM public.specialty_reviews v WHERE v.tenant=$1 AND v.case_id=c.id::text AND v.status<>'COMPLETE')`,
+			sanitizeTenant(tenant)), tenant)
+		if err != nil {
+			continue
+		}
+		var ids []string
+		for crows.Next() {
+			var id string
+			if crows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		crows.Close()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		for _, id := range ids {
+			select {
+			case <-stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			before := s.openReviewCount(ctx, tenant, id)
+			s.ensureStepHelper(req, tenant, id)
+			if s.openReviewCount(ctx, tenant, id) > before {
+				opened++
+			}
+		}
+	}
+	if opened > 0 {
+		slog.Info("specialty queues caught up", "opened", opened)
+	}
+}
+
+func (s *server) openReviewCount(ctx context.Context, tenant, caseID string) int {
+	var n int
+	_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.specialty_reviews WHERE tenant=$1 AND case_id=$2 AND status<>'COMPLETE'`, tenant, caseID).Scan(&n)
+	return n
 }

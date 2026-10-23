@@ -51,6 +51,25 @@ const CrmViews = (() => {
   // goes missing (the board used to load one list of 200 and group it client-side).
   const PIPE_PAGE = 20;
   const pipeCols = {};
+  // The board's filters (kept while the page is open): who the cases are with, and a search term.
+  const pipeFilter = { assigned: "", q: "" };
+  // A stage's phase, for the colour on its column: from the words in its name (the program's stages are configured).
+  function stagePhase(status) {
+    if (status === "__NONE__") return "intake";
+    if (TERMINAL_STAGES.has(status) || /closed|withdraw|dismiss|opt-out|ineligible|invoice paid/i.test(status)) return "done";
+    if (/letter|notification|packet|issued|notice/i.test(status)) return "notice";
+    if (/pending|awaiting|rfi|response/i.test(status)) return "waiting";
+    if (/intake|initiated|new/i.test(status)) return "intake";
+    return "review";
+  }
+  const pipeUsd = (cents) => "$" + Math.round((Number(cents) || 0) / 100).toLocaleString();
+  const initials = (name) => String(name || "?").split(/[\s._@-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
+  function pipeSla(days, closed) {
+    if (closed || days == null) return "";
+    const cls = days <= 3 ? "is-bad" : days <= 10 ? "is-warn" : "";
+    return `<span class="kc-sla ${cls}" title="Business days left on the statutory clock">${days <= 0 ? "due" : days + "d left"}</span>`;
+  }
+
   async function pipeline() {
     try {
       const prog = await Api.program.get().catch(() => null);
@@ -61,7 +80,10 @@ const CrmViews = (() => {
       const internalStatuses = prog?.config?.statuses?.internal;
       const byField = internalStatuses?.length ? "internal_status" : "status";
       const knownStages = internalStatuses?.length ? internalStatuses.map((s) => [s, s]) : PIPELINE;
-      const counts = await Api.cases.pipelineCounts(byField);
+      const opts = {};
+      if (pipeFilter.assigned) opts.assigned = pipeFilter.assigned;
+      if (pipeFilter.q) opts.q = pipeFilter.q;
+      const counts = await Api.cases.pipelineCounts(byField, opts);
       const countOf = new Map((counts.stages || []).map((x) => [x.stage, x]));
       // Safety net: a status the board doesn't know yet still gets a column
       // instead of its cases disappearing silently; cases with no status at
@@ -75,29 +97,100 @@ const CrmViews = (() => {
       ];
       const amtLabel = (prog && prog.config) ? "Disputed" : "QPA";
       const amtKey = (prog && prog.config) ? "disputed_cents" : "qpa_cents";
-      const usd = (cents) => "$" + ((Number(cents) || 0) / 100).toLocaleString();
       for (const k of Object.keys(pipeCols)) delete pipeCols[k];
+      let openN = 0, openAmt = 0, doneN = 0, doneAmt = 0, unassigned = 0;
       const cols = stages.map(([status, label], i) => {
         const c = countOf.get(status === "__NONE__" ? "" : status) || { count: 0 };
-        const n = Number(c.count) || 0;
+        const n = Number(c.count) || 0, amt = Number(c[amtKey]) || 0, un = Number(c.unassigned) || 0;
+        const phase = stagePhase(status);
+        if (phase === "done") { doneN += n; doneAmt += amt; } else { openN += n; openAmt += amt; unassigned += Number(c.unassigned_paid) || 0; }
         const colId = `pipe-col-${i}`;
-        if (n) pipeCols[colId] = { status, byField, total: n, cursors: [""], page: 0, amtField: (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents" };
-        return `<div class="kanban-col ${TERMINAL_STAGES.has(status) ? "is-terminal" : ""} ${n ? "" : "is-empty"}">
-          <h3>${esc(label)} <span class="kanban-count" title="${esc(amtLabel)} total ${usd(c[amtKey])}">${n}</span></h3>
-          <div class="kanban-col-body" id="${colId}">${n ? `<p class="muted">Loading…</p>` : ""}</div>
-          ${n > PIPE_PAGE ? `<div class="kanban-pager" id="${colId}-pager"></div>` : ""}</div>`;
+        if (n) pipeCols[colId] = { status, byField, total: n, cursors: [""], page: 0, closed: phase === "done",
+          amtField: (prog && prog.config) ? "disputed_amount_cents" : "qpa_cents" };
+        return `<section class="kanban-col ph-${phase} ${phase === "done" ? "is-terminal" : ""} ${n ? "" : "is-empty"}" aria-label="${esc(label)}: ${n}">
+          <header class="kc-head"><h3>${esc(label)}</h3><span class="kanban-count">${n.toLocaleString()}</span>
+            <div class="kc-sum">${pipeUsd(amt)} ${esc(amtLabel.toLowerCase())}${un && phase !== "done" ? ` · <span class="kc-un">${un.toLocaleString()} unassigned</span>` : ""}</div></header>
+          <div class="kanban-col-body" id="${colId}">${n ? `<p class="muted">Loading…</p>` : `<p class="kc-empty">Nothing here</p>`}</div>
+          ${n > PIPE_PAGE ? `<div class="kanban-pager" id="${colId}-pager"></div>` : ""}</section>`;
       });
       afterRender(() => {
-        $("#pipe-show-empty")?.addEventListener("change", (ev) => $("#pipe-board")?.classList.toggle("hide-empty", !ev.target.checked));
+        $("#pipe-show-empty")?.addEventListener("change", (ev) => {
+          $("#pipe-board")?.classList.toggle("hide-empty", !ev.target.checked);
+          $("#pipe-stages")?.classList.toggle("show-empty", ev.target.checked);
+          pipeEdges();
+        });
+        const board = $("#pipe-board");
+        if (board) {
+          board.addEventListener("scroll", pipeEdges, { passive: true });
+          board.addEventListener("keydown", (ev) => {
+            if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") { ev.preventDefault(); pipelineScroll(ev.key === "ArrowRight" ? 1 : -1); }
+          });
+          new ResizeObserver(pipeEdges).observe(board);
+        }
+        pipeEdges();
+        const search = $("#pipe-q");
+        let tmr;
+        search?.addEventListener("input", () => { clearTimeout(tmr); tmr = setTimeout(() => { pipeFilter.q = search.value.trim(); App.rerender(); }, 350); });
+        if (pipeFilter.q && search) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
         Object.keys(pipeCols).forEach((colId) => pipelinePage(colId, 0));
       });
       const total = Number(counts.total) || 0;
-      return `<div class="view-head"><h1>Pipeline</h1>
-          <span class="muted">${total} dispute${total === 1 ? "" : "s"} across ${stages.length} stage${stages.length === 1 ? "" : "s"}
-            · amounts shown as ${esc(amtLabel)}</span></div>
-        <label class="pipe-toggle"><input type="checkbox" id="pipe-show-empty" /> Show empty stages</label>
-        <div class="kanban hide-empty" id="pipe-board">${cols.join("")}</div>`;
+      const seg = (v, l) => `<button type="button" class="seg ${pipeFilter.assigned === v ? "on" : ""}" aria-pressed="${pipeFilter.assigned === v}" onclick="CrmViews.pipelineAssigned('${v}')">${l}</button>`;
+      return `<div class="wide-view"><div class="view-head"><h1>Pipeline</h1>
+          <span class="muted">${total.toLocaleString()} dispute${total === 1 ? "" : "s"}${pipeFilter.q ? ` matching “${esc(pipeFilter.q)}”` : ""} · amounts are ${esc(amtLabel.toLowerCase())}</span></div>
+        <div class="pipe-bar">
+          <input type="search" id="pipe-q" class="pipe-q" placeholder="Search case #, service line, party…" value="${esc(pipeFilter.q)}" aria-label="Search the pipeline" maxlength="100" />
+          <div class="segs" role="group" aria-label="Whose cases">${seg("", "All")}${seg("mine", "Mine")}${seg("unassigned", "Unassigned")}</div>
+          <label class="pipe-toggle"><input type="checkbox" id="pipe-show-empty" /> Show empty stages</label>
+        </div>
+        <div class="pipe-sum">
+          <div><span class="ps-l">Open</span><span class="ps-n">${openN.toLocaleString()}</span><span class="ps-s">${pipeUsd(openAmt)}</span></div>
+          <div><span class="ps-l">Waiting for a reviewer</span><span class="ps-n ${unassigned ? "is-warn" : ""}">${unassigned.toLocaleString()}</span><span class="ps-s">paid, nobody assigned yet</span></div>
+          <div><span class="ps-l">Closed</span><span class="ps-n">${doneN.toLocaleString()}</span><span class="ps-s">${pipeUsd(doneAmt)}</span></div>
+          <div><span class="ps-l">Stages in use</span><span class="ps-n">${stages.filter(([st]) => (countOf.get(st === "__NONE__" ? "" : st)?.count || 0) > 0).length}</span><span class="ps-s">of ${stages.length}</span></div>
+        </div>
+        <nav class="pipe-stages" id="pipe-stages" aria-label="Jump to a stage">${stages.map(([status, label], i) => {
+          const n = Number(countOf.get(status === "__NONE__" ? "" : status)?.count) || 0;
+          return `<button type="button" class="pst ph-${stagePhase(status)} ${n ? "" : "is-empty"}" data-col="${i}" onclick="CrmViews.pipelineJump(${i})">${esc(label)} <span>${n.toLocaleString()}</span></button>`;
+        }).join("")}</nav>
+        <div class="kanban-wrap" id="pipe-wrap">
+          <button type="button" class="kb-nav prev" aria-label="Scroll to earlier stages" onclick="CrmViews.pipelineScroll(-1)">‹</button>
+          <div class="kanban hide-empty" id="pipe-board" tabindex="0" aria-label="Pipeline stages — use the arrow keys to scroll">${cols.join("")}</div>
+          <button type="button" class="kb-nav next" aria-label="Scroll to later stages" onclick="CrmViews.pipelineScroll(1)">›</button>
+        </div>
+        <p class="pipe-hint" id="pipe-hint" hidden>Scroll sideways to see all <b id="pipe-hint-n"></b> stages — drag the bar below the board, use the ‹ › buttons, the arrow keys, or pick a stage above.</p></div>`;
     } catch (e) { return `<h1>Pipeline</h1>` + err(e); }
+  }
+  function pipelineAssigned(v) { pipeFilter.assigned = v; App.rerender(); }
+  // Showing there is more board to either side: fades + arrows at the edges that have more, the hint while the
+  // board is wider than the screen, and the stage strip lighting up the columns now in view.
+  function pipeEdges() {
+    const board = $("#pipe-board"), wrap = $("#pipe-wrap");
+    if (!board || !wrap) return;
+    const max = board.scrollWidth - board.clientWidth;
+    wrap.classList.toggle("can-left", board.scrollLeft > 4);
+    wrap.classList.toggle("can-right", board.scrollLeft < max - 4);
+    const hint = $("#pipe-hint");
+    const shown = [...board.querySelectorAll(".kanban-col")].filter((c) => c.offsetParent !== null);
+    if (hint) { hint.hidden = max <= 4; const n = $("#pipe-hint-n"); if (n) n.textContent = shown.length; }
+    const left = board.getBoundingClientRect().left, right = left + board.clientWidth;
+    board.querySelectorAll(".kanban-col").forEach((c, i) => {
+      const r = c.getBoundingClientRect();
+      document.querySelector(`#pipe-stages [data-col="${i}"]`)?.classList.toggle("in-view", r.width > 0 && r.right > left + 40 && r.left < right - 40);
+    });
+  }
+  function pipelineScroll(dir) {
+    const board = $("#pipe-board");
+    if (board) board.scrollBy({ left: dir * Math.max(280, board.clientWidth - 280), behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  }
+  function pipelineJump(i) {
+    const board = $("#pipe-board"), col = board?.querySelectorAll(".kanban-col")[i];
+    if (!col) return;
+    if (col.classList.contains("is-empty") && board.classList.contains("hide-empty")) { // show empty stages first
+      const t = $("#pipe-show-empty"); if (t) { t.checked = true; t.dispatchEvent(new Event("change")); }
+    }
+    board.scrollTo({ left: col.offsetLeft - board.offsetLeft - 8, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    col.classList.add("flash"); setTimeout(() => col.classList.remove("flash"), 900);
   }
 
   // One page of one column: `delta` +1 = next, -1 = previous, 0 = reload the current page. Pages are keyset
@@ -110,23 +203,27 @@ const CrmViews = (() => {
     if (page >= col.cursors.length) return;
     const params = { limit: PIPE_PAGE, cursor: col.cursors[page] };
     if (col.status === "__NONE__") params.unset = col.byField; else params[col.byField] = col.status;
+    if (pipeFilter.assigned) params.assigned = pipeFilter.assigned;
+    if (pipeFilter.q) params.q = pipeFilter.q;
     body.classList.add("is-loading");
     try {
       const r = await Api.cases.list(params);
       col.page = page;
       if (r.next_cursor && col.cursors.length === page + 1) col.cursors.push(r.next_cursor);
-      const usd = (cents) => "$" + ((cents || 0) / 100).toLocaleString();
-      body.innerHTML = (r.cases || []).map((c) => `<div class="kanban-card" onclick="location.hash='#/cases/${c.id}'">
-          <b>${esc(c.case_number)}</b>
-          <span class="muted">${esc(c.service_line || "—")} · ${usd(c[col.amtField])}</span></div>`).join("")
-        || `<p class="muted">No disputes on this page.</p>`;
+      body.innerHTML = (r.cases || []).map((c) => {
+        const who = c.assigned_to ? (c.assigned_name || "Assigned") : "";
+        return `<a class="kanban-card" href="#/cases/${esc(c.id)}">
+          <span class="kc-top"><b class="kc-no">${esc(c.case_number)}</b><span class="kc-amt">${pipeUsd(c[col.amtField])}</span></span>
+          ${c.service_line || (c.triage_lane && c.triage_lane !== "STANDARD") ? `<span class="kc-tags">${c.service_line ? `<span class="kc-tag">${esc(c.service_line.replace(/_/g, " ").toLowerCase())}</span>` : ""}${c.triage_lane && c.triage_lane !== "STANDARD" ? `<span class="kc-tag lane-${esc(c.triage_lane.toLowerCase())}">${esc(c.triage_lane.replace(/_/g, " ").toLowerCase())}</span>` : ""}</span>` : ""}
+          <span class="kc-foot">${who ? `<span class="kc-who"><span class="kc-av" aria-hidden="true">${esc(initials(who))}</span>${esc(who)}</span>` : `<span class="kc-who is-un">Unassigned</span>`}${pipeSla(c.sla_days_remaining, col.closed)}</span></a>`;
+      }).join("") || `<p class="kc-empty">No disputes on this page.</p>`;
       body.scrollTop = 0;
       const pager = document.getElementById(colId + "-pager");
       if (pager) {
         const from = page * PIPE_PAGE + 1, to = Math.min(col.total, (page + 1) * PIPE_PAGE);
         const hasNext = col.cursors.length > page + 1 && to < col.total;
         pager.innerHTML = `<button class="mini" ${page ? "" : "disabled"} onclick="CrmViews.pipelinePage('${colId}', -1)" aria-label="Previous page">‹</button>
-          <span class="muted">${from}–${to} of ${col.total}</span>
+          <span class="muted">${from}–${to} of ${col.total.toLocaleString()}</span>
           <button class="mini" ${hasNext ? "" : "disabled"} onclick="CrmViews.pipelinePage('${colId}', 1)" aria-label="Next page">›</button>`;
       }
     } catch (e) { body.innerHTML = err(e); }
@@ -134,14 +231,22 @@ const CrmViews = (() => {
   }
 
   // ---- Accounts ---------------------------------------------------------------
+  const ACC_TYPES = [["", "All"], ["PROVIDER", "Providers"], ["PAYER", "Payers"], ["IDRE", "IDRE entities"], ["AUDITOR", "Auditors"], ["OTHER", "Other"]];
+  let accType = "";
   function accounts() {
-    afterRender(() => accountsBox(""));
-    const typeFilter = `<select id="acc-type" onchange="CrmViews.accountsFilter(this.value)"><option value="">All types</option>
-      ${["PROVIDER", "PAYER", "IDRE", "AUDITOR", "OTHER"].map((t) => `<option value="${t}">${t}</option>`).join("")}</select>`;
-    SrvSearch.on("acc", () => accountsBox(document.getElementById("acc-type")?.value || ""));
-    return `<div class="view-head"><h1>Accounts</h1><a class="button" href="#/crm/accounts/new">New account</a>${typeFilter}</div>
-      ${SrvSearch.html("acc", "Search name, NPI, phone, website…")}
+    afterRender(() => { accountsSegs(); accountsBox(accType); });
+    SrvSearch.on("acc", () => { accountsSegs(); accountsBox(accType); });
+    return `<div class="view-head"><h1>Accounts</h1><span class="muted">providers, health plans and the other organizations on the platform</span>
+        <span class="spacer" style="flex:1"></span><a class="button" href="#/crm/accounts/new">New account</a></div>
+      <div class="list-bar">${SrvSearch.html("acc", "Search name, NPI, phone, website…")}<div id="acc-segs"></div></div>
       <div id="acc-box"><p class="muted">Loading…</p></div>`;
+  }
+  // The type switch, each type with its number of accounts (the search applies).
+  async function accountsSegs() {
+    const box = $("#acc-segs");
+    if (!box) return;
+    const counts = await Promise.all(ACC_TYPES.map(([t]) => Api.crm.accounts(t || null, { limit: 1, ...SrvSearch.params("acc") }).then((r) => r.total).catch(() => null)));
+    box.innerHTML = ListUI.segs("Account type", ACC_TYPES.map(([value, label], i) => ({ value, label, count: counts[i] })), accType, "CrmViews.accountsFilter");
   }
 
   async function accountsBox(type) {
@@ -152,7 +257,7 @@ const CrmViews = (() => {
       const page = await Api.crm.accounts(type || null, { limit: Pager.size(), ...SrvSearch.params("acc") });
       const state = { loaded: page.accounts.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((a) => `<tr class="click" onclick="location.hash='#/crm/accounts/${a.id}'">
-            <td>${esc(a.legal_name)}</td><td>${badge(a.type)}</td><td>${esc(a.npi)}</td><td>${esc(a.phone)}</td></tr>`).join("");
+            <td><span class="cell-main">${esc(a.legal_name)}</span></td><td>${badge(a.type)}</td><td class="mono">${esc(a.npi) || '<span class="muted">—</span>'}</td><td>${esc(a.phone) || '<span class="muted">—</span>'}</td></tr>`).join("");
       if (!state.loaded.length) {
         box.innerHTML = `<p class="muted">${SrvSearch.q("acc") ? `No account matches “${esc(SrvSearch.q("acc"))}”.` : type ? `No ${type.toLowerCase()} accounts.` : "No accounts yet — convert leads or create one."}</p>`;
         return;
@@ -164,7 +269,7 @@ const CrmViews = (() => {
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
-  function accountsFilter(type) { accountsBox(type); }
+  function accountsFilter(type) { accType = type; accountsSegs(); accountsBox(type); }
 
   async function account360(id) {
     try {
@@ -231,17 +336,20 @@ const CrmViews = (() => {
   }
 
   // ---- Leads ---------------------------------------------------------------------
+  const LEAD_STATUSES = [["OPEN", "Not converted"], ["CONVERTED", "Converted"], ["", "All"]];
+  let leadStatus = "OPEN";
   function leads() {
-    afterRender(() => leadsBox("OPEN"));
-    const statusFilter = `<select id="lead-status" onchange="CrmViews.leadsFilter(this.value)">
-      <option value="OPEN" selected>Not converted</option>
-      <option value="">All</option>
-      <option value="CONVERTED">Converted</option></select>`;
-    SrvSearch.on("lead", () => leadsBox(document.getElementById("lead-status")?.value ?? "OPEN"));
-    return `<div class="view-head"><h1>Leads</h1>${statusFilter}</div>
-      <p class="muted">Voice intake becomes a lead automatically; convert qualified leads into accounts.</p>
-      ${SrvSearch.html("lead", "Search name, organization, phone, email, summary…")}
+    afterRender(() => { leadsSegs(); leadsBox(leadStatus); });
+    SrvSearch.on("lead", () => { leadsSegs(); leadsBox(leadStatus); });
+    return `<div class="view-head"><h1>Leads</h1><span class="muted">voice intake becomes a lead automatically; convert qualified leads into accounts</span></div>
+      <div class="list-bar">${SrvSearch.html("lead", "Search name, organization, phone, email, summary…")}<div id="lead-segs"></div></div>
       <div id="lead-box"><p class="muted">Loading…</p></div>`;
+  }
+  async function leadsSegs() {
+    const box = $("#lead-segs");
+    if (!box) return;
+    const counts = await Promise.all(LEAD_STATUSES.map(([st]) => Api.crm.leads({ limit: 1, status: st, ...SrvSearch.params("lead") }).then((r) => r.total).catch(() => null)));
+    box.innerHTML = ListUI.segs("Lead status", LEAD_STATUSES.map(([value, label], i) => ({ value, label, count: counts[i] })), leadStatus, "CrmViews.leadsFilter");
   }
 
   async function leadsBox(status) {
@@ -251,21 +359,22 @@ const CrmViews = (() => {
     try {
       const page = await Api.crm.leads({ limit: Pager.size(), status, ...SrvSearch.params("lead") });
       const state = { loaded: page.leads.slice(), next: page.next_offset, total: page.total };
-      const rowsHtml = (list) => list.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.organization)}</td><td>${badge(l.source)}</td>
-            <td>${esc((l.summary || "").slice(0, 80))}</td><td>${badge(l.status)}</td>
-            <td>${l.status !== "CONVERTED" ? `<button onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
+      const rowsHtml = (list) => list.map((l) => `<tr><td><span class="cell-main">${esc(l.name) || '<span class="muted">—</span>'}</span>${l.organization ? `<span class="cell-sub">${esc(l.organization)}</span>` : ""}</td>
+            <td>${badge(l.source)}</td>
+            <td><span class="cell-clamp" title="${esc(l.summary || "")}">${esc(l.summary || "—")}</span></td><td>${badge(l.status)}</td>
+            <td>${l.status !== "CONVERTED" ? `<button class="mini" onclick="CrmViews.convert('${l.id}')">Convert</button>` : ""}</td></tr>`).join("");
       if (!state.loaded.length) {
         box.innerHTML = `<p class="muted">${SrvSearch.q("lead") ? `No lead matches “${esc(SrvSearch.q("lead"))}”.` : `No ${status === "OPEN" ? "unconverted " : status ? status.toLowerCase() + " " : ""}leads.`}</p>`;
         return;
       }
-      box.innerHTML = `<table id="lead-tb" data-serverpaged><thead><tr><th>Name</th><th>Organization</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
+      box.innerHTML = `<table id="lead-tb" data-serverpaged><thead><tr><th>Lead</th><th>Source</th><th>Summary</th><th>Status</th><th></th></tr></thead>
         <tbody>${rowsHtml(state.loaded)}</tbody></table>` + pagerHtml("lead");
       bindPager("lead", "#lead-tb tbody", state,
         (off, limit) => Api.crm.leads({ limit, offset: off, status, ...SrvSearch.params("lead") }).then((r) => ({ rows: r.leads, total: r.total })),
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
-  function leadsFilter(status) { leadsBox(status); }
+  function leadsFilter(status) { leadStatus = status; leadsSegs(); leadsBox(status); }
 
   async function convert(id) {
     const v = await UI.modal({ title: "Convert lead to account", submitLabel: "Convert",
@@ -284,12 +393,14 @@ const CrmViews = (() => {
   // hash query string (same pattern cases() already uses for ?view=/?sort=)
   // so the toggle is a real navigation, not just a DOM patch, and survives
   // refresh/back-button.
+  const TASK_STATUSES = [["OPEN", "Open"], ["DONE", "Done"], ["", "All"]];
+  let taskStatus = "OPEN";
   function tasks() {
     const mine = new URLSearchParams(location.hash.split("?")[1] || "").get("all") !== "1";
-    const title = mine ? "My tasks" : "All tasks";
-    SrvSearch.on("task", () => tasksBox(mine, document.getElementById("task-status")?.value ?? "OPEN"));
+    SrvSearch.on("task", () => { tasksSegs(mine); tasksBox(mine, taskStatus); });
     afterRender(() => {
-      tasksBox(mine, "OPEN");
+      tasksSegs(mine);
+      tasksBox(mine, taskStatus);
       document.querySelector("#nt")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = Object.fromEntries(new FormData(ev.target));
@@ -297,19 +408,32 @@ const CrmViews = (() => {
         catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
     });
-    const statusFilter = `<select id="task-status" onchange="CrmViews.tasksFilter(${mine}, this.value)">
-      <option value="OPEN" selected>Open</option><option value="">All</option><option value="DONE">Done</option></select>`;
-    return `<div class="view-head"><h1>${title}</h1>${statusFilter}</div>
-      <div class="tabs">
-        <a class="tab ${mine ? "active" : ""}" href="#/crm/tasks">My tasks</a>
-        <a class="tab ${!mine ? "active" : ""}" href="#/crm/tasks?all=1">All tasks</a>
+    return `<div class="view-head"><h1>Tasks</h1><span class="muted">follow-ups on disputes and accounts, with their due dates</span></div>
+      <div class="list-bar">
+        ${ListUI.segs("Whose tasks", [{ value: "mine", label: "My tasks", href: "#/crm/tasks" }, { value: "all", label: "All tasks", href: "#/crm/tasks?all=1" }], mine ? "mine" : "all")}
+        <div id="task-segs"></div>
+        ${SrvSearch.html("task", "Search subject, task ref, case…")}
       </div>
-      ${!can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? "" : `<form id="nt" class="form"><b>New task</b>
+      ${!can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? "" : `<details class="panel"><summary>New task</summary>
+        <form id="nt" class="inline-form">
         <input name="subject" placeholder="Subject" required />
         <input name="case_id" placeholder="Case ID (optional)" />
-        <input name="due_date" type="date" /><button>Create</button></form>`}
-      ${SrvSearch.html("task", "Search subject, task ref, case…")}
+        <input name="due_date" type="date" aria-label="Due date" /><button>Create task</button></form></details>`}
       <div id="task-box"><p class="muted">Loading…</p></div>`;
+  }
+  async function tasksSegs(mine) {
+    const box = $("#task-segs");
+    if (!box) return;
+    const counts = await Promise.all(TASK_STATUSES.map(([st]) => Api.crm.tasks(mine, { limit: 1, ...(st ? { status: st } : {}), ...SrvSearch.params("task") }).then((r) => r.total).catch(() => null)));
+    box.innerHTML = ListUI.segs("Task status", TASK_STATUSES.map(([value, label], i) => ({ value, label, count: counts[i] })), taskStatus, `CrmViews.tasksFilterFor(${mine})`);
+  }
+  // A due date, red once it has passed and amber in the last three days (open tasks only).
+  function dueCell(t) {
+    if (!t.due_date) return '<span class="muted">—</span>';
+    if (t.status !== "OPEN") return esc(t.due_date);
+    const days = Math.floor((new Date(t.due_date + "T00:00:00") - new Date(new Date().toDateString())) / 864e5);
+    return days < 0 ? `<span class="due-over">${esc(t.due_date)} · ${-days}d overdue</span>`
+      : days <= 3 ? `<span class="due-soon">${esc(t.due_date)} · ${days ? `in ${days}d` : "today"}</span>` : esc(t.due_date);
   }
 
   async function tasksBox(mine, status) {
@@ -320,12 +444,12 @@ const CrmViews = (() => {
       const page = await Api.crm.tasks(mine, { limit: Pager.size(), ...(status ? { status } : {}), ...SrvSearch.params("task") });
       const state = { loaded: page.tasks.slice(), next: page.next_offset, total: page.total };
       const rowsHtml = (list) => list.map((t) => `<tr><td class="mono">${esc(t.task_ref || "—")}</td>
-          <td>${esc(t.subject)}</td>
+          <td><span class="cell-main">${esc(t.subject)}</span></td>
           ${mine ? "" : `<td>${esc(t.assignee || "—")}</td>`}
-          <td>${t.case_id ? `<a href="#/cases/${esc(t.case_id)}" class="mono">${esc(t.case_id.slice(0, 8))}…</a>` : "—"}</td>
-          <td>${esc(t.due_date)}</td>
+          <td>${t.case_id ? `<a href="#/cases/${esc(t.case_id)}" class="mono">${esc(t.case_id.slice(0, 8))}…</a>` : '<span class="muted">—</span>'}</td>
+          <td>${dueCell(t)}</td>
           <td>${badge(t.status)}</td>
-          <td>${t.status === "OPEN" ? `<button onclick="CrmViews.done('${t.id}')">Done</button>` : ""}</td></tr>`).join("");
+          <td>${t.status === "OPEN" ? `<button class="mini" onclick="CrmViews.done('${t.id}')">Mark done</button>` : ""}</td></tr>`).join("");
       if (!state.loaded.length) {
         box.innerHTML = `<p class="muted">${SrvSearch.q("task") ? `No task matches “${esc(SrvSearch.q("task"))}”.` : mine ? "No tasks assigned to you." : "No tasks for this tenant."}</p>`;
         return;
@@ -338,7 +462,9 @@ const CrmViews = (() => {
         rowsHtml);
     } catch (e) { box.innerHTML = err(e); }
   }
-  function tasksFilter(mine, status) { tasksBox(mine, status); }
+  function tasksFilter(mine, status) { taskStatus = status; tasksSegs(mine); tasksBox(mine, status); }
+  // The status switch's handler: the switch calls fn('<status>'), so `mine` is bound here.
+  function tasksFilterFor(mine) { return (status) => tasksFilter(mine, status); }
 
   async function done(id) {
     try { await Api.crm.completeTask(id); UI.toast("Task completed"); App.rerender(); }
@@ -390,8 +516,8 @@ const CrmViews = (() => {
       const dayItems = byDay[iso] || [];
       cells += `<div class="cal-cell ${iso === todayISO ? "today" : ""} ${dayItems.length ? "has-items" : ""}">
         <span class="cal-num">${d}</span>
-        ${dayItems.slice(0, 3).map((i) => `<div class="cal-chip ${chipCls(i.kind)}"
-            title="${esc(i.kind)} — ${esc(i.label)}">${i.case_id
+        ${dayItems.slice(0, 3).map((i) => `<div class="cal-chip ${chipCls(i.kind)}${calDone(i) ? " cal-done" : ""}"
+            title="${calDone(i) ? "Done — " : esc(i.kind) + " — "}${esc(i.label)}">${calDone(i) ? "✓ " : ""}${i.case_id
               ? `<a href="#/cases/${esc(i.case_id)}">${esc(i.label)}</a>`
               : esc(i.label)}</div>`).join("")}
         ${dayItems.length > 3 ? `<span class="muted cal-more">+${dayItems.length - 3} more</span>` : ""}</div>`;
@@ -408,7 +534,13 @@ const CrmViews = (() => {
     FEE_DUE: ["pay", "$", "Fee due"], INVOICE_DUE: ["pay", "$", "Invoice due"],
     DOCS_DUE: ["docs", "⇪", "Documents due"],
     PLAN_RESPONSE: ["watch", "◷", "Plan's response due"], DECISION_DUE: ["watch", "§", "Recommendation due"],
-    TASK: ["task", "✓", "Task"],
+    TASK: ["task", "✓", "Task"], TASK_DONE: ["done", "✓", "Task done"],
+  };
+  // A task done stays on the calendar, ticked: the system's own tick themselves off when the case records the step.
+  const calDone = (i) => !!i.done || i.kind === "TASK_DONE";
+  const calDoneNote = (i) => {
+    const at = i.done_at || String(i.detail || "").replace(/^done /, "");
+    return `Done${at ? " " + fmtDate(at) : ""}${i.automatic ? " · automatically, when the case recorded it" : ""}`;
   };
   const calKind = (k) => CAL_KIND[k] || ["task", "•", k];
   async function calTaskDone(id) {
@@ -454,17 +586,19 @@ const CrmViews = (() => {
         return full;
       };
       const agenda = Object.keys(groups).map((d) => {
-        const cls = d === today ? "is-today" : d < today ? "is-overdue" : "";
+        const open = groups[d].filter((i) => !calDone(i)).length, doneN = groups[d].length - open;
+        const cls = d === today ? "is-today" : d < today ? (open ? "is-overdue" : "is-past") : "";
         return `<div class="cal-group ${cls}">
           <div class="cal-date"><span class="dow">${dow(d)}</span><span class="dom">${dom(d)}</span></div>
           <div class="cal-col">
-            <div class="cal-heading">${heading(d)} <span class="muted">(${groups[d].length})</span></div>
+            <div class="cal-heading">${open || d >= today ? heading(d) : new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} <span class="muted">(${groups[d].length}${doneN ? `, ${doneN} done` : ""})</span></div>
             <div class="cal-rows">${groups[d].map((i) => {
               const linkable = !!i.case_id;
-              return `<div class="cal-item ${linkable ? "link" : ""}" ${linkable ? `onclick="location.hash='#/cases/${esc(i.case_id)}'"` : ""}>
-                <span class="cal-kind k-${calKind(i.kind)[0]}" title="${esc(calKind(i.kind)[2])}">${calKind(i.kind)[1]}</span>
-                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}${i.detail ? `<span class="cal-detail">${esc(i.detail)}</span>` : ""}</span>
-                ${i.kind === "TASK" ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.calTaskDone('${esc(i.ref)}')">Done</button>` : ""}
+              const done = calDone(i);
+              return `<div class="cal-item ${linkable ? "link" : ""}${done ? " is-done" : ""}" ${linkable ? `onclick="location.hash='#/cases/${esc(i.case_id)}'"` : ""}>
+                <span class="cal-kind k-${done ? "done" : calKind(i.kind)[0]}" title="${esc(done ? "Done" : calKind(i.kind)[2])}">${done ? "✓" : calKind(i.kind)[1]}</span>
+                <span class="cal-label" title="${esc(i.label)}">${esc(i.label)}${done ? `<span class="cal-detail">${esc(calDoneNote(i))}</span>` : i.detail ? `<span class="cal-detail">${esc(i.detail)}</span>` : ""}</span>
+                ${i.kind === "TASK" && !done ? `<button class="mini" onclick="event.stopPropagation(); CrmViews.calTaskDone('${esc(i.ref)}')">Done</button>` : done ? `<span class="badge s-paid">Done</span>` : ""}
               </div>`;
             }).join("")}</div>
           </div>
@@ -492,8 +626,8 @@ const CrmViews = (() => {
           <b id="cal-month-label"></b>
           <button class="mini" id="cal-next">next ›</button>
           <span class="cal-legend">${isTPA
-            ? `<span class="cal-chip cal-chip-pay">payment due</span><span class="cal-chip cal-chip-docs">documents due</span><span class="cal-chip cal-chip-stat">deadline</span><span class="cal-chip cal-chip-watch">to watch</span><span class="cal-chip cal-chip-task">task</span>`
-            : `<span class="cal-chip cal-chip-stat">statutory / offer window</span><span class="cal-chip cal-chip-task">task</span>`}</span></div>
+            ? `<span class="cal-chip cal-chip-pay">payment due</span><span class="cal-chip cal-chip-docs">documents due</span><span class="cal-chip cal-chip-stat">deadline</span><span class="cal-chip cal-chip-watch">to watch</span><span class="cal-chip cal-chip-task">task</span><span class="cal-chip cal-chip-done cal-done">✓ done</span>`
+            : `<span class="cal-chip cal-chip-stat">statutory / offer window</span><span class="cal-chip cal-chip-task">task</span><span class="cal-chip cal-chip-done cal-done">✓ done</span>`}</span></div>
         <div id="cal-grid-box"></div>
         <h2>Agenda</h2>` + (agenda || `<p class="muted">${isTPA ? "Nothing due on your disputes right now. Fees, document requests, deadlines and your tasks appear here as they arise." : "No upcoming deadlines or tasks."}</p>`);
     } catch (e) { return `<h1>Calendar</h1>` + err(e); }
@@ -795,6 +929,6 @@ const CrmViews = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  return { pipeline, pipelinePage, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, done, search, calendar, calTaskDone, calTaskAdd,
+  return { pipeline, pipelinePage, pipelineAssigned, pipelineScroll, pipelineJump, accounts, accountsFilter, account360, accountNew, leads, leadsFilter, convert, tasks, tasksFilter, tasksFilterFor, done, search, calendar, calTaskDone, calTaskAdd,
     entity360, entitySearchPage, openEntity360, entityUnlinkFn, entityLinkPicker, entityMergeModal, entityOutreachLead };
 })();

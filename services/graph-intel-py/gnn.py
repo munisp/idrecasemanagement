@@ -20,10 +20,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
+from scipy import sparse
 
 import graphdb
 import lakehouse_io
@@ -42,6 +44,21 @@ MODEL_VERSION = "graphsage-np-1.0"
 
 def _bucket(value: str, n: int) -> int:
     return int(hashlib.md5((value or "").encode()).hexdigest(), 16) % n
+
+
+# Edges scored per training epoch, at most (a sample of them on a big graph).
+MAX_EDGES_PER_EPOCH = 20000
+# A party with more disputes than this links each one to its next PARTY_RING others, not to all of them.
+PARTY_ALL_PAIRS_MAX = 12
+PARTY_RING = 5
+
+
+def party_links(members: list[int]) -> list[tuple[int, int, float]]:
+    """Weak edges between the disputes of one party (weight 0.3). Pure, so it is tested."""
+    m = len(members)
+    if m <= PARTY_ALL_PAIRS_MAX:
+        return [(members[a], members[b], 0.3) for a in range(m) for b in range(a + 1, m)]
+    return [(members[a], members[(a + k) % m], 0.3) for a in range(m) for k in range(1, PARTY_RING + 1)]
 
 
 def build_dataset(tenant: str) -> dict:
@@ -63,27 +80,32 @@ def build_dataset(tenant: str) -> dict:
     for src, dst, _type, w in graphdb.case_edges(tenant):
         if src in idx and dst in idx:
             pos.append((idx[src], idx[dst], float(w)))
-    # party-mediated weak edges
+    # party-mediated weak edges: disputes that share a filer or plan. A party with a handful of disputes links
+    # them all; a big one (a TPA or plan with thousands) links each to its next few in a ring instead -- every
+    # pair would be millions of edges for one party, and the graph needs the connection, not every pair.
     by_party: dict[str, list[int]] = {}
     for cid, _t, party in graphdb.party_edges(tenant):
         if cid in idx:
             by_party.setdefault(party, []).append(idx[cid])
     for members in by_party.values():
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                pos.append((members[a], members[b], 0.3))
+        pos.extend(party_links(members))
 
-    A = np.zeros((n, n), dtype=np.float64)
-    for i, j, w in pos:
-        A[i, j] = A[j, i] = 1.0
-        deg[i] += 1
-        deg[j] += 1
+    # The adjacency is sparse: memory grows with the edges, not with cases x cases. (A dense n x n matrix of
+    # 20,000 cases is 3.2 GB, and the service is killed at 1 GiB the first time someone asks about a case.)
+    pairs = {(i, j) for i, j, _w in pos if i != j}
+    pairs |= {(j, i) for i, j in pairs}
+    for i, j in pairs:
+        deg[i] += 0.5  # each undirected edge appears twice in pairs
     if n:
         X[:, 23] = deg / max(1.0, deg.max())
-    A += np.eye(n)  # self-loops: keep each node's own features through aggregation
-    rowsum = A.sum(1, keepdims=True)
+    rows = np.fromiter((i for i, _ in pairs), dtype=np.int64, count=len(pairs))
+    cols = np.fromiter((j for _, j in pairs), dtype=np.int64, count=len(pairs))
+    rows = np.concatenate([rows, np.arange(n)])  # self-loops: keep each node's own features through aggregation
+    cols = np.concatenate([cols, np.arange(n)])
+    A = sparse.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+    rowsum = np.asarray(A.sum(1)).ravel()
     rowsum[rowsum == 0] = 1.0
-    A_norm = A / rowsum  # mean aggregation
+    A_norm = sparse.diags(1.0 / rowsum) @ A  # mean aggregation
 
     return {"ids": ids, "idx": idx, "X": X, "A": A_norm, "pos": pos, "n": n}
 
@@ -177,12 +199,19 @@ def train(tenant: str, epochs: int = EPOCHS, lr: float = LR) -> dict:
     t0 = time.time()
     for epoch in range(epochs):
         H = model.forward(A, X)
+        # A big graph trains on a fresh sample of its edges each epoch (all of them on a small one): scoring
+        # every edge and its negatives at once is what took the memory on a 20,000-case tenant.
+        if len(pos_arr) > MAX_EDGES_PER_EPOCH:
+            pick = rng.choice(len(pos_arr), MAX_EDGES_PER_EPOCH, replace=False)
+            ep_pos, ep_w = pos_arr[pick], weights[pick]
+        else:
+            ep_pos, ep_w = pos_arr, weights
         # negative sampling: uniform pairs excluding known positives
-        n_neg = len(pos_arr) * NEG_RATIO
+        n_neg = len(ep_pos) * NEG_RATIO
         negs = sample_negatives(n_neg)
-        src = np.concatenate([pos_arr[:, 0], negs[:, 0]])
-        dst = np.concatenate([pos_arr[:, 1], negs[:, 1]])
-        y = np.concatenate([weights, np.zeros(n_neg)])
+        src = np.concatenate([ep_pos[:, 0], negs[:, 0]])
+        dst = np.concatenate([ep_pos[:, 1], negs[:, 1]])
+        y = np.concatenate([ep_w, np.zeros(n_neg)])
         z, ea, eb, na, nb = _cos_scores(H, src, dst)
         loss, dz = _bce_with_logits(z, y)
         dH = _cos_backward(dz, ea, eb, na, nb, src, dst, H)
@@ -212,6 +241,28 @@ def _load_model() -> GraphSAGE | None:
     return m
 
 
+_training: set[str] = set()
+_training_lock = threading.Lock()
+
+
+def _train_in_background(tenant: str) -> None:
+    """One training run per tenant at a time, off the request."""
+    with _training_lock:
+        if tenant in _training:
+            return
+        _training.add(tenant)
+
+    def run():
+        try:
+            train(tenant)
+        except Exception as e:  # the next question tries again
+            print(f"[gnn] background training for {tenant} failed: {e}", flush=True)
+        finally:
+            with _training_lock:
+                _training.discard(tenant)
+    threading.Thread(target=run, daemon=True, name=f"gnn-train-{tenant}").start()
+
+
 def predict(tenant: str, case_id: str, k: int = 5, write_back: bool = True) -> dict:
     """gnn -> graph: top-k link predictions for a case; writes RELATED_TO
     edges back to FalkorDB and appends a gold-zone parquet record."""
@@ -220,10 +271,10 @@ def predict(tenant: str, case_id: str, k: int = 5, write_back: bool = True) -> d
         return {"case_id": case_id, "predictions": [], "reason": "case not in graph"}
     model = _load_model()
     if model is None:
-        res = train(tenant)
-        if not res.get("trained"):
-            return {"case_id": case_id, "predictions": [], "reason": res.get("reason")}
-        model = _load_model()
+        # No trained model yet (a fresh pod keeps none): train in the background and answer without the ranking
+        # now -- training a large tenant takes longer than anyone should wait, and longer than the gateway does.
+        _train_in_background(tenant)
+        return {"case_id": case_id, "predictions": [], "reason": "the model is being trained; ask again in a few minutes"}
 
     H = model.forward(ds["A"], ds["X"])
     i = ds["idx"][case_id]

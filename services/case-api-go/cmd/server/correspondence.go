@@ -30,9 +30,12 @@ import (
 // transition, which is the single source of truth for it.
 var templateDateKeys = map[string][]string{
 	"acceptance":        {"date_case_accepted", "date_acknowledgment_letter_sent_to_provider"},
-	"ineligible":        {"date_acknowledgment_letter_sent_to_provider"},
-	"dismissal":         {"date_acknowledgment_letter_sent_to_provider"},
+	"ineligible":        {"date_acknowledgment_letter_sent_to_provider", "date_ineligibility_letter_sent"},
+	"dismissal":         {"date_acknowledgment_letter_sent_to_provider", "date_dismissal_letter_sent"},
 	"plan_notification": {"date_acknowledgment_letter_sent_to_health_plan"},
+	// The closing letters: each stops the clock that timed it.
+	"plan_opt_out": {"date_opt_out_letter_sent"},
+	"withdrawal":   {"date_withdrawal_letter_sent"},
 	// Clock bases: each clock starts when its email actually goes out.
 	"estimate_cost": {"estimate_sent_at"},
 	"rfi":           {"rfi_sent_at"},
@@ -193,13 +196,19 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 	// Names as people know them: what was read from the documents or given
 	// at intake. The internal ids these placeholders used to print mean
 	// nothing in a letter.
-	var provider, plan, filer, filerType, contact string
+	var provider, plan, filer, filerType, contact, providerContact, planContact, due string
 	var disputed int64
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT coalesce(details->>'provider_org',''), coalesce(details->>'health_plan',''),
 		       coalesce(details->>'requester_org',''), coalesce(details->>'filing_party_type',''),
-		       coalesce(disputed_amount_cents,0), coalesce(details->>'requester_contact_name','')
-		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &filerType, &disputed, &contact)
+		       coalesce(disputed_amount_cents,0), coalesce(details->>'requester_contact_name',''),
+		       coalesce(nullif(details->>'provider_contact',''), ''), coalesce(nullif(details->>'health_plan_contact',''), '')
+		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&provider, &plan, &filer, &filerType, &disputed, &contact,
+		&providerContact, &planContact)
+	// The open invoice's due date, for "[due date]" in a payment reminder.
+	_ = s.db.QueryRow(r.Context(), `
+		SELECT coalesce(to_char(min(due_date), 'FMMonth FMDD, YYYY'), '') FROM public.invoices
+		WHERE tenant=$1 AND case_id::text=$2 AND status='OPEN' AND due_date IS NOT NULL`, tenant, caseID).Scan(&due)
 	if provider == "" {
 		provider = s.accountName(r, tenant, providerID)
 	}
@@ -230,11 +239,25 @@ func (s *server) renderTemplate(r *http.Request, tenant, caseID, text string) st
 			text = strings.ReplaceAll(text, k, v)
 		}
 	}
-	// The filer's contact is the provider's contact only when a provider filed.
+	// The filer's contact is its own side's contact: the provider's when a provider filed, the plan's when a plan did.
 	if strings.EqualFold(filerType, "HEALTH_PLAN") {
-		contact = ""
+		if planContact == "" {
+			planContact = contact
+		}
+	} else if contact != "" {
+		providerContact = contact
 	}
-	return fillInNames(text, provider, plan, contact)
+	// The filer, as the letter greets it; and the Full Review estimate the Reviewer recorded in the Dispute Summary.
+	filerName := orWord(contact, map[bool]string{true: plan, false: provider}[strings.EqualFold(filerType, "HEALTH_PLAN")])
+	var estimateCents int64
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce((details->'dispute_summary'->>'full_review_estimate_cents')::bigint, 0)
+		FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&estimateCents)
+	estimate := ""
+	if estimateCents > 0 {
+		estimate = usd(estimateCents)
+	}
+	return fillInNames(text, letterNames{Provider: provider, Plan: plan, ProviderContact: providerContact, PlanContact: planContact, DueDate: due,
+		Filer: filerName, Estimate: estimate})
 }
 
 // draftCorrespondence renders a program template for a case. If the template
@@ -299,6 +322,16 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(bodyText) == "" {
 		bodyText = tpl.Body // program standard text (FL: verbatim source templates)
 	}
+	// No cost estimate requested: the acceptance email carries no estimate language (the paragraphs about one go).
+	if tpl.Key == "acceptance" && s.estimateDeclined(r, tenant, caseID) {
+		bodyText = dropEstimateParagraphs(bodyText)
+	}
+	// "[contact name]" is the contact of the side the letter goes to.
+	side := "[Provider Contact Name]"
+	if (tpl.Key == "rfi" && in.RfiTo == "plan") || (tpl.Key != "rfi" && len(tpl.To) > 0 && (tpl.To[0] == "health_plan" || tpl.To[0] == "plan")) {
+		side = "[Health Plan Contact Name]"
+	}
+	bodyText = strings.ReplaceAll(bodyText, "[contact name]", side)
 	body := s.renderTemplate(r, tenant, caseID, bodyText)
 	for k, v := range in.Vars {
 		subject = strings.ReplaceAll(subject, "{"+k+"}", v)
@@ -334,13 +367,18 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	if in.AutoDownload || strings.Contains(body, "{download_link}") {
 		var objectKey string
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-			SELECT object_key FROM tenant_%s.documents
-			WHERE case_id=$1 AND NOT sealed AND scan_status<>'BLOCKED'
-			ORDER BY created_at DESC LIMIT 1`, sanitizeTenant(tenant)), caseID).Scan(&objectKey)
+			SELECT d.object_key FROM tenant_%s.documents d
+			WHERE d.case_id=$1 AND NOT d.sealed AND d.scan_status<>'BLOCKED' AND NOT `+internalDocSQL+`
+			ORDER BY d.created_at DESC LIMIT 1`, sanitizeTenant(tenant)), caseID).Scan(&objectKey)
 		// The plan notification carries ALL the filing party's documents,
 		// zipped ("Filing party dispute documentation FLxx-..."), not one file.
 		if tpl.Key == "plan_notification" && objectKey != "" {
 			objectKey = caseZipKey
+		}
+		// The Final Order package and the rationale copy carry their own set of documents (letterBundles),
+		// resolved when the link is used.
+		if _, ok := letterBundles[tpl.Key]; ok {
+			objectKey = caseSetPrefix + tpl.Key
 		}
 		link := ""
 		if objectKey != "" {
@@ -423,6 +461,7 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		s.logActivity(r.Context(), tenant, caseID, "EMAIL_SENT",
 			fmt.Sprintf("%s sent to %d recipient(s) (cc %d) — template %s", subject, len(in.To), len(in.CC), in.Template))
 		s.afterLetterSent(r, tenant, caseID, in.Template, in.RfiTo)
+		s.recordPartyDocs(r, tenant, caseID, in.Template, in.RfiTo, subject, body, qid, in.To, in.CC, time.Time{})
 		// "parties notified" and friends tick themselves on delivery.
 		s.autoChecklist(r, tenant, caseID)
 	}
@@ -440,6 +479,53 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 // qaQueue lists pending QA reviews; qaDecision approves/rejects. Approving a
 // PENDING review marks it SENT and writes the correspondence log — nothing
 // reaches a party without passing the gate.
+// withCaseNumbers adds each row's case_number (from its case_id), so the QA gate shows the case people know.
+func (s *server) withCaseNumbers(r *http.Request, tenant string, lists ...[]map[string]any) {
+	var ids []string
+	for _, l := range lists {
+		for _, row := range l {
+			if id := fmt.Sprint(row["case_id"]); id != "" && id != "<nil>" && !contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	nums := map[string]string{}
+	rows, err := s.db.Query(r.Context(), fmt.Sprintf(`SELECT id::text, case_number FROM tenant_%s.cases WHERE id::text = ANY($1)`, sanitizeTenant(tenant)), ids)
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var id, n string
+		if rows.Scan(&id, &n) == nil {
+			nums[id] = n
+		}
+	}
+	rows.Close()
+	// Who approved or reviewed it: stored as the account id; shown by name.
+	var subs []string
+	for _, l := range lists {
+		for _, row := range l {
+			row["case_number"] = nums[fmt.Sprint(row["case_id"])]
+			if v, ok := row["reviewed_by"].(string); ok && len(v) == 36 && strings.Count(v, "-") == 4 && !contains(subs, v) {
+				subs = append(subs, v)
+			}
+		}
+	}
+	if len(subs) > 0 {
+		names := s.resolveSubjectNames(r.Context(), subs)
+		for _, l := range lists {
+			for _, row := range l {
+				if v, ok := row["reviewed_by"].(string); ok && names[v] != "" {
+					row["reviewed_by"] = names[v]
+				}
+			}
+		}
+	}
+}
+
 func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, qaReadRoles...) {
@@ -458,7 +544,7 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		rows, err := s.queryRows(r, `
 			SELECT id, case_id, artifact, channel, subject, status, drafted_by, created_at
 			FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' AND case_id=$2
-			ORDER BY created_at`, tenant, cid)
+			ORDER BY created_at DESC`, tenant, cid)
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
@@ -468,7 +554,7 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.queryRows(r, `
 		SELECT id, case_id, artifact, channel, subject, status, drafted_by, created_at
-		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' ORDER BY created_at`, tenant)
+		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' ORDER BY created_at DESC`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -484,7 +570,8 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		SELECT id, case_id, artifact, subject, drafted_by, reviewed_by, reviewed_at, coalesce(requested_by_sub,'') AS requested_by_sub,
 		       to_recipients, cc_recipients
 		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
-		ORDER BY reviewed_at`, tenant)
+		ORDER BY reviewed_at DESC`, tenant)
+	s.withCaseNumbers(r, tenant, rows, recent, toSend)
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend})
 }
 
@@ -493,27 +580,29 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 // Coder sends it. They see only their own drafts in the QA gate.
 var qaDraftOnlyRoles = []string{"CODER"}
 
-// qaQueueOwn: the QA gate for a drafter -- their own drafts awaiting review,
-// the approved ones waiting for them to send, and their recent decisions.
+// qaQueueOwn: the QA gate for a drafter -- their own drafts awaiting review, the approved ones waiting for them to
+// send, and their recent decisions; and the same for every case they are now the specialist on, so a draft made
+// before they were assigned is theirs to follow and send.
 func (s *server) qaQueueOwn(w http.ResponseWriter, r *http.Request, p principal) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.queryRows(r, `
 		SELECT id, case_id, artifact, channel, subject, status, drafted_by, created_at
-		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' AND requested_by_sub=$2 ORDER BY created_at`, tenant, p.Subject)
+		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' AND (requested_by_sub=$2 OR case_id IN (SELECT h.case_id FROM public.case_helpers h WHERE h.tenant=$1 AND h.user_id=$2)) ORDER BY created_at DESC`, tenant, p.Subject)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
 	recent, _ := s.queryRows(r, `
 		SELECT id, case_id, subject, status, drafted_by, reviewed_by, reviewed_at
-		FROM public.qa_reviews WHERE tenant=$1 AND status<>'PENDING' AND requested_by_sub=$2
+		FROM public.qa_reviews WHERE tenant=$1 AND status<>'PENDING' AND (requested_by_sub=$2 OR case_id IN (SELECT h.case_id FROM public.case_helpers h WHERE h.tenant=$1 AND h.user_id=$2))
 		ORDER BY reviewed_at DESC NULLS LAST LIMIT 20`, tenant, p.Subject)
 	toSend, _ := s.queryRows(r, `
 		SELECT id, case_id, artifact, subject, drafted_by, reviewed_by, reviewed_at, coalesce(requested_by_sub,'') AS requested_by_sub,
 		       to_recipients, cc_recipients
 		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
-		  AND requested_by_sub=$2
-		ORDER BY reviewed_at`, tenant, p.Subject)
+		  AND (requested_by_sub=$2 OR case_id IN (SELECT h.case_id FROM public.case_helpers h WHERE h.tenant=$1 AND h.user_id=$2))
+		ORDER BY reviewed_at DESC`, tenant, p.Subject)
+	s.withCaseNumbers(r, tenant, rows, recent, toSend)
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend, "own_only": true})
 }
 
@@ -525,13 +614,41 @@ func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	qid := chi.URLParam(r, "qaId")
 	rows, err := s.queryRows(r, `
-		SELECT id, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, created_at
+		SELECT id, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, created_at,
+		       coalesce(reviewed_by,'') AS reviewed_by, reviewed_at, sent_at, coalesce(review_note,'') AS review_note,
+		       coalesce(requested_by_sub,'') AS requested_by_sub
 		FROM public.qa_reviews WHERE tenant=$1 AND id=$2`, tenant, qid)
 	if err != nil || len(rows) == 0 {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows[0])
+	// What the reviewer previews besides the text: a letter's own PDF, and the documents an email's links carry.
+	q := rows[0]
+	caseID, _ := q["case_id"].(string)
+	artifact, _ := q["artifact"].(string)
+	docs := []map[string]any{}
+	if caseID != "" {
+		t := sanitizeTenant(tenant)
+		if q["channel"] == "letter" {
+			var id, name string
+			if s.db.QueryRow(r.Context(), fmt.Sprintf(`
+				SELECT d.id::text, coalesce(d.filename,'') FROM tenant_%s.documents d, public.qa_reviews q
+				WHERE q.tenant=$1 AND q.id::text=$2 AND d.case_id::text=$3
+				  AND (d.object_key LIKE '%%/' || $4 || '-%%' OR ($4 = 'final_order_rationale' AND d.filename ILIKE 'Review Rationale and Letter%%'))
+				  AND d.created_at <= q.created_at + interval '2 minutes'
+				ORDER BY d.created_at DESC LIMIT 1`, t), tenant, qid, caseID, artifact).Scan(&id, &name) == nil {
+				docs = append(docs, map[string]any{"doc_id": id, "filename": name})
+			}
+		} else if body, _ := q["body"].(string); body != "" {
+			for _, id := range s.linkedDocs(r.Context(), tenant, caseID, body) {
+				var name string
+				_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(filename,'') FROM tenant_%s.documents WHERE id::text=$1`, t), id).Scan(&name)
+				docs = append(docs, map[string]any{"doc_id": id, "filename": name})
+			}
+		}
+	}
+	q["documents"] = docs
+	writeJSON(w, http.StatusOK, q)
 }
 
 func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
@@ -583,7 +700,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isRetry && s.reviewerSends(r, tenant) {
-		http.Error(w, `{"error":"this draft has already passed QA — it is with the Reviewer to send"}`, http.StatusConflict)
+		// Approving again what has already passed (a second click, or a stale page) changes nothing: say where the
+		// draft is instead of refusing -- the decision the person wanted is already on record.
+		writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "unchanged": true, "next": "with the Reviewer to send"})
 		return
 	}
 	// Self-approval guard: the drafter and the reviewer must be different
@@ -621,9 +740,16 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		programQARole = defaultQARole(s.corrTemplates(r, tenant))
 	}
 	copilotRequesterExempt := strings.HasPrefix(artifact, "copilot_") && requesterMatch && programQARole == ""
-	if selfApproval && !copilotRequesterExempt {
+	// A tenant admin (or a platform/federal admin) may decide their own drafts: the office's admin is the last word
+	// on its own queue. It is recorded on the case so the missing second person is visible, not silent.
+	adminSelf := selfApproval && wfIsAdmin(p)
+	if selfApproval && !copilotRequesterExempt && !adminSelf {
 		http.Error(w, `{"error":"forbidden: cannot approve or reject your own draft -- needs a second reviewer"}`, http.StatusForbidden)
 		return
+	}
+	if adminSelf {
+		s.logActivity(r.Context(), tenant, caseID, "QA_SELF_DECIDED",
+			fmt.Sprintf("%s: %s decided their own draft as an admin (%s)", subject, name, strings.ToLower(in.Decision)))
 	}
 	// Generic QA-role gate: the approver must hold the role the template
 	// configured as qa_role (e.g. "ATTORNEY" on FL AHCA's dismissal
@@ -735,6 +861,10 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	if in.Decision == "APPROVE" && channel == "letter" {
 		s.logActivity(r.Context(), tenant, caseID, "LETTER_APPROVED",
 			fmt.Sprintf("%s passed QA (%s) — ready to go out with its email", subject, displayName(p)))
+		// An invoice that passed QA is mailed to the party billed: its email is drafted for the PM.
+		if party := map[string]string{"invoice_health_plan": "HEALTH_PLAN", "invoice_provider": "PROVIDER"}[artifact]; party != "" {
+			s.draftInvoiceEmail(r, tenant, caseID, party, qid)
+		}
 		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
 			"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "channel": channel,
 		})
@@ -835,6 +965,10 @@ func (s *server) logCorrespondence(r *http.Request, tenant, caseID, direction, t
 		INSERT INTO public.correspondence_log (tenant, case_id, direction, template, subject, body, recipients, sent_by, delivery_status, delivery_error)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		tenant, caseID, direction, template, subject, body, rcpts, actor, status, derr)
+	// Mail that reached a party on the platform is kept under the dispute in its portal (party_documents.go).
+	if direction == "OUT" && status == "SENT" && caseID != "" && template != "sharebox_download" {
+		s.recordPartyDocs(r, tenant, caseID, template, "", subject, body, "", to, cc, time.Time{})
+	}
 }
 
 // listMailJournal: GET /correspondence?direction=IN|OUT&q=... — the
@@ -1072,6 +1206,7 @@ func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, case
 		// SOP ties to this letter are set, and the workflow hears of it.
 		s.releaseCaseFromQA(r, tenant, caseID, qid)
 		s.afterLetterSent(r, tenant, caseID, artifact, rfiTo)
+		s.recordPartyDocs(r, tenant, caseID, artifact, rfiTo, subject, body, qid, to, cc, time.Time{})
 		// Notification is a fact now — the checklist follows.
 		s.autoChecklist(r, tenant, caseID)
 	}
@@ -1106,8 +1241,9 @@ func (s *server) qaSend(w http.ResponseWriter, r *http.Request) {
 	}
 	// The drafter sends; Reviewers and admins may send any approved draft
 	// (reminders the system drafted have no person behind them).
-	if requestedBySub != p.Subject && !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		http.Error(w, `{"error":"forbidden: an approved draft is sent by the person who drafted it, or a Reviewer"}`, http.StatusForbidden)
+	// The specialist named on the case now sends it too: a draft outlives a reassignment.
+	if requestedBySub != p.Subject && !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && !s.namedOnCase(r, tenant, caseID, p.Subject) {
+		http.Error(w, `{"error":"forbidden: an approved draft is sent by the person who drafted it, the specialist now on the case, or a Reviewer"}`, http.StatusForbidden)
 		return
 	}
 	var to, cc []string
@@ -1195,4 +1331,33 @@ func letterPartyNames(provider, plan, filer, filingPartyType string) (string, st
 		provider = filer
 	}
 	return provider, plan
+}
+
+// namedOnCase: sub is one of the specialists named on the case (case_helpers).
+func (s *server) namedOnCase(r *http.Request, tenant, caseID, sub string) bool {
+	var n int
+	_ = s.db.QueryRow(r.Context(), `SELECT count(*) FROM public.case_helpers WHERE tenant=$1 AND case_id=$2 AND user_id=$3`,
+		tenant, caseID, sub).Scan(&n)
+	return n > 0
+}
+
+// estimateDeclined: the filing said no cost estimate is wanted (unknown counts as not declined).
+func (s *server) estimateDeclined(r *http.Request, tenant, caseID string) bool {
+	var v string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT lower(coalesce(details->>'fee_estimate_requested','')) FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&v)
+	return v == "false" || v == "no"
+}
+
+// dropEstimateParagraphs removes the paragraphs of a message that speak of a cost estimate.
+func dropEstimateParagraphs(body string) string {
+	paras := strings.Split(body, "\n\n")
+	kept := paras[:0]
+	for _, p := range paras {
+		if l := strings.ToLower(p); strings.Contains(l, "estimated cost") || strings.Contains(l, "cost estimate") {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return strings.Join(kept, "\n\n")
 }

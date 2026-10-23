@@ -59,6 +59,37 @@ func timeEntryRole(p principal) string {
 	return "STAFF"
 }
 
+// billedRoleFor is the role an entry is recorded and billed under: the role asked for, or def when none was.
+// FL's Reviewer is CASE_MANAGER. Nurse and Physician time bill at their own rates (AHCA price sheet), so a
+// Nurse/Physician records each entry as a Nurse (utilization nursing review) or a Physician (DOCTOR, physician
+// expert review), never as both. The second result says why the role is refused.
+func billedRoleFor(p principal, asked, def string) (string, string) {
+	want := strings.ToUpper(strings.TrimSpace(asked))
+	switch want {
+	case "REVIEWER":
+		want = "CASE_MANAGER"
+	case "PHYSICIAN":
+		want = "DOCTOR"
+	case "NURSE/PHYSICIAN", "NURSE PHYSICIAN":
+		want = "NURSE_PHYSICIAN"
+	}
+	if want == "" {
+		want = def
+	}
+	if want == "NURSE_PHYSICIAN" {
+		return "", "choose Nurse or Physician for this time: nursing review and physician review are billed at different rates"
+	}
+	// The combined grant itself (hasRole would also count a Nurse or a Doctor as one) may bill as either.
+	combined := false
+	for _, r := range p.Roles {
+		combined = combined || r == "NURSE_PHYSICIAN"
+	}
+	if asked != "" && !hasRole(p, want) && !((want == "NURSE" || want == "DOCTOR") && combined) {
+		return "", fmt.Sprintf("role %q is not one you hold — the entry role is chosen per entry but must be a role assigned to you", strings.TrimSpace(asked))
+	}
+	return want, ""
+}
+
 type timeEntryIn struct {
 	Minutes   int     `json:"minutes"`    // exact minutes; wins when >0
 	Hours     float64 `json:"hours"`      // convenience: 1.5h = 90m
@@ -125,20 +156,10 @@ func (s *server) addTimeEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	billable := in.Billable == nil || *in.Billable
-	role := timeEntryRole(p)
-	if want := strings.ToUpper(strings.TrimSpace(in.Role)); want != "" {
-		// FL workflow names map onto platform roles.
-		switch want {
-		case "REVIEWER":
-			want = "CASE_MANAGER"
-		case "NURSE/PHYSICIAN", "NURSE PHYSICIAN", "PHYSICIAN":
-			want = "NURSE_PHYSICIAN"
-		}
-		if !hasRole(p, want) {
-			http.Error(w, fmt.Sprintf(`{"error":"role %q is not one you hold — the entry role is chosen per entry but must be a role assigned to you"}`, strings.TrimSpace(in.Role)), http.StatusUnprocessableEntity)
-			return
-		}
-		role = want
+	role, why := billedRoleFor(p, in.Role, timeEntryRole(p))
+	if why != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, why), http.StatusUnprocessableEntity)
+		return
 	}
 	var id int64
 	if err := s.db.QueryRow(r.Context(), `
@@ -320,11 +341,11 @@ const timeReportMaxEntries = 5000
 // dispute, per person, totals, and the entries themselves. Amounts are
 // attached only when showMoney -- money never leaks to plain viewers -- and a
 // role with no configured rate adds hours but no dollars. Pure, so tested.
-func summarizeTime(entries []timeEntryRow, rates map[string]int64, showMoney bool) map[string]any {
+func summarizeTime(entries []timeEntryRow, rates rateBook, showMoney bool) map[string]any {
 	byCase := map[string]*timeReportAcc{}
 	byPerson := map[string]*timeReportAcc{}
 	seen := map[string]map[string]bool{}
-	addMoney := func(a *timeReportAcc, role string, bill int64) {
+	addMoney := func(a *timeReportAcc, role, day string, bill int64) {
 		if !showMoney || bill == 0 {
 			return
 		}
@@ -332,7 +353,7 @@ func summarizeTime(entries []timeEntryRow, rates map[string]int64, showMoney boo
 			var zero, z2 int64
 			a.Amount, a.Unrated = &zero, &z2
 		}
-		if rate, ok := rates[role]; ok {
+		if rate, ok := rates.at(role, day); ok {
 			*a.Amount += bill * rate / 60
 		} else {
 			*a.Unrated += bill
@@ -350,7 +371,7 @@ func summarizeTime(entries []timeEntryRow, rates map[string]int64, showMoney boo
 		}
 		byCase[e.CaseID].Minutes += e.Minutes
 		byCase[e.CaseID].Billable += bill
-		addMoney(byCase[e.CaseID], e.Role, bill)
+		addMoney(byCase[e.CaseID], e.Role, e.Date, bill)
 		if !seen[e.CaseID][e.Subject] {
 			seen[e.CaseID][e.Subject] = true
 			byCase[e.CaseID].People++
@@ -361,7 +382,7 @@ func summarizeTime(entries []timeEntryRow, rates map[string]int64, showMoney boo
 		}
 		byPerson[key].Minutes += e.Minutes
 		byPerson[key].Billable += bill
-		addMoney(byPerson[key], e.Role, bill)
+		addMoney(byPerson[key], e.Role, e.Date, bill)
 		people[e.Subject] = true
 	}
 	caseList, personList := []*timeReportAcc{}, []*timeReportAcc{}
@@ -471,9 +492,9 @@ func (s *server) buildTimeReport(r *http.Request, tenant, from, to, label string
 		roles = append(roles, role)
 	}
 	sort.Strings(roles)
-	rates := map[string]int64{}
+	rates := rateBook{}
 	if showMoney {
-		rates = s.timeRateMap(r, tenant)
+		rates = s.timeRateBook(r, tenant)
 	}
 	resp := summarizeTime(kept, rates, showMoney)
 	if d := f.describe(); d != "" {
@@ -665,7 +686,7 @@ func moneyCell(c *int64) string {
 
 // timeRateManageRoles: who may SET rates. timeRateViewRoles: who may SEE
 // dollar amounts (superset: FINANCE reads for billing reconciliation).
-var timeRateManageRoles = []string{"PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+var timeRateManageRoles = []string{"PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 var timeRateViewRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // getTimeRates: GET /reports/time/rates
@@ -699,9 +720,18 @@ func (s *server) putTimeRate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Role             string `json:"role"`
 		RateCentsPerHour int64  `json:"rate_cents_per_hour"`
+		EffectiveFrom    string `json:"effective_from"` // YYYY-MM-DD; empty = today
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	today := time.Now().In(s.tenantZone(r, tenant)).Format("2006-01-02")
+	if in.EffectiveFrom == "" {
+		in.EffectiveFrom = today
+	}
+	if _, err := time.Parse("2006-01-02", in.EffectiveFrom); err != nil {
+		http.Error(w, `{"error":"effective_from must be a date (YYYY-MM-DD)"}`, http.StatusBadRequest)
 		return
 	}
 	role := strings.ToUpper(strings.TrimSpace(in.Role))
@@ -713,33 +743,50 @@ func (s *server) putTimeRate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rate out of range"}`, http.StatusBadRequest)
 		return
 	}
+	// The dated rate; time_rates keeps the rate in force today for anything that still reads it.
 	if _, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.time_rates (tenant, role, rate_cents_per_hour, updated_by)
-		VALUES ($1,$2,$3,$4)
-		ON CONFLICT (tenant, role) DO UPDATE SET rate_cents_per_hour=EXCLUDED.rate_cents_per_hour,
-			updated_by=EXCLUDED.updated_by, updated_at=now()`,
-		tenant, role, in.RateCentsPerHour, p.Subject); err != nil {
+		INSERT INTO public.time_rate_schedule (tenant, role, effective_from, rate_cents_per_hour, set_by)
+		VALUES ($1,$2,$3::date,$4,$5)
+		ON CONFLICT (tenant, role, effective_from) DO UPDATE SET rate_cents_per_hour=EXCLUDED.rate_cents_per_hour,
+			set_by=EXCLUDED.set_by, set_at=now()`,
+		tenant, role, in.EffectiveFrom, in.RateCentsPerHour, displayName(p)); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
+	if cur, ok := s.timeRateBook(r, tenant).at(role, today); ok {
+		_, _ = s.db.Exec(r.Context(), `
+			INSERT INTO public.time_rates (tenant, role, rate_cents_per_hour, updated_by)
+			VALUES ($1,$2,$3,$4)
+			ON CONFLICT (tenant, role) DO UPDATE SET rate_cents_per_hour=EXCLUDED.rate_cents_per_hour,
+				updated_by=EXCLUDED.updated_by, updated_at=now()`, tenant, role, cur, p.Subject)
+	}
 	s.logAudit(r.Context(), tenant, "", "TIME_RATE_SET", map[string]any{
-		"by": p.Subject, "role": role, "rate_cents_per_hour": in.RateCentsPerHour,
+		"by": p.Subject, "role": role, "rate_cents_per_hour": in.RateCentsPerHour, "effective_from": in.EffectiveFrom,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"role": role, "rate_cents_per_hour": in.RateCentsPerHour})
+	writeJSON(w, http.StatusOK, map[string]any{"role": role, "rate_cents_per_hour": in.RateCentsPerHour, "effective_from": in.EffectiveFrom})
 }
 
-// timeRateMap loads the tenant's role → rate table for report enrichment.
-func (s *server) timeRateMap(r *http.Request, tenant string) map[string]int64 {
-	m := map[string]int64{}
-	rows, err := s.queryRows(r, `SELECT role, rate_cents_per_hour FROM public.time_rates WHERE tenant=$1`, tenant)
-	if err != nil {
-		return m
-	}
+// rateBook: each role's hourly rates (cents) with the day each takes effect. The rate for a piece of time is the one
+// in force on the day it was worked, so a new rate never re-prices time already worked.
+type rateBook map[string][]FeeStep
+
+func (b rateBook) at(role, day string) (int64, bool) { return feeOn(b[role], day) }
+
+// timeRateBook loads the tenant's dated rates (time_rate_schedule); a role set only the old way (time_rates) counts
+// from the start.
+func (s *server) timeRateBook(r *http.Request, tenant string) rateBook {
+	b := rateBook{}
+	rows, _ := s.queryRows(r, `
+		SELECT role, effective_from::text AS effective_from, rate_cents_per_hour FROM public.time_rate_schedule WHERE tenant=$1
+		UNION ALL
+		SELECT t.role, '2000-01-01', t.rate_cents_per_hour FROM public.time_rates t
+		WHERE t.tenant=$1 AND NOT EXISTS (SELECT 1 FROM public.time_rate_schedule x WHERE x.tenant=t.tenant AND x.role=t.role)`, tenant)
 	for _, row := range rows {
 		role, _ := row["role"].(string)
-		m[role] = toInt64(row["rate_cents_per_hour"])
+		from, _ := row["effective_from"].(string)
+		b[role] = append(b[role], FeeStep{EffectiveFrom: from, Cents: toInt64(row["rate_cents_per_hour"])})
 	}
-	return m
+	return b
 }
 
 // ---- Personal timesheet (daily entry screen) -------------------------------
@@ -853,18 +900,12 @@ func (s *server) updateTimeEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := fmt.Sprint(before["role"])
-	if want := strings.ToUpper(strings.TrimSpace(in.Role)); want != "" {
-		switch want {
-		case "REVIEWER":
-			want = "CASE_MANAGER"
-		case "NURSE/PHYSICIAN", "NURSE PHYSICIAN", "PHYSICIAN":
-			want = "NURSE_PHYSICIAN"
-		}
-		if !hasRole(p, want) {
-			http.Error(w, fmt.Sprintf(`{"error":"role %q is not one you hold"}`, in.Role), http.StatusUnprocessableEntity)
+	if strings.TrimSpace(in.Role) != "" {
+		var why string
+		if role, why = billedRoleFor(p, in.Role, role); why != "" {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, why), http.StatusUnprocessableEntity)
 			return
 		}
-		role = want
 	}
 	billable := fmt.Sprint(before["billable"]) == "true"
 	if in.Billable != nil {

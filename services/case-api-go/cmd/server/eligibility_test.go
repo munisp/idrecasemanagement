@@ -275,3 +275,22 @@ func TestPackageCaseFacts(t *testing.T) {
 		t.Fatal("nothing read, nothing set")
 	}
 }
+
+// The filing window is about the day the dispute was filed, not the day it is reviewed: filed in time and
+// reviewed after the deadline is still in time; filed after the deadline is late however soon it is reviewed.
+func TestFilingWindowUsesFilingDate(t *testing.T) {
+	cfg := &ProgramConfig{}
+	cfg.Eligibility.FilingWindowMonths = 12
+	in := eligibilityInput{FinalDeterminationAt: "2025-05-09", FiledOn: "2026-04-30"} // filed 9 days before the deadline
+	if res, reason, ev := evalEligibility(cfg, in); res != "ELIGIBLE" {
+		t.Errorf("filed in time, reviewed later: got %s %s %v", res, reason, ev)
+	}
+	in.FiledOn = "2026-10-21" // filed five months after the deadline
+	res, reason, ev := evalEligibility(cfg, in)
+	if res != "INELIGIBLE" || reason != "over_filing_window" {
+		t.Errorf("filed late: got %s %s", res, reason)
+	}
+	if ev["filing_deadline"] != "2026-05-09" || ev["filed_on"] != "2026-10-21" || ev["final_determination_at"] != "2025-05-09" {
+		t.Errorf("evidence should carry the determination date, deadline and filing date: %v", ev)
+	}
+}

@@ -44,6 +44,9 @@ class AhcaDisputeWorkflow:
         self.estimate_requested = False
         self.estimate_permission: bool | None = None  # True = proceed, False = declined
         self.provider_withdrawn = False
+        self.withdrawal_confirmed = False  # Capitol Bridge verified the withdrawal request (WITHDRAWAL_CONFIRMED)
+        # A person decided the fee is to be refunded (REFUND_APPROVED): the refund is never decided by the clock.
+        self.refund_approved = False
         self.plan_response_received = False
         self.plan_opted_out: bool | None = None  # set on PLAN_OPT_OUT signal
         # Stage 5's Coder -> (optional Nurse/Physician) -> Attorney handoff,
@@ -55,6 +58,8 @@ class AhcaDisputeWorkflow:
         self.attorney_done = False
         self.outcome_data: dict = {}
         self.final_order_issued = False
+        # The day a step actually happened, as its dialog gave it (signal -> YYYY-MM-DD); see _day.
+        self.step_days: dict[str, str] = {}
         self.determination_sent = False
         self.rfi_pending = False
         self.rfi_to: str | None = None  # "provider" | "plan"
@@ -150,6 +155,7 @@ class AhcaDisputeWorkflow:
         # the packet didn't, and have done outreach -- this is what starts
         # the 7-day REFUND_WINDOW clock (basis=outreach_at), not case receipt.
         self.outreach_done = True
+        self.step_days["OUTREACH_DONE"] = str(data.get("date") or "")
 
     @workflow.signal(name="ELIGIBILITY_RESULT")
     def on_eligibility_result(self, data: dict) -> None:
@@ -162,6 +168,21 @@ class AhcaDisputeWorkflow:
     @workflow.signal(name="ESTIMATE_PERMISSION")
     def on_estimate_permission(self, data: dict) -> None:
         self.estimate_permission = data.get("granted", False)
+        self.step_days["ESTIMATE_PERMISSION"] = str(data.get("date") or "")
+
+    @workflow.signal(name="ESTIMATE_CONFIRMED")
+    def on_estimate_confirmed(self, data: dict) -> None:
+        # "Confirm if Cost Estimate requested", the step after the case is deemed eligible: it decides, once the
+        # acceptance letter is out, whether the cost estimate and the provider's permission come next.
+        self.estimate_requested = bool(data.get("requested", False))
+
+    @workflow.signal(name="WITHDRAWAL_CONFIRMED")
+    def on_withdrawal_confirmed(self, data: dict) -> None:
+        self.withdrawal_confirmed = True
+
+    @workflow.signal(name="REFUND_APPROVED")
+    def on_refund_approved(self, data: dict) -> None:
+        self.refund_approved = True
 
     @workflow.signal(name="PROVIDER_WITHDRAW")
     def on_provider_withdraw(self, data: dict) -> None:
@@ -170,6 +191,7 @@ class AhcaDisputeWorkflow:
     @workflow.signal(name="PLAN_RESPONSE_RECEIVED")
     def on_plan_response(self, data: dict) -> None:
         self.plan_response_received = True
+        self.step_days["PLAN_RESPONSE_RECEIVED"] = str(data.get("date") or "")
 
     @workflow.signal(name="PLAN_OPT_OUT")
     def on_plan_opt_out(self, data: dict) -> None:
@@ -201,6 +223,7 @@ class AhcaDisputeWorkflow:
     @workflow.signal(name="FINAL_ORDER_ISSUED")
     def on_final_order_issued(self, data: dict) -> None:
         self.final_order_issued = True
+        self.step_days["FINAL_ORDER_ISSUED"] = str(data.get("date") or "")
 
     @workflow.signal(name="LETTER_SENT")
     def on_letter_sent(self, data: dict) -> None:
@@ -215,6 +238,16 @@ class AhcaDisputeWorkflow:
     @workflow.signal(name="RFI_RESPONSE_RECEIVED")
     def on_rfi_response_received(self, data: dict) -> None:
         self.rfi_response_received = True
+
+    def _day(self, signal: str) -> str:
+        """The day the step a signal recorded happened: its dialog's date when one was given (and is not in the
+        future), otherwise today."""
+        today = workflow.now().date()
+        try:
+            d = date.fromisoformat(self.step_days.get(signal, ""))
+            return d.isoformat() if d <= today else today.isoformat()
+        except ValueError:
+            return today.isoformat()
 
     # ---- main ------------------------------------------------------------
     @workflow.run
@@ -237,6 +270,8 @@ class AhcaDisputeWorkflow:
                 "AOR_REVISED": self.on_aor_revised,
                 "ESTIMATE_PERMISSION": self.on_estimate_permission,
                 "PROVIDER_WITHDRAW": self.on_provider_withdraw,
+                "REFUND_APPROVED": self.on_refund_approved,
+                "WITHDRAWAL_CONFIRMED": self.on_withdrawal_confirmed, "ESTIMATE_CONFIRMED": self.on_estimate_confirmed,
                 "PLAN_RESPONSE_RECEIVED": self.on_plan_response,
                 "PLAN_OPT_OUT": self.on_plan_opt_out,
                 "CODING_REVIEW_COMPLETE": self.on_coding_review_complete,
@@ -420,18 +455,43 @@ class AhcaDisputeWorkflow:
             await self._until(lambda: self.outreach_done or self.provider_withdrawn)
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
+            outreach_day = self._day("OUTREACH_DONE")
             await self._activity(
-                set_program_date, args=[tenant, case_id, "outreach_at", workflow.now().date().isoformat()],
+                set_program_date, args=[tenant, case_id, "outreach_at", outreach_day],
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            manual = workflow.patched("manual-refund")
+            # The 7 days run from the day of the outreach (recorded late, fewer are left; at least one).
+            window = max(1, 7 - (workflow.now().date() - date.fromisoformat(outreach_day)).days)
             completed = await self._deadline(
-                lambda: self.packet_complete or self.provider_withdrawn, 7, "refund-window", "REFUND_WINDOW")
+                lambda: self.packet_complete or self.provider_withdrawn or (manual and self.refund_approved),
+                window, "refund-window", "REFUND_WINDOW")
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
+            # A run that was already inside its refund window when refunds became manual recorded no marker above;
+            # its window running out now is decided by a person too.
+            if not manual and not completed and workflow.patched("manual-refund-late"):
+                manual = True
+            if manual and not self.refund_approved and not self.packet_complete:
+                # 7 days after outreach with no complete packet the fee MAY be refunded -- a person decides. The
+                # Reviewer and the PM are told; the case stays open until the packet arrives, the provider
+                # withdraws, or someone chooses Close and refund (REFUND_APPROVED).
+                await self._activity(
+                    notify_roles,
+                    args=[tenant, case_id, ["CASE_MANAGER", "PM"], "REFUND_REVIEW_DUE",
+                          "Potential refund: no complete filing packet 7 days after outreach. If the fee should be "
+                          "refunded, choose Close and refund on the case; otherwise keep waiting for the packet."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                await self._until(lambda: self.packet_complete or self.provider_withdrawn or self.refund_approved)
+                if self.provider_withdrawn:
+                    return await self._withdraw(tenant, case_id)
+            if manual:
+                completed = not self.refund_approved
             if not completed:
-                # 7 days after outreach with no complete packet: the case is
-                # closed and the fee refunded. The filer is told, and Finance
-                # is asked to make the refund.
+                # The refund is approved (or, on a run from before this was manual, the
+                # window ran out): the case is closed and the fee refunded. The filer
+                # is told, and Finance is asked to make the refund.
                 if workflow.patched("refund-notice"):
                     try:
                         await self._activity(
@@ -444,8 +504,10 @@ class AhcaDisputeWorkflow:
                     await self._activity(
                         notify_roles,
                         args=[tenant, case_id, ["FINANCE", "CASE_MANAGER"], "REFUND_DUE",
-                              "No complete filing packet 7 days after outreach — case closed. Finance: refund the initial fee "
-                              "(Financials → Refunds due → Refund)."],
+                              ("Refund approved — case closed. Finance: refund the initial fee "
+                               "(Financials → Refunds due → Refund)." if self.refund_approved else
+                               "No complete filing packet 7 days after outreach — case closed. Finance: refund the initial fee "
+                               "(Financials → Refunds due → Refund).")],
                         start_to_close_timeout=timedelta(seconds=30),
                     )
                 self.closed_early = True
@@ -464,11 +526,14 @@ class AhcaDisputeWorkflow:
             set_dual_status, args=[tenant, case_id, "Initial Review Pending", "Pending Initial Review"],
             start_to_close_timeout=timedelta(seconds=30),
         )
+        # Eligibility review: complete within 13 calendar days (the letter -- acceptance or ineligibility -- on or
+        # before day 13). Runs from before this kept their 10-day target.
+        review_days = 13 if workflow.patched("eligibility-13-days") else 10
         decided = await self._deadline(
-            lambda: self.eligibility_result is not None, 10, "initial-review", "INITIAL_REVIEW")
+            lambda: self.eligibility_result is not None, review_days, "initial-review", "INITIAL_REVIEW")
         if not decided:
             await self._activity(
-                flag_cms_breach, args=[tenant, case_id, "INITIAL_REVIEW", "Eligibility not decided within 10 calendar days"],
+                flag_cms_breach, args=[tenant, case_id, "INITIAL_REVIEW", f"Eligibility not decided within {review_days} calendar days"],
                 start_to_close_timeout=timedelta(seconds=30),
             )
             await self._until(lambda: self.eligibility_result is not None)
@@ -557,10 +622,14 @@ class AhcaDisputeWorkflow:
                     set_program_date, args=[tenant, case_id, "estimate_sent_at", today],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
-            # PROVIDER_PERMISSION: 15cd, day-13 follow-up (call_and_reply_all).
+            # PROVIDER_PERMISSION: up to 15 calendar days; no permission by then is a dismissal -- no reminder,
+            # no further grace. (Runs from before this kept the day-13 follow-up and the 3 business days.)
+            exact15 = workflow.patched("permission-exact-15")
             got_followup = await self._deadline(
                 lambda: self.estimate_permission is not None or self.provider_withdrawn or self.rfi_lapsed,
-                13, "permission-day13", "PROVIDER_PERMISSION")
+                15 if exact15 else 13, "permission-day15-exact" if exact15 else "permission-day13", "PROVIDER_PERMISSION")
+            if exact15:
+                got_followup = True  # nothing more to wait for: on to the permission or the dismissal
             if self.provider_withdrawn:
                 return await self._withdraw(tenant, case_id)
             if self.rfi_lapsed:
@@ -579,10 +648,9 @@ class AhcaDisputeWorkflow:
             if self.rfi_lapsed:
                 return "RFI_LAPSED"
             if self.estimate_permission is not True and workflow.patched("gate-dismissal-letter-sent"):
-                # No permission by day 15: the SOP gives a further 2-3 business
-                # days, and a dismissal is a letter (Attorney QA), not a status
-                # click. A late "yes" during either wait still proceeds.
-                if self.estimate_permission is None:
+                # No permission by day 15: a dismissal is a letter (Attorney QA), not a status click. A late "yes"
+                # before it goes out still proceeds. (The older runs' further 3 business days stay theirs.)
+                if self.estimate_permission is None and not exact15:
                     start = workflow.now().date()
                     grace_days = (add_business_days(start, 3, tenant) - start).days
                     await self._activity(
@@ -619,7 +687,7 @@ class AhcaDisputeWorkflow:
 
         if self.estimate_requested and self.estimate_permission is True and workflow.patched("date-provider-responded"):
             await self._activity(
-                set_program_date, args=[tenant, case_id, "date_provider_responded", workflow.now().date().isoformat()],
+                set_program_date, args=[tenant, case_id, "date_provider_responded", self._day("ESTIMATE_PERMISSION")],
                 start_to_close_timeout=timedelta(seconds=30),
             )
 
@@ -659,11 +727,19 @@ class AhcaDisputeWorkflow:
 
         # --- Stage 5: full review -- PLAN_RESPONSE clock, 15cd, follow_ups on
         # days 13 (Medicaid AHCA-notify), 14 (call+email), 15 (call again).
-        plan_followups = [
-            (13, "medicaid_ahca_notify", "Day 13 — Medicaid health plan, notify AHCA for follow-up"),
-            (14, "call_and_email", "Day 14 — response due tomorrow (day 15); call and email the plan"),
-            (15, "call_again", "Day 15 — final attempt to reach the plan before default determination"),
-        ]
+        # Up to 15 calendar days, with one reminder to the plan of its due date on day 13; no response by day 15 is
+        # a default determination. (Older runs keep their day 13/14/15 follow-ups.)
+        if workflow.patched("plan-reminder-day13"):
+            plan_followups = [
+                (13, "plan_due_date_reminder", "Day 13 — remind the Health Plan its response is due on day 15"),
+                (15, "plan_response_lapsed", "Day 15 — no response from the Health Plan: default determination"),
+            ]
+        else:
+            plan_followups = [
+                (13, "medicaid_ahca_notify", "Day 13 — Medicaid health plan, notify AHCA for follow-up"),
+                (14, "call_and_email", "Day 14 — response due tomorrow (day 15); call and email the plan"),
+                (15, "call_again", "Day 15 — final attempt to reach the plan before default determination"),
+            ]
         prev_day = 0
         for day, action, detail in plan_followups:
             reached = await self._deadline(
@@ -746,7 +822,7 @@ class AhcaDisputeWorkflow:
             )
             if workflow.patched("plan-responded-date-and-notice"):
                 await self._activity(
-                    set_program_date, args=[tenant, case_id, "date_plan_responded", workflow.now().date().isoformat()],
+                    set_program_date, args=[tenant, case_id, "date_plan_responded", self._day("PLAN_RESPONSE_RECEIVED")],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 await self._activity(
@@ -825,7 +901,7 @@ class AhcaDisputeWorkflow:
         await self._until(lambda: self.final_order_issued)
 
         await self._activity(
-            set_program_date, args=[tenant, case_id, "date_final_order_sent", workflow.now().date().isoformat()],
+            set_program_date, args=[tenant, case_id, "date_final_order_sent", self._day("FINAL_ORDER_ISSUED")],
             start_to_close_timeout=timedelta(seconds=30),
         )
         await self._activity(
@@ -835,9 +911,26 @@ class AhcaDisputeWorkflow:
         return "FINAL_ORDER_ISSUED"
 
     async def _withdraw(self, tenant: str, case_id: str) -> str:
-        # A withdrawal is closed by its letter (QA, AHCA and the plan copied),
-        # ideally within one business day of the request.
-        if workflow.patched("gate-withdrawal-letter-sent"):
+        # A withdrawal: the provider or the health plan asks; Capitol Bridge verifies and confirms the request; the
+        # Withdrawal letter goes out (QA, AHCA and the plan copied); the case closes, with no invoice.
+        if workflow.patched("withdrawal-confirm-step"):
+            if not self.withdrawal_confirmed:
+                await self._activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "confirm_withdrawal",
+                          "A withdrawal was requested — verify it with the party and confirm it on the case. The Withdrawal letter follows."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            await self._until(lambda: self.withdrawal_confirmed)
+            if "withdrawal" not in self.letters_sent:
+                await self._activity(
+                    record_followup_action,
+                    args=[tenant, case_id, "send_withdrawal_letter",
+                          "Withdrawal confirmed — send the Withdrawal letter through QA, copying AHCA and the Health Plan. The case closes when it has been sent."],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            await self._until(lambda: "withdrawal" in self.letters_sent)
+        elif workflow.patched("gate-withdrawal-letter-sent"):
             if "withdrawal" not in self.letters_sent:
                 await self._activity(
                     record_followup_action,

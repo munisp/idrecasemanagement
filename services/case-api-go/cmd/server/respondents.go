@@ -47,10 +47,26 @@ type respondent struct {
 	NPI   string `json:"npi,omitempty"`
 }
 
+// normalizeNAIC is the optional NAIC as a 5-digit code: digits only ("NAIC 12-345" -> "12345"), a shorter code
+// padded with its leading zeros ("6319" -> "06319"). Anything else is dropped -- the code only helps match the
+// plan, so a mistyped one never stops a filing.
+func normalizeNAIC(v string) string {
+	d := strings.Map(func(c rune) rune {
+		if c >= '0' && c <= '9' {
+			return c
+		}
+		return -1
+	}, v)
+	if d == "" || len(d) > 5 || strings.Trim(d, "0") == "" {
+		return ""
+	}
+	return strings.Repeat("0", 5-len(d)) + d
+}
+
 // check: who the other side is, and where its notices go, are required.
 func (rsp *respondent) check() string {
 	rsp.Name, rsp.Email = strings.TrimSpace(rsp.Name), strings.TrimSpace(rsp.Email)
-	rsp.NAIC, rsp.NPI = strings.TrimSpace(rsp.NAIC), strings.TrimSpace(rsp.NPI)
+	rsp.NAIC, rsp.NPI = normalizeNAIC(rsp.NAIC), strings.TrimSpace(rsp.NPI)
 	other := "health plan"
 	if rsp.Side == "PROVIDER" {
 		other = "provider"
@@ -62,8 +78,6 @@ func (rsp *respondent) check() string {
 		return "the other party's name is too long"
 	case !validMailbox(rsp.Email):
 		return "give the " + other + "'s email for dispute notices (other_party_email)"
-	case rsp.NAIC != "" && !isDigits(rsp.NAIC, 5):
-		return "the health plan's NAIC code must be 5 digits"
 	case rsp.NPI != "" && !npiValid(rsp.NPI):
 		return "the provider's NPI failed the Luhn check"
 	}
@@ -311,8 +325,8 @@ func (s *server) respondingCase(actor string) http.HandlerFunc {
 		docs, _ := s.queryRows(r, fmt.Sprintf(`
 			SELECT id::text AS id, coalesce(filename,'') AS filename, folder, created_at::text AS created_at,
 			       (folder='PARTY_UPLOADS' AND uploaded_by LIKE 'respondent:%%') AS yours
-			FROM tenant_%s.documents WHERE case_id::text=$1 AND NOT sealed AND folder IN ('INTAKE','PARTY_UPLOADS')
-			ORDER BY created_at`, sanitizeTenant(tenant)), caseID)
+			FROM tenant_%s.documents d WHERE d.case_id::text=$1 AND NOT d.sealed AND d.folder IN ('INTAKE','PARTY_UPLOADS') AND NOT `+internalDocSQL+`
+			ORDER BY created_at DESC`, sanitizeTenant(tenant)), caseID)
 		var c any
 		if len(cs) > 0 {
 			s.fillResponseDue(r, tenant, cs)
@@ -335,7 +349,8 @@ func (s *server) respondingDocFile(actor string) http.HandlerFunc {
 		var key, filename string
 		if err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
 			SELECT object_key, coalesce(filename,'') FROM tenant_%s.documents
-			WHERE id::text=$1 AND case_id::text=$2 AND NOT sealed AND folder IN ('INTAKE','PARTY_UPLOADS')`, sanitizeTenant(tenant)),
+			WHERE id::text=$1 AND case_id::text=$2 AND NOT sealed AND folder IN ('INTAKE','PARTY_UPLOADS')
+			  AND NOT (content_type = 'text/html' AND left(coalesce(filename,''), 22) = 'Eligibility Checklist ')`, sanitizeTenant(tenant)),
 			docID, caseID).Scan(&key, &filename); err != nil {
 			http.Error(w, `{"error":"document not found"}`, http.StatusNotFound)
 			return
@@ -425,7 +440,7 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 		if s.loadProgram(r, tenant) != nil {
 			wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 		}
-		signalled := s.tc != nil && s.tc.SignalWorkflow(r.Context(), wfID, "", "PLAN_RESPONSE_RECEIVED",
+		signalled := s.sigCase(r.Context(), tenant, caseID, wfID, "PLAN_RESPONSE_RECEIVED",
 			map[string]any{"source": "respondent dashboard", "by": sc.label, "documents": docs}) == nil
 		detail, _ := json.Marshal(map[string]any{"by": sc.label, "documents": docs, "note": strings.TrimSpace(in.Note), "source": "respondent dashboard"})
 		s.logActivity(r.Context(), tenant, caseID, "PLAN_RESPONSE_RECEIVED",

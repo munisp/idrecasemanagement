@@ -29,7 +29,8 @@ def _breaches(clock):
 
 
 async def _initial_review(extend_days: int | None):
-    """New case, packet complete, nobody decides eligibility. Returns (breached by day 11, breached by day 16)."""
+    """New case, packet complete, nobody decides eligibility (13 calendar days). Returns (breached by day 14,
+    breached by day 19)."""
     calls.clear()
     env = await WorkflowEnvironment.start_time_skipping()
     async with env:
@@ -44,23 +45,23 @@ async def _initial_review(extend_days: int | None):
             if extend_days:
                 await h.signal("DEADLINE_EXTENDED", {"clock": "INITIAL_REVIEW", "days": extend_days, "by": "pm"})
                 await _settle(h)
-            await env.sleep(timedelta(days=11))
+            await env.sleep(timedelta(days=14))
             await _settle(h)
-            by_day_11 = bool(_breaches("INITIAL_REVIEW"))
+            by_day_14 = bool(_breaches("INITIAL_REVIEW"))
             await env.sleep(timedelta(days=5))
             await _settle(h)
-            by_day_16 = bool(_breaches("INITIAL_REVIEW"))
-            return by_day_11, by_day_16
+            by_day_19 = bool(_breaches("INITIAL_REVIEW"))
+            return by_day_14, by_day_19
 
 
 @pytest.mark.asyncio
-async def test_no_extension_breaches_on_day_10():
+async def test_no_extension_breaches_after_day_13():
     assert await _initial_review(None) == (True, True)
 
 
 @pytest.mark.asyncio
 async def test_extension_moves_the_breach():
-    # 10 days + 5 extended: nothing on day 11, the breach on day 15.
+    # 13 days + 5 extended: nothing on day 14, the breach by day 19.
     assert await _initial_review(5) == (False, True)
 
 
@@ -78,7 +79,7 @@ async def test_extension_for_another_clock_changes_nothing():
             await h.signal("PACKET_COMPLETE", {})
             await h.signal("DEADLINE_EXTENDED", {"clock": "PLAN_RESPONSE", "days": 9})
             await _settle(h)
-            await env.sleep(timedelta(days=11))
+            await env.sleep(timedelta(days=14))
             await _settle(h)
             assert _breaches("INITIAL_REVIEW")
 
@@ -98,7 +99,7 @@ async def test_resume_replays_an_extension():
                                         {"name": "DEADLINE_EXTENDED", "data": {"clock": "INITIAL_REVIEW", "days": 5}}]}},
                 id=f"wf-{uuid.uuid4()}", task_queue=queue)
             await _settle(h)
-            await env.sleep(timedelta(days=11))
+            await env.sleep(timedelta(days=14))
             await _settle(h)
             assert not _breaches("INITIAL_REVIEW")
             await env.sleep(timedelta(days=5))

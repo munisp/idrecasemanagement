@@ -55,7 +55,6 @@ var (
 	packetBools = []string{"contracted", "fee_estimate_requested", "attestation_certified", "certification_agreed"}
 	isoDate     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	tenDigits   = regexp.MustCompile(`^\d{10}$`)
-	taxID       = regexp.MustCompile(`^\d{2}-?\d{7}$`)
 )
 
 // filingPacket is the form as the portal posts it: details by their case-field names, the aggregated amount in
@@ -160,8 +159,11 @@ func (pk *filingPacket) normalize() (map[string]any, *int64, []packetClaim, []st
 	if v, ok := out["provider_npi"].(string); ok && !tenDigits.MatchString(v) {
 		problems = append(problems, "provider_npi: 10 digits")
 	}
-	if v, ok := out["provider_tin"].(string); ok && !taxID.MatchString(v) {
-		problems = append(problems, "provider_tin: a federal tax ID, 12-3456789")
+	// The same rule as every other TIN taken (verifications.go); kept as the filer wrote it.
+	if v, ok := out["provider_tin"].(string); ok {
+		if _, msg := tinCheck(v); msg != "" {
+			problems = append(problems, "provider_tin: "+msg)
+		}
 	}
 	if v, ok := out["provider_email"].(string); ok && !validMailbox(v) {
 		problems = append(problems, "provider_email: an email address")
