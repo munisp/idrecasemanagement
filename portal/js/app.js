@@ -202,6 +202,7 @@
   // financialReadRoles (access-control follow-up).
   if (has("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
   if (has("PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/ops", "◔", "Ops"]);
+  if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/productivity", "⌁", "Productivity"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
   if (!outside) links.push(["#/timesheet", "⏱", "My timesheet"]);
@@ -420,6 +421,7 @@
     [/^#\/deliverables$/, Views.deliverables],
     [/^#\/finance$/, Views.finance],
     [/^#\/ops$/, Views.opsDashboard],
+    [/^#\/productivity$/, Views.productivity],
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],
