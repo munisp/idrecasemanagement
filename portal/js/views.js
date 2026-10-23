@@ -5034,7 +5034,7 @@ const Views = (() => {
     const box = document.getElementById("tpl-health");
     if (!box) return;
     try {
-      const r = await Api.cases.qaTemplateHealth(90);
+      const r = await Api.program.qaTemplateHealth(90);
       const ts = (r.templates || []).filter((t) => t.verdict !== "insufficient_data");
       if (!ts.length) { box.remove(); return; }
       const badgeOf = { retire_candidate: `<span class="badge warn">Retire candidate</span>`,
