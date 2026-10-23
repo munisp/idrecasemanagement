@@ -67,6 +67,7 @@ type Config struct {
 	RedisPrefix     string
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
+	DeidURL         string // http://deid:8083 ("" = de-identification disabled)
 	CopilotEndpoint string // OpenAI-compatible /v1 of the LOCAL ollama ("" = copilot disabled)
 	CopilotModel    string // local model name, e.g. qwen2.5:7b-instruct
 	OpenSearchURL   string // http://opensearch:9200 ("" = document full-text search disabled)
@@ -125,6 +126,7 @@ func configFromEnv() Config {
 		RedisPrefix:   get("REDIS_KEY_PREFIX", "idre"),
 		VaultURL:      get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL: get("GRAPH_INTEL_URL", "http://localhost:8082"),
+		DeidURL:       get("DEID_URL", ""),
 		// The copilot shares the in-cluster ollama already serving doc-intel
 		// extraction and graph-intel KGQA — a shared LOCAL instance with a
 		// known OOM history, so briefs are single bounded calls, never loops.
@@ -538,12 +540,16 @@ func main() {
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
 		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
+		r.Get("/cases/prefill", s.casePrefill) // prefill suggestions for the initiation form
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/pipeline/counts", s.pipelineCounts) // per-stage totals for the Pipeline board (pages via /cases)
 		r.Get("/cases/{caseId}", s.getCase)
-		r.Get("/cases/{caseId}/summary", s.caseSummary) // the dispute in words, from current data (casesummary.go)
-		r.Post("/fees/transfer", s.postFeeTransfer)     // escrow/admin/IDRE fee double-entry
-		r.Post("/cases/{caseId}/signal", s.signalCase)  // e.g. response filed, fees paid
+		r.Get("/cases/{caseId}/summary", s.caseSummary)        // the dispute in words, from current data (casesummary.go)
+		r.Post("/fees/transfer", s.postFeeTransfer)            // escrow/admin/IDRE fee double-entry
+		r.Post("/cases/{caseId}/signal", s.signalCase)         // e.g. response filed, fees paid
+		r.Get("/cases/{caseId}/next-action", s.caseNextAction) // rule-based next best action
+		r.Post("/telemetry/events", s.telemetryIngest)         // portal interaction baseline
+		r.Get("/telemetry/metrics", s.telemetryMetrics)
 
 		// Documents: encrypted upload, authorized download, analysis status.
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
@@ -587,6 +593,14 @@ func main() {
 		r.Get("/entity360/lookup", s.entityLookupRef)
 		r.Get("/entity360/outreach", s.entityOutreach)
 		r.Get("/entity360/{entityId}/graph", s.entityGraph)
+		// De-identification (services/deid-py): audit trail, clinical layer,
+		// duplicate signal, redaction preview. Gated by DEID_URL + "deid" flag.
+		r.Get("/cases/{caseId}/deid-reports", s.deidReports)
+		r.Get("/cases/{caseId}/clinical", s.caseClinical)
+		r.Get("/cases/{caseId}/clinical/overlaps", s.clinicalOverlaps)
+		r.Post("/deid/deidentify", s.deidProxy)
+		r.Post("/internal/documents/{docId}/clinical", s.deidClinicalIngest) // worker-token: doc-intel
+		r.Post("/internal/deid/reports", s.deidInternalReport)               // worker-token: graph-intel lakehouse
 		r.Get("/entity360/{entityId}", s.entity360View)
 		r.Post("/contacts", s.createContact)
 		r.Get("/leads", s.listLeads)
@@ -925,7 +939,8 @@ func main() {
 		r.Get("/party/cases/{caseId}/respond/documents/{docId}/file", s.respondingDocFile("party"))
 		r.Post("/party/cases/{caseId}/respond/documents", s.respondingUpload("party"))
 		r.Post("/party/cases/{caseId}/respond/submit", s.respondingSubmit("party"))
-		r.Get("/qa", s.qaQueue) // QA gate queue (G4)
+		r.Get("/qa", s.qaQueue)                      // QA gate queue (G4)
+		r.Get("/qa/draft-quality", s.qaDraftQuality) // per-template draft effectiveness
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
 		r.Post("/qa/{qaId}/send", s.qaSend)                // the drafter sends a draft that has passed QA
