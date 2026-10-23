@@ -2858,15 +2858,19 @@ const Views = (() => {
         return `<div class="view-head"><h1>QA gate</h1>
           <span class="muted">nothing reaches a party without approval on gated templates</span></div>
           ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}${dqHtml}`;
+      const due = (i) => {
+        const ds = [i.open_negotiation_end, i.offer_window_ends_at].filter(Boolean).sort();
+        return ds.length ? fmtDate(ds[0]) : "—";
+      };
       const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
-            <td>${esc(i.drafted_by)}</td>
+            <td>${esc(i.drafted_by)}</td><td>${due(i)}</td>
             <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
       const { bodyHtml, pagerHtml } = initClientPager("qa", q, rowsHtml);
       afterRender(() => bindClientPager("qa", "#qa-tb tbody"));
       return `<div class="view-head"><h1>QA gate</h1>
         <span class="muted">nothing reaches a party without approval on gated templates</span></div>
         ${intro}<h2>Awaiting review (${q.length})</h2>
-        <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th></th></tr></thead>
+        <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th>Statutory due</th><th></th></tr></thead>
         <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}${dqHtml}`;
     } catch (e) { return err(e); }
   }
@@ -2897,9 +2901,16 @@ const Views = (() => {
           <label>To <input id="qa-to" value="${esc(to)}" placeholder="recipient emails, comma-separated" /></label>
           <label>Cc <input id="qa-cc" value="${esc(cc)}" placeholder="cc emails, comma-separated" /></label>
         </div>`;
+      // Phase 3-lite reviewer context: this template's track record at the
+      // gate — evidence, not a recommendation.
+      const ts = d.template_stats;
+      const tsHtml = ts && ts.drafts
+        ? `<p class="muted">Template track record (90d): ${ts.drafts} drafts · ${ts.approved_unedited} approved untouched (${Math.round(100 * ts.approved_unedited / ts.drafts)}%) · ${ts.rejected} rejected${ts.avg_edit_ratio != null ? ` · reviewers rewrite ~${Math.round(ts.avg_edit_ratio * 100)}% when editing` : ""}</p>`
+        : "";
       box.innerHTML = `<div class="card"><h3>${esc(d.subject)}</h3>
         <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval" : `channel ${esc(d.channel)}`}
           ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
+        ${tsHtml}
         ${recipientsHtml}
         ${bodyHtml}
         <div class="actions">
