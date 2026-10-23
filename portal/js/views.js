@@ -534,7 +534,7 @@ const Views = (() => {
         const c = r.counts || {};
         const chips = [
           [c.qa_pending, "#/qa", "QA awaiting review"],
-          [c.docs_findings_review, "#/doc-review", "docs with findings"],
+          [c.docs_findings_review, "#/doc-review", `docs with findings${c.docs_findings_aging ? ` (${c.docs_findings_aging} aging 48h+)` : ""}`],
           [c.intake_steps_due, "#/intake", `intake steps due${c.intake_overdue ? ` (${c.intake_overdue} overdue)` : ""}`],
           [c.statutory_due_72h, "#/cases", "statutory clocks < 72h"],
           [c.statutory_overdue, "#/cases", "statutory clocks overdue"],
@@ -5019,9 +5019,39 @@ const Views = (() => {
 
   async function templatesPage() {
     afterRender(tplLoad);
+    afterRender(tplHealthLoad);
     return `<div class="view-head"><h1>Templates</h1>
       <span class="muted">the emails this program sends, and which one is used when</span></div>
+      <div id="tpl-health"></div>
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
+  }
+
+  // Template health: per-template QA decision record (approvals, rewrites,
+  // rejections) rolled into a verdict. Renders above the template list as a
+  // work list — retire candidates first. Absent entirely until any template
+  // has QA observations; no fake "all healthy" banner on zero data.
+  async function tplHealthLoad() {
+    const box = document.getElementById("tpl-health");
+    if (!box) return;
+    try {
+      const r = await Api.cases.qaTemplateHealth(90);
+      const ts = (r.templates || []).filter((t) => t.verdict !== "insufficient_data");
+      if (!ts.length) { box.remove(); return; }
+      const badgeOf = { retire_candidate: `<span class="badge warn">Retire candidate</span>`,
+        watch: `<span class="badge">Watch</span>`, healthy: `<span class="badge s-paid">Healthy</span>` };
+      box.innerHTML = `<h2>Draft quality by template <span class="muted">last ${r.days} days</span></h2>
+        <table><thead><tr><th>Template</th><th>Decisions</th><th>Approved unedited</th><th>Rejected</th>
+          <th>Avg rewrite</th><th>Verdict</th></tr></thead><tbody>` +
+        ts.map((t) => `<tr>
+          <td class="mono">${esc(t.artifact)}</td>
+          <td>${t.drafts}</td>
+          <td>${t.approved_unedited}</td>
+          <td>${t.rejected}</td>
+          <td>${t.avg_edit_ratio != null ? Math.round(100 * t.avg_edit_ratio) + "%" : "—"}</td>
+          <td>${badgeOf[t.verdict] || esc(t.verdict)}</td></tr>`).join("") +
+        `</tbody></table>
+        <p class="muted">Verdicts need 20+ decisions. Retire candidate: &gt;40% rejected or reviewers rewrite &gt;35% of the body on average — the template is producing work, not saving it.</p>`;
+    } catch { const b = document.getElementById("tpl-health"); if (b) b.remove(); }
   }
 
   async function tplLoad() {
@@ -8940,11 +8970,11 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     try {
       const r = await Api.cases.docReviewQueue();
       const q = r.queue || [];
-      const rows = q.map((i) => `<tr>
+      const rows = q.map((i) => `<tr${i.aging ? ' class="tpl-retired"' : ""}>
         <td><a href="#/cases/${i.case_id}">${esc(i.case_number)}</a></td>
         <td>${esc(i.doc_type || "document")}</td>
         <td>${i.findings}</td>
-        <td class="muted">${fmtDate(i.analyzed_at)}</td>
+        <td class="muted">${fmtDate(i.analyzed_at)}${i.aging ? ' <span class="badge warn">aging 48h+</span>' : ""}</td>
         <td>${i.next_statutory_date ? fmtDate(i.next_statutory_date) : "—"}</td>
         <td><button class="mini primary" onclick="Views.docAck('${i.case_id}','${i.doc_id}',this)">Mark reviewed</button></td></tr>`).join("");
       return `<div class="view-head"><h1>Document review</h1>
