@@ -53,6 +53,12 @@ var financialReadRoles = []string{"FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_AD
 // portal's own QA Gate nav gate.
 var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
+// qaAgingHours: a PENDING draft older than this is stuck, not queued.
+// 24h is deliberately shorter than the doc-findings 48h — a QA draft sits
+// ON a statutory path (its case's clock is why it's in the queue at all),
+// while a document finding is informational until reviewed.
+const qaAgingHours = 24
+
 // reportsReadRoles: the Reports page's summary/SLA endpoints. Matches the
 // portal's own Reports nav gate (notably FINANCE and ARBITRATOR are NOT
 // here, unlike financialReadRoles -- Reports nav never included them).

@@ -533,7 +533,7 @@ const Views = (() => {
         const r = await Api.cases.queuesSummary();
         const c = r.counts || {};
         const chips = [
-          [c.qa_pending, "#/qa", "QA awaiting review"],
+          [c.qa_pending, "#/qa", `QA awaiting review${c.qa_pending_aging ? ` (${c.qa_pending_aging} aging 24h+)` : ""}`],
           [c.docs_findings_review, "#/doc-review", `docs with findings${c.docs_findings_aging ? ` (${c.docs_findings_aging} aging 48h+)` : ""}`],
           [c.intake_steps_due, "#/intake", `intake steps due${c.intake_overdue ? ` (${c.intake_overdue} overdue)` : ""}`],
           [c.statutory_due_72h, "#/cases", "statutory clocks < 72h"],
@@ -2904,7 +2904,7 @@ const Views = (() => {
         const ds = [i.open_negotiation_end, i.offer_window_ends_at].filter(Boolean).sort();
         return ds.length ? fmtDate(ds[0]) : "—";
       };
-      const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
+      const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
             <td>${esc(i.drafted_by)}</td><td>${due(i)}</td>
             <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
       const { bodyHtml, pagerHtml } = initClientPager("qa", q, rowsHtml);
