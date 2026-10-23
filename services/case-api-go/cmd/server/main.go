@@ -883,6 +883,7 @@ func main() {
 		r.Post("/party/cases/{caseId}/respond/documents", s.respondingUpload("party"))
 		r.Post("/party/cases/{caseId}/respond/submit", s.respondingSubmit("party"))
 		r.Get("/qa", s.qaQueue) // QA gate queue (G4)
+		r.Get("/qa/draft-quality", s.qaDraftQuality) // per-template draft effectiveness
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
 		r.Post("/qa/{qaId}/send", s.qaSend)                // the drafter sends a draft that has passed QA

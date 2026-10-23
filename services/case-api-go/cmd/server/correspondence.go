@@ -521,6 +521,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(),
 		`SELECT case_id, subject, body, status, to_recipients, cc_recipients, artifact, coalesce(channel,'email'), coalesce(drafted_by,''), coalesce(requested_by_sub,''), coalesce(rfi_to,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`,
 		tenant, qid).Scan(&caseID, &subject, &body, &status, &toJ, &ccJ, &artifact, &channel, &draftedBy, &requestedBySub, &rfiTo)
+	originalBody := body // the EDIT prong below may replace body; the draft-quality capture needs the pre-edit text
 	// APPROVED (not yet SENT) + a fresh APPROVE decision is a retry of a
 	// previously failed send -- status only reaches APPROVED-without-SENT
 	// when sendMail below failed last time, and the response used to claim
@@ -661,6 +662,13 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.qa_reviews SET status=$3, reviewed_by=$4, reviewed_at=now(), review_note=$5
 		WHERE tenant=$1 AND id=$2`, tenant, qid, newStatus, displayName(p), in.Note)
+	// Phase 3-lite: every decision is a draft-quality observation (decision +
+	// token edit distance when the reviewer rewrote the body). Synchronous on
+	// purpose: losing observations to a queue outage would silently bias the
+	// dataset that later decides which templates actually work.
+	if status == "PENDING" { // not on send-retry re-approvals — one observation per draft
+		s.captureQAEdit(r, tenant, qid, caseID, artifact, channel, draftedBy, in.Decision, originalBody, body, p.Subject)
+	}
 
 	var to, cc []string
 	_ = json.Unmarshal(toJ, &to)
