@@ -903,3 +903,26 @@ def test_package_fields_states_nothing_it_does_not_read():
     from main import package_fields as f
     assert f("") == {}
     assert f("OPEN NEGOTIATION NOTICE\nThe parties negotiated in good faith.") == {}
+
+
+def test_filing_fields_read_what_the_filing_form_asks():
+    from main import package_fields as f
+    eob = ("Sunshine Health Plan - Remittance Advice\nEXPLANATION OF BENEFITS\n"
+           "Claim Number: TPA-TEST-55021   Member ID: TSTMBR-7781\nNAIC: 12345\n"
+           "Total Billed: $2,450.00\nPlan Paid: $600.00\nClaims email: Claims@SunshineHealth.example\n"
+           "Provider: Gulf Coast Emergency Physicians  NPI 1234567893\n")
+    got = f(eob)
+    assert got["payer_name"] == "Sunshine Health Plan"
+    assert got["payer_email"] == "claims@sunshinehealth.example" and got["payer_naic"] == "12345"
+    assert got["billed_cents"] == 245000 and got["paid_cents"] == 60000
+    assert got["provider_name"] == "Gulf Coast Emergency Physicians"
+    form = "Health Plan: Bay Health Plan\nAmount in dispute: $1,850.00\n"
+    got = f(form)
+    assert got["payer_name"] == "Bay Health Plan" and got["disputed_cents"] == 185000
+
+
+def test_filing_fields_never_guess():
+    from main import filing_fields as f
+    # An unlabelled amount and a personal address are not read as the plan's.
+    got = f("We spoke on the phone about $500.00 and wrote to jane.doe@gmail.com.")
+    assert "billed_cents" not in got and "payer_email" not in got and "payer_name" not in got

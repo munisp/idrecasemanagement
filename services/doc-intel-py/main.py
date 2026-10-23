@@ -423,6 +423,59 @@ _NETWORK_LINE = re.compile(r"(?im)\b(?:network\s+status|network|participation(?:
                            r"\s*[:#]\s*([^\n]{2,40})")
 
 
+# What a filing form asks that a dispute's own documents state (package_fields -> the File a dispute prefill).
+_PAYER_LINE = re.compile(r"(?im)^\s*(?:health\s+plan(?:\s+name)?|plan\s+name|payer(?:\s+name)?|insurer|insurance\s+(?:company|carrier)|carrier)"
+                         r"\s*[:#]\s*(.{2,100}?)\s*$")
+_PAYER_HEAD = re.compile(r"(?im)^\s*([A-Z][A-Za-z&.' ]{2,60}?(?:Health(?:\s+Plan|care)?|Insurance|Medical\s+Plan|HMO))\b")
+_PLAN_EMAIL_LINE = re.compile(r"(?im)\b(?:plan|payer|claims|appeals?|disputes?|provider\s+relations)\s+e-?mail\s*[:#]\s*"
+                              r"([\w.+-]+@[\w-]+(?:\.[\w-]+)+)")
+_ROLE_EMAIL = re.compile(r"\b((?:claims|disputes?|appeals?|provider\.?(?:services|relations))[\w.+-]*@[\w-]+(?:\.[\w-]+)+)", re.I)
+_NAIC = re.compile(r"(?i)\bNAIC(?:\s*(?:code|number|no\.?|#))?\s*[:#]?\s*(\d{5})\b")
+_DISPUTED_LINE = re.compile(r"(?i)\b(?:amount\s+in\s+dispute|disputed\s+amount|amount\s+disputed)\s*[:#]?\s*\$\s*"
+                            r"(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)")
+
+
+def _cents(s: str) -> int:
+    return round(float(s.replace(",", "")) * 100)
+
+
+def filing_fields(text: str | None, f: dict | None = None) -> dict:
+    """The filing form's facts a document prints: the health plan (name, notices email, NAIC), the provider's
+    name, and the money (billed, paid, the amount in dispute). Only what is labelled as such -- never a guess from
+    an unlabelled number or address. Pure, so it is tested."""
+    t = text or ""
+    f = f if f is not None else extract_fields(t)
+    out: dict = {}
+    m = _PAYER_LINE.search(t)
+    if m:
+        out["payer_name"] = m.group(1).strip(" .-")
+    else:
+        head = "\n".join(t.splitlines()[:6])
+        m = _PAYER_HEAD.search(head)
+        if m:
+            out["payer_name"] = m.group(1).strip(" .-")
+    m = _PLAN_EMAIL_LINE.search(t) or _ROLE_EMAIL.search(t)
+    if m:
+        out["payer_email"] = m.group(1).lower()
+    m = _NAIC.search(t)
+    if m:
+        out["payer_naic"] = m.group(1)
+    m = _PROVIDER_LINE.search(t)
+    if m:
+        out["provider_name"] = m.group(1).strip(" .-")
+    amounts = f.get("amounts") or []
+    billed = [a["cents"] for a in amounts if a.get("canonical") == "billed" and a.get("cents")]
+    paid = [a["cents"] for a in amounts if a.get("canonical") == "paid" and a.get("cents") is not None]
+    if billed:
+        out["billed_cents"] = max(billed)
+    if paid:
+        out["paid_cents"] = max(paid)
+    m = _DISPUTED_LINE.search(t)
+    if m:
+        out["disputed_cents"] = _cents(m.group(1))
+    return out
+
+
 def package_fields(text: str | None) -> dict:
     """The eligibility facts a document in a TPA's or plan's document set
     states, read when the set is checked -- the set is filed later, and the
@@ -454,6 +507,7 @@ def package_fields(text: str | None) -> dict:
     npi = (f.get("identifiers") or {}).get("npi") or {}
     if npi.get("luhn_valid"):
         out["provider_npi"] = npi["value"]
+    out.update(filing_fields(t, f))
     return out
 
 

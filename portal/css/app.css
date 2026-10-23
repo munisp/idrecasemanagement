@@ -1602,3 +1602,7 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 /* Clinical terms & privacy on the case page */
 .clin-terms{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px 18px;margin-bottom:10px}
 .clin-terms p{margin:4px 0 0;display:flex;flex-wrap:wrap;gap:4px}
+/* File a dispute: fields filled in from the dispute's own documents (filePrefillFn) */
+.prefilled{background:var(--info-bg, #2B5BD414)!important;border-color:var(--info-fg, #2B5BD4)!important}
+.prefill-note{margin:10px 0;padding:10px 12px;border:1px solid var(--border-subtle);border-left:4px solid var(--info-fg, #2B5BD4);border-radius:8px;background:var(--surface-raised);font-size:13px}
+.prefill-note ul{margin:6px 0 0;padding-left:18px}

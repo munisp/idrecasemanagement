@@ -621,6 +621,8 @@ const Api = (() => {
       closeDocRequest: (caseId, reqId, action) => req("POST", `${t()}/cases/${caseId}/document-requests/${reqId}/close`, { action }),
       // The letters sent to the organization and the documents they carried (party_documents.go).
       sentRecord: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
+      // File a dispute filled in from its own document set (org_prefill.go). k: tpa | hp.
+      orgPrefill: (k, packageId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/prefill?package_id=${encodeURIComponent(packageId)}`),
       sentDocPath: (k, docId) => `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`,
       disputeSummary: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/disputes/${caseId}/summary`),
       sentDocGet: (k, docId, name) => download(`${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`, name || "document"),

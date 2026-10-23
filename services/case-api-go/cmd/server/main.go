@@ -847,6 +847,8 @@ func main() {
 		r.Post("/tpa/disputes/{caseId}/pay", s.disputePay("tpa"))
 		r.Get("/tpa/disputes/{caseId}/fee", s.disputeFee("tpa"))
 		r.Get("/tpa/disputes/{caseId}/summary", s.orgDisputeSummary("tpa")) // the dispute as the TPA sees it (party_dispute_view.go)
+		r.Get("/tpa/prefill", s.orgPrefill("tpa"))                          // File a dispute filled in from its own documents (org_prefill.go)
+		r.Get("/hp/prefill", s.orgPrefill("hp"))
 		r.Get("/hp/disputes/{caseId}/summary", s.orgDisputeSummary("hp"))
 		r.Post("/tpa/fees/checkout/{groupId}/confirm", s.checkoutConfirm("tpa"))
 		r.Post("/tpa/fees/checkout/{groupId}/cancel", s.checkoutCancel("tpa"))
