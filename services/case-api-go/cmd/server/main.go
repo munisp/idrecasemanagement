@@ -526,14 +526,15 @@ func main() {
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
 		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
-		r.Get("/cases/prefill", s.casePrefill) // prefill suggestions for the initiation form
+		r.Get("/cases/prefill", s.casePrefill)      // prefill suggestions for the initiation form
 		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
+		r.Get("/queues/summary", s.queuesSummary)   // dashboard rollup: queue counts + clocks in one call
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
 		r.Get("/cases/{caseId}/next-action", s.caseNextAction) // rule-based next best action
-		r.Post("/telemetry/events", s.telemetryIngest)       // portal interaction baseline
+		r.Post("/telemetry/events", s.telemetryIngest)         // portal interaction baseline
 		r.Get("/telemetry/metrics", s.telemetryMetrics)
-		r.Get("/telemetry/paths", s.telemetryPaths) // per-workflow transitions + abandonment
+		r.Get("/telemetry/paths", s.telemetryPaths)    // per-workflow transitions + abandonment
 		r.Post("/fees/transfer", s.postFeeTransfer)    // escrow/admin/IDRE fee double-entry
 		r.Post("/cases/{caseId}/signal", s.signalCase) // e.g. response filed, fees paid
 
@@ -544,7 +545,7 @@ func main() {
 		r.Patch("/cases/{caseId}/documents/{docId}", s.moveDocument) // re-file to folder (staff only)
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
 		r.Post("/cases/{caseId}/documents/{docId}/acknowledge", s.acknowledgeDocFindings) // reviewer checked the findings
-		r.Get("/cases/{caseId}/documents/{docId}/835.csv", s.documentAs835) // an 835 ERA text file as a table
+		r.Get("/cases/{caseId}/documents/{docId}/835.csv", s.documentAs835)               // an 835 ERA text file as a table
 		r.Post("/cases/{caseId}/documents/{docId}/analysis/retry", s.retryDocumentAnalysis)
 		r.Post("/cases/{caseId}/documents/{docId}/analysis/feedback", s.submitDocFeedback)
 
@@ -885,8 +886,8 @@ func main() {
 		r.Get("/party/cases/{caseId}/respond/documents/{docId}/file", s.respondingDocFile("party"))
 		r.Post("/party/cases/{caseId}/respond/documents", s.respondingUpload("party"))
 		r.Post("/party/cases/{caseId}/respond/submit", s.respondingSubmit("party"))
-		r.Get("/qa", s.qaQueue) // QA gate queue (G4)
-		r.Get("/qa/draft-quality", s.qaDraftQuality) // per-template draft effectiveness
+		r.Get("/qa", s.qaQueue)                            // QA gate queue (G4)
+		r.Get("/qa/draft-quality", s.qaDraftQuality)       // per-template draft effectiveness
 		r.Get("/documents/review-queue", s.docReviewQueue) // tenant-level findings inbox
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
