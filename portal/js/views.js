@@ -2151,7 +2151,24 @@ const Views = (() => {
       const programmed = !!(prog && prog.config);
       const det = c.details || {};
       const P = { overview: "", documents: "", review: "", mail: "", billing: "", activity: "" };
-      let html = CaseLayout.header(c, prog, clocks);
+      let html = CaseLayout.header(c, prog, clocks) + `<div id="next-action"></div>`;
+      // The next-action recommender (nextaction.go) under the step banner: the steps say what is next on the
+      // dispute; this adds what else is worth doing (a QA draft, documents to look at, possible duplicates).
+      // Accepting it emits next_action_accept, as its telemetry expects; ignoring it is the implicit override.
+      afterRender(() => Api.cases.nextAction(id).then((na) => {
+        const a = na && na.next_action, box = document.getElementById("next-action");
+        if (!a || !box || ["review_case", "triage", "submit_offer", "log_negotiation"].includes(a.action_id)) return;
+        box.innerHTML = `<div class="na-also"><span class="muted">Also suggested:</span>
+          <button type="button" class="mini" id="na-go">${esc(a.label)}</button> <span class="muted">${esc(a.reason)}</span></div>`;
+        document.getElementById("na-go").addEventListener("click", () => {
+          if (window.Telemetry) Telemetry.track("next_action_accept", a.action_id, { confidence: a.confidence });
+          // Its links name a section ("#/cases/<id>#documents"): open that section of this page.
+          const section = { documents: "case-docs", correspondence: "p-send-details", checklist: "case-checklist", relationships: "case-rel" }[(a.href.split("#")[2] || "")];
+          const el = section && document.getElementById(section);
+          if (el) { CaseLayout.reveal(el); if (el.tagName === "DETAILS") el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); }
+          else location.hash = a.href.split("#").slice(0, 2).join("#");
+        });
+      }).catch(() => {}));
       if (c.lock) {
         html += `<div class="case-lock" role="status"><b>${c.lock === "AWAITING_PAYMENT" ? "Awaiting payment" : "Ineligible"} — this case is frozen.</b>
           ${c.lock === "AWAITING_PAYMENT"
