@@ -139,17 +139,36 @@ func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles
 	// The address that asked to file stands in for a provider with no
 	// contacts on its account (and for a dispute with no account linked).
 	var requester, partyBilled string
+	var planFiled bool
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-		`SELECT coalesce(details->>'requester_email',''), coalesce(details->>'party_billed','') FROM tenant_%s.cases WHERE id=$1`,
-		sanitizeTenant(tenant)), caseID).Scan(&requester, &partyBilled)
+		`SELECT coalesce(details->>'requester_email',''), coalesce(details->>'party_billed',''),
+		        upper(coalesce(details->>'filing_party_type','')) = 'HEALTH_PLAN' FROM tenant_%s.cases WHERE id=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&requester, &partyBilled, &planFiled)
+	// A side with no CRM contacts is reached where its filing says: the TPA or filer that filed it, or the health
+	// plan's email for notices given when it was filed (sideContact) -- so a letter's To is filled in, not typed.
+	filed := func(side string) []string {
+		if e := strings.TrimSpace(s.sideContact(r.Context(), tenant, caseID, side).email); e != "" {
+			return []string{e}
+		}
+		return nil
+	}
+	// The address the filing gave for THIS dispute comes first; an organization's CRM contacts (every one of
+	// them) only when the filing gave none -- a large plan's account holds many contacts, and a letter is for
+	// the one that handles the dispute.
 	provider := func() []string {
-		if got := lookup(providerAccountID); len(got) > 0 {
+		if got := filed("PROVIDER"); len(got) > 0 {
 			return got
 		}
 		if requester != "" {
 			return []string{requester}
 		}
-		return nil
+		return lookup(providerAccountID)
+	}
+	plan := func() []string {
+		if got := filed("HEALTH_PLAN"); len(got) > 0 {
+			return got
+		}
+		return lookup(payerAccountID)
 	}
 	var pmRecipients []string
 	var praw []byte
@@ -159,24 +178,30 @@ func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles
 	}
 	for _, role := range roles {
 		switch role {
-		case "provider", "requester", "filing_party":
+		case "filing_party":
+			if planFiled { // a health plan filed this dispute itself
+				add(plan())
+			} else {
+				add(provider())
+			}
+		case "provider", "requester":
 			add(provider())
 		case "health_plan":
-			add(lookup(payerAccountID))
+			add(plan())
 		case "agency":
 			add(agencyRecipients)
 		case "pm":
 			add(pmRecipients)
 		case "all_parties":
 			add(provider())
-			add(lookup(payerAccountID))
+			add(plan())
 		case "billed_party":
 			// who the Reviewer recorded as billed
 			if partyBilled == "Provider" || partyBilled == "Both" {
 				add(provider())
 			}
 			if partyBilled == "Health Plan" || partyBilled == "Both" {
-				add(lookup(payerAccountID))
+				add(plan())
 			}
 		}
 	}

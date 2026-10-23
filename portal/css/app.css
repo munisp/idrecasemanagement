@@ -1606,3 +1606,4 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .prefilled{background:var(--info-bg, #2B5BD414)!important;border-color:var(--info-fg, #2B5BD4)!important}
 .prefill-note{margin:10px 0;padding:10px 12px;border:1px solid var(--border-subtle);border-left:4px solid var(--info-fg, #2B5BD4);border-radius:8px;background:var(--surface-raised);font-size:13px}
 .prefill-note ul{margin:6px 0 0;padding-left:18px}
+.pkg-optional td{color:var(--text-secondary)}

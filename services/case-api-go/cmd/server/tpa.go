@@ -554,7 +554,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 				WHERE tenant=$1 AND tpa_id=$2 AND client_id=$3 AND id=$4`,
 				tenant, org.ID, in.ClientID, in.PackageID).Scan(&pkgStatus)
 			if ok, _ := s.packageFileable(r.Context(), tenant, "tpa", in.PackageID); err != nil || !ok {
-				http.Error(w, `{"error":"these documents can't be filed yet: every one of the six that was started must be accepted first (or file without them)"}`, http.StatusConflict)
+				http.Error(w, `{"error":"these documents are still being read — file once they are (a minute or two), or file without them; none of them is required"}`, http.StatusConflict)
 				return
 			}
 			var verified int

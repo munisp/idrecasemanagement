@@ -266,11 +266,17 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	// so the latest of those and the documents' counts too. No determination date anywhere = the Reviewer enters it.
 	if in.FinalDeterminationAt == "" {
 		var fromDocs, fromClaims string
+		// Any analyzed document's labelled decision date counts, whatever type it was read as: a final
+		// determination letter read as "unrelated", or a filed set's "denials_eobs" / "final_determination_letter",
+		// still states it, and only a date printed under a decision label is ever read as one (fields.py).
 		_ = s.db.QueryRow(r.Context(), `
-			SELECT coalesce(MAX(NULLIF(result->'normalized'->>'determination_date','')), '')
-			FROM public.doc_analysis
-			WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
-			  AND doc_type IN ('eob','determination_letter')`, tenant, caseID).Scan(&fromDocs)
+			SELECT coalesce(MAX(dt), '') FROM (
+			  SELECT NULLIF(result->'normalized'->>'determination_date','') AS dt FROM public.doc_analysis
+			  WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
+			  UNION ALL
+			  SELECT NULLIF(result->'extracted'->>'determination_date','') FROM public.doc_analysis
+			  WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%') x
+			WHERE dt ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'`, tenant, caseID).Scan(&fromDocs)
 		_ = s.db.QueryRow(r.Context(), `
 			SELECT coalesce(MAX(coalesce(date_of_final_determination, date_of_denial))::text, '')
 			FROM public.case_claims WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&fromClaims)
@@ -278,7 +284,7 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 		case fromClaims != "" && fromClaims > fromDocs:
 			in.FinalDeterminationAt, in.DeterminationFrom = fromClaims, "the filing packet's claims (latest final determination / denial)"
 		case fromDocs != "":
-			in.FinalDeterminationAt, in.DeterminationFrom = fromDocs, "the documents (latest EOB / determination letter)"
+			in.FinalDeterminationAt, in.DeterminationFrom = fromDocs, "the documents (the latest decision date they state)"
 		}
 	}
 	// Earliest analyzed date of service, for the program-start floor. The
