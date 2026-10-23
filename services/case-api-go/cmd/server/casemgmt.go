@@ -59,6 +59,12 @@ var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDE
 // while a document finding is informational until reviewed.
 const qaAgingHours = 24
 
+// qaSendOverdueHours: an APPROVED email draft unsent this long after review
+// is a statutory miss in the making — the reviewer did their half and the
+// drafter never did theirs. Same 24h: the case clock doesn't pause between
+// approval and send.
+const qaSendOverdueHours = 24
+
 // reportsReadRoles: the Reports page's summary/SLA endpoints. Matches the
 // portal's own Reports nav gate (notably FINANCE and ARBITRATOR are NOT
 // here, unlike financialReadRoles -- Reports nav never included them).

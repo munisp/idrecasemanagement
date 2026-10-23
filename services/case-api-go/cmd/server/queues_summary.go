@@ -32,7 +32,8 @@ const stalledCaseDays = 7
 type queueCounts struct {
 	AttentionCases     int `json:"attention_cases"`
 	QAPending          int `json:"qa_pending"`
-	QAPendingAging     int `json:"qa_pending_aging"` // subset PENDING past qaAgingHours
+	QAPendingAging     int `json:"qa_pending_aging"`   // subset PENDING past qaAgingHours
+	QAApprovedUnsent   int `json:"qa_approved_unsent"` // APPROVED, sent_at NULL past qaSendOverdueHours
 	DocsFindingsReview int `json:"docs_findings_review"`
 	DocsFindingsAging  int `json:"docs_findings_aging"` // subset unacknowledged past docFindingsAgingHours
 	IntakeStepsDue     int `json:"intake_steps_due"`
@@ -68,6 +69,15 @@ func (s *server) queuesSummary(w http.ResponseWriter, r *http.Request) {
 		       count(*) FILTER (WHERE created_at < now() - make_interval(hours => $2))
 		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING'`,
 		tenant, qaAgingHours).Scan(&c.QAPending, &c.QAPendingAging)
+
+	// Approved but never sent: the reviewer did their half, the drafter never
+	// did theirs. Only emails count — portal-posted artifacts have no send.
+	_ = s.db.QueryRow(r.Context(), `
+		SELECT count(*) FROM public.qa_reviews
+		WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL
+		  AND coalesce(channel,'email')='email'
+		  AND reviewed_at < now() - make_interval(hours => $2)`,
+		tenant, qaSendOverdueHours).Scan(&c.QAApprovedUnsent)
 
 	// Documents whose analysis surfaced findings nobody has acknowledged yet,
 	// with the aging subset (past docFindingsAgingHours) counted separately so

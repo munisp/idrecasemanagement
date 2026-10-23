@@ -486,6 +486,13 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		       to_recipients, cc_recipients
 		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
 		ORDER BY reviewed_at`, tenant)
+	// Approved-but-unsent past qaSendOverdueHours: flag so the ready-to-send
+	// list can tell "approved an hour ago" from "approved three days ago".
+	for _, row := range toSend {
+		if ts, ok := row["reviewed_at"].(time.Time); ok && now.Sub(ts) > qaSendOverdueHours*time.Hour {
+			row["send_overdue"] = true
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend})
 }
 

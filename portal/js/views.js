@@ -534,6 +534,7 @@ const Views = (() => {
         const c = r.counts || {};
         const chips = [
           [c.qa_pending, "#/qa", `QA awaiting review${c.qa_pending_aging ? ` (${c.qa_pending_aging} aging 24h+)` : ""}`],
+          [c.qa_approved_unsent, "#/qa", "approved drafts unsent 24h+"],
           [c.docs_findings_review, "#/doc-review", `docs with findings${c.docs_findings_aging ? ` (${c.docs_findings_aging} aging 48h+)` : ""}`],
           [c.intake_steps_due, "#/intake", `intake steps due${c.intake_overdue ? ` (${c.intake_overdue} overdue)` : ""}`],
           [c.statutory_due_72h, "#/cases", "statutory clocks < 72h"],
@@ -2867,7 +2868,7 @@ const Views = (() => {
         ? `<h2>Passed QA — ready to send</h2>
           <p class="muted">These drafts were approved and are back with the Reviewer. Check the addresses and send; the send is logged and the case's dates are set.</p>
           <table><thead><tr><th>Subject</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
-          toSend.map((i) => `<tr><td>${esc(i.subject)}</td><td>${esc(i.reviewed_by || "—")}</td><td class="muted">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
+          toSend.map((i) => `<tr><td>${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</td><td>${esc(i.reviewed_by || "—")}</td><td class="muted">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
             <td>${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
           `</tbody></table>` : "";
       const intro = sendHtml + `<details class="prog-sec" ${q.length ? "" : "open"}><summary>What the QA gate does</summary>
