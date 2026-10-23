@@ -307,6 +307,12 @@ const Api = (() => {
       zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
       // How a letter will read before it is sent (mail_preview.go); body as for a draft.
       mailTracker: (id) => req("GET", `${t()}/cases/${id}/mail-tracker`),
+      // De-identification and clinical terms (deid.go): what each letter's scan found, the clinical terms of the
+      // documents, and other disputes sharing them.
+      deidReports: (id) => req("GET", `${t()}/cases/${id}/deid-reports`),
+      clinical: (id) => req("GET", `${t()}/cases/${id}/clinical`),
+      clinicalOverlaps: (id) => req("GET", `${t()}/cases/${id}/clinical/overlaps`),
+      qaDraftQuality: (days = 90) => req("GET", `${t()}/qa/draft-quality?days=${days}`),
       corrPreview: (id, body) => req("POST", `${t()}/cases/${id}/correspondence/preview`, body),
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
       filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),

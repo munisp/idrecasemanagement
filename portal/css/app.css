@@ -1599,3 +1599,6 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .field-bad,.inline-form .field-bad{border-color:var(--danger-fg)!important;box-shadow:0 0 0 2px var(--danger-bg);outline:none}
 /* The next-action recommender's suggestion, under the step banner */
 .na-also{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:6px 0 10px;font-size:13px}
+/* Clinical terms & privacy on the case page */
+.clin-terms{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px 18px;margin-bottom:10px}
+.clin-terms p{margin:4px 0 0;display:flex;flex-wrap:wrap;gap:4px}

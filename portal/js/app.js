@@ -162,7 +162,9 @@
   document.querySelectorAll(".rail-mark").forEach((el) => { el.textContent = brandMark; });
   document.title = BRAND + " Portal";
   window.APP_BRAND = BRAND;
-  const feature = (n) => FEATURES[n] !== false;
+  // Most flags are on until turned off; these are off until turned on (features.go featureDefaultOff).
+  const FEATURE_DEFAULT_OFF = { onboarding_required: true, deid_hold_mail: true };
+  const feature = (n) => (FEATURE_DEFAULT_OFF[n] ? FEATURES[n] === true : FEATURES[n] !== false);
   // The switches change while people are signed in (a tenant admin's Feature toggles): read them again as
   // pages open, at most every 15 seconds, and at once after a change (App.featuresChanged()).
   let featuresAt = Date.now();

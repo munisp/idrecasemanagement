@@ -1963,6 +1963,8 @@ const Views = (() => {
 
   // ---- Platform-admin feature toggles -----------------------------------------
   const FEATURE_LABELS = {
+    deid: "De-identification: scan outbound letters, scrub the lakehouse, read documents' clinical terms",
+    deid_hold_mail: "Hold a letter the scan finds direct identifiers in (off: it is flagged and goes out)",
     sealed_offers: "Sealed offers (double-blind bidding)",
     review_queues: "Specialty review queues (coding/clinical/legal)",
     party_workspace: "Party workspace (Keycloak party accounts)",
@@ -1997,8 +1999,9 @@ const Views = (() => {
     const p = await Api.program.get().catch(() => ({ features: {} }));
     const flags = p.features || {};
     const tenant = Api.getTenant();
+    const DEFAULT_OFF = { onboarding_required: true, deid_hold_mail: true }; // features.go featureDefaultOff
     const row = (k, label, desc) => {
-      const on = flags[k] !== false;
+      const on = DEFAULT_OFF[k] ? flags[k] === true : flags[k] !== false;
       return `<tr><td><b>${esc(label)}</b>${desc ? `<br><span class="muted">${esc(desc)}</span>` : ""}<br><span class="muted mono" style="font-size:11px">${esc(k)}</span></td>
         <td class="feat-state">${on ? '<span class="badge s-active">ON</span>' : '<span class="badge">OFF</span>'}
           <button type="button" class="mini ${on ? "ghost" : ""}" data-feat="${k}" data-to="${on ? "0" : "1"}">${on ? "Turn off" : "Turn on"}</button></td></tr>`;
@@ -2247,6 +2250,13 @@ const Views = (() => {
       P.documents += CaseLayout.documents(id, docs);
       P.documents += `<div id="analysis"></div>`;
 
+      // ---- Review: clinical terms read from the documents, other disputes sharing them, and what each outbound
+      // letter's privacy scan found (deid.go). Loaded when opened. ----
+      if (can("CASE_MANAGER", "PM", "ATTORNEY", "CODER", "NURSE_PHYSICIAN", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        P.review += `<details class="prog-sec" id="case-privacy" data-tab="review"><summary>Clinical terms &amp; privacy <span class="muted">— from the documents, possible duplicates, and each letter's privacy scan</span></summary>
+          <div id="case-privacy-box" data-case-id="${esc(id)}"><p class="muted">Loading…</p></div></details>`;
+        afterRender(() => document.getElementById("case-privacy")?.addEventListener("toggle", (ev) => { if (ev.target.open) casePrivacyBox(id); }));
+      }
       // ---- Review: the Copilot's advisory drafts and the SOP checklist (the program's sections join here) ----
       if (can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
         P.review += `<details class="prog-sec" id="case-copilot"><summary>Copilot drafts <span class="muted">— advisory; nothing goes out without approval</span></summary>
@@ -2406,6 +2416,67 @@ const Views = (() => {
       <p class="muted">${pv.qa_role ? `Sending puts it in the QA gate for the ${esc(String(pv.qa_role).replace(/_/g, " ").toLowerCase())}; it goes out once approved.` : "It goes out as soon as you send it."}
         Secure links are created when it is sent.</p>` });
   }
+  // Clinical terms & privacy on the case page (deid.go).
+  const CLIN_TYPE = { DRUG: "Drugs", CONDITION: "Conditions", PROCEDURE: "Procedures", ANATOMY: "Anatomy" };
+  async function casePrivacyBox(caseId) {
+    const box = document.getElementById("case-privacy-box");
+    if (!box || box.dataset.loaded === caseId) return;
+    box.dataset.loaded = caseId;
+    const [cl, ov, dr] = await Promise.all([Api.cases.clinical(caseId).catch(() => null), Api.cases.clinicalOverlaps(caseId).catch(() => null),
+      Api.cases.deidReports(caseId).catch(() => null)]);
+    const terms = {};
+    for (const d of (cl && cl.documents) || []) for (const e of d.entities || []) {
+      const k = e.type || "OTHER", t = String(e.text || "").toLowerCase();
+      if (t) ((terms[k] ||= {})[t] = ((terms[k] || {})[t] || 0) + 1);
+    }
+    const termHtml = Object.keys(terms).length ? `<div class="clin-terms">${Object.entries(terms).map(([k, m]) => `<div><b>${esc(CLIN_TYPE[k] || k)}</b>
+        <p>${Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 30).map(([t, n]) => `<span class="chip">${esc(t)}${n > 1 ? ` ×${n}` : ""}</span>`).join(" ")}</p></div>`).join("")}</div>`
+      : `<p class="muted">No clinical terms read yet. They are read from documents analyzed after de-identification was turned on.</p>`;
+    const overlaps = (ov && ov.overlaps) || [];
+    const ovHtml = overlaps.length ? `<table class="tbl" data-nosearch><thead><tr><th>Dispute</th><th>Shared terms</th></tr></thead><tbody>
+        ${overlaps.map((o) => `<tr><td><a class="mono" href="#/cases/${esc(o.case_id)}">${esc(o.case_number || o.case_id.slice(0, 8))}</a></td><td>${o.overlap}: ${(o.shared_terms || []).map(esc).join(", ")}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="muted">No other dispute shares two or more of these clinical terms.</p>`;
+    const reps = (dr && dr.reports) || [];
+    const ACTION = { SCAN: ["Scanned", ""], FLAG: ["Flagged — sent", "s-ck-review"], BLOCK: ["Held", "s-rejected"] };
+    const repHtml = reps.length ? `<table class="tbl" data-nosearch><thead><tr><th>When</th><th>What</th><th>Result</th><th>Found</th></tr></thead><tbody>
+        ${reps.map((x) => { const [t, c] = ACTION[x.action] || [x.action, ""]; const counts = Object.entries(x.counts || {}).map(([k, n]) => `${esc(k.toLowerCase().replace(/_/g, " "))} ${n}`).join(", ");
+          return `<tr><td>${fmtDate(x.created_at)}</td><td>${esc(String(x.artifact || "").replace(/_/g, " "))}</td><td><span class="badge ${c}">${t}</span></td><td class="muted">${counts || "nothing"}</td></tr>`; }).join("")}</tbody></table>`
+      : `<p class="muted">No letter on this dispute has been scanned yet.</p>`;
+    box.innerHTML = `<h3>Clinical terms in the documents</h3>${termHtml}
+      <h3>Other disputes with the same clinical picture</h3><p class="muted">Two or more shared drugs, conditions or procedures — a possible duplicate or the same episode of care.</p>${ovHtml}
+      <h3>Privacy scan of outgoing letters</h3><p class="muted">Each letter is scanned for direct identifiers before it goes out.
+        ${App.feature("deid_hold_mail") ? "A letter with them is held until it is redacted." : "Holding is off: a letter with them is flagged here and still goes (Feature toggles → Hold a letter…)."}</p>${repHtml}`;
+  }
+  // QA draft quality by template (qa_learning.go): how often each template's drafts pass QA untouched.
+  async function qaDraftQualityBox() {
+    const box = document.getElementById("qa-dq-box");
+    if (!box || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    let r;
+    try { r = await Api.cases.qaDraftQuality(90); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const ts = r.templates || [];
+    const pct = (a, b) => (b ? Math.round((100 * a) / b) + "%" : "—");
+    box.innerHTML = ts.length ? `<div class="tbl-wrap"><table class="tbl qa-tbl"><thead><tr><th>Template</th><th>Drafts</th><th>Approved as written</th><th>Approved after edits</th><th>Sent back</th><th>Edited, on average</th><th>Reviewers</th></tr></thead><tbody>
+        ${ts.map((x) => `<tr><td class="qa-tbl-main">${esc(qaTpl(x.artifact))} <span class="muted">${esc(x.channel || "")}</span></td><td data-label="Drafts">${x.drafts}</td>
+          <td data-label="As written">${pct(x.approved_unedited, x.drafts)}</td><td data-label="After edits">${pct(x.approved - x.approved_unedited, x.drafts)}</td>
+          <td data-label="Sent back">${pct(x.rejected, x.drafts)}</td><td data-label="Edited">${x.avg_edit_ratio != null ? Math.round(x.avg_edit_ratio * 100) + "% of the text" : "—"}</td><td data-label="Reviewers">${x.reviewers}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No QA decisions recorded yet in the last ${r.days || 90} days. Each approval or send-back from now on is counted here.</p>`;
+  }
+  // Portal productivity (telemetry.go): how much work each screen takes, and how often the suggestions are taken.
+  async function productivityBox() {
+    const box = document.getElementById("rpt-productivity");
+    if (!box) return;
+    let r;
+    try { r = await Api.cases.telemetryMetrics(30); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const ws = r.workflows || [];
+    const rate = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+    const n1 = (v) => (v == null ? "—" : Number(v).toFixed(1));
+    box.innerHTML = ws.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Screen</th><th>Sessions</th><th>Clicks per session</th><th>Keystrokes per session</th><th>Submits</th><th>Prefill kept</th><th>Suggestion taken</th></tr></thead><tbody>
+        ${ws.map((x) => `<tr><td>${esc(String(x.workflow || "").replace(/_/g, " "))}</td><td>${x.sessions}</td><td>${n1(x.clicks_per_session)}</td><td>${n1(x.keystrokes_per_session)}</td><td>${x.submits}</td>
+          <td>${rate(x.prefill_accept_rate)}</td><td>${rate(x.next_action_accept_rate)}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">Nothing recorded yet in the last ${r.days || 30} days. The portal records clicks, typing and submits per screen (never what is typed).</p>`;
+  }
+
   // The mail tracker (mail_tracker.go): each email of the case with where it stands, from draft to delivery.
   const MAIL_STATE = {
     IN_QA: ["Waiting for QA", "s-ck-review"], APPROVED: ["Approved — not sent yet", "s-ck-review"], SENT_BACK: ["Sent back", "s-rejected"],
@@ -2970,6 +3041,8 @@ const Views = (() => {
     return `<div class="view-head"><h1>Reports</h1>
       <span class="muted">charted on-platform, exportable — statutory reporting without external BI</span></div>
       ${geoLink ? `<p>${geoLink}</p>` : ""}
+      ${(afterRender(productivityBox), "")}
+      <details class="prog-sec" open><summary>Portal productivity <span class="muted">— last 30 days, per screen</span></summary><div id="rpt-productivity"><p class="muted">Loading…</p></div></details>
       <div class="kpi-row rpt-kpi-strip">
         <div class="kpi"><span class="kpi-n" id="kpi-open">—</span><span class="kpi-l">Open disputes</span></div>
         <div class="kpi kpi-danger"><span class="kpi-n" id="kpi-breaches">—</span><span class="kpi-l">SLA breaches</span></div>
@@ -3903,7 +3976,10 @@ const Views = (() => {
           <section class="panel qa-list"><h2>Awaiting review <span class="n">${q.length}</span></h2><div class="qa-items">${items}</div></section>
           <section class="panel qa-pane" id="qa-detail" aria-live="polite">${detailEmpty}</section>
         </div>
-        ${recentHtml}${explain}</div>`;
+        ${recentHtml}
+        <details class="prog-sec" id="qa-dq" ontoggle="if (this.open) Views.qaDraftQualityBox()"><summary>Draft quality by template <span class="muted">— last 90 days: how often each template's drafts pass QA as written</span></summary>
+          <div id="qa-dq-box"><p class="muted">Loading…</p></div></details>
+        ${explain}</div>`;
     } catch (e) { return err(e); }
   }
 
@@ -10915,5 +10991,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox };
 })();

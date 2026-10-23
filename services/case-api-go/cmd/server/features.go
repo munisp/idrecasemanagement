@@ -50,13 +50,18 @@ var registeredFeatures = map[string]bool{
 	"payment_lock":    true, // a case awaiting its initial fee allows only correspondence
 	"ineligible_lock": true, // a case found ineligible allows only correspondence
 	"fwa_review":      true, // fraud, waste or abuse review on the case page, and its automatic flag on large disputes
+	// De-identification (deid.go, services/deid-py): outbound mail scanned and reported, the lakehouse scrubbed, the
+	// clinical terms of documents read. Holding mail is separate and off by default: letters to a dispute's own
+	// parties carry its names and claims by design, so a hold is turned on only once the policy is tuned.
+	"deid":           true,
+	"deid_hold_mail": true, // hold an outbound letter the scan finds direct identifiers in (featureDefaultOff)
 }
 
 // tenantAdminRoles may change their own tenant's toggles; the platform and federal admins any tenant's.
 var tenantAdminRoles = []string{"TENANT_ADMIN", "PLATFORM_ADMIN", "FEDERAL_ADMIN"}
 
 // featureDefaultOff are the flags a tenant has to turn on; every other flag is on until turned off.
-var featureDefaultOff = map[string]bool{"onboarding_required": true}
+var featureDefaultOff = map[string]bool{"onboarding_required": true, "deid_hold_mail": true}
 
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle
 // applies to the very next request). Absent flag or absent row = on, except featureDefaultOff.
