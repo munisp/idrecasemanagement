@@ -527,6 +527,7 @@ func main() {
 		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases/prefill", s.casePrefill) // prefill suggestions for the initiation form
+		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/{caseId}", s.getCase)
 		r.Get("/cases/{caseId}/next-action", s.caseNextAction) // rule-based next best action
