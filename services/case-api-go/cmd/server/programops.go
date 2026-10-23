@@ -448,7 +448,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		Notes               string `json:"notes"`
 		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
-		QPACents            int64  `json:"qpa_cents"` // federal NSA tenants only — programmed tenants use disputed_amount_cents
+		QPACents            int64  `json:"qpa_cents"`    // federal NSA tenants only — programmed tenants use disputed_amount_cents
 		ServiceLine         string `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
@@ -490,7 +490,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 			`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&st)
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"case_id": caseID, "case_number": caseNumber, "status": st,
-			"payment_required": st == "AWAITING_PAYMENT",
+			"payment_required":  st == "AWAITING_PAYMENT",
 			"filing_party_type": fpt, "programmed": true,
 		})
 		return
@@ -720,6 +720,24 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 		tj, _ := rows[j]["created_at"].(time.Time)
 		return ti.After(tj)
 	})
+	// Rule-based next step per intake-pipeline row (computed from status and
+	// timestamps already on the row — no extra queries). Case-origin rows are
+	// covered by the case page's own next-action engine, so they're skipped.
+	now := time.Now().UTC()
+	for _, row := range rows {
+		if str(row["origin"]) != "legacy" {
+			continue
+		}
+		createdAt, _ := row["created_at"].(time.Time)
+		packetAt, _ := row["packet_complete_at"].(time.Time)
+		var packetPtr *time.Time
+		if !packetAt.IsZero() {
+			packetPtr = &packetAt
+		}
+		if step := recommendIntakeStep(str(row["status"]), createdAt, packetPtr, now); step != nil {
+			row["next_step"] = step
+		}
+	}
 	total := len(rows)
 	end := offset + limit
 	if end > total {
