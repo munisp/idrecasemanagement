@@ -577,17 +577,16 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"queue": rows})
 		return
 	}
-	// Urgency ordering: a QA draft on a case whose offer window or open-
-	// negotiation period is closing jumps the FIFO line — the statutory date
-	// is the deadline, not the draft's arrival order. LEAST ignores NULLs, so
-	// a case with only one clock still sorts by it; dateless cases keep FIFO.
+	// The latest draft on top, like every list in the portal. The case's statutory dates still come with each
+	// draft (shown as its "due" badge), so an urgent one is visible without reordering the queue.
 	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT q.id, q.case_id, q.artifact, q.channel, q.subject, q.status, q.drafted_by, q.created_at,
 		       c.open_negotiation_end, c.offer_window_ends_at
 		FROM public.qa_reviews q
 		LEFT JOIN tenant_%s.cases c ON c.id::text = q.case_id
 		WHERE q.tenant=$1 AND q.status='PENDING'
-		ORDER BY LEAST(c.offer_window_ends_at, c.open_negotiation_end::timestamptz) ASC NULLS LAST, q.created_at`,
+		ORDER BY q.created_at DESC -- the latest on top; each draft shows its case's statutory date
+		`,
 		sanitizeTenant(tenant)), tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)

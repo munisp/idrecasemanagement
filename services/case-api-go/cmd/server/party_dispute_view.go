@@ -119,7 +119,7 @@ func (s *server) orgDisputeSummary(kind string) http.HandlerFunc {
 		fees, _ := s.queryRows(r, `
 			SELECT coalesce(invoice_no,'') AS invoice_no, kind, amount_cents, status, coalesce(due_date::text,'') AS due_date,
 			       coalesce(paid_at::text,'') AS paid_at
-			FROM public.invoices WHERE tenant=$1 AND case_id=$2 AND party=$3 AND status <> 'VOID' ORDER BY created_at`, tenant, caseID, side)
+			FROM public.invoices WHERE tenant=$1 AND case_id=$2 AND party=$3 AND status <> 'VOID' ORDER BY created_at DESC`, tenant, caseID, side)
 		writeJSON(w, http.StatusOK, map[string]any{"case": c, "side": side, "dates": dates, "claims": claims, "fees": fees})
 	}
 }

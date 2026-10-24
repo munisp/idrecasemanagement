@@ -115,7 +115,8 @@ func (s *server) onboardingReviews(w http.ResponseWriter, r *http.Request) {
 		JOIN public.health_plans o ON o.id=pk.plan_id
 		JOIN public.hp_parties c ON c.id=pk.party_id
 		WHERE d.tenant=$1 AND d.status='NEEDS_REVIEW' AND pk.status<>'FILED'
-		ORDER BY 6`, tenant)
+		ORDER BY 6 DESC -- the latest analyzed first
+		`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
