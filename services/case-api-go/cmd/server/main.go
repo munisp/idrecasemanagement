@@ -540,7 +540,9 @@ func main() {
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
 		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
-		r.Get("/cases/prefill", s.casePrefill) // prefill suggestions for the initiation form
+		r.Get("/cases/prefill", s.casePrefill)      // prefill suggestions for the initiation form
+		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
+		r.Get("/queues/summary", s.queuesSummary)   // dashboard rollup: queue counts + clocks in one call
 		r.Get("/cases", s.listCases)
 		r.Get("/cases/pipeline/counts", s.pipelineCounts) // per-stage totals for the Pipeline board (pages via /cases)
 		r.Get("/cases/{caseId}", s.getCase)
@@ -550,6 +552,10 @@ func main() {
 		r.Get("/cases/{caseId}/next-action", s.caseNextAction) // rule-based next best action
 		r.Post("/telemetry/events", s.telemetryIngest)         // portal interaction baseline
 		r.Get("/telemetry/metrics", s.telemetryMetrics)
+		r.Get("/telemetry/paths", s.telemetryPaths)                // per-workflow transitions + abandonment
+		r.Get("/telemetry/action-stats", s.telemetryActionStats)   // per-action calibration: prior vs observed
+		r.Get("/telemetry/prefill-stats", s.telemetryPrefillStats) // per-field prefill accept rates
+		r.Get("/analytics/transitions", s.analyticsTransitions)
 
 		// Documents: encrypted upload, authorized download, analysis status.
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
@@ -557,7 +563,8 @@ func main() {
 		r.Get("/cases/{caseId}/documents/{docId}/download", s.downloadDocument)
 		r.Patch("/cases/{caseId}/documents/{docId}", s.moveDocument) // re-file to folder (staff only)
 		r.Get("/cases/{caseId}/documents/{docId}/analysis", s.documentAnalysis)
-		r.Get("/cases/{caseId}/documents/{docId}/835.csv", s.documentAs835) // an 835 ERA text file as a table
+		r.Post("/cases/{caseId}/documents/{docId}/acknowledge", s.acknowledgeDocFindings) // reviewer checked the findings
+		r.Get("/cases/{caseId}/documents/{docId}/835.csv", s.documentAs835)               // an 835 ERA text file as a table
 		r.Post("/cases/{caseId}/documents/{docId}/analysis/retry", s.retryDocumentAnalysis)
 		r.Post("/cases/{caseId}/documents/{docId}/analysis/feedback", s.submitDocFeedback)
 
@@ -941,8 +948,10 @@ func main() {
 		r.Get("/party/cases/{caseId}/respond/documents/{docId}/file", s.respondingDocFile("party"))
 		r.Post("/party/cases/{caseId}/respond/documents", s.respondingUpload("party"))
 		r.Post("/party/cases/{caseId}/respond/submit", s.respondingSubmit("party"))
-		r.Get("/qa", s.qaQueue)                      // QA gate queue (G4)
-		r.Get("/qa/draft-quality", s.qaDraftQuality) // per-template draft effectiveness
+		r.Get("/qa", s.qaQueue)                            // QA gate queue (G4)
+		r.Get("/qa/draft-quality", s.qaDraftQuality)       // per-template draft effectiveness
+		r.Get("/qa/template-health", s.qaTemplateHealth)   // portfolio verdicts for the templates admin page
+		r.Get("/documents/review-queue", s.docReviewQueue) // tenant-level findings inbox
 		r.Get("/qa/{qaId}", s.qaGet)
 		r.Post("/qa/{qaId}/decision", s.qaDecision)
 		r.Post("/qa/{qaId}/send", s.qaSend)                // the drafter sends a draft that has passed QA
@@ -1285,6 +1294,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"insert"}`, http.StatusInternalServerError)
 		return
 	}
+	s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "", initialStatus, r.Context().Value(ctxPrincipal{}).(principal).Subject, "initiation")
 
 	// Transactional outbox — published to Kafka by the outbox relay.
 	payload, _ := json.Marshal(map[string]any{
@@ -1503,6 +1513,17 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	// Triage lane filter (Lever 2): whitelisted, never interpolated raw.
 	if lane := q.Get("lane"); lane == "AUTO_REVIEW" || lane == "STANDARD" || lane == "COMPLEX" {
 		where += fmt.Sprintf(" AND %s = '%s'", triageLaneSQL, lane)
+	}
+	// stalled=true: EXACTLY the queues-rollup definition, so the dashboard
+	// chip's count and the list it lands on can never disagree. The clause
+	// references stalledCaseDays via parameter, not a duplicated literal.
+	if q.Get("stalled") == "true" {
+		where += fmt.Sprintf(` AND c.status NOT LIKE 'CLOSED%%' AND c.status <> 'SETTLED_IN_NEGOTIATION'
+			AND c.offer_window_ends_at IS NULL AND c.open_negotiation_end IS NULL
+			AND coalesce((SELECT max(a.created_at) FROM public.case_activities a
+			              WHERE a.tenant=$1 AND a.case_id=c.id::text), c.opened_at)
+			    < now() - make_interval(days => $%d)`, len(args)+1)
+		args = append(args, stalledCaseDays)
 	}
 	if cur := q.Get("cursor"); cur != "" && !offsetMode {
 		parts := strings.SplitN(cur, "|", 2)

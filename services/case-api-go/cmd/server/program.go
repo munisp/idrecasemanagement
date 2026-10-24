@@ -577,9 +577,15 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var matched int64
 	if in.Internal != "" {
+		var oldInternal string
+		_ = s.db.QueryRow(r.Context(),
+			fmt.Sprintf(`SELECT coalesce(internal_status,'') FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).Scan(&oldInternal)
 		res, _ := s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status=$2, updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), id, in.Internal)
 		matched += res.RowsAffected()
+		if res.RowsAffected() > 0 {
+			s.recordTransition(r.Context(), tenant, id, axisProgram, oldInternal, in.Internal, p.Subject, "status_update")
+		}
 	}
 	if in.Agency != "" {
 		res, _ := s.db.Exec(r.Context(),

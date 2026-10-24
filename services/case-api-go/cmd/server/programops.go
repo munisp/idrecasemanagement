@@ -805,6 +805,24 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 		tj, _ := rows[j]["created_at"].(time.Time)
 		return ti.After(tj)
 	})
+	// Rule-based next step per intake-pipeline row (computed from status and
+	// timestamps already on the row — no extra queries). Case-origin rows are
+	// covered by the case page's own next-action engine, so they're skipped.
+	now := time.Now().UTC()
+	for _, row := range rows {
+		if str(row["origin"]) != "legacy" {
+			continue
+		}
+		createdAt, _ := row["created_at"].(time.Time)
+		packetAt, _ := row["packet_complete_at"].(time.Time)
+		var packetPtr *time.Time
+		if !packetAt.IsZero() {
+			packetPtr = &packetAt
+		}
+		if step := recommendIntakeStep(str(row["status"]), createdAt, packetPtr, now); step != nil {
+			row["next_step"] = step
+		}
+	}
 	total := len(rows)
 	end := offset + limit
 	if end > total {

@@ -267,9 +267,11 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case "status":
+			oldStatus := s.caseStatusNow(r.Context(), tenant, id)
 			_, err = s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET status=$1, updated_at=now() WHERE id=$2`, t), in.Status, id)
 			if err == nil {
+				s.recordTransition(r.Context(), tenant, id, axisLifecycle, oldStatus, in.Status, p.Subject, "bulk")
 				s.logActivity(r.Context(), tenant, id, "STATUS_CHANGE", fmt.Sprintf("Status changed to %s (bulk) by %s", in.Status, p.Subject))
 				s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
 					"by": p.Subject, "status": in.Status, "bulk": true,

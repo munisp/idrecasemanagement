@@ -53,6 +53,18 @@ var financialReadRoles = []string{"FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_AD
 // portal's own QA Gate nav gate.
 var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
+// qaAgingHours: a PENDING draft older than this is stuck, not queued.
+// 24h is deliberately shorter than the doc-findings 48h — a QA draft sits
+// ON a statutory path (its case's clock is why it's in the queue at all),
+// while a document finding is informational until reviewed.
+const qaAgingHours = 24
+
+// qaSendOverdueHours: an APPROVED email draft unsent this long after review
+// is a statutory miss in the making — the reviewer did their half and the
+// drafter never did theirs. Same 24h: the case clock doesn't pause between
+// approval and send.
+const qaSendOverdueHours = 24
+
 // reportsReadRoles: the Reports page's summary/SLA endpoints. Matches the
 // portal's own Reports nav gate (notably FINANCE and ARBITRATOR are NOT
 // here, unlike financialReadRoles -- Reports nav never included them).
@@ -536,19 +548,25 @@ func (s *server) autoChecklist(r *http.Request, tenant, caseID string) {
 func (s *server) maybeAdvanceStatus(r *http.Request, tenant, caseID string) {
 	t := sanitizeTenant(tenant)
 	// All case invoices PAID while awaiting payment => funds settled.
-	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+	res, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET status='CLOSED_PAID', updated_at=now()
 		WHERE id=$1 AND status='PAYMENT_PENDING'
 		  AND EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$2 AND case_id=$1)
 		  AND NOT EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$2 AND case_id=$1 AND status='OPEN')`, t),
 		caseID, tenant)
+	if err == nil && res.RowsAffected() > 0 {
+		s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "PAYMENT_PENDING", "CLOSED_PAID", "", "auto_advance")
+	}
 	// A generated determination letter while under review => determined.
-	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+	res2, err2 := s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET status='DETERMINED', updated_at=now()
 		WHERE id=$1 AND status='IN_REVIEW'
 		  AND EXISTS(SELECT 1 FROM tenant_%s.documents d
 		             WHERE d.case_id=$1 AND d.object_key ILIKE '%%determination%%')`, t, t),
 		caseID)
+	if err2 == nil && res2.RowsAffected() > 0 {
+		s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "IN_REVIEW", "DETERMINED", "", "auto_advance")
+	}
 }
 
 func (s *server) getChecklist(w http.ResponseWriter, r *http.Request) {

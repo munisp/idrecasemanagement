@@ -15,6 +15,8 @@ const Telemetry = (() => {
     const h = location.hash || "#/";
     if (h.startsWith("#/new")) return "case_initiate";
     if (h.startsWith("#/qa")) return "qa_queue";
+    if (h.startsWith("#/intake")) return "intake";
+    if (h.startsWith("#/doc-review")) return "doc_review";
     if (h.startsWith("#/cases/")) return "case_detail";
     if (h.startsWith("#/crm")) return "crm";
     if (h === "#/" || h.startsWith("#/dashboard")) return "dashboard";
@@ -81,7 +83,19 @@ const Telemetry = (() => {
 
   document.addEventListener("focusin", (ev) => { const f = ev.target.closest && ev.target.closest("[data-task]"); if (f) taskStart(f.dataset.task); }, true);
 
-  return { track, flush, taskStart, taskDone, taskError };
+  // role: the single role this user acts as, for per-role learning cells.
+  // SAME canonical order as canonicalRoleOrder in the API's nextaction.go —
+  // event-time stamps and request-time lookups must agree or the cells split.
+  const ROLE_ORDER = ["PLATFORM_ADMIN", "FEDERAL_ADMIN", "TENANT_ADMIN",
+    "CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "FINANCE", "PM",
+    "DOCTOR", "NURSE", "NURSE_PHYSICIAN", "CODER", "BULK_SUBMITTER", "PARTY"];
+  const role = () => {
+    const have = (window.Auth && Auth.claims() && Auth.claims().roles) || [];
+    for (const want of ROLE_ORDER) if (have.includes(want)) return want;
+    return have[0] || "";
+  };
+
+  return { track, flush, role, taskStart, taskDone, taskError };
 })();
 // A top-level const is not a property of window: callers check window.Telemetry, so put it there.
 window.Telemetry = Telemetry;

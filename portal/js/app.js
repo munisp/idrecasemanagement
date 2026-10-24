@@ -241,6 +241,7 @@
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
+    if (has("CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/doc-review", "◉", "Doc review"]);
   }
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/intake", "⇥", "Intake"]);
@@ -251,6 +252,7 @@
   // financialReadRoles (access-control follow-up).
   if (finTabs.length) links.push(["#/" + finTabs[0][0], "◍", "Financials"]);
   if (has("PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/ops", "◔", "Ops"]);
+  if (has("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/productivity", "⌁", "Productivity"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
   if (!outside) links.push(["#/timesheet", "⏱", "My timesheet"]);
@@ -528,10 +530,12 @@
     [/^#\/assistant$/, () => Views.assistant("")],
     [/^#\/assistant\/([\w-]+)$/, (m) => Views.assistant(m[1])],
     [/^#\/qa$/, Views.qaQueue],
+    [/^#\/doc-review$/, Views.docReview],
     [/^#\/intake$/, Views.intake],
     [/^#\/deliverables$/, Views.deliverables],
     [/^#\/finance$/, Views.finance],
     [/^#\/ops$/, Views.opsDashboard],
+    [/^#\/productivity$/, Views.productivity],
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/onboarding$/, Views.onboarding],
     [/^#\/onboarding\/new$/, Views.onboardingNew],

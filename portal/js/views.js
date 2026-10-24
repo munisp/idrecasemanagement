@@ -883,7 +883,51 @@ const Views = (() => {
     if (outsideOnly()) return partyCases(); // an invited party's home is its own disputes
     const me = Auth.claims();
     let html = `<div class="view-head"><h1>Good day, ${esc((me.name || "").split(/[.\s]/)[0] || me.name)}</h1>
-      <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>`;
+      <span class="muted">tenant <b>${esc(Api.getTenant()).toUpperCase()}</b> · ${me.roles.map(esc).join(", ")}</span></div>
+      <div id="queue-summary"></div>
+      <div id="attention"></div>`;
+    // Queues-at-a-glance: one aggregate call, counts-only (no model — renders
+    // even when the assistant's LLM is down). Each chip links to the queue it
+    // counts. Loaded async so the dashboard never blocks on it.
+    afterRender(async () => {
+      const qs = document.getElementById("queue-summary");
+      if (!qs) return;
+      try {
+        const r = await Api.cases.queuesSummary();
+        const c = r.counts || {};
+        const chips = [
+          [c.qa_pending, "#/qa", `QA awaiting review${c.qa_pending_aging ? ` (${c.qa_pending_aging} aging 24h+)` : ""}`],
+          [c.qa_approved_unsent, "#/qa", "approved drafts unsent 24h+"],
+          [c.docs_findings_review, "#/doc-review", `docs with findings${c.docs_findings_aging ? ` (${c.docs_findings_aging} aging 48h+)` : ""}`],
+          [c.intake_steps_due, "#/intake", `intake steps due${c.intake_overdue ? ` (${c.intake_overdue} overdue)` : ""}`],
+          [c.statutory_due_72h, "#/cases", "statutory clocks < 72h"],
+          [c.statutory_overdue, "#/cases", "statutory clocks overdue"],
+          [c.stalled_cases, "#/cases?stalled=1", "stalled cases (no activity 7d+)"],
+        ].filter(([n]) => n > 0);
+        if (!chips.length) { qs.remove(); return; }
+        qs.innerHTML = `<div class="sla-cluster">` + chips.map(([n, href, lbl]) => `
+          <a class="sla-card" href="${href}" style="text-decoration:none">
+            <span class="lbl"><b>${n}</b> ${esc(lbl)}</span>
+          </a>`).join("") + `</div>`;
+      } catch { const b = document.getElementById("queue-summary"); if (b) b.remove(); }
+    });
+    // Portfolio next-actions: the per-case rule engine ranked across the open
+    // docket. Loaded async so the dashboard never blocks on it; clicking a
+    // card emits next_action_accept into the calibration stream.
+    afterRender(async () => {
+      const box = document.getElementById("attention");
+      if (!box) return;
+      try {
+        const r = await Api.cases.attention();
+        const items = r.attention || [];
+        if (!items.length) { box.remove(); return; }
+        box.innerHTML = `<h2>Needs attention</h2><div class="sla-cluster">` + items.map((it) => `
+          <div class="sla-card" style="border-left:3px solid var(--accent,#3b82f6)">
+            <button class="primary" onclick="Views.attentionGo('${it.case_id}','${esc(it.next_action.action_id)}')">${esc(it.next_action.label)}</button>
+            <span class="lbl"><b>${esc(it.case_number)}</b> · ${esc(it.next_action.reason)}${it.next_statutory_date ? ` · due ${fmtDate(it.next_statutory_date)}` : ""}</span>
+          </div>`).join("") + `</div>`;
+      } catch { const b = document.getElementById("attention"); if (b) b.remove(); }
+    });
     try {
       const [{ cases }, clocks, prog] = await Promise.all([Api.cases.list({ limit: 200 }), clockMap(), Api.program.get().catch(() => null)]);
       if (prog?.tenant_label) {
@@ -1237,7 +1281,8 @@ const Views = (() => {
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
       const asgParams = { ...(assigned ? { assigned } : {}), ...(assignee ? { assignee } : {}) };
-      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...asgParams };
+      const stalled = hq.get("stalled") === "1";
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...(stalled ? { stalled: "true" } : {}), ...asgParams };
       // The reviewers, for the Reviewer filter (their workload is on the Team page).
       const team = canAssign() ? Api.cm.assignees("CASE_MANAGER").then((r) => r.assignees || []).catch(() => []) : Promise.resolve([]);
       // Summary figures for the whole list (the search applies; the other filters are the switches below).
@@ -1353,7 +1398,7 @@ const Views = (() => {
         });
       });
       // The whole width of the page: the grid has eleven columns. Who holds how many cases is on the Team page.
-      return `<div class="wide-view"><div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}</span>
+      return `<div class="wide-view"><div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}${stalled ? ' · <span class="badge warn">stalled: no activity 7 days+</span> <a href="#/cases">clear</a>' : ""}</span>
         <div class="case-search"><input id="case-search" type="search" value="${esc(search)}" maxlength="100"
           placeholder="Search case number, provider, health plan, NPI, email…" aria-label="Search disputes" />
           ${search ? `<button class="mini" id="case-search-clear" aria-label="Clear search">Clear</button>` : ""}</div>
@@ -2161,16 +2206,29 @@ const Views = (() => {
       afterRender(() => Api.cases.nextAction(id).then((na) => {
         const a = na && na.next_action, box = document.getElementById("next-action");
         if (!a || !box || ["review_case", "triage", "submit_offer", "log_negotiation"].includes(a.action_id)) return;
+        if (window.Telemetry) Telemetry.track("next_action_shown", a.action_id,
+          { confidence: a.confidence, basis: na.confidence_basis, role: Telemetry.role(), service_line: c.service_line || "", case_id: id });
         box.innerHTML = `<div class="na-also"><span class="muted">Also suggested:</span>
           <button type="button" class="mini" id="na-go">${esc(a.label)}</button> <span class="muted">${esc(a.reason)}</span></div>`;
         document.getElementById("na-go").addEventListener("click", () => {
-          if (window.Telemetry) Telemetry.track("next_action_accept", a.action_id, { confidence: a.confidence });
+          if (window.Telemetry) Telemetry.track("next_action_accept", a.action_id,
+            { confidence: a.confidence, role: Telemetry.role(), service_line: c.service_line || "", case_id: id });
           // Its links name a section ("#/cases/<id>#documents"): open that section of this page.
           const section = { documents: "case-docs", correspondence: "p-send-details", checklist: "case-checklist", relationships: "case-rel" }[(a.href.split("#")[2] || "")];
           const el = section && document.getElementById(section);
           if (el) { CaseLayout.reveal(el); if (el.tagName === "DETAILS") el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); }
           else location.hash = a.href.split("#").slice(0, 2).join("#");
         });
+        // Expected path: the tenant's transition matrix read at this case's
+        // current status. Present only when the model gate and the per-cell
+        // samples both cleared — the API omits it otherwise and nothing renders.
+        if (na.expected_path && na.expected_path.next && na.expected_path.next.length) {
+          const ep = na.expected_path;
+          const h2 = (h) => h >= 48 ? (h / 24).toFixed(1) + "d" : h.toFixed(0) + "h";
+          const legs = ep.next.map((n) => `${esc(n.to)} ${Math.round(100 * n.share)}% (~${h2(n.median_dwell_hours)})`).join(", ");
+          box.insertAdjacentHTML("beforeend", `<div class="muted" style="margin-top:4px;font-size:12px">
+            Typical from ${esc(ep.from)} (n=${ep.sample_exits}): ${legs}${ep.median_hours_to_close != null ? ` · median to close ${h2(ep.median_hours_to_close)} (n=${ep.closed_sample})` : ""}</div>`);
+        }
       }).catch(() => {}));
       if (c.lock) {
         html += `<div class="case-lock" role="status"><b>${c.lock === "AWAITING_PAYMENT" ? "Awaiting payment" : "Ineligible"} — this case is frozen.</b>
@@ -3936,6 +3994,12 @@ const Views = (() => {
   }
   const qaCase = (i) => i.case_id ? `<a class="mono" href="#/cases/${esc(i.case_id)}" onclick="event.stopPropagation()">${esc(i.case_number || i.case_id.slice(0, 8) + "…")}</a>` : "";
 
+  // The statutory date a QA draft's case is up against (its offer window or open-negotiation end), and how this
+  // template's drafts have fared at the gate (qaTemplateStats): evidence for the reviewer, not a verdict.
+  const qaDue = (i) => { const ds = [i.open_negotiation_end, i.offer_window_ends_at].filter(Boolean).sort(); return ds.length ? fmtDate(ds[0]) : ""; };
+  const qaTrackRecord = (ts) => ts && ts.drafts
+    ? `<p class="muted">Template track record (90 days): ${ts.drafts} drafts · ${ts.approved_unedited} approved as written (${Math.round(100 * ts.approved_unedited / ts.drafts)}%) · ${ts.rejected} sent back${ts.avg_edit_ratio != null ? ` · ~${Math.round(ts.avg_edit_ratio * 100)}% of the text rewritten on average` : ""}</p>`
+    : "";
   async function qaQueue() {
     try {
       const r = await Api.program.qaQueue();
@@ -3956,13 +4020,13 @@ const Views = (() => {
         ? `<section class="panel"><h2>Passed QA — ready to send <span class="n">${toSend.length}</span></h2>
           <p class="panel-sub">Approved and back with the person who drafted them. Check the addresses and send; the send is logged and the case's dates are set.</p>
           <table class="qa-tbl"><thead><tr><th>Subject</th><th>Case</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
-          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span></td><td data-label="Case">${qaCase(i)}</td>
+          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span></td><td data-label="Case">${qaCase(i)}</td>
             <td data-label="Approved by">${esc(i.reviewed_by || "—")}</td><td class="muted" data-label="To">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
             <td class="qa-tbl-act">${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
           `</tbody></table></section>` : "";
       const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
-          <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
-          <span class="qa-item-meta">${qaCase(i)}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span></span>
+          <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
+          <span class="qa-item-meta">${qaCase(i)}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span>${qaDue(i) ? `<span class="badge" title="The statutory date on this case">due ${esc(qaDue(i))}</span>` : ""}</span>
           <span class="qa-item-by">drafted by ${esc(i.drafted_by || "—")}${r.own_only ? " · waiting for QA" : ""}</span></button>`).join("")
         : `<p class="kc-empty">Queue empty — no drafts awaiting review.</p>`;
       const detailEmpty = q.length
@@ -4035,6 +4099,7 @@ const Views = (() => {
           <div class="qa-actions">${qaActionsHtml(d, qaId, isNote, isLetter)}</div>
         </div>
         <p class="panel-sub">${what}</p>
+        ${qaTrackRecord(d.template_stats)}
         ${recipientsHtml}
         ${qaUnfilledHtml(d)}
         ${isLetter && (d.documents || []).length ? `<div class="qa-letter" id="qa-letter-view"><p class="muted">Loading the letter as it will print…</p></div>` : ""}
@@ -4249,6 +4314,12 @@ const Views = (() => {
       });
     } catch (e) { box.innerHTML = err(e); }
   }
+  function intakeStepGo(id, actionId, advanceTo, el) {
+    if (window.Telemetry) Telemetry.track("next_action_accept", actionId, { source: "intake" });
+    if (advanceTo) return Views.advanceIntake(id, advanceTo, el);
+    UI.toast("Noted — complete this step manually; the row shows the detail", { duration: 5000 });
+  }
+
   function intakeFilter(status) { intakeStatus = status; intakeSegs(); intakeBox(status); }
 
   // Shared by intake()'s initial render and every later page --
@@ -4269,7 +4340,9 @@ const Views = (() => {
       <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
       <td class="muted">${fmtDate(i.outreach_at)}</td>
       <td class="muted">${i.packet_complete_at ? fmtDate(i.packet_complete_at) : "—"}</td>
-      <td>${i.origin === "legacy" && !INTAKE_TERMINAL.includes(i.status) ?
+      <td>${i.next_step ?
+        `<button class="mini primary" title="${esc(i.next_step.reason)}" onclick="Views.intakeStepGo('${i.id}','${esc(i.next_step.action_id)}','${esc(i.next_step.advance_to || "")}', this)">${esc(i.next_step.label)}</button>` : ""}
+        ${i.origin === "legacy" && !INTAKE_TERMINAL.includes(i.status) ?
         `<select onchange="Views.advanceIntake('${i.id}', this.value, this)">
           <option value="">advance…</option><option>DOCS_RECEIVED</option>
           <option value="PACKET_COMPLETE">PACKET_COMPLETE (starts 10-day review)</option>
@@ -6274,11 +6347,41 @@ const Views = (() => {
 
   async function templatesPage() {
     afterRender(tplLoad);
+    afterRender(tplHealthLoad);
     return `<div class="view-head"><h1>Templates</h1>
       <span class="muted">the emails this program sends, and which one is used when</span></div>
       ${Letters.variablesCardHtml()}
       ${Letters.settingsCardHtml()}
+      <div id="tpl-health"></div>
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
+  }
+
+  // Template health: per-template QA decision record (approvals, rewrites,
+  // rejections) rolled into a verdict. Renders above the template list as a
+  // work list — retire candidates first. Absent entirely until any template
+  // has QA observations; no fake "all healthy" banner on zero data.
+  async function tplHealthLoad() {
+    const box = document.getElementById("tpl-health");
+    if (!box) return;
+    try {
+      const r = await Api.program.qaTemplateHealth(90);
+      const ts = (r.templates || []).filter((t) => t.verdict !== "insufficient_data");
+      if (!ts.length) { box.remove(); return; }
+      const badgeOf = { retire_candidate: `<span class="badge warn">Retire candidate</span>`,
+        watch: `<span class="badge">Watch</span>`, healthy: `<span class="badge s-paid">Healthy</span>` };
+      box.innerHTML = `<h2>Draft quality by template <span class="muted">last ${r.days} days</span></h2>
+        <table><thead><tr><th>Template</th><th>Decisions</th><th>Approved unedited</th><th>Rejected</th>
+          <th>Avg rewrite</th><th>Verdict</th></tr></thead><tbody>` +
+        ts.map((t) => `<tr>
+          <td class="mono">${esc(t.artifact)}</td>
+          <td>${t.drafts}</td>
+          <td>${t.approved_unedited}</td>
+          <td>${t.rejected}</td>
+          <td>${t.avg_edit_ratio != null ? Math.round(100 * t.avg_edit_ratio) + "%" : "—"}</td>
+          <td>${badgeOf[t.verdict] || esc(t.verdict)}</td></tr>`).join("") +
+        `</tbody></table>
+        <p class="muted">Verdicts need 20+ decisions. Retire candidate: &gt;40% rejected or reviewers rewrite &gt;35% of the body on average — the template is producing work, not saving it.</p>`;
+    } catch { const b = document.getElementById("tpl-health"); if (b) b.remove(); }
   }
 
   async function tplLoad() {
@@ -11085,5 +11188,176 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients };
+  async function productivity() {
+    if (!can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
+    try {
+      const [m, p] = await Promise.all([Api.cases.telemetryMetrics(30), Api.cases.telemetryPaths(30)]);
+      const pct = (x) => x == null ? "—" : Math.round(x * 100) + "%";
+      const dur = (s) => s == null ? "—" : s < 90 ? Math.round(s) + "s" : (s / 60).toFixed(1) + "m";
+      const pathsByWf = Object.fromEntries((p.workflows || []).map((w) => [w.workflow, w]));
+      const cards = (m.workflows || []).map((w) => {
+        const pw = pathsByWf[w.workflow] || {};
+        return `<tr>
+          <td><a href="#/productivity" onclick="Views.productivityDetail('${esc(w.workflow)}');return false">${esc(w.workflow)}</a></td>
+          <td>${w.sessions}</td>
+          <td>${pct(pw.completion_rate)}</td>
+          <td>${dur(pw.median_time_to_submit_secs)}</td>
+          <td>${w.clicks_per_session != null ? w.clicks_per_session.toFixed(1) : "—"}</td>
+          <td>${w.keystrokes_per_session != null ? w.keystrokes_per_session.toFixed(1) : "—"}</td>
+          <td>${pct(w.prefill_accept_rate)}</td>
+          <td>${pct(w.next_action_accept_rate)}</td></tr>`;
+      }).join("");
+      const html = `<div class="view-head"><h1>Productivity</h1>
+        <span class="muted">measured interaction baseline, last ${m.days} days — keystroke counts, never content</span></div>
+        <h2>Workflow funnel</h2>
+        <table><thead><tr><th>Workflow</th><th>Sessions</th><th>Completed</th><th>Median → submit</th><th>Clicks/session</th>
+          <th>Keystrokes/session</th><th>Prefill accept</th><th>Next-action accept</th></tr></thead>
+        <tbody>${cards || `<tr><td colspan="8" class="muted">No telemetry yet — events appear as people use the portal.</td></tr>`}</tbody></table>
+        <div id="action-stats"></div>
+        <div id="model-matrix"></div>
+        <div id="prefill-stats"></div>
+        <div id="prod-detail"></div>`;
+      // Next-action calibration: per action, the prior the rule carries vs the
+      // Laplace-smoothed observed accept rate once n>=30 — same numbers the
+      // live recommender uses, so this is "why did the button say 0.83".
+      afterRender(async () => {
+        const box = document.getElementById("action-stats");
+        if (!box) return;
+        try {
+          const r = await Api.cases.telemetryActionStats(90);
+          const hrs = (h) => h == null ? "—" : h >= 48 ? (h / 24).toFixed(1) + "d" : h.toFixed(0) + "h";
+          const anyOutcome = (r.actions || []).some((a) => a.outcome && (a.outcome.accepted_median_hours_to_close != null || a.outcome.not_accepted_median_hours_to_close != null));
+          const rows = (r.actions || []).map((a) => `<tr>
+            <td class="mono">${esc(a.action_id)}</td>
+            <td>${a.shown}</td><td>${a.accepts}</td>
+            <td>${a.shown ? Math.round(100 * a.accepts / a.shown) + "%" : "—"}</td>
+            <td>${a.prior ? a.prior.toFixed(2) : "— (retired rule)"}</td>
+            <td>${a.confidence.toFixed(2)}</td>
+            <td>${a.basis === "observed" ? badge("OBSERVED") : '<span class="muted">prior</span>'}</td>
+            ${anyOutcome ? `<td>${hrs(a.outcome && a.outcome.accepted_median_hours_to_close)}</td>
+            <td>${hrs(a.outcome && a.outcome.not_accepted_median_hours_to_close)}</td>` : ""}</tr>`).join("");
+          if (!rows) { box.remove(); return; }
+          box.innerHTML = `<h2>Next-action calibration <span class="muted">last ${r.days} days</span></h2>
+            <table><thead><tr><th>Action</th><th>Shown</th><th>Accepted</th><th>Accept rate</th>
+              <th>Prior</th><th>Confidence now</th><th>Basis</th>
+              ${anyOutcome ? "<th>→ close when accepted</th><th>→ close when not</th>" : ""}</tr></thead><tbody>${rows}</tbody></table>
+            ${anyOutcome ? `<p class="muted">${esc(r.outcome_caveat || "")}</p>` : ""}
+            <p class="muted">Confidence flips from prior to observed at 30 showings (Laplace-smoothed, never a literal 100%).</p>
+            ${r.model_gate ? `<p class="muted">${r.model_gate.open
+              ? `Learning gate OPEN — ${r.model_gate.closed_cases} closed cases: the priors above now drive ranking directly (basis "learned" on the case page).`
+              : `Learning gate: ${r.model_gate.closed_cases}/${r.model_gate.required} closed cases — at ${r.model_gate.required}, next-action ranking switches from hand-set priors to the tenant's own accept rates.`}</p>` : ""}`;
+        } catch { const b = document.getElementById("action-stats"); if (b) b.remove(); }
+      });
+      // Transition matrix (Phase 5): where cases actually go from each
+      // status and how long they sit there first, computed from the tenant's
+      // own recorded transitions. Gated with the priors: below 300 closed
+      // cases this shows gate progress instead of a handful of anecdotes.
+      afterRender(async () => {
+        const box = document.getElementById("model-matrix");
+        if (!box) return;
+        const dwell = (h) => h == null ? "—" : h >= 48 ? (h / 24).toFixed(1) + "d" : h.toFixed(1) + "h";
+        // Two axes: lifecycle (canonical federal NSA statuses) and program
+        // (the program's own working board, e.g. FL AHCA CDR spellings).
+        const loadMatrix = async (axis) => {
+          const r = await Api.cases.analyticsTransitions(axis);
+          const toggle = `<span class="muted">axis:</span> ${["lifecycle", "program"].map((x) =>
+            x === axis ? `<b>${x}</b>` : `<a href="#/productivity" data-axis="${x}">${x}</a>`).join(" · ")}`;
+          if (r.status === "insufficient_data") {
+            box.innerHTML = `<h2>Transition matrix <span class="muted">${toggle}</span></h2>
+              <p class="muted">Learning gate: ${r.closed_cases}/${r.required} closed cases. Every status hop is
+              being recorded from now on; the matrix — where cases go next from each status, and the median
+              time they spend there first — unlocks at ${r.required}.</p>`;
+            return;
+          }
+          const rows = (r.matrix || []).map((c) => `<tr>
+            <td class="mono">${esc(c.from)}</td><td class="mono">${esc(c.to)}</td>
+            <td>${c.count}</td><td>${Math.round(100 * c.share)}%</td>
+            <td>${dwell(c.median_dwell_hours)}</td></tr>`).join("");
+          if (!rows) { box.innerHTML = `<h2>Transition matrix <span class="muted">${toggle}</span></h2>
+            <p class="muted">No ${axis} transitions recorded yet.</p>`; return; }
+          box.innerHTML = `<h2>Transition matrix <span class="muted">${toggle} · ${r.transitions} recorded transitions</span></h2>
+            <table><thead><tr><th>From</th><th>To</th><th>Cases</th><th>Share of exits</th><th>Median dwell</th></tr></thead>
+            <tbody>${rows}</tbody></table>
+            <p class="muted">Share is within the from-status. Dwell is wall time between entering the status and leaving it toward that outcome.</p>`;
+        };
+        box.addEventListener("click", (ev) => {
+          const a = ev.target.closest("a[data-axis]");
+          if (!a) return;
+          ev.preventDefault();
+          loadMatrix(a.dataset.axis).catch(() => {});
+        });
+        try { await loadMatrix("lifecycle"); } catch { const b = document.getElementById("model-matrix"); if (b) b.remove(); }
+      });
+      // Prefill accuracy by field: a low accept rate means the extraction is
+      // wrong or its confidence badge is distrusted — either way, a pipeline
+      // fix, and this is where you find which field needs it.
+      afterRender(async () => {
+        const box = document.getElementById("prefill-stats");
+        if (!box) return;
+        try {
+          const r = await Api.cases.telemetryPrefillStats(90);
+          const rows = (r.fields || []).map((f) => `<tr>
+            <td class="mono">${esc(f.field)}</td>
+            <td>${f.accepts}</td><td>${f.overrides}</td>
+            <td>${f.accept_rate != null ? Math.round(100 * f.accept_rate) + "%" : "—"}</td></tr>`).join("");
+          if (!rows) { box.remove(); return; }
+          box.innerHTML = `<h2>Prefill accuracy by field <span class="muted">last ${r.days} days</span></h2>
+            <table><thead><tr><th>Field</th><th>Accepted</th><th>Typed over</th><th>Accept rate</th></tr></thead><tbody>${rows}</tbody></table>`;
+        } catch { const b = document.getElementById("prefill-stats"); if (b) b.remove(); }
+      });
+      return html;
+    } catch (e) { return err(e); }
+  }
+
+  async function productivityDetail(workflow) {
+    const box = $("#prod-detail");
+    try {
+      const d = await Api.cases.telemetryPaths(30, workflow);
+      const t = (d.top_transitions || []).map((x) =>
+        `<tr><td>${esc(x.from)}</td><td>${esc(x.to)}</td><td>${x.count}</td></tr>`).join("");
+      const ex = (d.abandon_exits || []).map((x) =>
+        `<tr><td>${esc(x.last_step)}</td><td>${x.sessions}</td></tr>`).join("");
+      box.innerHTML = `<h2>${esc(workflow)} — step transitions</h2>
+        <table><thead><tr><th>From</th><th>To</th><th>Count</th></tr></thead><tbody>${t || `<tr><td colspan="3" class="muted">No transitions yet.</td></tr>`}</tbody></table>
+        <h3>Where abandoned sessions end</h3>
+        <table><thead><tr><th>Last step before giving up</th><th>Sessions</th></tr></thead><tbody>${ex || `<tr><td colspan="2" class="muted">No abandoned sessions.</td></tr>`}</tbody></table>`;
+    } catch (e) { box.innerHTML = err(e); }
+  }
+
+  function attentionGo(caseId, actionId) {
+    if (window.Telemetry) Telemetry.track("next_action_accept", actionId, { source: "attention" });
+    location.hash = `#/cases/${caseId}`;
+  }
+
+  async function docReview() {
+    if (!can("CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
+    try {
+      const r = await Api.cases.docReviewQueue();
+      const q = r.queue || [];
+      const rows = q.map((i) => `<tr${i.aging ? ' class="tpl-retired"' : ""}>
+        <td><a href="#/cases/${i.case_id}">${esc(i.case_number)}</a></td>
+        <td>${esc(i.doc_type || "document")}</td>
+        <td>${i.findings}</td>
+        <td class="muted">${fmtDate(i.analyzed_at)}${i.aging ? ' <span class="badge warn">aging 48h+</span>' : ""}</td>
+        <td>${i.next_statutory_date ? fmtDate(i.next_statutory_date) : "—"}</td>
+        <td><button class="mini primary" onclick="Views.docAck('${i.case_id}','${i.doc_id}',this)">Mark reviewed</button></td></tr>`).join("");
+      return `<div class="view-head"><h1>Document review</h1>
+        <span class="muted">analysis findings awaiting a human check, statutory-urgency first</span></div>
+        ${q.length ? `<table><thead><tr><th>Case</th><th>Document</th><th>Findings</th><th>Analyzed</th><th>Statutory due</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>` : `<p class="muted">Queue empty — every analysis with findings has been reviewed.</p>`}`;
+    } catch (e) { return err(e); }
+  }
+
+  async function docAck(caseId, docId, btn) {
+    await UI.run(btn, async () => {
+      try {
+        await Api.cases.ackDoc(caseId, docId);
+        if (window.Telemetry) Telemetry.track("next_action_accept", "review_documents", { source: "doc_review" });
+        btn.closest("tr").remove();
+        UI.toast("Findings reviewed");
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "…");
+  }
+
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

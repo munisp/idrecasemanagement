@@ -577,12 +577,31 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"queue": rows})
 		return
 	}
-	rows, err := s.queryRows(r, `
-		SELECT id, case_id, artifact, channel, subject, status, drafted_by, created_at
-		FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING' ORDER BY created_at DESC`, tenant)
+	// Urgency ordering: a QA draft on a case whose offer window or open-
+	// negotiation period is closing jumps the FIFO line — the statutory date
+	// is the deadline, not the draft's arrival order. LEAST ignores NULLs, so
+	// a case with only one clock still sorts by it; dateless cases keep FIFO.
+	rows, err := s.queryRows(r, fmt.Sprintf(`
+		SELECT q.id, q.case_id, q.artifact, q.channel, q.subject, q.status, q.drafted_by, q.created_at,
+		       c.open_negotiation_end, c.offer_window_ends_at
+		FROM public.qa_reviews q
+		LEFT JOIN tenant_%s.cases c ON c.id::text = q.case_id
+		WHERE q.tenant=$1 AND q.status='PENDING'
+		ORDER BY LEAST(c.offer_window_ends_at, c.open_negotiation_end::timestamptz) ASC NULLS LAST, q.created_at`,
+		sanitizeTenant(tenant)), tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	// Aging: a PENDING draft older than qaAgingHours is stuck, not queued —
+	// flag it so the queue screen (and the dashboard rollup) can tell a
+	// 3-day-old draft from a 3-hour-old one. Same escalation pattern as
+	// doc-findings aging; statutory ordering stays the primary sort.
+	now := time.Now().UTC()
+	for _, row := range rows {
+		if ts, ok := row["created_at"].(time.Time); ok && now.Sub(ts) > qaAgingHours*time.Hour {
+			row["aging"] = true
+		}
 	}
 	// Recent decisions keep the page useful when the pending queue is empty —
 	// reviewers see what the gate has been doing, not a blank screen.
@@ -596,6 +615,13 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 		       to_recipients, cc_recipients
 		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
 		ORDER BY reviewed_at DESC`, tenant)
+	// Approved-but-unsent past qaSendOverdueHours: flag so the ready-to-send
+	// list can tell "approved an hour ago" from "approved three days ago".
+	for _, row := range toSend {
+		if ts, ok := row["reviewed_at"].(time.Time); ok && now.Sub(ts) > qaSendOverdueHours*time.Hour {
+			row["send_overdue"] = true
+		}
+	}
 	s.withCaseNumbers(r, tenant, rows, recent, toSend)
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend})
 }
@@ -673,6 +699,13 @@ func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	q["documents"] = docs
+	// Reviewer context: how this template's drafts have fared at this gate
+	// historically (Phase 3-lite observations). Evidence-citing — the
+	// reviewer sees "this template is usually sent untouched" or "expect to
+	// rewrite ~20%", not a recommendation to approve or reject.
+	if artifact != "" {
+		q["template_stats"] = s.qaTemplateStats(r, tenant, artifact)
+	}
 	writeJSON(w, http.StatusOK, q)
 }
 
