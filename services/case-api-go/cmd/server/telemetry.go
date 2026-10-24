@@ -341,7 +341,7 @@ func (s *server) telemetryPrefillStats(w http.ResponseWriter, r *http.Request) {
 		FROM public.interaction_events
 		WHERE tenant=$1 AND action IN ('prefill_accept','prefill_override') AND target <> ''
 		  AND created_at > now() - make_interval(days => $2)
-		GROUP BY target ORDER BY accepts + overrides DESC`, tenant, days)
+		GROUP BY target ORDER BY count(*) DESC`, tenant, days)
 	if err != nil {
 		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 		return

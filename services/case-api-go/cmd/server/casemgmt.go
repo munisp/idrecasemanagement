@@ -550,7 +550,7 @@ func (s *server) maybeAdvanceStatus(r *http.Request, tenant, caseID string) {
 	// All case invoices PAID while awaiting payment => funds settled.
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET status='CLOSED_PAID', updated_at=now()
-		WHERE id=$1 AND status='PAYMENT_PENDING'
+		WHERE id::text=$1 AND status='PAYMENT_PENDING'
 		  AND EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$2 AND case_id=$1)
 		  AND NOT EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$2 AND case_id=$1 AND status='OPEN')`, t),
 		caseID, tenant)

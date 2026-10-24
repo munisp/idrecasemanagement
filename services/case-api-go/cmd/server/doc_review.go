@@ -16,7 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-var docReviewRoles = []string{"CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+var docReviewRoles = []string{"CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "PM", "TENANT_ADMIN"}
 
 // docFindingsAgingHours: findings older than this without a reviewer
 // acknowledgment are "aging" — flagged in the queue and counted separately

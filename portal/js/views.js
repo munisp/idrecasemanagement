@@ -11330,7 +11330,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
   async function docReview() {
-    if (!can("CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
+    if (!can("CASE_MANAGER", "PM", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
     try {
       const r = await Api.cases.docReviewQueue();
       const q = r.queue || [];
