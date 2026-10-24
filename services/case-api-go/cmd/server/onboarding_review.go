@@ -75,9 +75,17 @@ func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onbo
 // not ready until doc-intel has read it (a READY package with an unread
 // document in it would otherwise still file).
 func (s *server) packageDocReplaced(r *http.Request, tenant string, k onboardingKind, pkgID string) {
+	// The set's status from what is left in it, by doc-intel's rule (tpa_docs._refresh_package): being read while
+	// a document is (or a merged PDF waits to be split into them), READY once every one has been, ASSEMBLING when it
+	// is empty. After a removal nothing is left to read, so a set set to VALIDATING here stayed "being read" until
+	// its next upload.
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
-		UPDATE public.%s_packages SET status='VALIDATING', updated_at=now()
-		WHERE tenant=$1 AND id=$2 AND status<>'FILED'`, k.prefix), tenant, pkgID)
+		UPDATE public.%[1]s_packages pk SET updated_at=now(), status = CASE
+		    WHEN NOT EXISTS (SELECT 1 FROM public.%[1]s_package_docs d WHERE d.package_id=pk.id)
+		      THEN CASE WHEN pk.mode='MERGED' AND coalesce(pk.source_object_key,'') <> '' THEN 'VALIDATING' ELSE 'ASSEMBLING' END
+		    WHEN EXISTS (SELECT 1 FROM public.%[1]s_package_docs d WHERE d.package_id=pk.id AND d.status IN ('PENDING','ANALYZING')) THEN 'VALIDATING'
+		    ELSE 'READY' END
+		WHERE pk.tenant=$1 AND pk.id=$2 AND pk.status<>'FILED'`, k.prefix), tenant, pkgID)
 	var owner string
 	if s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT %s::text FROM public.%s_packages WHERE tenant=$1 AND id=$2`, k.ownerCol, k.prefix),

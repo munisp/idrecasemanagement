@@ -8765,7 +8765,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <td>
             <button class="mini" onclick="Views.hpProfileForm('${c.party_id}','${c.party_type}')">Profile</button>
             <button class="mini" onclick="Views.hpPaymentForm('${c.party_id}')">Payment</button>
-            <button class="mini" onclick="Views.hpPackageStart('${c.party_id}','DISCRETE')">6-file package</button>
+            <button class="mini" onclick="Views.hpPackageStart('${c.party_id}','DISCRETE')">Add documents</button>
             <button class="mini" onclick="Views.hpPackageStart('${c.party_id}','MERGED')">Merged PDF</button>
             ${(c.open_packages || []).map((p) => `<button class="mini" onclick="Views.hpPackageBox('${p.id}')">${esc(p.mode)} ${esc(p.status)}</button>`).join("")}
           </td></tr>`;
@@ -8869,7 +8869,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpMergedFn(this,'${packageId}')">
             <input name="file" type="file" accept=".pdf,application/pdf" required />
             <button class="mini">Upload merged PDF</button></form>` : ""}
-        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when submitting.</p>' : ""}
+        ${p.status === "READY" ? '<p class="ok">Every document is read — this package can be referenced when submitting.</p>' : ""}
         ${moreDocsHtml(p, "hp")}`;
       // The filing list is filled by the board: redraw it once the package is
       // ready, or a READY package only showed up there after a page reload.
@@ -9144,9 +9144,9 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   }
 
   // ── Documents for the dispute being filed ──
-  // Its own set, made for it here: six files or one merged PDF, each checked before the dispute is filed (a set
-  // named on a filing must have all six accepted). A set started earlier for the same client and not filed yet
-  // can be used instead.
+  // Its own set, made for it here: its documents (any number, the six usual ones optional) or one merged PDF, each
+  // read before the dispute is filed. A set started earlier for the same client and not filed yet can be used
+  // instead.
   let tpaFileDocs = null; // { id, client, mode, status }
   function tpaFileDocsReset() {
     tpaFileDocs = null;
@@ -9647,7 +9647,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       out.innerHTML = `<p>${r.waiting_for_documents} dispute(s) accepted and waiting for their documents to be checked${r.refused ? `, <b>${r.refused} refused</b>` : ""}.</p>
         <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Documents</th><th>Result</th></tr></thead><tbody>
         ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.dispute_ref)}</td><td>${esc(x.party)}</td>
-          <td>${x.mode ? esc(x.mode === "MERGED" ? "merged PDF" : (x.attached || []).length + " of 6 files") : "—"}</td>
+          <td>${x.mode ? esc(x.mode === "MERGED" ? "merged PDF" : (x.attached || []).length + ((x.attached || []).length === 1 ? " file" : " files")) : "—"}</td>
           <td>${x.status === "WAITING_DOCS" ? '<span class="badge s-validating">Checking documents</span>' : '<span class="badge s-rejected">Refused</span>'}${(x.errors || []).length ? `<br><span class="muted">${(x.errors || []).map(esc).join("<br>")}</span>` : ""}</td></tr>`).join("")}
         </tbody></table>`;
       if (window.Telemetry) Telemetry.taskDone("bulk_filing", { rows: (r.rows || []).length, refused: r.refused || 0 });
