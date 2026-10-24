@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -45,6 +46,16 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = "INITIAL_FEE"
 	}
+	// A case closed without review (ineligible, withdrawn, dismissed, plan opt-out, refunded) generates no invoice.
+	if in.Kind != "INITIAL_FEE" {
+		var internal, outcome string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(internal_status,''), coalesce(details->>'case_outcome','') FROM tenant_%s.cases WHERE id=$1`,
+			sanitizeTenant(tenant)), caseID).Scan(&internal, &outcome)
+		if closedWithoutReviewStatuses[internal] || s.loadProgram(r, tenant).outcomeGroupOf(outcome) == "Closed Without Review" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "no invoice is generated for a case closed without review (" + orWord(outcome, internal) + ")"})
+			return
+		}
+	}
 	// The review invoice is a step of its own (after the Attorney's review).
 	if in.Kind != "INITIAL_FEE" && !s.stepGuard(w, r, tenant, caseID, "invoice") {
 		return
@@ -80,7 +91,14 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, caseID, "INVOICE_ISSUED", map[string]any{
 		"by": p.Subject, "invoice_id": invID, "party": in.Party, "kind": in.Kind, "amount_cents": in.AmountCents,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"invoice_id": invID, "invoice_no": caseNumber})
+	// A review invoice is mailed to the party billed: its PDF is made now, and once it passes QA the email that
+	// carries it is drafted for the PM to send (draftInvoiceEmail).
+	letterQueued := false
+	if in.Kind != "INITIAL_FEE" {
+		key := map[string]string{"HEALTH_PLAN": "invoice_health_plan", "PROVIDER": "invoice_provider"}[in.Party]
+		letterQueued = s.enqueueLetter(r, tenant, caseID, caseNumber, key, displayName(p)) == nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"invoice_id": invID, "invoice_no": caseNumber, "invoice_letter_queued": letterQueued})
 }
 
 func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
@@ -89,11 +107,19 @@ func (s *server) listInvoices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	// The case from the path (/cases/{id}/invoices), or ?case_id= on /invoices; ?status= narrows either.
 	caseID := chi.URLParam(r, "caseId")
+	if caseID == "" {
+		caseID = strings.TrimSpace(r.URL.Query().Get("case_id"))
+	}
 	where, args := `tenant=$1`, []any{tenant}
 	if caseID != "" {
-		where += ` AND case_id=$2`
 		args = append(args, caseID)
+		where += fmt.Sprintf(` AND case_id=$%d`, len(args))
+	}
+	if st := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status"))); st != "" {
+		args = append(args, st)
+		where += fmt.Sprintf(` AND status=$%d`, len(args))
 	}
 	limit, offset := pageParams(r, 50, 500)
 	var total int
@@ -130,6 +156,7 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Action        string `json:"action"` // PAY|REFUND|VOID
 		RemittanceRef string `json:"remittance_ref"`
+		RefundMethod  string `json:"refund_method"` // REFUND: "" (how it was paid) | "outside" (check / ACH, not the card)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
@@ -140,30 +167,25 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"action must be PAY|REFUND|VOID"}`, http.StatusBadRequest)
 		return
 	}
-	// Card refund first when a Stripe payment exists — never mark REFUNDED
-	// without the money actually moving.
+	// A refund goes through refunds.go: claimed once, the card refunded for this fee's own amount, and only
+	// called REFUNDED when the money has gone back (a card refund can stay REFUND_PENDING until Stripe confirms).
 	if in.Action == "REFUND" {
-		if err := s.refundCardPayment(r, tenant, invID); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"stripe refund failed: %s"}`, err.Error()), http.StatusBadGateway)
+		actorP := r.Context().Value(ctxPrincipal{}).(principal)
+		st, err := s.startRefund(r, tenant, invID, in.RemittanceRef, displayName(actorP), in.RefundMethod == "outside")
+		if errors.Is(err, errRefundState) {
+			http.Error(w, `{"error":"invoice not paid, or already being refunded"}`, http.StatusConflict)
+			return
+		} else if err != nil {
+			// 422, not 502: Cloudflare replaces a 5xx from the origin with its own error page, and the person
+			// pressing Refund needs Stripe's reason (the fee is still paid; nothing was recorded).
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": st})
+		return
 	}
-	// REFUND requires the invoice to actually be PAID first -- PAY and VOID
-	// both require OPEN (you settle or void something outstanding). Before
-	// this, all three actions shared the same `status='OPEN'` filter, so
-	// REFUND on a never-paid OPEN invoice passed the filter and jumped
-	// straight OPEN -> REFUNDED. refundCardPayment() deliberately no-ops
-	// (returns nil) when it finds no Stripe payment on file, trusting that
-	// to mean "paid offline, refund handled outside the system" -- a
-	// reasonable assumption for an invoice that really was PAID, but for
-	// one that was NEVER paid it let the code log a real "$X refund issued"
-	// ledger entry (REFUND_ISSUED/OUT) for money that never moved. Confirmed
-	// live: an unpaid invoice went OPEN -> REFUNDED with a ledger entry and
-	// no refund email.
+	// PAY and VOID both require OPEN (you settle or void something outstanding).
 	requiredStatus := "OPEN"
-	if in.Action == "REFUND" {
-		requiredStatus = "PAID"
-	}
 	var caseID string
 	var amount int64
 	var party string
@@ -178,6 +200,22 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, caseID, "INVOICE_"+status,
 		fmt.Sprintf("Invoice %s marked %s%s", invID, status, orDash(" — remittance "+in.RemittanceRef)))
+	// The money record and the audit first, before the slower follow-ons below (a case can open, rules fire):
+	// a settlement that went through must never be missing from the books.
+	kind, dir := "INVOICE_VOIDED", "NONE"
+	if in.Action == "PAY" {
+		kind, dir = "PAYMENT_PAID", "IN"
+	}
+	// finEvent's actor is shown to reviewers (financial-report transaction
+	// stream) and gets displayName(); logAudit's "by" stays the stable
+	// subject ID -- a tamper-evident compliance record should point at the
+	// permanent account identity, not a display name that could change.
+	actorP := r.Context().Value(ctxPrincipal{}).(principal)
+	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, displayName(actorP))
+	s.logAudit(context.WithoutCancel(r.Context()), tenant, caseID, "INVOICE_SETTLED", map[string]any{
+		"by": actorP.Subject, "invoice_id": invID, "action": in.Action, "status": status,
+		"amount_cents": amount, "party": party, "remittance_ref": in.RemittanceRef,
+	})
 	if status == "PAID" {
 		// Paid offline: an open card checkout for this fee must not take it again.
 		_ = s.expireOverlapping(r.Context(), tenant, []string{invID})
@@ -193,23 +231,6 @@ func (s *server) settleInvoice(w http.ResponseWriter, r *http.Request) {
 			"tenant": tenant,
 		})
 	}
-	// unified financial stream (offline settlements: check/ACH/manual)
-	kind, dir := "INVOICE_VOIDED", "NONE"
-	if in.Action == "PAY" {
-		kind, dir = "PAYMENT_PAID", "IN"
-	} else if in.Action == "REFUND" {
-		kind, dir = "REFUND_ISSUED", "OUT"
-	}
-	// finEvent's actor is shown to reviewers (financial-report transaction
-	// stream) and gets displayName(); logAudit's "by" stays the stable
-	// subject ID -- a tamper-evident compliance record should point at the
-	// permanent account identity, not a display name that could change.
-	actorP := r.Context().Value(ctxPrincipal{}).(principal)
-	s.finEvent(r, tenant, caseID, invID, kind, dir, amount, party, in.RemittanceRef, displayName(actorP))
-	s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
-		"by": actorP.Subject, "invoice_id": invID, "action": in.Action, "status": status,
-		"amount_cents": amount, "party": party, "remittance_ref": in.RemittanceRef,
-	})
 	// Money moved — the case status and checklist follow the fact.
 	s.maybeAdvanceStatus(r, tenant, caseID)
 	s.autoChecklist(r, tenant, caseID)
@@ -340,31 +361,57 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A claim already on the case is updated from the line (a corrected spreadsheet uploaded again); a blank
+	// cell leaves what it held. Only claims new to the case add to its count and billed amount.
 	var billed int64
+	added, updated := 0, 0
 	for _, c := range in.Claims {
 		if c.ClaimNumber == "" {
 			continue
 		}
-		if _, err := tx.Exec(r.Context(), `
+		var inserted bool
+		if err := tx.QueryRow(r.Context(), `
 			INSERT INTO public.case_claims (tenant, case_id, claim_number, cpt, billed_cents, paid_cents,
 				disputed_cents, patient_first_name, patient_last_name, type_of_service, denial_reason,
 				date_of_service, date_claim_submitted, date_of_denial, date_of_final_determination,
 				provider_name, facility_name, evidence_location)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,nullif($12,'')::date,nullif($13,'')::date,
 				nullif($14,'')::date,nullif($15,'')::date,$16,$17,$18)
-			ON CONFLICT (tenant, case_id, claim_number) DO NOTHING`,
+			ON CONFLICT (tenant, case_id, claim_number) DO UPDATE SET
+				cpt = coalesce(nullif(excluded.cpt,''), case_claims.cpt),
+				billed_cents = CASE WHEN excluded.billed_cents > 0 THEN excluded.billed_cents ELSE case_claims.billed_cents END,
+				paid_cents = CASE WHEN excluded.paid_cents > 0 THEN excluded.paid_cents ELSE case_claims.paid_cents END,
+				disputed_cents = CASE WHEN excluded.disputed_cents > 0 THEN excluded.disputed_cents ELSE case_claims.disputed_cents END,
+				patient_first_name = coalesce(nullif(excluded.patient_first_name,''), case_claims.patient_first_name),
+				patient_last_name = coalesce(nullif(excluded.patient_last_name,''), case_claims.patient_last_name),
+				type_of_service = coalesce(nullif(excluded.type_of_service,''), case_claims.type_of_service),
+				denial_reason = coalesce(nullif(excluded.denial_reason,''), case_claims.denial_reason),
+				date_of_service = coalesce(excluded.date_of_service, case_claims.date_of_service),
+				date_claim_submitted = coalesce(excluded.date_claim_submitted, case_claims.date_claim_submitted),
+				date_of_denial = coalesce(excluded.date_of_denial, case_claims.date_of_denial),
+				date_of_final_determination = coalesce(excluded.date_of_final_determination, case_claims.date_of_final_determination),
+				provider_name = coalesce(nullif(excluded.provider_name,''), case_claims.provider_name),
+				facility_name = coalesce(nullif(excluded.facility_name,''), case_claims.facility_name),
+				evidence_location = coalesce(nullif(excluded.evidence_location,''), case_claims.evidence_location)
+			RETURNING (xmax = 0)`,
 			tenant, caseID, c.ClaimNumber, c.CPT, c.BilledCents, c.PaidCents,
 			c.DisputedCents, c.PatientFirst, c.PatientLast, c.TypeOfService, c.DenialReason,
 			c.DateOfService, c.DateSubmitted, c.DateOfDenial, c.DateFinalDeterm,
-			c.ProviderName, c.FacilityName, c.EvidenceLoc); err != nil {
-			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+			c.ProviderName, c.FacilityName, c.EvidenceLoc).Scan(&inserted); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, "claim "+c.ClaimNumber+": "+claimDBError(err)), http.StatusBadRequest)
 			return
 		}
-		billed += c.BilledCents
+		if inserted {
+			added++
+			billed += c.BilledCents
+		} else {
+			updated++
+		}
 	}
 	if _, err := tx.Exec(r.Context(),
-		fmt.Sprintf(`UPDATE tenant_%s.cases SET num_claims = coalesce(num_claims,0)+$2, disputed_amount_cents = coalesce(disputed_amount_cents,0)+$3, updated_at=now() WHERE id=$1`,
-			sanitizeTenant(tenant)), caseID, len(in.Claims), billed); err != nil {
+		fmt.Sprintf(`UPDATE tenant_%s.cases SET num_claims = (SELECT count(*) FROM public.case_claims WHERE tenant=$3 AND case_id=$4),
+			disputed_amount_cents = coalesce(disputed_amount_cents,0)+$2, updated_at=now() WHERE id=$1`,
+			sanitizeTenant(tenant)), caseID, billed, tenant, caseID); err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
@@ -387,13 +434,12 @@ func (s *server) importClaims(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf(`SELECT coalesce(disputed_amount_cents,0) FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&disputed)
 	s.escalationTrigger(r, tenant, caseID, disputed)
 	s.logActivity(r.Context(), tenant, caseID, "CLAIMS_IMPORT",
-		fmt.Sprintf("%d claim lines imported ($%d.%02d billed; running total %d claims)",
-			len(in.Claims), billed/100, billed%100, len(in.Claims)))
+		fmt.Sprintf("%d claim lines imported: %d new ($%d.%02d billed), %d updated", len(in.Claims), added, billed/100, billed%100, updated))
 	s.logAudit(r.Context(), tenant, caseID, "CLAIMS_IMPORTED", map[string]any{
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "line_count": len(in.Claims),
 		"billed_cents": billed, "full_record_required": requireFull,
 	})
-	resp := map[string]any{"imported": len(in.Claims)}
+	resp := map[string]any{"imported": added + updated, "added": added, "updated": updated}
 	// Adopted Capitol Bridge large-volume policy (v01.01.2026): evaluated on
 	// every import when the tenant has it enabled; violations land on the
 	// case record + activity stream.
@@ -410,7 +456,7 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 		SELECT claim_number, cpt, billed_cents, paid_cents, disputed_cents,
 		       patient_first_name, patient_last_name, type_of_service, denial_reason,
 		       date_of_service, date_claim_submitted, date_of_denial, date_of_final_determination,
-		       provider_name, facility_name, evidence_location, created_at
+		       provider_name, facility_name, evidence_location, created_at, status
 		FROM public.case_claims WHERE tenant=$1 AND case_id=$2 ORDER BY claim_number LIMIT 500`,
 		tenant, caseID)
 	if err != nil {
@@ -442,14 +488,19 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
-		Email               string `json:"email"`
-		ContactName         string `json:"contact_name"`
-		Org                 string `json:"org"`
-		Notes               string `json:"notes"`
-		FilingPartyType     string `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
-		DisputedAmountCents int64  `json:"disputed_amount_cents"`
-		QPACents            int64  `json:"qpa_cents"`    // federal NSA tenants only — programmed tenants use disputed_amount_cents
-		ServiceLine         string `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
+		Email               string        `json:"email"`
+		ContactName         string        `json:"contact_name"`
+		Org                 string        `json:"org"`
+		Notes               string        `json:"notes"`
+		FilingPartyType     string        `json:"filing_party_type"` // PROVIDER|HEALTH_PLAN (default PROVIDER)
+		DisputedAmountCents int64         `json:"disputed_amount_cents"`
+		QPACents            int64         `json:"qpa_cents"`    // federal NSA tenants only — programmed tenants use disputed_amount_cents
+		ServiceLine         string        `json:"service_line"` // programmed tenants only — the real case gets this at creation; legacy federal intake_requests rows have no such column (service_line is captured later, when staff open the real case via "New dispute")
+		Packet              *filingPacket `json:"packet"`       // the filing packet form, when staff took the packet by phone/email (filing_packet.go)
+		// The side the dispute is against and where its notices go (the intake page requires them; the assistant's
+		// chat intake does not ask yet). Checked and recorded whenever given -- here or in the packet form.
+		OtherPartyName  string `json:"other_party_name"`
+		OtherPartyEmail string `json:"other_party_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
@@ -462,6 +513,21 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	if fpt != "PROVIDER" && fpt != "HEALTH_PLAN" {
 		http.Error(w, `{"error":"filing_party_type must be PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
 		return
+	}
+	if packetRejected(w, in.Packet) {
+		return
+	}
+	rsp := in.Packet.otherParty(respondent{Side: otherSide(fpt), Name: in.OtherPartyName, Email: in.OtherPartyEmail})
+	named := rsp.Name != "" || rsp.Email != ""
+	if named {
+		if msg := rsp.check(); msg != "" {
+			http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+			return
+		}
+		if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); msg != "" {
+			http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Programmed tenants (FL AHCA CDR today): the Filing Party has always
@@ -481,6 +547,11 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 			return
+		}
+		staff := r.Context().Value(ctxPrincipal{}).(principal)
+		s.fileWithPacket(r, tenant, caseID, in.Packet, displayName(staff))
+		if named {
+			s.recordRespondent(r, tenant, caseID, rsp)
 		}
 		// Reflect the payment gate honestly to staff: when the program
 		// charges an initial fee the case sits AWAITING_PAYMENT until the
@@ -715,6 +786,20 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = filtered
 	}
+	// Search (?q=): same merged set, so it filters here too -- requester, contact, organization, case number,
+	// status, service line, filing party.
+	if t := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q"))); t != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			for _, k := range []string{"email", "contact_name", "org", "case_number", "status", "service_line", "filing_party_type"} {
+				if strings.Contains(strings.ToLower(str(row[k])), t) {
+					filtered = append(filtered, row)
+					break
+				}
+			}
+		}
+		rows = filtered
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		ti, _ := rows[i]["created_at"].(time.Time)
 		tj, _ := rows[j]["created_at"].(time.Time)
@@ -925,7 +1010,10 @@ func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
 	// Attorney's opt-out decision the workflow is waiting on, same
 	// dedicated-endpoint correspondence as checkEligibility's auto-signal.
 	wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-	_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "PLAN_OPT_OUT", map[string]any{"eligible": in.Eligible})
+	_ = s.sigCase(r.Context(), tenant, caseID, wfID, "PLAN_OPT_OUT", map[string]any{"eligible": in.Eligible})
+	if in.Eligible {
+		s.markProgramDate(r.Context(), tenant, caseID, "opt_out_decided_at") // the Opt-Out letter is due by the next business day
+	}
 	s.logActivity(r.Context(), tenant, caseID, "OPT_OUT_DECISION",
 		fmt.Sprintf("Opt-out eligibility: %v%s (by %s)", in.Eligible, orDash(" — "+in.Rationale), p.Subject))
 	// Response unchanged (pre-existing behavior), but only audit a decision that was persisted.
@@ -1226,4 +1314,16 @@ func (s *server) checkVolumeRules(r *http.Request, tenant, caseID string) map[st
 				strings.Join(violations, "; ")))
 	}
 	return result
+}
+
+// claimDBError: a claim line the database refused, in words (a date or an amount it could not read).
+func claimDBError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "date/time") || strings.Contains(msg, "type date"):
+		return "a date could not be read (use YYYY-MM-DD or MM/DD/YYYY)"
+	case strings.Contains(msg, "out of range"):
+		return "an amount is too large"
+	}
+	return "it could not be saved"
 }

@@ -1,0 +1,33 @@
+/* The filing packet form (js/packetform.js) -- used by app.html and dispute.html, so colours come from either
+   page's tokens with plain fallbacks. */
+.pf{display:flex;flex-direction:column;gap:14px;max-width:1100px}
+.pf-sec{border:1px solid var(--border-default,#d6d9de);border-radius:10px;padding:12px 16px 14px;margin:0;min-width:0}
+.pf-sec legend{font-weight:600;padding:0 6px;color:var(--text-primary,inherit)}
+.pf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px 16px;margin:6px 0}
+.pf label{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--text-secondary,#4a5160)}
+.pf input:not([type=radio]):not([type=checkbox]),.pf textarea{font:inherit;font-size:14px;padding:6px 8px;border:1px solid var(--border-default,#c9cdd3);border-radius:6px;background:var(--surface-raised,#fff);color:var(--text-primary,inherit);min-width:0}
+.pf textarea{resize:vertical;width:100%;box-sizing:border-box}
+.pf .pf-choice{flex-direction:row;align-items:flex-start;gap:8px;font-size:14px;color:var(--text-primary,inherit);line-height:1.35}
+.pf .pf-choice input{margin-top:3px;flex:none}
+.pf-choices{display:flex;flex-direction:column;gap:4px;margin:4px 0 8px}
+.pf-choices.pf-inline{flex-direction:row;flex-wrap:wrap;gap:4px 22px}
+.pf-choices.pf-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:4px 16px}
+.pf-checks{display:flex;flex-direction:column;gap:6px;margin:6px 0 10px;max-width:80ch}
+.pf-q{margin:10px 0 2px;font-size:14px;font-weight:500;color:var(--text-primary,inherit)}
+.pf-hint{margin:2px 0 8px;font-size:12.5px;color:var(--text-tertiary,#6b7280);max-width:80ch}
+.pf-fixed{margin:4px 0;font-weight:500}
+.pf-area{margin:6px 0 10px}
+.pf-certify{margin:6px 0 10px;max-width:80ch}
+.pf-scroll{overflow-x:auto}
+.pf-claims{border-collapse:collapse;min-width:1050px;font-size:13px}
+.pf-claims th{text-align:left;font-weight:500;font-size:12px;color:var(--text-secondary,#4a5160);padding:4px;vertical-align:bottom}
+.pf-claims td{padding:2px 4px}
+.pf-claims td input{width:100%;box-sizing:border-box;padding:4px 6px!important;font-size:13px!important}
+.pf-del{border:0;background:none;font-size:18px;line-height:1;cursor:pointer;color:var(--text-tertiary,#6b7280);padding:2px 6px}
+.pf-add{margin-top:8px}
+.pf[data-party="PROVIDER"] .pf-pos-plan,.pf[data-party="HEALTH_PLAN"] .pf-pos-provider{display:none}
+.pf-pdf{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:14px;margin:6px 0 12px}
+.pf-pdf-msg{color:var(--text-secondary,#4a5160);font-size:13px}
+.pf-problems{color:var(--danger-fg,#b42318);font-size:13px;margin:8px 0}
+.pf input[type=radio],.pf input[type=checkbox]{width:auto;min-width:0;padding:0}
+.pf-wrap,.pf,.pf-sec{min-width:0;max-width:100%}

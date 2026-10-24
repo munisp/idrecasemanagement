@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/jackc/pgx/v5"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -18,6 +19,13 @@ var telemClean = regexp.MustCompile(`[^a-z0-9_:/#-]`)
 
 // telemetryIngest: POST /telemetry/events {events:[...]} — best-effort,
 // cheap, and never the reason a portal interaction fails.
+
+// telemActions: what the portal reports (telemetry.js). task_start / task_done / task_error carry a task name
+// (target) and, for task_done/task_error, how long it took (meta.ms) and how much work (meta.clicks, meta.keys).
+var telemActions = map[string]bool{"click": true, "keystroke": true, "submit": true, "navigate": true,
+	"prefill_accept": true, "prefill_override": true, "next_action_accept": true, "next_action_override": true,
+	"task_start": true, "task_done": true, "task_error": true, "next_action_shown": true}
+
 func (s *server) telemetryIngest(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -41,11 +49,12 @@ func (s *server) telemetryIngest(w http.ResponseWriter, r *http.Request) {
 	if len(sess) > 64 {
 		sess = sess[:64]
 	}
-	stored := 0
+	// One round trip for the whole upload, and only the actions the metrics read.
+	batch := &pgx.Batch{}
 	for _, e := range in.Events {
 		wf := telemClean.ReplaceAllString(e.Workflow, "")
 		act := telemClean.ReplaceAllString(e.Action, "")
-		if wf == "" || act == "" || len(wf) > 40 || len(act) > 40 {
+		if wf == "" || !telemActions[act] || len(wf) > 40 {
 			continue
 		}
 		tgt := e.Target
@@ -53,12 +62,21 @@ func (s *server) telemetryIngest(w http.ResponseWriter, r *http.Request) {
 			tgt = tgt[:120]
 		}
 		meta, _ := json.Marshal(e.Meta)
-		if _, err := s.db.Exec(r.Context(), `
-			INSERT INTO public.interaction_events (tenant, actor_sub, session_id, workflow, action, target, meta)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			tenant, p.Subject, sess, wf, act, tgt, meta); err == nil {
-			stored++
+		if len(meta) > 1024 {
+			meta = []byte("{}")
 		}
+		batch.Queue(`INSERT INTO public.interaction_events (tenant, actor_sub, session_id, workflow, action, target, meta)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)`, tenant, p.Subject, sess, wf, act, tgt, meta)
+	}
+	stored := 0
+	if batch.Len() > 0 {
+		br := s.db.SendBatch(r.Context(), batch)
+		for i := 0; i < batch.Len(); i++ {
+			if _, err := br.Exec(); err == nil {
+				stored++
+			}
+		}
+		_ = br.Close()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"stored": stored})
 }
@@ -69,7 +87,7 @@ func (s *server) telemetryIngest(w http.ResponseWriter, r *http.Request) {
 func (s *server) telemetryMetrics(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "CASE_MANAGER") {
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "CASE_MANAGER") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -120,7 +138,42 @@ func (s *server) telemetryMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"days": days, "workflows": out, "generated_at": time.Now().UTC()})
+	rows.Close()
+	// Each task (filing a dispute, approving a draft, sending a letter...): how many were done, how many refused,
+	// and what a typical one took -- the median, so one left open over lunch doesn't skew it.
+	tasks := []map[string]any{}
+	if trows, err := s.db.Query(r.Context(), `
+		SELECT workflow, target,
+		       count(*) FILTER (WHERE action='task_done') AS done,
+		       count(*) FILTER (WHERE action='task_error') AS errors,
+		       percentile_cont(0.5) WITHIN GROUP (ORDER BY (meta->>'ms')::float8) FILTER (WHERE action='task_done' AND meta ? 'ms') AS median_ms,
+		       avg((meta->>'clicks')::float8) FILTER (WHERE action='task_done' AND meta ? 'clicks') AS avg_clicks,
+		       avg((meta->>'keys')::float8) FILTER (WHERE action='task_done' AND meta ? 'keys') AS avg_keys,
+		       count(*) FILTER (WHERE action='task_done' AND (meta->>'prefilled')::int > 0) AS with_prefill
+		FROM public.interaction_events
+		WHERE tenant=$1 AND created_at > now() - make_interval(days => $2) AND action IN ('task_done','task_error') AND target <> ''
+		GROUP BY workflow, target ORDER BY done DESC, errors DESC LIMIT 100`, tenant, days); err == nil {
+		for trows.Next() {
+			var wf, task string
+			var done, errs, withPrefill int64
+			var med, clicks, keys *float64
+			if trows.Scan(&wf, &task, &done, &errs, &med, &clicks, &keys, &withPrefill) == nil {
+				t := map[string]any{"workflow": wf, "task": task, "done": done, "errors": errs, "with_prefill": withPrefill}
+				if med != nil {
+					t["median_seconds"] = *med / 1000
+				}
+				if clicks != nil {
+					t["avg_clicks"] = *clicks
+				}
+				if keys != nil {
+					t["avg_keys"] = *keys
+				}
+				tasks = append(tasks, t)
+			}
+		}
+		trows.Close()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"days": days, "workflows": out, "tasks": tasks, "generated_at": time.Now().UTC()})
 }
 
 // telemetryActionStats: GET /telemetry/action-stats?days=90 — the calibration
@@ -134,7 +187,7 @@ func (s *server) telemetryMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *server) telemetryActionStats(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "CASE_MANAGER") {
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "CASE_MANAGER") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -273,7 +326,7 @@ func (s *server) telemetryActionStats(w http.ResponseWriter, r *http.Request) {
 func (s *server) telemetryPrefillStats(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "CASE_MANAGER") {
+	if !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "CASE_MANAGER") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -288,7 +341,7 @@ func (s *server) telemetryPrefillStats(w http.ResponseWriter, r *http.Request) {
 		FROM public.interaction_events
 		WHERE tenant=$1 AND action IN ('prefill_accept','prefill_override') AND target <> ''
 		  AND created_at > now() - make_interval(days => $2)
-		GROUP BY target ORDER BY accepts + overrides DESC`, tenant, days)
+		GROUP BY target ORDER BY count(*) DESC`, tenant, days)
 	if err != nil {
 		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
 		return
@@ -324,7 +377,7 @@ func (s *server) telemetryPrefillStats(w http.ResponseWriter, r *http.Request) {
 // aggregation exists and is validated long before any model consumes it.
 func (s *server) telemetryPaths(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "CASE_MANAGER") {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "CASE_MANAGER") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}

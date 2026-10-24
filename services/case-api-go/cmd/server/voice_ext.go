@@ -1,10 +1,10 @@
 // voice_ext.go — CRM activity timeline + outbound calling.
 //
-// - recordVoiceActivity: every inbound voice event with a case_number is
-//   auto-attached to that case's activity timeline (the CRM record), and
-//   voice intake referencing a known case is auto-linked.
-// - outboundCall: triggers an outbound call through the tenant's configured
-//   voice platform (getline.ai-style outbound-call API), logs OUTBOUND_TRIGGER.
+//   - recordVoiceActivity: every inbound voice event with a case_number is
+//     auto-attached to that case's activity timeline (the CRM record), and
+//     voice intake referencing a known case is auto-linked.
+//   - outboundCall: triggers an outbound call through the tenant's configured
+//     voice platform (getline.ai-style outbound-call API), logs OUTBOUND_TRIGGER.
 package main
 
 import (

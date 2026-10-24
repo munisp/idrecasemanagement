@@ -40,6 +40,96 @@ type ClockRule struct {
 	Cite     string     `json:"cite"`
 	Breach   string     `json:"breach"`
 	FollowUp []FollowUp `json:"follow_ups"`
+	// StopOn: the program dates any one of which means the step was done. Once one is set the clock is met -- on time
+	// or late -- and stops counting down. Without it a clock ran on after its step was done.
+	StopOn []string `json:"stop_on,omitempty"`
+	// Target: a working target (how long a step usually takes), not a contract deadline -- shown, never a breach.
+	Target bool `json:"target,omitempty"`
+}
+
+// FeeStep: from EffectiveFrom on, the fee is Cents. EffectiveFrom is a day (YYYY-MM-DD, from midnight) or a day
+// and time (YYYY-MM-DDTHH:MM), in the program's time zone. CardFeeCents (initial fees only) is the credit card
+// transaction fee charged on top of Cents when the fee is paid by card; nothing is added for a bank account or check.
+type FeeStep struct {
+	EffectiveFrom string `json:"effective_from"`
+	Cents         int64  `json:"cents"`
+	CardFeeCents  int64  `json:"card_fee_cents,omitempty"`
+}
+
+// LateFee: a review invoice not paid within AfterDays of the case's Final Order is charged Cents on day
+// AfterDays+1, and Cents again every EveryDays after that until it is paid (AHCA price sheet, line 7).
+type LateFee struct {
+	Cents     int64 `json:"cents"`
+	AfterDays int   `json:"after_days"`
+	EveryDays int   `json:"every_days"`
+}
+
+// lateChargesDue is how many late charges a review invoice owes daysSince days after its Final Order.
+func (l *LateFee) lateChargesDue(daysSince int) int {
+	if l == nil || l.Cents <= 0 || l.AfterDays < 0 || daysSince <= l.AfterDays {
+		return 0
+	}
+	if l.EveryDays <= 0 {
+		return 1
+	}
+	return 1 + (daysSince-l.AfterDays-1)/l.EveryDays
+}
+
+// stepStart is the moment a step takes effect, read in loc.
+func stepStart(v string, loc *time.Location) (time.Time, bool) {
+	for _, layout := range []string{"2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02 15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, strings.TrimSpace(v), loc); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// feeAt is the scheduled fee in force at the moment now (the latest step that has started), and whether the
+// schedule covers that moment.
+func feeAt(schedule []FeeStep, now time.Time, loc *time.Location) (int64, bool) {
+	st, ok := stepAt(schedule, now, loc)
+	return st.Cents, ok
+}
+
+// stepAt is the schedule's entry in force at now, and whether one is.
+func stepAt(schedule []FeeStep, now time.Time, loc *time.Location) (FeeStep, bool) {
+	var best time.Time
+	var cur FeeStep
+	found := false
+	for _, st := range schedule {
+		start, ok := stepStart(st.EffectiveFrom, loc)
+		if !ok || start.After(now) {
+			continue
+		}
+		if !found || start.After(best) {
+			best, cur, found = start, st, true
+		}
+	}
+	return cur, found
+}
+
+// location is the program's time zone (time_zone, an IANA name such as America/New_York): the clock fees and
+// "today" are read on. Eastern when none is set.
+func (c *ProgramConfig) location() *time.Location {
+	if c != nil && c.TimeZone != "" {
+		if loc, err := time.LoadLocation(c.TimeZone); err == nil {
+			return loc
+		}
+	}
+	return programZone("")
+}
+
+// feeOn is the scheduled fee in force on day (YYYY-MM-DD), and whether the schedule covers that day.
+func feeOn(schedule []FeeStep, day string) (int64, bool) {
+	best, found := "", false
+	var cents int64
+	for _, st := range schedule {
+		if st.EffectiveFrom <= day && (!found || st.EffectiveFrom > best) {
+			best, cents, found = st.EffectiveFrom, st.Cents, true
+		}
+	}
+	return cents, found
 }
 
 type ThresholdRule struct {
@@ -49,6 +139,8 @@ type ThresholdRule struct {
 }
 
 type ProgramConfig struct {
+	// TimeZone: the program's clock (IANA name). Fees take effect, and "today" turns over, on this clock.
+	TimeZone   string `json:"time_zone,omitempty"`
 	CaseNumber struct {
 		Pattern string `json:"pattern"` // e.g. "FL{yy}-{seq}"
 		SeqPad  int    `json:"seq_pad"`
@@ -74,9 +166,14 @@ type ProgramConfig struct {
 		QuarterHours bool `json:"quarter_hours"` // FL: time recorded in decimal quarter hours only
 	} `json:"time"`
 	Fees struct {
-		InitialFeeCents  int64 `json:"initial_fee_cents"`
-		RefundWindowDays int   `json:"refund_window_days"`
-		InvoiceDueDays   *int  `json:"invoice_due_days"`
+		// InitialFeeCents is the fee in force today: loadProgram sets it from InitialFeeSchedule, so every filing is
+		// charged the fee of the day it is filed. Without a schedule it is the single stored fee.
+		InitialFeeCents int64 `json:"initial_fee_cents"`
+		// InitialFeeSchedule: the fee and the day it takes effect, one entry per change (the program sets it each
+		// year). The latest entry on or before a day is that day's fee.
+		InitialFeeSchedule []FeeStep `json:"initial_fee_schedule,omitempty"`
+		RefundWindowDays   int       `json:"refund_window_days"`
+		InvoiceDueDays     *int      `json:"invoice_due_days"`
 		// ReminderLeadDays: how many days before an invoice's due date the
 		// Payment Reminder is drafted (default 7).
 		ReminderLeadDays *int `json:"reminder_lead_days"`
@@ -87,6 +184,8 @@ type ProgramConfig struct {
 		// front. Membership in this list is a fee-config change, so it is
 		// protected by the migration-only guard trigger like the fee itself.
 		InvoicedFilerOrgs []string `json:"invoiced_filer_orgs"`
+		// LateFee: what an unpaid review invoice is charged after the Final Order (none when unset).
+		LateFee *LateFee `json:"late_fee,omitempty"`
 	} `json:"fees"`
 	Escalation struct {
 		AmountTriggerCents int64    `json:"amount_trigger_cents"`
@@ -96,7 +195,12 @@ type ProgramConfig struct {
 	NotesStreams     []string            `json:"notes_streams"`
 	NotesStreamRoles map[string][]string `json:"notes_stream_roles"`
 	FieldSchema      map[string][]string `json:"field_schema"`
-	Checklist        map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
+	// OutcomeDefinitions: what each case outcome (field_schema.case_outcome) means, in the office's words.
+	OutcomeDefinitions map[string]string `json:"outcome_definitions,omitempty"`
+	// OutcomeGroups: the outcome structure (Open Cases, Closed Without Review, Decided With Determination,
+	// Administrative Closure), each with the outcomes it holds.
+	OutcomeGroups []OutcomeGroup      `json:"outcome_groups,omitempty"`
+	Checklist     map[string][]string `json:"checklist"` // stage -> items; overrides the federal NSA default
 	// ChecklistOwners: checklist item -> the role that ticks it. An item
 	// with no owner here can be ticked by any case staff, as before.
 	ChecklistOwners map[string]string `json:"checklist_owners"`
@@ -110,9 +214,13 @@ type ProgramConfig struct {
 		AgencyRecipients []string       `json:"agency_recipients"`
 		Templates        []CorrTemplate `json:"templates"`
 	} `json:"correspondence"`
-	Billing        BillingConfig `json:"billing"`        // service-fee invoicing engine (billing.go)
-	Reconciliation ReconConfig   `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
-	Bank           BankConfig    `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
+	// The letters lettergen builds ({key, subject, filename, folder}) and the office's standard letterhead
+	// wording -- the case page's Letters list and the Letterhead & invoice card read them.
+	LetterTemplates []map[string]any `json:"letter_templates"`
+	Letters         map[string]any   `json:"letters"`
+	Billing         BillingConfig    `json:"billing"`        // service-fee invoicing engine (billing.go)
+	Reconciliation  ReconConfig      `json:"reconciliation"` // recon engine + accounting adapters (recon.go)
+	Bank            BankConfig       `json:"bank"`           // lockbox webhook + NACHA origination (bank.go)
 }
 
 // loadProgram returns nil when the tenant runs the built-in federal NSA program.
@@ -126,6 +234,9 @@ func (s *server) loadProgram(r *http.Request, tenant string) *ProgramConfig {
 	var cfg ProgramConfig
 	if json.Unmarshal(raw, &cfg) != nil {
 		return nil
+	}
+	if fee, ok := feeAt(cfg.Fees.InitialFeeSchedule, time.Now(), cfg.location()); ok {
+		cfg.Fees.InitialFeeCents = fee
 	}
 	return &cfg
 }
@@ -258,7 +369,11 @@ func (s *server) programDates(r *http.Request, tenant, caseID string) map[string
 
 // projectProgramClocks runs the generic date-driven clock engine over a case's
 // program_dates. Calendar-day and business-day rules both supported.
-func projectProgramClocks(rules []ClockRule, dates map[string]string, today time.Time) []ClockView {
+func projectProgramClocks(rules []ClockRule, dates map[string]string, today time.Time, ext ...map[string]int) []ClockView {
+	extended := map[string]int{} // clock → days the PM extended it (deadline_extensions.go)
+	if len(ext) > 0 && ext[0] != nil {
+		extended = ext[0]
+	}
 	out := []ClockView{}
 	for _, rl := range rules {
 		raw, ok := dates[rl.Basis]
@@ -271,26 +386,52 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 		}
 		var due time.Time
 		var remaining int
+		extra := extended[rl.Name]
 		if rl.DayType == "business" {
-			due = addBusinessDays(basis, rl.Days)
+			due = addBusinessDays(basis, rl.Days+extra)
 			remaining = businessDaysBetween(today, due)
 		} else {
-			due = basis.AddDate(0, 0, rl.Days)
+			due = basis.AddDate(0, 0, rl.Days+extra)
 			remaining = int(due.Sub(today).Hours() / 24)
 		}
 		cv := ClockView{
 			Clock: rl.Name, Label: rl.Label, Basis: rl.DayType,
 			TotalDays: rl.Days, Remaining: remaining,
-			Due: due.Format("2006-01-02"), State: clockState(remaining, rl.Days),
+			Due: due.Format("2006-01-02"), State: clockState(remaining, rl.Days+extra),
+			ExtendedDays: extra, Extendable: !nonExtendableClocks[rl.Name],
 			Cite:      rl.Cite,
 			BasisNote: fmt.Sprintf("from %s %s", rl.Basis, raw[:minI(10, len(raw))]),
 		}
+		// Met: the step's own date is set. Its clock stops, saying whether it was on time.
+		for _, k := range rl.StopOn {
+			v := dates[k]
+			if len(v) < 10 {
+				continue
+			}
+			if met, err := time.Parse("2006-01-02", v[:10]); err == nil && !met.Before(basis) {
+				cv.MetOn = met.Format("2006-01-02")
+				cv.State = "met"
+				if met.After(due) {
+					cv.State = "met_late"
+				}
+				break
+			}
+		}
+		if cv.MetOn != "" {
+			out = append(out, cv)
+			continue
+		}
+		// A working target past its day is "over target", never a breach.
+		if rl.Target && remaining < 0 {
+			cv.State = "over_target"
+		}
+		cv.Target = rl.Target
 		// Past the target but inside the contract's hard limit is "late",
 		// not yet a breach.
 		if rl.MaxDays > rl.Days {
-			hard := basis.AddDate(0, 0, rl.MaxDays)
+			hard := basis.AddDate(0, 0, rl.MaxDays+extra)
 			if rl.DayType == "business" {
-				hard = addBusinessDays(basis, rl.MaxDays)
+				hard = addBusinessDays(basis, rl.MaxDays+extra)
 			}
 			cv.HardDue = hard.Format("2006-01-02")
 			if remaining < 0 && !today.After(hard) {
@@ -305,9 +446,21 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 // caseProgramClocks: generic program clock projection (used when the tenant
 // has a program_rules row; otherwise the federal NSA engine in engines.go runs).
 func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenant, caseID string, cfg *ProgramConfig) bool {
+	writeJSON(w, http.StatusOK, s.programClockViews(r, tenant, caseID, cfg))
+	return true
+}
+
+// programClockViews: the case's program clocks, as the Clocks panel and the Steps show them.
+func (s *server) programClockViews(r *http.Request, tenant, caseID string, cfg *ProgramConfig) []ClockView {
 	dates := s.programDates(r, tenant, caseID)
-	// received_at falls back to opened_at (federal field) when unset
-	if _, ok := dates["received_at"]; !ok {
+	// "Date Received" is the day the fee was paid: a case still awaiting payment has not been received, so no
+	// clock that runs from it has started (and none can breach) until the fee is paid.
+	var status string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
+	if status == "AWAITING_PAYMENT" {
+		delete(dates, "received_at")
+	} else if _, ok := dates["received_at"]; !ok {
+		// received_at falls back to opened_at (federal field) when unset
 		var opened time.Time
 		if err := s.db.QueryRow(r.Context(),
 			fmt.Sprintf(`SELECT opened_at FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
@@ -323,8 +476,12 @@ func (s *server) caseProgramClocks(w http.ResponseWriter, r *http.Request, tenan
 	// off by one). engines.go's federal-default clock path already
 	// truncates the same way (casesClocks/caseClocks) -- this path never
 	// matched it.
-	writeJSON(w, http.StatusOK, projectProgramClocks(cfg.Clocks, dates, time.Now().Truncate(24*time.Hour)))
-	return true
+	ext, extList := s.clockExtensions(r.Context(), tenant, caseID)
+	views := projectProgramClocks(cfg.Clocks, dates, time.Now().Truncate(24*time.Hour), ext)
+	for i := range views {
+		views[i].Extensions = extList[views[i].Clock]
+	}
+	return views
 }
 
 // setProgramDate records a program-specific date (starts/restarts a clock).
@@ -346,6 +503,16 @@ func (s *server) setProgramDate(w http.ResponseWriter, r *http.Request) {
 	if _, err := time.Parse("2006-01-02", in.Value); err != nil {
 		http.Error(w, `{"error":"value must be YYYY-MM-DD"}`, http.StatusBadRequest)
 		return
+	}
+	// The workflow records Date Received when it starts; for a payment-gated intake that is too early -- the
+	// date is the day the fee is paid, and activatePaidIntake records it then.
+	if in.Key == "received_at" {
+		var status string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), chi.URLParam(r, "caseId")).Scan(&status)
+		if status == "AWAITING_PAYMENT" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deferred", "reason": "Date Received is recorded when the initial fee is paid"})
+			return
+		}
 	}
 	// jsonb_build_object is polymorphic ("any"), so pgx's prepared-statement
 	// protocol can't infer $2/$3's type on its own (confirmed live: SQLSTATE
@@ -434,6 +601,9 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
 		"by": p.Subject, "internal_status": in.Internal, "agency_status": in.Agency,
 	})
+	// The workflow moves a case by setting its status (here), not through the step signals: a case it has brought
+	// to a specialist's step goes in that queue now, not the next time someone happens to open the case.
+	s.ensureStepHelper(r, tenant, id)
 	// Warn-only eligibility gate (G2 hardening): moving past the initial
 	// review phase without an ELIGIBLE decision on record is legal risk —
 	// billing downstream of a wrong "proceed" is unlawful — so the response
@@ -489,6 +659,7 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	var override struct {
 		Override bool   `json:"override"`
 		Reason   string `json:"override_reason"`
+		Notes    string `json:"notes"` // the Reviewer's working notes, saved with the review (eligibility_notes.go)
 	}
 	// Decode twice: the decision input, then the override envelope (separate
 	// type so eligibilityInput stays exactly the rule inputs).
@@ -498,6 +669,11 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.Unmarshal(raw, &override)
+	notes, notesOK := cleanEligibilityNote(override.Notes)
+	if !notesOK {
+		http.Error(w, `{"error":"notes are limited to 4000 characters"}`, http.StatusBadRequest)
+		return
+	}
 	// A human-submitted date that does not parse must be rejected, not
 	// ignored: evalEligibility skips a rule whose date is unusable, which
 	// would turn a typo into a silent pass on the filing window.
@@ -517,6 +693,12 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The filing window is measured on the day the dispute was filed (the case's own record, never the request's).
+	in.FiledOn = ""
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(opened_at::date::text,'') FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), id).Scan(&in.FiledOn)
+	if in.FinalDeterminationAt != "" {
+		in.DeterminationFrom = "entered by the Reviewer"
+	}
 	// Decision + persistence both live in triage.go, shared with the
 	// auto-adjudication endpoint — one implementation, so the auto path
 	// can never drift from what a human reviewer would compute.
@@ -571,6 +753,9 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	// logAudit's "by" above, which is an intentionally stable-identity
 	// audit key).
 	reviewID := s.persistEligibilityOutcome(r, tenant, id, displayName(p), result, reason, evidence, opts)
+	if notes != "" && reviewID != "" {
+		_, _ = s.insertEligibilityNote(r.Context(), tenant, id, reviewID, notes, p)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": reviewID, "result": result, "reason": reason, "evidence": evidence,
 		"rule_version": opts.ruleVersion, "borderline": opts.borderline, "override": opts.override,
@@ -591,6 +776,15 @@ func (s *server) eligibilityHistory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
+	}
+	notes := s.eligibilityNotesByReview(r, tenant, id)
+	for _, rv := range rows {
+		rid, _ := rv["id"].(string)
+		if n := notes[rid]; n != nil {
+			rv["notes"] = n
+		} else {
+			rv["notes"] = []map[string]any{}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reviews": rows})
 }
@@ -633,7 +827,12 @@ func (s *server) escalationTrigger(r *http.Request, tenant, caseID string, dispu
 		VALUES ($1,$2,'PROGRAM_TRIGGER',2,$3,$4)`, tenant, caseID, cfg.Escalation.RouteRole, detail)
 	s.logActivity(r.Context(), tenant, caseID, "ESCALATION_AUTO", detail)
 	// The same review the SOP prescribes for suspected fraud, waste or
-	// abuse: the PM assigns an independent reviewer (sopdeadlines.go).
+	// abuse: the PM assigns an independent reviewer (sopdeadlines.go) -- unless
+	// the tenant turned that review off; the escalation above stands either way.
+	if !s.featureEnabled(r, tenant, "fwa_review") {
+		s.notify(r, tenant, "*", "ESCALATION", detail, "#/cases/"+caseID)
+		return
+	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET details = jsonb_build_object('fwa', jsonb_build_object(
 		  'status','REPORTED','reason',$2::text,'reported_by','system','reported_at',$3::text)) || details
@@ -733,4 +932,99 @@ func (s *server) publicBrand(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	writeJSON(w, http.StatusOK, map[string]string{"brand_name": brand})
+}
+
+// tenantZone is the tenant's configured program time zone (Eastern when it has none).
+func (s *server) tenantZone(r *http.Request, tenant string) *time.Location {
+	return s.loadProgram(r, tenant).location()
+}
+
+// programToday is today's date (YYYY-MM-DD) on the program's clock.
+func (s *server) programToday(ctx context.Context, tenant string) string {
+	var tz string
+	_ = s.db.QueryRow(ctx, `SELECT coalesce(config->>'time_zone','') FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&tz)
+	return time.Now().In((&ProgramConfig{TimeZone: tz}).location()).Format("2006-01-02")
+}
+
+// stepDayOf is the day a recorded step actually happened: the "date" its dialog gave (YYYY-MM-DD, not after
+// today), or today when none was given. The second result says what is wrong with a given date.
+func stepDayOf(data map[string]any, today string) (string, string) {
+	v, _ := data["date"].(string)
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return today, ""
+	}
+	if _, err := time.Parse("2006-01-02", v); err != nil {
+		return "", "the date must be a date (YYYY-MM-DD)"
+	}
+	if v > today {
+		return "", "the date can't be later than today"
+	}
+	return v, ""
+}
+
+// markProgramDate records a program date (YYYY-MM-DD, today on the program's clock) unless the case already has it:
+// the first time a step happened is when its clock was met.
+func (s *server) markProgramDate(ctx context.Context, tenant, caseID, key string) {
+	s.markProgramDateOn(ctx, tenant, caseID, key, s.programToday(ctx, tenant))
+}
+
+// markProgramDateOn is markProgramDate for a given day.
+func (s *server) markProgramDateOn(ctx context.Context, tenant, caseID, key, day string) {
+	_, _ = s.db.Exec(ctx, fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object($2::text, $3::text)
+		WHERE id::text=$1 AND NOT (coalesce(program_dates,'{}'::jsonb) ? $2)`, sanitizeTenant(tenant)),
+		caseID, key, day)
+}
+
+// OutcomeGroup: one heading of the program's outcome structure and the outcomes under it.
+type OutcomeGroup struct {
+	Group    string   `json:"group"`
+	Outcomes []string `json:"outcomes"`
+}
+
+// outcomeGroupOf: the group an outcome belongs to ("" when none lists it).
+func (c *ProgramConfig) outcomeGroupOf(outcome string) string {
+	if c == nil {
+		return ""
+	}
+	for _, g := range c.OutcomeGroups {
+		for _, o := range g.Outcomes {
+			if strings.EqualFold(o, outcome) {
+				return g.Group
+			}
+		}
+	}
+	return ""
+}
+
+// closedWithoutReviewStatuses: the internal statuses a case closes with before any review (no invoice follows).
+var closedWithoutReviewStatuses = map[string]bool{"Provider Closure Letter Issued": true, "Dismissed": true, "Plan Opt-Out": true,
+	"Provider - Withdrawal": true, "Closed-Refunded": true}
+
+// setProgramDateToday records a program date as today, replacing any earlier one (a step that can recur, like an
+// RFI response, is met by its latest occurrence).
+func (s *server) setProgramDateToday(ctx context.Context, tenant, caseID, key string) {
+	s.setProgramDateOn(ctx, tenant, caseID, key, s.programToday(ctx, tenant))
+}
+
+// setProgramDateOn is setProgramDateToday for a given day.
+func (s *server) setProgramDateOn(ctx context.Context, tenant, caseID, key, day string) {
+	_, _ = s.db.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object($2::text, $3::text) WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID, key, day)
+}
+
+// setCaseDetail sets one field of a case's details.
+func (s *server) setCaseDetail(ctx context.Context, tenant, caseID, key, value string) {
+	_, _ = s.db.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object($2::text, $3::text) WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID, key, value)
+}
+
+// addCaseNote keeps a note on the case (the internal stream) and on its activity timeline, as addNote does.
+func (s *server) addCaseNote(ctx context.Context, tenant, caseID, author, body string) {
+	if _, err := s.db.Exec(ctx, `INSERT INTO public.notes (tenant, record_type, record_id, stream, body, author) VALUES ($1,'CASE',$2,'internal',$3,$4)`,
+		tenant, caseID, body, author); err != nil {
+		return
+	}
+	_, _ = s.db.Exec(ctx, `INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES ($1,$2,'NOTE',$3)`, tenant, caseID, body)
 }

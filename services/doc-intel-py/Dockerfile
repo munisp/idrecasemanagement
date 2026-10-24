@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir paddlepaddle paddleocr pypdfium2
 # for every document, forever, until this was added.
 RUN pip install --no-cache-dir "paddlex[ocr]==3.7.2"
 RUN pip install --no-cache-dir docling
-RUN pip install --no-cache-dir openai confluent-kafka minio httpx "psycopg[binary]" opensearch-py pyyaml pillow
+RUN pip install --no-cache-dir openai confluent-kafka minio httpx "psycopg[binary]" opensearch-py pyyaml pillow pypdf
 # check_processor.py (physical check OCR/MICR intake) -- requirements.txt
 # has listed these since that feature was added, but this Dockerfile never
 # actually reads requirements.txt (see the layer-split comment above), so

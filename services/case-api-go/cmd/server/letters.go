@@ -56,26 +56,12 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, _ := json.Marshal(map[string]any{
-		"type": "letter.requested", "tenant": tenant, "case_id": caseID,
-		"template": key, "case_number": caseNumber,
-		// displayName(p): this flows straight into qa_reviews.drafted_by via
-		// lettergen-py -- confirmed live, a reviewer opening the QA queue
-		// for a generated letter saw a raw Keycloak UUID with no way to
-		// tell who requested it. Same fix as the QA queue's other
-		// attribution columns.
-		"requested_by": displayName(p), "at": time.Now().UTC(),
-		"traceparent": traceparentOf(r.Context()),
-	})
-	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(
-		`INSERT INTO tenant_%s.outbox (topic, key, payload) VALUES ($1,$2,$3)`,
-		sanitizeTenant(tenant)),
-		fmt.Sprintf("%s.%s.letters", s.cfg.TopicPrefix, tenant), caseID, payload); err != nil {
+	// displayName(p): this flows straight into qa_reviews.drafted_by via lettergen-py, so a reviewer opening the
+	// QA queue sees who requested the letter, not a raw Keycloak UUID.
+	if err := s.enqueueLetter(r, tenant, caseID, caseNumber, key, displayName(p)); err != nil {
 		http.Error(w, `{"error":"outbox"}`, http.StatusInternalServerError)
 		return
 	}
-	s.logActivity(r.Context(), tenant, caseID, "LETTER_REQUESTED",
-		fmt.Sprintf("Letter generation requested by %s — template %s", displayName(p), key))
 	// A determination letter request while IN_REVIEW advances the case once
 	// the rendered document lands; tick what the platform can already prove.
 	s.autoChecklist(r, tenant, caseID)
@@ -95,4 +81,24 @@ func progRaw(r *http.Request, s *server, tenant, key string) (json.RawMessage, b
 		return nil, false
 	}
 	return raw, true
+}
+
+// enqueueLetter asks lettergen for one letter on a case (a letter.requested event through the outbox) and notes it
+// on the case's activity; by is who it is generated for.
+func (s *server) enqueueLetter(r *http.Request, tenant, caseID, caseNumber, key, by string) error {
+	payload, _ := json.Marshal(map[string]any{
+		"type": "letter.requested", "tenant": tenant, "case_id": caseID,
+		"template": key, "case_number": caseNumber,
+		"requested_by": by, "at": time.Now().UTC(),
+		"traceparent": traceparentOf(r.Context()),
+	})
+	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(
+		`INSERT INTO tenant_%s.outbox (topic, key, payload) VALUES ($1,$2,$3)`,
+		sanitizeTenant(tenant)),
+		fmt.Sprintf("%s.%s.letters", s.cfg.TopicPrefix, tenant), caseID, payload); err != nil {
+		return err
+	}
+	s.logActivity(r.Context(), tenant, caseID, "LETTER_REQUESTED",
+		fmt.Sprintf("Letter generation requested by %s — template %s", by, key))
+	return nil
 }

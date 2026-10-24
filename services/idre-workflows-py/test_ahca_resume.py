@@ -18,6 +18,7 @@ from temporalio.worker import Worker
 from ahca_workflow import AhcaDisputeWorkflow
 
 calls: list[tuple] = []
+dates: dict = {}  # the last value each program date was set to
 
 
 @activity.defn(name="set_dual_status")
@@ -28,6 +29,7 @@ async def set_dual_status(tenant, case_id, internal_status, agency_status=""):
 @activity.defn(name="set_program_date")
 async def set_program_date(tenant, case_id, key, value):
     calls.append(("set_program_date", key))
+    dates[key] = value
 
 
 @activity.defn(name="recommendation_days_left")

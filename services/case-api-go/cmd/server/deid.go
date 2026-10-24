@@ -123,9 +123,12 @@ func (s *server) deidGateOutbound(r *http.Request, tenant, caseID, artifact, ref
 	if !s.deidActive(r, tenant) || strings.TrimSpace(text) == "" {
 		return ""
 	}
+	// Holding mail is the tenant's choice (deid_hold_mail, off by default): without it the scan reports and the
+	// letter goes -- a letter to the dispute's own parties carries its names and claims by design.
+	hold := s.featureEnabled(r, tenant, "deid_hold_mail")
 	res, err := s.deidScan(r.Context(), tenant, caseID, artifact, text)
 	if err != nil {
-		if envOr("DEID_FAIL_OPEN", "") == "1" {
+		if !hold || envOr("DEID_FAIL_OPEN", "") == "1" {
 			s.logActivity(r.Context(), tenant, caseID, "DEID_UNAVAILABLE",
 				fmt.Sprintf("deid scan failed (%s); %s released under DEID_FAIL_OPEN", err, artifact))
 			return ""
@@ -133,7 +136,12 @@ func (s *server) deidGateOutbound(r *http.Request, tenant, caseID, artifact, ref
 		return fmt.Sprintf("de-identification service unavailable (%s) — %s held; retry when deid is healthy", err, artifact)
 	}
 	s.deidPersistReport(r.Context(), tenant, caseID, artifact, refID, "SCAN", res.Audit)
-	if reason := deidBlockReason(res); reason != "" {
+	if reason := deidBlockReason(res); reason != "" && !hold {
+		s.deidPersistReport(r.Context(), tenant, caseID, artifact, refID, "FLAG", res.Audit)
+		s.logActivity(r.Context(), tenant, caseID, "DEID_FLAGGED",
+			fmt.Sprintf("Outbound %s carries direct identifiers (%s) — released: holding mail is off", artifact, reason))
+		return ""
+	} else if reason != "" {
 		s.deidPersistReport(r.Context(), tenant, caseID, artifact, refID, "BLOCK", res.Audit)
 		s.logActivity(r.Context(), tenant, caseID, "DEID_BLOCKED",
 			fmt.Sprintf("Outbound %s held: direct identifiers detected (%s)", artifact, reason))
@@ -256,6 +264,13 @@ func (s *server) clinicalOverlaps(w http.ResponseWriter, r *http.Request) {
 		if rows.Scan(&cid, &overlap, &shared) == nil {
 			out = append(out, map[string]any{"case_id": cid, "overlap": overlap, "shared_terms": shared})
 		}
+	}
+	rows.Close()
+	// The case number people know each one by.
+	for _, o := range out {
+		var num string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), o["case_id"]).Scan(&num)
+		o["case_number"] = num
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"overlaps": out})
 }

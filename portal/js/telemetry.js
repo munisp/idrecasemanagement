@@ -20,6 +20,12 @@ const Telemetry = (() => {
     if (h.startsWith("#/cases/")) return "case_detail";
     if (h.startsWith("#/crm")) return "crm";
     if (h === "#/" || h.startsWith("#/dashboard")) return "dashboard";
+    // The organization portals, by the tab in use: filing, bulk filing and payments are different work.
+    if (h.startsWith("#/tpa")) { const t = document.querySelector("#tpa-tabs [data-tab].active"); return "tpa_" + ((t && t.dataset.tab) || "home"); }
+    if (h.startsWith("#/healthplan")) { const t = document.querySelector("#hp-tabs [data-tab].active"); return "hp_" + ((t && t.dataset.tab) || "home"); }
+    if (h.startsWith("#/document-requests")) return "document_requests";
+    if (h.startsWith("#/calendar")) return "calendar";
+    if (h.startsWith("#/reports")) return "reports";
     return "other";
   };
   const track = (action, target, meta) => {
@@ -41,19 +47,41 @@ const Telemetry = (() => {
     }).catch(() => {});
   };
 
+  // Tasks: one job from its first touch to done (or refused) -- filing a dispute, approving a draft, sending a
+  // letter. The time it took, and the clicks and typing it needed, are what productivity is measured by.
+  const open = {}; // name -> { t0, clicks, keys, workflow }
+  const taskStart = (name) => { if (!open[name]) open[name] = { t0: Date.now(), clicks: 0, keys: 0, workflow: workflowOf() }; };
+  const taskEnd = (name, action, meta) => {
+    const t = open[name];
+    if (!t) return;
+    queue.push({ workflow: t.workflow, action, target: name,
+      meta: Object.assign({ ms: Date.now() - t.t0, clicks: t.clicks, keys: t.keys }, meta || {}) });
+    if (action === "task_done") delete open[name]; // a refused attempt stays open: the retry is the same task
+  };
+  const taskDone = (name, meta) => taskEnd(name, "task_done", meta);
+  const taskError = (name, reason) => taskEnd(name, "task_error", { reason: String(reason || "").slice(0, 80) });
+
   document.addEventListener("click", (ev) => {
     const el = ev.target.closest("button, a, [data-track]");
     if (!el) return;
+    for (const k in open) open[k].clicks++;
     const label = (el.dataset.track || el.textContent || "").trim().slice(0, 60);
     if (label) track("click", label);
   }, true);
   document.addEventListener("keydown", (ev) => {
-    if (ev.target.matches("input, textarea, select")) keys++;
+    if (!ev.target.matches("input, textarea, select")) return;
+    keys++;
+    for (const k in open) open[k].keys++;
+    // Typing in a form that names its task starts it.
+    const f = ev.target.closest("[data-task]");
+    if (f) taskStart(f.dataset.task);
   }, true);
   document.addEventListener("submit", (ev) => track("submit", ev.target.id || ev.target.name || "form"), true);
   window.addEventListener("hashchange", () => track("navigate", location.hash));
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flush(true); });
   setInterval(() => flush(false), 15000);
+
+  document.addEventListener("focusin", (ev) => { const f = ev.target.closest && ev.target.closest("[data-task]"); if (f) taskStart(f.dataset.task); }, true);
 
   // role: the single role this user acts as, for per-role learning cells.
   // SAME canonical order as canonicalRoleOrder in the API's nextaction.go —
@@ -67,5 +95,7 @@ const Telemetry = (() => {
     return have[0] || "";
   };
 
-  return { track, flush, role };
+  return { track, flush, role, taskStart, taskDone, taskError };
 })();
+// A top-level const is not a property of window: callers check window.Telemetry, so put it there.
+window.Telemetry = Telemetry;

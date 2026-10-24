@@ -104,8 +104,10 @@ func TestReportPeriod(t *testing.T) {
 
 func TestClosureReason(t *testing.T) {
 	for _, c := range []struct{ tpl, elig, reason, outcome string }{
-		{"ineligible", "over_filing_window", "Dismissed-Timeliness eligibility failed", "Dismissed"},
-		{"ineligible", "below_threshold", "Other", "Dismissed"},
+		{"ineligible", "over_filing_window", "Dismissed-Timeliness eligibility failed", "Ineligible - Closed"},
+		{"ineligible", "below_threshold", "Other", "Ineligible - Closed"},
+		{"plan_opt_out", "", "Plan Opt-Out", "Plan Opt-Out"},
+		{"refund", "", "Refunded", "Refunded"},
 		{"dismissal", "", "Provider No Response", "Dismissed"},
 		{"withdrawal", "", "Other", "Withdrawn"},
 		{"acceptance", "", "", ""},
@@ -150,7 +152,7 @@ func TestFlReportReadsRecordedFields(t *testing.T) {
 	}
 	w := c.weeklyRow()
 	want := []string{"Under Review", "FL26-000001", "01/06/2026", "01/10/2026", "12", "01/10/2026", "01/12/2026", "01/13/2026",
-		"01/28/2026", "01/20/2026", "11", "03/07/2026", "02/20/2026", "TBD – case in process", "No", "plan asked for an extension"}
+		"01/28/2026", "01/20/2026", "11", "03/07/2026", "02/20/2026", "TBD - In Process", "No", "plan asked for an extension"}
 	for i := range want {
 		if w[i] != want[i] {
 			t.Errorf("weekly column %c (%s): got %q, want %q", 'A'+i, flWeeklyHeaders[i], w[i], want[i])

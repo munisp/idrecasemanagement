@@ -108,7 +108,9 @@ def _norm_date_token(tok: str) -> str | None:
 
 _NPI_RE = re.compile(r"(?i)\bNPI\b\s*[:#]?\s*(\d{10})\b")
 _TIN_RE = re.compile(r"(?i)\b(?:TIN|EIN|FEIN|tax\s*id(?:entification)?\s*(?:number|no\.?)?)\b\s*[:#]?\s*(\d{2}-?\d{7})\b")
-_CLAIM_RE = re.compile(r"(?i)\b(?:claim|invoice|account|bill|statement)\s*(?:number|no\.?|#|:)?\s*[:#]?\s*([A-Z0-9][-A-Z0-9]{5,24})\b")
+# The id must hold a digit: "Claim Dispute Resolution Program" (every filing packet's title) read as claim
+# "DISPUTE", and duplicate detection then matched every case that had a packet.
+_CLAIM_RE = re.compile(r"(?i)\b(?:claim|invoice|account|bill|statement)\s*(?:number|no\.?|#|:)?\s*[:#]?\s*(?=[-A-Z0-9]*\d)([A-Z0-9][-A-Z0-9]{5,24})\b")
 _CPT_RE = re.compile(r"(?<![\d-])(\d{5})(?![\d])")
 _HCPCS_RE = re.compile(r"\b([A-VY]\d{4})\b")
 # Member / subscriber identifier on EOBs and claim forms.

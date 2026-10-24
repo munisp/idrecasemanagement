@@ -18,6 +18,7 @@ Run: uvicorn main:app --host 0.0.0.0 --port 8082
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import psycopg
@@ -97,8 +98,10 @@ otel_setup.init("idre-graph-intel")
 otel_setup.instrument_fastapi(app)
 
 
-def _load_cases(tenant: str) -> list[dict]:
+def _load_cases(tenant: str, case_id: str | None = None) -> list[dict]:
+    """Every case of the tenant, or just one (case_id)."""
     t = "".join(c for c in tenant.lower() if c.isalnum())
+    where, args = (" WHERE id::text=%s", (case_id,)) if case_id else ("", ())
     cols = ["id", "case_number", "status", "service_line", "plan_type",
             "qpa_cents", "provider_id", "payer_id", "opened_at"]
     # The parties as people know them. A program tenant records the filer's
@@ -111,13 +114,13 @@ def _load_cases(tenant: str) -> list[dict]:
             rows = c.execute(
                 f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
                 f" provider_id, payer_id, opened_at, details->>'provider_org', details->>'health_plan',"
-                f" details->>'requester_org', details->>'filing_party_type' FROM tenant_{t}.cases"
+                f" details->>'requester_org', details->>'filing_party_type' FROM tenant_{t}.cases" + where, args
             ).fetchall()
             use = named
         except Exception:  # a tenant whose cases table has no details column
             rows = c.execute(
                 f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
-                f" provider_id, payer_id, opened_at FROM tenant_{t}.cases"
+                f" provider_id, payer_id, opened_at FROM tenant_{t}.cases" + where, args
             ).fetchall()
             use = cols
     out = []
@@ -150,9 +153,29 @@ def healthz():
     return {"ok": True, "falkordb": graph_ok, "model": epr_kgqa.OLLAMA_MODEL}
 
 
-@app.post("/sync/from-db")
-def sync_from_db(tenant: str = Query(...)):
-    """Source-of-truth sync: Postgres tenant schema -> FalkorDB + bronze/silver."""
+@app.post("/sync/case")
+def sync_case(tenant: str = Query(...), case_id: str = Query(...)):
+    """One case changed (filed, or moved a step): just that case and its
+    parties are brought up to date in the graph. This is what case-api calls on
+    every change; the full rebuild below is for an admin or a restore."""
+    cases = _load_cases(tenant, case_id)
+    for c in cases:
+        graphdb.upsert_case(tenant, c)
+    if cases:
+        graphdb.drop_orphan_parties(tenant)
+    return {"tenant": tenant, "case_id": case_id, "synced": len(cases)}
+
+
+# A full rebuild reads every case of the tenant into memory. One runs per
+# tenant at a time: asking again while one runs queues exactly one more (the
+# changes made meanwhile are then picked up), instead of starting copies side
+# by side -- several at once ran the service out of memory (OOMKilled at 1 GiB
+# on a tenant of 20,000 cases).
+_sync_lock = threading.Lock()
+_sync_state: dict[str, str] = {}  # tenant -> "running" | "again"
+
+
+def _full_sync(tenant: str) -> dict:
     cases = _load_cases(tenant)
     for c in cases:
         graphdb.upsert_case(tenant, c)
@@ -164,6 +187,27 @@ def sync_from_db(tenant: str = Query(...)):
     bronze = lakehouse_io.append_bronze(f"cases-{tenant}", scrubbed)
     silver = lakehouse_io.write_silver_cases(tenant, scrubbed)
     return {"tenant": tenant, "cases": len(cases), "bronze": bronze, "silver": silver}
+
+
+@app.post("/sync/from-db")
+def sync_from_db(tenant: str = Query(...)):
+    """Source-of-truth sync: Postgres tenant schema -> FalkorDB + bronze/silver."""
+    with _sync_lock:
+        if tenant in _sync_state:
+            _sync_state[tenant] = "again"
+            return {"tenant": tenant, "queued": True,
+                    "note": "a full sync of this tenant is running; one more runs when it ends"}
+        _sync_state[tenant] = "running"
+    try:
+        while True:
+            out = _full_sync(tenant)
+            with _sync_lock:
+                if _sync_state.get(tenant) != "again":
+                    return out
+                _sync_state[tenant] = "running"
+    finally:
+        with _sync_lock:
+            _sync_state.pop(tenant, None)
 
 
 @app.post("/sync/from-lakehouse")

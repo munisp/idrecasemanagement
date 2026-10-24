@@ -134,9 +134,23 @@ schemas:
              member_id, place_of_service, network_status,
              provider_street, provider_city, provider_state, provider_zip,
              line_of_business]
+  # The filing packet's facts are read from its form fields (packet_docs.py); the model only names the parties,
+  # so the claim-form schema's amounts never compete with the packet's own aggregated amount.
+  filing_packet:
+    fields: [provider_name, payer_name, provider_npi]
   determination_letter:
     fields: [case_number, idre_entity, prevailing_party, awarded_amount_usd,
              rationale_summary, signature_present, determination_date]
+  # The office's own letters (letter_docs.py reads the amounts deterministically; these are the VLM's view).
+  fl_decision_report:
+    fields: [case_number, claim_number, outcome, awarded_amount_usd, already_paid_usd, balance_owed_usd,
+             provider_name, payer_name]
+  fl_cover_letter:
+    fields: [case_number, outcome, amount_in_controversy_usd, awarded_amount_usd, provider_name, payer_name]
+  fl_review_invoice:
+    fields: [invoice_number, case_number, bill_to_name, review_cost_usd, responsible_percent, total_usd]
+  iro_decision:
+    fields: [case_number, iro_number, outcome, date_received, decision_date, denial_reason, provider_name, payer_name]
   eob:
     # service_date/determination_date: the eligibility filing window runs
     # from the last EOB/determination date, and without these an EOB could

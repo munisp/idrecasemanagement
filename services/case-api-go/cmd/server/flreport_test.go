@@ -52,7 +52,7 @@ func TestFlWeeklyRowShape(t *testing.T) {
 		t.Fatalf("recommendation due wrong: %s", row[11])
 	}
 	// No outcome recorded => contract placeholder.
-	if row[13] != "TBD – case in process" {
+	if row[13] != "TBD - In Process" {
 		t.Fatalf("outcome default wrong: %s", row[13])
 	}
 	// No estimate/RFI => provider due equals the acknowledgment date itself.

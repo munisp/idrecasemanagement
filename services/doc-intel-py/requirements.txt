@@ -13,3 +13,4 @@ opensearch-py>=2.6
 pyyaml>=6.0
 pillow>=10.4
 opencv-python-headless
+pypdf>=4.0             # the filing packet's fillable form fields (packet_docs.py)

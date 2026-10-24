@@ -116,6 +116,8 @@ func (s *server) releaseCaseFromQA(r *http.Request, tenant, caseID, qid string) 
 // approval): the dates the SOP ties to that letter, the RFI response clock,
 // and the signal the workflow's stage gates wait for.
 func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiTo string) {
+	// The step tasks this letter settles tick themselves off (step_tasks.go), once everything below is recorded.
+	defer s.settleStepTasks(r.Context(), tenant, caseID)
 	if dateKeys, ok := templateDateKeys[template]; ok {
 		today := time.Now().UTC().Format("2006-01-02")
 		for _, key := range dateKeys {
@@ -124,7 +126,22 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 					sanitizeTenant(tenant)), caseID, key, today)
 		}
 	}
+	// No cost estimate requested: the Health Plan Notification is due with the acceptance, on or before day 13 of
+	// the eligibility review -- that clock runs from the same start as the review, on these cases only.
+	if template == "acceptance" && s.estimateDeclined(r, tenant, caseID) {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.cases SET program_dates = program_dates || jsonb_build_object('no_estimate_window_from', program_dates->>'packet_complete_at')
+			WHERE id::text=$1 AND coalesce(program_dates->>'packet_complete_at','') <> '' AND NOT (program_dates ? 'no_estimate_window_from')`,
+			sanitizeTenant(tenant)), caseID)
+	}
 	s.recordCaseDeliverables(r, tenant, caseID, template)
+	// The Cost Estimate asks the filer for its permission: in its portal too. A dismissal ends the wait.
+	switch template {
+	case "estimate_cost":
+		s.permissionDocRequest(r, tenant, caseID)
+	case "dismissal":
+		s.closePermissionRequests(r.Context(), tenant, caseID, "CANCELLED")
+	}
 	s.setProviderResponseDue(r, tenant, caseID, template)
 	// A closure letter records why and how the case closed, once.
 	var eligReason string
@@ -156,10 +173,10 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 		if rfiTo != "plan" {
 			rfiTo = "provider"
 		}
-		_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "RFI_SENT", map[string]any{"to": rfiTo})
+		_ = s.sigCase(r.Context(), tenant, caseID, wfID, "RFI_SENT", map[string]any{"to": rfiTo})
 		s.rfiDocRequest(r, tenant, caseID, rfiTo) // answered in the portal when that side has one
 	}
-	_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "LETTER_SENT", map[string]any{"template": template})
+	_ = s.sigCase(r.Context(), tenant, caseID, wfID, "LETTER_SENT", map[string]any{"template": template})
 }
 
 // setProviderResponseDue keeps "Date Provider's Response is Due" as the Field

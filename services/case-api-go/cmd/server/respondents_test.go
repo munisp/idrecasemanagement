@@ -11,12 +11,16 @@ func TestRespondentCheck(t *testing.T) {
 		"no name":   {Side: "HEALTH_PLAN", Email: "a@b.test"},
 		"no email":  {Side: "HEALTH_PLAN", Name: "Plan"},
 		"bad email": {Side: "HEALTH_PLAN", Name: "Plan", Email: "not-an-email"},
-		"bad NAIC":  {Side: "HEALTH_PLAN", Name: "Plan", Email: "a@b.test", NAIC: "12"},
 		"bad NPI":   {Side: "PROVIDER", Name: "Clinic", Email: "a@b.test", NPI: "1234567890"},
 	} {
 		if msg := r.check(); msg == "" {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// The NAIC is optional and only matches the plan: a mistyped one is dropped, never a refusal.
+	typo := respondent{Side: "HEALTH_PLAN", Name: "Plan", Email: "a@b.test", NAIC: "123456"}
+	if msg := typo.check(); msg != "" || typo.NAIC != "" {
+		t.Fatalf("mistyped NAIC: %q, kept %q", msg, typo.NAIC)
 	}
 	prov := respondent{Side: "PROVIDER", Name: "Clinic", Email: "a@b.test", NPI: "1234567893"}
 	if msg := prov.check(); msg != "" {

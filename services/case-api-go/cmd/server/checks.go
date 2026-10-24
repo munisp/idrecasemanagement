@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -383,42 +384,69 @@ func (s *server) submitCheckFeedback(w http.ResponseWriter, r *http.Request) {
 // the bank/lockbox webhook — one path turns a matched check into money,
 // whoever confirms it. Returns (httpStatus, errorJSON).
 func (s *server) settleClearedCheck(r *http.Request, tenant, checkID, remittanceRef, actor string) (int, string) {
-	var invID, caseID string
-	var amount int64
-	err := s.db.QueryRow(r.Context(), `
-		UPDATE public.checks SET status='CLEARED', cleared_at=now(), updated_at=now()
-		WHERE id=$1 AND tenant=$2 AND status='MATCHED'
-		RETURNING invoice_id, case_id, amount_cents`, checkID, tenant).
-		Scan(&invID, &caseID, &amount)
-	if err != nil {
+	// The check against the fee it was matched to, before anything changes: a check for less than the fee
+	// can't pay it, and is sent back to be corrected or matched elsewhere.
+	var invID, caseID, invStatus string
+	var amount, invAmount int64
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT c.invoice_id::text, c.case_id, coalesce(c.amount_cents,0), coalesce(i.status,''), coalesce(i.amount_cents,0)
+		FROM public.checks c LEFT JOIN public.invoices i ON i.tenant=c.tenant AND i.id=c.invoice_id
+		WHERE c.id=$1 AND c.tenant=$2 AND c.status='MATCHED'`, checkID, tenant).
+		Scan(&invID, &caseID, &amount, &invStatus, &invAmount); err != nil {
 		return http.StatusConflict, `{"error":"check not in MATCHED state"}`
 	}
-	if _, err = s.db.Exec(r.Context(), `
+	if amount <= 0 {
+		return http.StatusConflict, `{"error":"the check has no amount — correct it before clearing"}`
+	}
+	if invStatus == "OPEN" && amount < invAmount {
+		return http.StatusConflict, fmt.Sprintf(`{"error":"the check is %s, less than the fee of %s — correct the amount, or match it to the right fee"}`, usd(amount), usd(invAmount))
+	}
+	if _, err := s.db.Exec(r.Context(), `
+		UPDATE public.checks SET status='CLEARED', cleared_at=now(), updated_at=now() WHERE id=$1 AND tenant=$2 AND status='MATCHED'`,
+		checkID, tenant); err != nil {
+		return http.StatusInternalServerError, `{"error":"check update failed"}`
+	}
+	// The fee it pays, claimed only while still open: a fee paid meanwhile another way is not paid twice.
+	applied := int64(0)
+	var claimed string
+	if err := s.db.QueryRow(r.Context(), `
 		UPDATE public.invoices SET status='PAID', paid_at=now()::date, remittance_ref=$3
-		WHERE tenant=$1 AND id=$2 AND status='OPEN'`, tenant, invID,
-		orDash(remittanceRef)); err != nil {
-		return http.StatusInternalServerError, `{"error":"invoice settle failed"}`
+		WHERE tenant=$1 AND id::text=$2 AND status='OPEN' RETURNING id::text`, tenant, invID, orDash(remittanceRef)).Scan(&claimed); err == nil {
+		applied = invAmount
 	}
 	s.db.Exec(r.Context(), `
 		UPDATE public.payments SET status='PAID', updated_at=now()
 		WHERE session_id=$1 AND provider='check'`, "chk:"+checkID)
 
-	// Ledger leg: money is real now (clearing -> escrow), deterministic id.
+	// Ledger leg: the whole check is real money now (clearing -> escrow), deterministic id.
 	s.postPaymentLedger(tenant, caseID, "chk:"+checkID, "", uint64(amount), false)
 
-	s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, "",
-		orDash(remittanceRef), actor)
-	s.maybeAdvanceStatus(r, tenant, caseID) // all fees PAID => CLOSED_PAID
-	s.autoChecklist(r, tenant, caseID)
+	// The books: the fee's own amount is collected; anything over it (or all of it, when the fee was already
+	// paid) is money received that pays no fee -- held for Finance to refund or apply, never counted as fees.
+	if applied > 0 {
+		s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", applied, "", orDash(remittanceRef), actor)
+		s.maybeAdvanceStatus(r, tenant, caseID) // all fees PAID => CLOSED_PAID
+		s.autoChecklist(r, tenant, caseID)
+		s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
+			"case_id": caseID, "invoice_id": invID, "amount_cents": applied,
+			"method": "check", "remittance_ref": remittanceRef, "tenant": tenant,
+		})
+	}
+	if extra := amount - applied; extra > 0 {
+		s.finEvent(r, tenant, caseID, invID, "PAYMENT_UNAPPLIED", "IN", extra, "", "chk:"+checkID, actor)
+		why := fmt.Sprintf("%s more than the fee", usd(extra))
+		if applied == 0 {
+			why = fmt.Sprintf("the fee was already %s, so none of the %s pays it", strings.ToLower(orDash(invStatus)), usd(amount))
+		}
+		s.notify(r, tenant, "role:FINANCE", "PAYMENT_NEEDS_ATTENTION",
+			fmt.Sprintf("Check %s cleared: %s. Refund %s to the payer, or apply it to another fee.", checkID[:8], why, usd(extra)), "#/finance")
+		s.logActivity(r.Context(), tenant, caseID, "CHECK_UNAPPLIED", fmt.Sprintf("Check %s: %s held as not applied — %s", checkID[:8], usd(extra), why))
+	}
 	s.logActivity(r.Context(), tenant, caseID, "CHECK_CLEARED",
-		fmt.Sprintf("Check %s cleared — invoice %s paid ($%d.%02d)", checkID, invID, amount/100, amount%100))
-	s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
-		"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
-		"method": "check", "remittance_ref": remittanceRef, "tenant": tenant,
-	})
-	s.logAudit(r.Context(), tenant, caseID, "CHECK_CLEARED", map[string]any{
-		"by": actor, "check_id": checkID,
-		"invoice_id": invID, "amount_cents": amount, "remittance_ref": remittanceRef,
+		fmt.Sprintf("Check %s cleared — %s received, %s applied to invoice %s", checkID, usd(amount), usd(applied), invID))
+	s.logAudit(context.WithoutCancel(r.Context()), tenant, caseID, "CHECK_CLEARED", map[string]any{
+		"by": actor, "check_id": checkID, "invoice_id": invID, "amount_cents": amount,
+		"applied_cents": applied, "unapplied_cents": amount - applied, "remittance_ref": remittanceRef,
 	})
 	return http.StatusOK, ""
 }
@@ -434,10 +462,17 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	status := r.URL.Query().Get("status")
 	limit, offset := pageParams(r, 50, 500)
+	// Search (?q=): check number, payer, memo, case, invoice number, status. Not the bank account/routing numbers.
+	args := []any{tenant, status}
+	search := ""
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		search = searchClause(len(args), "c.check_number", "c.payer_name", "c.memo", "c.case_id", "c.status", "i.invoice_no")
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
-		`SELECT count(*) FROM public.checks WHERE tenant=$1 AND ($2='' OR status=$2)`,
-		tenant, status).Scan(&total); err != nil {
+		`SELECT count(*) FROM public.checks c LEFT JOIN public.invoices i ON i.id = c.invoice_id AND i.tenant = c.tenant
+		 WHERE c.tenant=$1 AND ($2='' OR c.status=$2)`+search, args...).Scan(&total); err != nil {
 		http.Error(w, `{"error":"query"}`, http.StatusInternalServerError)
 		return
 	}
@@ -448,8 +483,8 @@ func (s *server) listChecks(w http.ResponseWriter, r *http.Request) {
 		       c.invoice_id, c.case_id, coalesce(i.invoice_no,'') AS case_number, c.payer_name, c.created_at
 		FROM public.checks c
 		LEFT JOIN public.invoices i ON i.id = c.invoice_id AND i.tenant = c.tenant
-		WHERE c.tenant=$1 AND ($2='' OR c.status=$2)
-		ORDER BY c.created_at DESC, c.id DESC LIMIT %d OFFSET %d`, limit, offset), tenant, status)
+		WHERE c.tenant=$1 AND ($2='' OR c.status=$2)`+search+`
+		ORDER BY c.created_at DESC, c.id DESC LIMIT %d OFFSET %d`, limit, offset), args...)
 	if err != nil {
 		http.Error(w, `{"error":"query"}`, http.StatusInternalServerError)
 		return

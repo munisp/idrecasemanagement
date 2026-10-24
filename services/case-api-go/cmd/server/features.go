@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -34,25 +35,48 @@ var registeredFeatures = map[string]bool{
 	"letter_citation":       true,
 	"tpa_onboarding":        true,
 	"healthplan_onboarding": true,
-	// With onboarding on, every filing by a TPA or health plan must reference a
-	// READY package. Off: a client or party that never started onboarding
-	// files the old way (the behaviour before this flag existed).
+	// On: every filing by a TPA or health plan must reference a READY package
+	// (its documents accepted) and a verified payment method. Off (the default,
+	// featureDefaultOff): onboarding is optional and any active client can be
+	// filed for; a package named on a filing must still be READY.
 	"onboarding_required": true,
 	// Cross-rail organization aggregate (TPA 360 / provider 360 / health
 	// plan 360): entities registry + resolver + six-panel endpoint.
 	"entity360": true,
+	// Case workflow rules (workflowsteps.go, caselock.go). A tenant admin turns these off when their office works a
+	// case out of the SOP's order, or lets anyone on staff take any step.
+	"step_order":      true, // only the case's next step can be acted on
+	"step_owner":      true, // only the role that owns a step (or an admin) can act on it
+	"payment_lock":    true, // a case awaiting its initial fee allows only correspondence
+	"ineligible_lock": true, // a case found ineligible allows only correspondence
+	"fwa_review":      true, // fraud, waste or abuse review on the case page, and its automatic flag on large disputes
+	// De-identification (deid.go, services/deid-py): outbound mail scanned and reported, the lakehouse scrubbed, the
+	// clinical terms of documents read. Holding mail is separate and off by default: letters to a dispute's own
+	// parties carry its names and claims by design, so a hold is turned on only once the policy is tuned.
+	"deid":           true,
+	"deid_hold_mail": true, // hold an outbound letter the scan finds direct identifiers in (featureDefaultOff)
 }
 
+// tenantAdminRoles may change their own tenant's toggles; the platform and federal admins any tenant's.
+var tenantAdminRoles = []string{"TENANT_ADMIN", "PLATFORM_ADMIN", "FEDERAL_ADMIN"}
+
+// featureDefaultOff are the flags a tenant has to turn on; every other flag is on until turned off.
+var featureDefaultOff = map[string]bool{"onboarding_required": true, "deid_hold_mail": true}
+
 // featureEnabled reads the tenant's flags fresh (no cache — an admin toggle
-// applies to the very next request). Absent flag or absent row = true.
+// applies to the very next request). Absent flag or absent row = on, except featureDefaultOff.
 // featureFlags is a tenant's stored flags: any left in its program settings
 // (config->'features', where they were first kept) overlaid by
 // public.tenant_features, where they are written now. Absent = not stored.
 func (s *server) featureFlags(r *http.Request, tenant string) map[string]bool {
+	return s.featureFlagsCtx(r.Context(), tenant)
+}
+
+func (s *server) featureFlagsCtx(ctx context.Context, tenant string) map[string]bool {
 	var legacy, own []byte
-	_ = s.db.QueryRow(r.Context(),
+	_ = s.db.QueryRow(ctx,
 		`SELECT coalesce(config->'features','{}'::jsonb) FROM public.program_rules WHERE tenant=$1`, tenant).Scan(&legacy)
-	_ = s.db.QueryRow(r.Context(),
+	_ = s.db.QueryRow(ctx,
 		`SELECT features FROM public.tenant_features WHERE tenant=$1`, tenant).Scan(&own)
 	return mergeFlags(legacy, own)
 }
@@ -72,10 +96,15 @@ func mergeFlags(sets ...[]byte) map[string]bool {
 }
 
 func (s *server) featureEnabled(r *http.Request, tenant, name string) bool {
-	if v, ok := s.featureFlags(r, tenant)[name]; ok {
+	return s.featureEnabledCtx(r.Context(), tenant, name)
+}
+
+// featureEnabledCtx is featureEnabled for code that has no request (the case lock, background passes).
+func (s *server) featureEnabledCtx(ctx context.Context, tenant, name string) bool {
+	if v, ok := s.featureFlagsCtx(ctx, tenant)[name]; ok {
 		return v
 	}
-	return true
+	return !featureDefaultOff[name]
 }
 
 // featureGate rejects the request with 404 (not 403 — a disabled feature
@@ -94,7 +123,7 @@ func (s *server) featureGate(w http.ResponseWriter, r *http.Request, tenant, nam
 func (s *server) tenantFeatures(r *http.Request, tenant string) map[string]bool {
 	out := map[string]bool{}
 	for k := range registeredFeatures {
-		out[k] = true
+		out[k] = !featureDefaultOff[k]
 	}
 	for k, v := range s.featureFlags(r, tenant) {
 		if registeredFeatures[k] {
@@ -104,15 +133,29 @@ func (s *server) tenantFeatures(r *http.Request, tenant string) map[string]bool 
 	return out
 }
 
-// setTenantFeatures: PLATFORM_ADMIN / FEDERAL_ADMIN toggle surface. Validates
-// keys against the registered vocabulary and upserts config->'features'.
+// setTenantFeatures: PUT /v1/admin/tenants/{tenant}/features -- the platform and federal admins, any tenant.
 func (s *server) setTenantFeatures(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "PLATFORM_ADMIN", "FEDERAL_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
-	tenant := chi.URLParam(r, "tenant")
+	s.writeTenantFeatures(w, r, chi.URLParam(r, "tenant"), p)
+}
+
+// setOwnTenantFeatures: PUT /v1/tenants/{t}/features -- a tenant admin, for the tenant they are signed in to
+// (the tenancy middleware has already checked they belong to it).
+func (s *server) setOwnTenantFeatures(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, tenantAdminRoles...) {
+		http.Error(w, `{"error":"forbidden: requires TENANT_ADMIN, PLATFORM_ADMIN or FEDERAL_ADMIN"}`, http.StatusForbidden)
+		return
+	}
+	s.writeTenantFeatures(w, r, r.Context().Value(ctxTenant{}).(string), p)
+}
+
+// writeTenantFeatures validates keys against the registered vocabulary and stores the flags named.
+func (s *server) writeTenantFeatures(w http.ResponseWriter, r *http.Request, tenant string, p principal) {
 	var in struct {
 		Features map[string]bool `json:"features"`
 	}

@@ -14,13 +14,15 @@ func TestNPIValid(t *testing.T) {
 	}
 }
 
-func TestTINValid(t *testing.T) {
-	if !tinValid("123456789") {
-		t.Fatal("9-digit TIN rejected")
+func TestNormTINThenTINProblem(t *testing.T) {
+	for _, ok := range []string{"591234567", "12-3456789", "123 45 6789", "123456789"} {
+		if _, msg := tinCheck(ok); msg != "" {
+			t.Errorf("%q refused: %s", ok, msg)
+		}
 	}
-	for _, bad := range []string{"", "12345678", "1234567890", "1234 6789", "abcdefghi"} {
-		if tinValid(bad) {
-			t.Fatalf("invalid TIN %q accepted", bad)
+	for _, bad := range []string{"", "12345678", "1234567890", "abcdefghi", "111111111", "00-1234567", "07-1234567", "000-12-3456", "666-12-3456"} {
+		if _, msg := tinCheck(bad); msg == "" {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }
@@ -39,13 +41,13 @@ func TestRoutingValid(t *testing.T) {
 
 func TestTPASlotFromFilename(t *testing.T) {
 	cases := map[string]string{
-		"EOB_claim42.pdf":              "EOB",
-		"itemized_bill.pdf":            "ITEMIZED_BILL",
-		"proof_of_coverage.pdf":        "PROOF_OF_COVERAGE",
-		"open_negotiation_notice.pdf":  "OPEN_NEGOTIATION_NOTICE",
-		"offer_substantiation.pdf":     "OFFER_SUBSTANTIATION",
-		"idre_attestation.pdf":         "IDRE_ATTESTATION",
-		"random_notes.txt":             "",
+		"EOB_claim42.pdf":             "EOB",
+		"itemized_bill.pdf":           "ITEMIZED_BILL",
+		"proof_of_coverage.pdf":       "PROOF_OF_COVERAGE",
+		"open_negotiation_notice.pdf": "OPEN_NEGOTIATION_NOTICE",
+		"offer_substantiation.pdf":    "OFFER_SUBSTANTIATION",
+		"idre_attestation.pdf":        "IDRE_ATTESTATION",
+		"random_notes.txt":            "",
 	}
 	for name, want := range cases {
 		if got := tpaSlotFromFilename(name); got != want {
@@ -64,5 +66,36 @@ func TestTPASlotsComplete(t *testing.T) {
 			t.Fatalf("slot %q duplicate or invalid", s)
 		}
 		seen[s] = true
+	}
+}
+
+func TestMoreDocSlots(t *testing.T) {
+	s := newMoreSlot("MEDICAL_RECORDS")
+	if moreDocKind(s) != "MEDICAL_RECORDS" || !tpaSlotValid(s) {
+		t.Fatalf("new slot %q not recognized", s)
+	}
+	if moreDocKind("EOB") != "" || moreDocKind("MORE_NOPE_ABCDEF12") != "" || moreDocKind("MORE_OTHER_xyz") != "" {
+		t.Error("only MORE_<kind>_<8 hex> slots are additional documents")
+	}
+	if got := slotForUpload("EOB"); got != "EOB" {
+		t.Errorf("the six upload as themselves, got %q", got)
+	}
+	if got := slotForUpload("MORE_CONTRACT"); moreDocKind(got) != "CONTRACT" {
+		t.Errorf("a kind gets a fresh slot, got %q", got)
+	}
+	if a, b := slotForUpload("MORE_OTHER"), slotForUpload("MORE_OTHER"); a == b {
+		t.Error("each additional document gets its own slot")
+	}
+	if slotForUpload("MORE_NOPE") != "" || slotForUpload("RANDOM") != "" {
+		t.Error("unknown kinds are refused")
+	}
+	for name, want := range map[string]string{"medical_records.pdf": "MEDICAL_RECORDS", "provider_contract.pdf": "CONTRACT",
+		"fl_license.pdf": "FLORIDA_LICENSE", "overpayment_notice.pdf": "NOTICE_OF_OVERPAYMENT", "scan001.pdf": "OTHER"} {
+		if got := moreKindFromFilename(name); got != want {
+			t.Errorf("%s: %s, want %s", name, got, want)
+		}
+	}
+	if packageDocType(newMoreSlot("CODING_RULES")) != "coding_rules" {
+		t.Error("an additional document goes onto the case as its kind")
 	}
 }

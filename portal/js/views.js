@@ -10,8 +10,10 @@ const Views = (() => {
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   // A plain date (YYYY-MM-DD: a due date, a date of service) is a calendar
   // day, not midnight UTC -- shown as that day, with no time, in every zone.
-  const fmtDate = (d) => (!d ? "—" : /^\d{4}-\d{2}-\d{2}$/.test(d)
-    ? new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { dateStyle: "medium", timeZone: "UTC" })
+  // A date with no time of its own (a date column, often sent as midnight UTC) reads as a date, never "…, 1:00 AM".
+  const dateOnly = (d) => typeof d === "string" && (/^\d{4}-\d{2}-\d{2}$/.test(d) || /^\d{4}-\d{2}-\d{2}T00:00:00(\.0+)?(Z|[+-]00:?00)$/.test(d));
+  const fmtDate = (d) => (!d ? "—" : dateOnly(d)
+    ? new Date(d.slice(0, 10) + "T12:00:00Z").toLocaleDateString("en-US", { dateStyle: "medium", timeZone: "UTC" })
     : new Date(d).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }));
   const badge = (s) => `<span class="badge s-${esc(s).toLowerCase().replace(/_/g, "-")}">${esc(s)}</span>`;
   const err = (e) => `<div class="err-box"><b>Something didn't load.</b> ${esc(e.message)} <button class="mini" onclick="App.rerender()">Retry</button></div>`;
@@ -45,6 +47,10 @@ const Views = (() => {
   // so every FL case always counted as open. agency_status='Closed' is
   // the one consistent marker the backend actually sets across every
   // terminal internal_status (confirmed against live data).
+  // The status a case row shows: a programmed case's Internal Status (with the
+  // agency status on hover), else its status.
+  const caseBadge = (c) => c.internal_status
+    ? `<span title="${esc(c.agency_status ? "Agency: " + c.agency_status : "")}">${badge(c.internal_status)}</span>` : badge(c.status);
   const caseClosed = (prog, c) => (prog && prog.config) ? c.agency_status === "Closed" : String(c.status).startsWith("CLOSED");
 
   // Client-side CSV export: reports were read-only on screen with no way to
@@ -116,21 +122,30 @@ const Views = (() => {
     const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : "";
     return `<details class="prog-sec" id="p-summary-details" data-wf="summary" data-wf-roles="CODER"><summary>Dispute Summary (Coder)</summary>
       <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead, the summary of the dispute,
-        and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${sopStamp(ds)}</p>
+        and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${ds.by ? `<br/><span class="form-stamp">Last saved by ${esc(ds.by)}, ${fmtDate(ds.at)}</span>` : ""}</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveDisputeSummary('${id}',this)">
-        <div class="inline-form">
-          <input name="plan_type" placeholder="health plan type" value="${esc(ds.plan_type || "")}" ${ro} />
-          <label>verified from the plan's letterhead <input type="checkbox" name="verified" ${ds.plan_type_verified_from_letterhead ? "checked" : ""} ${ro} /></label>
-          <label>coding review required <input type="checkbox" name="coding" ${ds.coding_review_required ? "checked" : ""} ${ro} /></label>
-        </div>
-        <label>Summary <textarea name="summary" rows="3" ${mine ? "" : "readonly"}>${esc(ds.summary || "")}</textarea></label>
-        <div class="inline-form">
-          ${matrix.length ? `<select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
-            <option value="">Estimated Cost Matrix…</option>
-            ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select>` : ""}
-          <input name="estimate" type="number" step="0.01" min="0" placeholder="full review cost estimate $" value="${est}" ${ro} />
-          <input name="basis" placeholder="matrix row / basis for the estimate" value="${esc(ds.estimate_basis || "")}" ${ro} />
-        </div>
+        <div class="field-group"><h4>Health plan</h4>
+          <div class="field-grid">
+            <label>Health plan type
+              <input name="plan_type" placeholder="e.g. Medicaid managed care" value="${esc(ds.plan_type || (c.details || {}).plan_type || "")}" ${ro} />
+              ${!ds.plan_type && (c.details || {}).plan_type ? `<span class="field-hint">as ticked on the filing packet — verify against the letterhead</span>` : ""}</label>
+            <label><input type="checkbox" name="verified" ${ds.plan_type_verified_from_letterhead ? "checked" : ""} ${ro} /> Verified from the plan's letterhead</label>
+            <label><input type="checkbox" name="coding" ${ds.coding_review_required ? "checked" : ""} ${ro} /> Coding review required</label>
+          </div></div>
+        <div class="field-group"><h4>Dispute</h4>
+          <label>Summary of the dispute
+            <textarea name="summary" rows="4" placeholder="What is in dispute and why, in a sentence or two" ${mine ? "" : "readonly"}>${esc(ds.summary || "")}</textarea></label></div>
+        <div class="field-group"><h4>Full review cost estimate <span class="field-hint">— only when the filer asked for one</span></h4>
+          <div class="field-grid">
+            ${matrix.length ? `<label>From the Estimated Cost Matrix
+              <select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
+              <option value="">Choose a row…</option>
+              ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select></label>` : ""}
+            <label>Estimate ($)
+              <input name="estimate" type="number" step="0.01" min="0" placeholder="0.00" value="${est}" ${ro} /></label>
+            <label>Basis for the estimate
+              <input name="basis" placeholder="matrix row or reason" value="${esc(ds.estimate_basis || "")}" ${ro} /></label>
+          </div></div>
         ${mine ? `<button class="mini">Save Dispute Summary</button>` : ""}</form></details>`;
   }
   // Documents that disagree with what the case carries: the case value is
@@ -138,9 +153,11 @@ const Views = (() => {
   function sopConflictsHtml(c) {
     const cs = (c.details && c.details.eligibility_conflicts) || [];
     if (!cs.length) return "";
-    const show = (f, v) => (f === "disputed_amount_cents" ? usdC(v) : String(v));
+    const show = (f, v) => (f === "disputed_amount_cents" ? usdC(v) : f === "provider_type" ? providerTypeLabel(v)
+      : f === "contracted" ? (v === true || v === "true" ? "in the plan's network" : "not in the plan's network") : String(v));
+    const name = (f) => (f === "contracted" ? "network status" : String(f).replace(/_cents$/, "").replace(/_/g, " "));
     return `<div class="err-box"><b>⚠ Documents disagree with the case.</b> The case value was kept — check which is right before deciding.
-      <ul>${cs.map((x) => `<li>${esc(String(x.field).replace(/_cents$/, "").replace(/_/g, " "))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
+      <ul>${cs.map((x) => `<li>${esc(name(x.field))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
         ${esc(x.document || "a document")} says <b>${esc(show(x.field, x.document_value))}</b></li>`).join("")}</ul></div>`;
   }
   // Case information: the fields the Reviewer completes after payment
@@ -156,21 +173,150 @@ const Views = (() => {
     return `<details class="prog-sec"><summary>Case information${missing && mine ? ` — ${missing} report field(s) not filled` : ""}</summary>
       <p class="muted">Completed by the Reviewer. These go on the monthly report to Florida; the provider's name and the health plan come from the linked accounts unless typed here.</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveCaseInfo('${id}', this)">
-        <div class="inline-form">
+        <div class="field-grid">
           ${sel("line_of_business", "Line of business", fs.line_of_business)}
           ${sel("disputed_issue", "Disputed issue", fs.disputed_issue)}
           ${sel("out_of_network", "Out-of-network provider", fs.out_of_network || ["Yes", "No"])}
-          ${inp("claims_submitted", "Claims in the filing packet", 'type="number" min="0" style="width:7em"')}
-          ${d.claims_detected && !d.claims_submitted ? `<span class="muted">the documents show ${esc(d.claims_detected)} claim(s)</span>` : ""}
+          ${inp("claims_submitted", "Claims in the filing packet" + (d.claims_detected && !d.claims_submitted ? ` <span class="field-hint">— the documents show ${esc(d.claims_detected)}</span>` : ""), 'type="number" min="0"')}
         </div>
-        <div class="inline-form">
+        <h4 class="sub">Provider and health plan</h4><div class="field-grid">
           ${inp("provider_org", "Provider organization")}${inp("provider_contact", "Provider contact")}${inp("health_plan", "Health plan")}
         </div>
-        <div class="inline-form">
-          ${inp("provider_street", "Street address", 'style="min-width:18em"')}${inp("provider_city", "City")}
-          ${inp("provider_state", "State", 'maxlength="2" style="width:4em" placeholder="FL"')}${inp("provider_postal", "Postal code", 'style="width:8em" placeholder="12345"')}
+        <h4 class="sub">Provider address</h4><div class="field-grid">
+          ${inp("provider_street", "Street address", '')}${inp("provider_city", "City")}
+          ${inp("provider_state", "State", 'maxlength="2" placeholder="FL"')}${inp("provider_postal", "Postal code", 'placeholder="12345"')}
         </div>
-        ${mine ? `<button class="mini">Save case information</button>` : ""}</form></details>`;
+        ${mine ? `<button class="mini">Save case information</button>` : ""}</form>${sopPacketFactsHtml(d)}</details>`;
+  }
+  // The rest of what the filing packet (and the remittances / UB-04) stated, read by document analysis: shown so
+  // nobody re-types it, and so the unticked attestations and missing required documents stand out.
+  const PACKET_FACTS = [
+    ["filing_party_type", "Filing party"], ["provider_legal_entity", "Legal entity"], ["provider_trade_name", "Trade name"],
+    ["provider_npi", "NPI"], ["provider_tin", "Tax ID"], ["provider_license", "License no."], ["provider_phone", "Telephone"],
+    ["provider_fax", "Fax"], ["provider_email", "E-mail"], ["provider_alt_address", "Contact address"],
+    ["packet_provider_type", "Provider type (packet)"], ["provider_type", "Provider type (program)"],
+    ["health_plan_trade_name", "Plan trade name"], ["plan_type", "Health plan type"], ["contracted", "Contracted with the plan"],
+    ["internal_dispute_exhausted", "Internal dispute exhausted"], ["type_of_service", "Type of service"],
+    ["fee_estimate_requested", "Full review estimate requested"], ["aor_representative", "Appointed representative"],
+    ["attested_by_name", "Attested by"], ["attested_by_title", "Title"], ["attested_on", "Attested on"],
+  ];
+  const PACKET_POSITIONS = [
+    ["provider_position_basis", "Provider — basis and amount"], ["provider_position_references", "Provider — contract references"],
+    ["provider_position_rebuttal", "Provider — rebuttal"], ["plan_position_basis", "Health plan — basis for overpayment"],
+    ["plan_position_references", "Health plan — references"], ["plan_position_rebuttal", "Health plan — rebuttal"],
+  ];
+  const PACKET_DOCS = { claim_forms: "Claim form(s)", denials_eobs: "Denials / EOBs", florida_license: "Florida license",
+    final_determination_letter: "Final determination letter" };
+  // The filing packet form (js/packetform.js) on a screen: a block with its PDF picker, its init, and reading it
+  // back for a submit (null when the filer did not use it, false when it has problems -- shown in `out`).
+  function packetBlockHtml(hostId, summary) {
+    return `<details class="pf-wrap"><summary>${summary}</summary>${PacketForm.pdfPicker("#" + hostId)}<div id="${hostId}"></div></details>`;
+  }
+  function packetInit(hostId, values, opts = {}) {
+    const h = document.getElementById(hostId);
+    if (!h) return;
+    h.innerHTML = PacketForm.html(values || {}, { id: hostId + "-pf", ...opts });
+    PacketForm.bind(h);
+    if (opts.readOnly) h.querySelectorAll("input,textarea,button").forEach((x) => { x.disabled = true; });
+    // A packet PDF read into the form also fills the filing screen's own short fields that are still empty.
+    if (h.dataset.shortBound) return;
+    h.dataset.shortBound = "1";
+    // Typing the other side's name or email into the packet form fills the short form's fields as well.
+    h.addEventListener("input", (ev) => {
+      if (!/^d\.(health_plan|health_plan_email|provider_org|provider_email|provider_npi)$/.test(ev.target.name || "")) return;
+      const f = h.closest(".card")?.querySelector("form");
+      if (f) packetToShortForm(f, PacketForm.read(h).packet.details, opts.partyFixed === "HEALTH_PLAN");
+    });
+    h.addEventListener("packetfilled", (ev) => {
+      const f = h.closest(".card")?.querySelector("form");
+      if (!f) return;
+      const d = ev.detail.details || {}, plan = opts.partyFixed === "HEALTH_PLAN";
+      const set = (name, v) => { const el = f.elements[name]; if (el && !el.value && v != null && v !== "") el.value = v; };
+      if (ev.detail.disputed_amount_cents) set("amount", (ev.detail.disputed_amount_cents / 100).toFixed(2));
+      packetToShortForm(f, d, plan);
+      set("contact_name", d.provider_contact);
+      if (d.contracted != null) set("in_network", d.contracted ? "yes" : "no");
+      const ptype = { "Rural Hospital": "rural_hospital", "Physician/Medical Group": "physician_dentist", Dentist: "physician_dentist" }[d.packet_provider_type]
+        || (d.packet_provider_type === "Hospital" ? ({ "Hospital Inpatient": "hospital_inpatient", "Hospital Outpatient": "hospital_outpatient" }[d.type_of_service]) : "");
+      if (ptype) set("provider_type", ptype);
+    });
+  }
+  // The other side, from the packet, into a filing screen's own fields that are still empty: the health plan and
+  // its notice email (TPA, staff intake), or the provider, its email and NPI (a health plan filing).
+  function packetToShortForm(f, d, providerIsOther) {
+    const set = (name, v) => { const el = f.elements[name]; if (el && !el.value && v) el.value = v; };
+    set("other_party_name", providerIsOther ? (d.provider_org || d.provider_legal_entity) : d.health_plan);
+    set("other_party_email", providerIsOther ? d.provider_email : d.health_plan_email);
+    if (providerIsOther) set("other_party_npi", d.provider_npi);
+  }
+  function packetFrom(hostId, out) {
+    const h = document.getElementById(hostId);
+    if (!h || !PacketForm.touched(h)) return null;
+    const { packet, problems } = PacketForm.read(h);
+    if (problems.length) { out.innerHTML = `<p class="error">Fix the filing packet: ${esc(problems.join("; "))}</p>`; return false; }
+    return packet;
+  }
+  const packetErr = (e) => esc(e.message) + (e.problems ? ": " + esc(e.problems.join("; ")) : "");
+  // The staff case page's "Filing packet": the packet's sections as the filer entered them or as document analysis
+  // read them from the uploaded packet; the Reviewer or PM corrects and saves (their values replace the case's).
+  const PACKET_EDITORS = ["CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
+  function sopPacketFormHtml(id, c) {
+    const staff = can(...PACKET_EDITORS);
+    // Its own claims fetch: the program panel's wiring can run before this section is on the page.
+    setTimeout(async () => {
+      const values = { details: c.details || {}, disputed_amount_cents: c.disputed_amount_cents };
+      packetInit("p-packet", values, { readOnly: !staff });
+      const claims = (await Api.program.claims(id).catch(() => ({}))).claims || [];
+      const h = document.getElementById("p-packet");
+      if (h && claims.length && !PacketForm.touched(h)) packetInit("p-packet", { ...values, claims }, { readOnly: !staff });
+    }, 0);
+    return `<details class="prog-sec" id="p-packet-details"><summary>Filing packet</summary>
+      <p class="muted">The filing packet's sections — as the filer entered them, or as read from the uploaded packet.
+        ${staff ? "Correct anything here and save: your values replace the case's." : "Kept by the Reviewer and the PM."}</p>
+      ${staff ? PacketForm.pdfPicker("#p-packet") : ""}<div id="p-packet"></div>
+      ${staff ? `<button class="mini" onclick="Views.savePacketForm('${id}', this)">Save filing packet</button>` : ""}
+      <div id="p-packet-out"></div></details>`;
+  }
+  async function savePacketForm(id, btn) {
+    const out = document.getElementById("p-packet-out"), h = document.getElementById("p-packet");
+    const { packet, problems } = PacketForm.read(h);
+    if (problems.length) { out.innerHTML = `<p class="error">Fix the filing packet: ${esc(problems.join("; "))}</p>`; return; }
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.cases.filingPacket(id, packet);
+        out.innerHTML = "";
+        UI.toast(`Filing packet saved — ${r.fields.length} field(s), ${r.claims} claim(s)`);
+        App.rerender();
+      } catch (e) { out.innerHTML = `<p class="error">${packetErr(e)}</p>`; }
+    }, "Saving…");
+  }
+  function sopPacketFactsHtml(d) {
+    const val = (v) => (v === true ? "Yes" : v === false ? "No" : String(v));
+    const rows = PACKET_FACTS.filter(([k]) => d[k] != null && d[k] !== "")
+      .map(([k, label]) => `<tr><th>${esc(label)}</th><td>${esc(k === "provider_type" ? providerTypeLabel(d[k]) : val(d[k]))}</td></tr>`);
+    const pos = PACKET_POSITIONS.filter(([k]) => d[k]).map(([k, label]) => `<h5>${esc(label)}</h5><p class="prewrap">${esc(d[k])}</p>`);
+    const notes = [];
+    const att = d.packet_attestation;
+    if (att && typeof att === "object") {
+      const unticked = Object.entries(att).filter(([k, v]) => !v && k !== "rural_hospital").map(([k]) => ELIG_REASON_LABELS[k] || k.replace(/_/g, " "));
+      if (unticked.length) notes.push(`Not attested (the filer left these unticked): ${unticked.map(esc).join("; ")}`);
+      if (att.rural_hospital) notes.push("Filed as a rural hospital — rural hospital documentation should be attached");
+    }
+    if (Array.isArray(d.packet_documents_submitted)) {
+      const missing = Object.keys(PACKET_DOCS).filter((k) => !d.packet_documents_submitted.includes(k)).map((k) => PACKET_DOCS[k]);
+      if (missing.length) notes.push(`Required documentation not ticked: ${missing.map(esc).join(", ")}`);
+    }
+    for (const cf of Array.isArray(d.claim_conflicts) ? d.claim_conflicts : []) {
+      notes.push(cf.field === "same_service_as"
+        ? `Claim ${esc(cf.claim_number)} is the same service, date and charge as claim ${esc(cf.case_value)} — a corrected or replacement claim?`
+        : `Claim ${esc(cf.claim_number)}: ${esc(cf.document)} says ${esc(cf.field.replace(/_/g, " "))} ${esc(cf.document_value)}, the claims table has ${esc(cf.case_value)}`);
+    }
+    if (!rows.length && !pos.length && !notes.length) return "";
+    return `<h4 class="sub">Read from the filing packet and remittances</h4>
+      ${notes.length ? `<ul class="warn-list">${notes.map((n) => `<li>${n}</li>`).join("")}</ul>` : ""}
+      ${rows.length ? `<table class="tbl kv"><tbody>${rows.join("")}</tbody></table>` : ""}
+      ${pos.length ? `<details><summary>Positions stated in the packet</summary>${pos.join("")}</details>` : ""}
+      <p class="muted">Read by document analysis — check against the documents before relying on it.</p>`;
   }
   async function saveCaseInfo(id, form) {
     const body = {};
@@ -190,6 +336,7 @@ const Views = (() => {
   const FWA_LABEL = { REPORTED: "Reported — awaiting the PM", UNDER_REVIEW: "With the independent reviewer",
     REFERRED_TO_AGENCY: "Referred to the agency", NOT_SUBSTANTIATED: "Reviewed — not substantiated" };
   function sopFwaHtml(id, c) {
+    if (!App.feature("fwa_review")) return ""; // turned off by a tenant admin (Feature toggles)
     const f = (c.details && c.details.fwa) || {};
     const isPM = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
     const open = f.status === "REPORTED" || f.status === "UNDER_REVIEW";
@@ -253,10 +400,23 @@ const Views = (() => {
   // step are greyed out until that step is next, and hidden from roles that
   // never perform it. The server refuses out-of-order actions regardless.
   const WF_MARK = { done: "✓", skipped: "–", next: "▶", upcoming: "○" };
+  // A document step's timing: met (and when), or its due date with a live countdown; a working target says so.
+  function wfClockHtml(d) {
+    const v = d.clock_view;
+    if (v) {
+      if (v.state === "met" || v.state === "met_late") return `<span class="badge ${v.state === "met" ? "s-ck-clear" : "s-ck-review"}">${v.state === "met" ? "Met" : "Met late"}${v.met_on ? " " + esc(fmtDate(v.met_on)) : ""}</span>`;
+      if (!v.due) return "";
+      const days = v.remaining >= 0 ? `${v.remaining} ${v.basis === "business" ? "business" : "calendar"} day${v.remaining === 1 ? "" : "s"} left` : `${Math.abs(v.remaining)} day${v.remaining === -1 ? "" : "s"} over`;
+      return `<span class="sla ${esc(v.state)}" title="${esc(v.cite || "")}">${v.target ? "Target" : "Due"} ${esc(fmtDate(v.due))} · ${days}</span> ${d.state === "done" ? "" : countdown(v.due)}`;
+    }
+    if (d.due) return `<span class="sla ok">Due ${esc(fmtDate(d.due))}</span> ${d.state === "done" ? "" : countdown(d.due)}`;
+    return d.state === "upcoming" && d.clock ? '<span class="muted">its clock starts when the step before it is done</span>' : "";
+  }
   const WF_STAGE_LETTERS = ["acceptance", "ineligible", "estimate_cost", "plan_notification", "final_order", "final_order_rationale_copy"];
   const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate" : a.startsWith("send:") ? "Send it"
     : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "aor_confirm" ? "Give the ruling"
-    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it" : "Open");
+    : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it"
+    : a === "report:save" ? "Open the decision report" : a.startsWith("report:") ? "Generate it" : "Open");
   async function wfLoad(id, cfg) {
     const box = document.getElementById("wf-steps");
     if (!box) return;
@@ -264,26 +424,109 @@ const Views = (() => {
     if (!can("CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) { box.remove(); return; }
     let r;
     try { r = await Api.program.workflow(id); }
-    catch (e) { box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return; }
+    catch (e) {
+      // Reassigned to someone else while open: for a Reviewer the case is no longer theirs to see.
+      if (e.status === 404 && Auth.reviewerScoped()) { caseGone(); return; }
+      box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return;
+    }
     if (!r.programmed) { box.remove(); return; }
     const steps = r.steps || [];
     const next = steps.find((x) => x.state === "next");
-    window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin };
-    box.innerHTML = `<h3>Steps</h3>
-      <p class="muted">${next ? `Only the next step can be acted on, by the ${esc(next.owner)} (or an admin). Everything else is greyed out until its turn.`
-        : "No open step — nothing further is due on this case."}</p>
-      <ol class="wf">${steps.map((x) => `<li class="wf-${x.state}">
+    // A workflow that has ended (finished, or stopped by an admin) can't take a step: say so instead of a button.
+    const ended = r.workflow_running === false && !!next;
+    const inOrder = r.step_order !== false; // a tenant admin can let steps be taken out of order (Feature toggles)
+    window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin, ended, inOrder };
+    // The office's "Streamline Workflows, Timelines, and Outcomes": the case's workflow, its numbered steps in the
+    // document's words, each with the countdown of the clock that times it, and the tasks that carry it out.
+    const doc = r.doc || { workflow: "", steps: [] };
+    const task = Object.fromEntries(steps.map((x) => [x.key, x]));
+    const numbered = doc.steps.filter((d) => d.n);
+    const nextDoc = doc.steps.find((d) => next && (d.keys || []).includes(next.key));
+    const docDone = numbered.filter((d) => d.state === "done" || d.state === "skipped").length;
+    CaseLayout.nextStep(steps, next, next && next.can_act && !ended ? WF_BUTTON(next.action) : "",
+      ended ? "This case's workflow has ended (it finished, or an admin stopped it), so its steps can't be moved. Reopen the case, or ask an admin." : "",
+      nextDoc ? { heading: `${doc.workflow} · step ${nextDoc.n || "—"} of ${numbered.length}`, title: nextDoc.title, detail: nextDoc.detail, clock: wfClockHtml(nextDoc) } : null);
+    const wasOpen = box.querySelector("details.wf-all")?.open;
+    const taskLi = (x) => !x ? "" : `<li class="wf-${x.state}">
         <span class="wf-mark" aria-hidden="true">${WF_MARK[x.state] || ""}</span>
         <span class="wf-label">${esc(x.label)}</span> <span class="chip">${esc(x.owner)}</span>
-        ${x.state === "next" ? (x.can_act
+        ${x.state === "next" || (!inOrder && x.can_act) ? (ended ? `<span class="muted">workflow ended</span>` : x.can_act
           ? `<button type="button" class="mini" onclick="Views.wfAct('${esc(x.key)}')">${WF_BUTTON(x.action)}</button>`
           : `<span class="muted">waiting on the ${esc(x.owner)}</span>`) : ""}
-        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`).join("")}</ol>`;
+        ${x.state === "next" && x.hint ? `<div class="muted wf-hint">${esc(x.hint)}</div>` : ""}</li>`;
+    let phase = "";
+    box.innerHTML = `<details class="wf-all"${wasOpen === false ? "" : " open"}><summary><b>${esc(doc.workflow || "Steps")}</b>
+      <span class="muted">— ${docDone} of ${numbered.length} steps done. ${inOrder
+        ? `Only the next task can be acted on, by ${r.step_owner === false ? "anyone on the case" : "its owner (or an admin)"}.`
+        : `Tasks can be taken in any order, by ${r.step_owner === false ? "anyone on the case" : "their owner (or an admin)"}.`}</span></summary>
+      <ol class="wfdoc">${doc.steps.map((d) => {
+        const head = d.phase && d.phase !== phase ? `<li class="wfdoc-phase">${esc((phase = d.phase))}</li>` : "";
+        return `${head}<li class="wfdoc-step wf-${d.state}">
+          <div class="wfdoc-row"><span class="wf-mark" aria-hidden="true">${WF_MARK[d.state] || (d.state === "optional" ? "·" : "")}</span>
+            <span class="wfdoc-n">${d.n ? d.n + "." : ""}</span>
+            <span class="wfdoc-title"><b>${esc(d.title)}</b>${d.detail ? ` <span class="muted">— ${esc(d.detail)}</span>` : ""}</span>
+            <span class="wfdoc-clock">${wfClockHtml(d)}</span></div>
+          ${d.note ? `<div class="wfdoc-note">${esc(d.note)}</div>` : ""}
+          ${(d.keys || []).length ? `<ul class="wf wfdoc-tasks">${d.keys.map((k) => taskLi(task[k])).join("")}</ul>` : ""}</li>`;
+      }).join("")}</ol></details>`;
     wfApplyLocks();
   }
+  // Keeping the steps current without a reload. After anything is saved on the
+  // open case (api.js fires idre:changed) the step list and the next-step
+  // banner are read again -- and again a few times, since a step can move on a
+  // moment later, once the workflow has taken the change in. While a case is
+  // open they are also re-read every 20 seconds, so a step someone else
+  // finished shows up here too. Only the steps are redrawn: what is being typed
+  // in the forms stays.
+  let wfTimer = null, wfPoll = null;
+  async function wfRefresh(tries = [0, 1500, 3500, 7000, 12000, 20000, 30000]) {
+    const w = window._wf;
+    if (!w || !document.getElementById("wf-steps") || !location.hash.includes(w.id)) return;
+    const before = w.next ? w.next.key : "";
+    clearTimeout(wfTimer);
+    const step = async (i) => {
+      if (i >= tries.length) return;
+      wfTimer = setTimeout(async () => {
+        const cur = window._wf;
+        if (!cur || cur.id !== w.id || !location.hash.includes(w.id)) return;
+        await wfLoad(w.id, w.cfg);
+        const after = window._wf && window._wf.next ? window._wf.next.key : "";
+        if (after !== before) { wfMoved(window._wf.next); return; }
+        step(i + 1);
+      }, tries[i]);
+    };
+    step(0);
+  }
+  // The case was reassigned away from this Reviewer while they had it open.
+  function caseGone() {
+    clearInterval(wfPoll); clearTimeout(wfTimer); window._wf = null;
+    UI.toast("This case was reassigned to someone else and is no longer on your list.", { kind: "warn", duration: 9000 });
+    location.hash = "#/cases";
+  }
+  function wfMoved(next) {
+    if (!next) { UI.toast("All steps are done"); return; }
+    UI.toast(next.can_act ? `Next: ${next.label} — it's yours` : `Next: ${next.label} — with the ${next.owner}`);
+  }
+  window.addEventListener("idre:changed", () => wfRefresh());
+  function wfStartPolling() {
+    clearInterval(wfPoll);
+    wfPoll = setInterval(async () => {
+      const w = window._wf;
+      if (!w || !document.getElementById("wf-steps") || !location.hash.includes(w.id)) { clearInterval(wfPoll); return; }
+      if (document.hidden) return;
+      const before = w.next ? w.next.key : "";
+      try {
+        const r = await Api.program.workflow(w.id);
+        const n = (r.steps || []).find((x) => x.state === "next");
+        if ((n ? n.key : "") !== before) { await wfLoad(w.id, w.cfg); wfMoved(window._wf.next); }
+      } catch (e) { if (e.status === 404 && Auth.reviewerScoped()) caseGone(); /* else the next round tries again */ }
+    }, 20000);
+  }
   function wfApplyLocks() {
-    const { next, isAdmin } = window._wf || {};
-    const mine = (action) => !!(next && next.can_act && next.action === action);
+    const { next, isAdmin, steps, inOrder } = window._wf || {};
+    const mine = (action) => inOrder === false
+      ? (steps || []).some((x) => x.can_act && x.action === action)
+      : !!(next && next.can_act && next.action === action);
     document.querySelectorAll("[data-wf-admin]").forEach((el) => { if (!isAdmin) el.remove(); });
     document.querySelectorAll("[data-wf]").forEach((el) => {
       const roles = (el.dataset.wfRoles || "").split(" ").filter(Boolean);
@@ -299,6 +542,7 @@ const Views = (() => {
         else el.open = true;
       }
     });
+    CaseLayout.markTabs();
     // Stage letters can only be drafted on their own step.
     const sel = document.querySelector('#p-send select[name="template"]');
     if (sel) {
@@ -315,15 +559,19 @@ const Views = (() => {
   }
   async function wfSend(id, signal, data, label) {
     try { await Api.cases.signal(id, signal, data || {}); UI.toast(label || "Recorded"); setTimeout(() => App.rerender(), 1200); }
-    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+    catch (e) {
+      UI.toast(e.message, { kind: "warn", duration: 9000 });
+      // The case's workflow has ended: redraw the steps, which then offer nothing to press.
+      if (e.workflowEnded && window._wf) wfLoad(window._wf.id, window._wf.cfg);
+    }
   }
   const WF_YESNO = [["", "choose…"], ["yes", "Yes"], ["no", "No"]];
   async function wfAct(key) {
     const { id, cfg, steps } = window._wf || {};
     const st = (steps || []).find((x) => x.key === key);
-    if (!st || st.state !== "next" || !st.can_act) return;
+    if (!st || !st.can_act) return; // can_act already says whether it is open (the next step, or any with order off)
     const a = st.action;
-    const open = (sel) => { const el = document.querySelector(sel); if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+    const open = (sel) => { const el = document.querySelector(sel); if (el) { CaseLayout.reveal(el); el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); } };
     if (a.startsWith("letter:")) {
       const tpl = a.slice(7), sel = document.querySelector('#p-send select[name="template"]');
       if (sel) { sel.value = tpl; corrTemplateBody(sel); }
@@ -333,12 +581,30 @@ const Views = (() => {
     if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
     if (a === "summary") return open("#p-summary-details");
     if (a === "invoice") return open("#p-inv-details");
+    if (a === "report:save") return open("#p-dr-details");
+    if (a.startsWith("report:")) {
+      // Generating is quick to ask for and takes a few seconds to land: the
+      // step moves on once the generated document reaches the QA gate.
+      await Letters.gen(id, a.slice(7), true);
+      wfRefresh([2500, 5000, 9000, 15000, 25000, 40000]);
+      return;
+    }
     if (a === "settle") { location.hash = "#/finance"; return; }
     if (a === "outcome") {
       const fs = (cfg && cfg.field_schema) || {};
       const opts = (xs) => [["", "choose…"]].concat((xs || []).map((x) => [x, x]));
+      // What each outcome means, from the program's own definitions, right where one is chosen.
+      const defs = (cfg && cfg.outcome_definitions) || {};
+      // Grouped as the program's outcome structure has them (Closed Without Review, Decided With Determination...).
+      const groups = (cfg && cfg.outcome_groups) || [];
+      const grouped = groups.length ? groups.map((g) => {
+        const rows = (g.outcomes || []).filter((o) => defs[o]).map((o) => `<dt>${esc(o)}</dt><dd>${esc(defs[o])}</dd>`).join("");
+        return rows ? `<dt class="outcome-group" style="grid-column:1/-1">${esc(g.group)}</dt>${rows}` : "";
+      }).join("") : "";
+      const defList = grouped || (fs.case_outcome || []).filter((o) => defs[o]).map((o) => `<dt>${esc(o)}</dt><dd>${esc(defs[o])}</dd>`).join("");
       const v = await UI.modal({ title: "Record the outcome", submitLabel: "Record", wide: true,
-        body: "These go on the reports to Florida. Each party's review cost comes from its invoice.",
+        body: `These go on the reports to Florida. Each party's review cost comes from its invoice.
+          ${defList ? `<details class="outcome-defs"><summary>What each outcome means</summary><dl>${defList}</dl></details>` : ""}`,
         fields: [{ name: "case_outcome", label: "Case outcome", required: true, options: opts(fs.case_outcome) },
           { name: "party_billed", label: "Party billed", required: true, options: opts(fs.party_billed) },
           { name: "amount", label: "Final amount awarded (USD)", type: "number", step: "0.01" },
@@ -354,29 +620,107 @@ const Views = (() => {
     if (!a.startsWith("signal:")) return;
     const sig = a.slice(7);
     if (sig === "PACKET_COMPLETE") {
-      const v = await UI.modal({ title: "Filing packet complete", body: "Payment and documents have both arrived.", submitLabel: "Confirm",
-        fields: [{ name: "est", label: "Did the filer tick “estimate requested” in the packet?", required: true, options: WF_YESNO },
-          { name: "claims", label: "Number of claims in the filing packet", type: "number", required: true,
+      // What the uploaded filing packet itself says, read by document analysis -- offered, still confirmed here.
+      const det = (await Api.cases.get(id).catch(() => ({}))).details || {};
+      const est = det.fee_estimate_requested === true ? "yes" : det.fee_estimate_requested === false ? "no" : undefined;
+      const read = est !== undefined || det.claims_submitted != null ? " Answers below are as read from the uploaded filing packet — check them." : "";
+      void est;
+      const v = await UI.modal({ title: "Filing packet complete", body: "Payment and documents have both arrived." + read, submitLabel: "Confirm",
+        fields: [{ name: "claims", label: "Number of claims in the filing packet", type: "number", required: true,
+            value: det.claims_submitted ?? det.claims_detected ?? "",
             hint: "Reported to Florida as “Number of Claims Submitted with Initial Filing”." }] });
-      if (v) wfSend(id, sig, { estimate_requested: v.est === "yes", claims_submitted: parseInt(v.claims, 10) || 0 }, "Packet recorded as complete");
-    } else if (sig === "ESTIMATE_PERMISSION") {
-      const v = await UI.modal({ title: "Provider's permission to proceed", submitLabel: "Record",
-        fields: [{ name: "g", label: "Did the provider give permission to proceed with the full review?", required: true, options: WF_YESNO }] });
-      if (v) wfSend(id, sig, { granted: v.g === "yes" }, "Permission recorded");
-    } else if (sig === "CODING_REVIEW_COMPLETE") {
-      const v = await UI.modal({ title: "Coding review complete", submitLabel: "Complete",
-        fields: [{ name: "c", label: "Is clinical review by the Nurse / Physician needed?", required: true, options: WF_YESNO }] });
-      if (v) wfSend(id, sig, { clinical_requested: v.c === "yes" }, "Coding review recorded");
-    } else if (await UI.confirm(st.label, "Record this step as done?", "Record")) {
-      wfSend(id, sig, {}, "Recorded");
+      if (v) wfSend(id, sig, { claims_submitted: parseInt(v.claims, 10) || 0 }, "Packet recorded as complete");
+    } else {
+      wfForm(id, sig, st.label);
     }
   }
-  async function wfAnytime(id, signal) {
-    const what = { PROVIDER_WITHDRAW: "The provider asked to withdraw. The case will close when the Withdrawal letter has been sent through QA.",
-      RFI_RESPONSE_RECEIVED: "The response to the request for additional documentation has arrived.",
-      OUTREACH_DONE: "Payment arrived but the packet did not, and you have contacted the filer. This starts the 7-day refund window." }[signal];
-    if (await UI.confirm("Record this?", what, "Record", signal === "PROVIDER_WITHDRAW")) wfSend(id, signal, {}, "Recorded");
+  // What each step asks for when it is recorded: the day it actually happened (the program's clocks run from it),
+  // who and how where that matters, and a note. The answers go to the workflow and onto the case as a note.
+  const wfToday = () => new Date().toLocaleDateString("en-CA", { timeZone: (window._wf && window._wf.cfg && window._wf.cfg.time_zone) || "America/New_York" });
+  const wfDate = (label, hint) => ({ name: "date", label, type: "date", required: true, value: wfToday(), max: wfToday(), hint });
+  const wfNote = (label = "Note", required = false, hint = "Kept on the case as a note.") => ({ name: "note", label, type: "textarea", required, hint });
+  const WF_HOW = [["", "choose…"], ["Email", "Email"], ["Phone", "Phone"], ["Portal", "Portal"], ["Mail", "Mail"], ["Fax", "Fax"]];
+  const WF_REVIEW_NOTE = "Kept on the review record.";
+  const WF_FORMS = {
+    ESTIMATE_CONFIRMED: { title: "Confirm if Cost Estimate requested", submit: "Confirm", toast: "Cost estimate answer recorded",
+      body: "With a cost estimate: the Acceptance letter and the Cost Estimate go out by day 13, then the provider has 15 calendar days to give permission. Without one: no cost estimate email is sent, the estimate language comes out of the Acceptance letter and email, and the Acceptance and the Health Plan Notification go out by day 13.",
+      fields: [{ name: "r", label: "Did the filer request a cost estimate (the filing packet's “estimate requested” box)?", required: true, options: WF_YESNO }, wfNote()],
+      prefill: async (id) => {
+        const det = (await Api.cases.get(id).catch(() => ({}))).details || {};
+        return { r: det.fee_estimate_requested === true ? "yes" : det.fee_estimate_requested === false ? "no" : "" };
+      },
+      data: (v) => ({ requested: v.r === "yes" }) },
+    ESTIMATE_PERMISSION: { title: "Provider's permission to proceed", toast: "Permission recorded",
+      fields: [{ name: "g", label: "Did the provider give permission to proceed with the full review?", required: true, options: WF_YESNO },
+        wfDate("Answer received on", "The provider has 15 calendar days from the acceptance and cost estimate."),
+        { name: "how", label: "Received by", options: WF_HOW }, wfNote()],
+      data: (v) => ({ granted: v.g === "yes" }) },
+    AOR_REVISED: { title: "Revised AOR received", toast: "Revised AOR recorded",
+      body: "The filer sent a corrected Assignment of Rights; eligibility is checked again next.",
+      fields: [wfDate("Revised AOR received on"), { name: "how", label: "Received by", options: WF_HOW }, wfNote("What was corrected")] },
+    PLAN_RESPONSE_RECEIVED: { title: "Health plan's response received", toast: "Plan response recorded",
+      body: "The health plan's response has arrived; the case goes Under Review.",
+      fields: [wfDate("Response received on", "The plan has up to 15 calendar days from its notification."),
+        { name: "how", label: "Received by", options: WF_HOW }, { name: "contact", label: "Sent by (name at the plan)" }, wfNote("What the plan sent")] },
+    CODING_REVIEW_COMPLETE: { title: "Coding review complete", submit: "Complete", toast: "Coding review recorded",
+      fields: [{ name: "c", label: "Is clinical review by the Nurse / Physician needed?", required: true, options: WF_YESNO, hint: "Yes puts it in the clinical queue." },
+        wfNote("Your findings", true, WF_REVIEW_NOTE)],
+      data: (v) => ({ clinical_requested: v.c === "yes" }) },
+    CLINICAL_REVIEW_COMPLETE: { title: "Clinical review complete", submit: "Complete", toast: "Clinical review recorded",
+      fields: [wfNote("Your findings", true, WF_REVIEW_NOTE)] },
+    ATTORNEY_REVIEW_COMPLETE: { title: "Attorney review complete", submit: "Complete", toast: "Attorney review recorded",
+      body: "This records the final rationale and the Final Order package. The outcome itself is recorded in its own step.",
+      fields: [wfNote("Final rationale", true, WF_REVIEW_NOTE)] },
+    FINAL_ORDER_ISSUED: { title: "AHCA's Final Order", toast: "Final Order recorded", body: "AHCA has issued its Final Order on this case. Upload the order the Agency sent; it is filed under Determination.",
+      fields: [{ name: "file", label: "AHCA's Final Order (PDF)", type: "file", required: true, accept: ".pdf,application/pdf" },
+        wfDate("Final Order issued on"), { name: "order_number", label: "Final Order number", placeholder: "As on the order, if it has one" }, wfNote()] },
+    PROVIDER_WITHDRAW: { title: "Withdrawal requested", submit: "Record the request", danger: true, toast: "Withdrawal request recorded",
+      body: "The provider or the health plan asked to withdraw the dispute. Next, verify the request with them and confirm it here; then the Withdrawal letter goes out and the case closes, with no invoice.",
+      fields: [{ name: "by", label: "Requested by", required: true, options: [["", "choose…"], ["provider", "The provider"], ["health_plan", "The health plan"]] },
+        wfDate("Request received on"), { name: "how", label: "Received by", required: true, options: WF_HOW },
+        { name: "contact", label: "Name of the person who asked" }, wfNote("Reason given")] },
+    WITHDRAWAL_CONFIRMED: { title: "Confirm the withdrawal", submit: "Confirm the withdrawal", toast: "Withdrawal confirmed",
+      body: "You have verified the withdrawal request with the party who asked. The Withdrawal letter is next; the case closes when it has been sent.",
+      fields: [{ name: "contact", label: "Verified with (name)", required: true }, { name: "how", label: "Verified by", required: true, options: WF_HOW },
+        wfDate("Verified on"), wfNote()] },
+    RFI_RESPONSE_RECEIVED: { title: "Additional documentation received", toast: "RFI response recorded",
+      body: "The response to the request for additional documentation has arrived.",
+      fields: [wfDate("Received on"), { name: "how", label: "Received by", options: WF_HOW }, wfNote("What was received", true)] },
+    OUTREACH_DONE: { title: "Outreach to the filer", toast: "Outreach recorded",
+      body: "Payment arrived but the packet did not, and you have contacted the filer. After 7 days without a complete packet you'll be asked whether to refund — nothing is refunded on its own.",
+      fields: [{ name: "how", label: "Contacted by", required: true, options: WF_HOW }, { name: "contact", label: "Who you spoke or wrote to" },
+        wfDate("Contacted on", "The 7 days run from this day."), wfNote("What was said", true)] },
+    REFUND_APPROVED: { title: "Close and refund?", submit: "Close and refund", danger: true, toast: "Closing for a refund",
+      body: "Close this case and refund the initial fee? The filer is sent the refund letter (through QA) and Finance is asked to refund the fee. Only do this when the filing packet isn't coming.",
+      fields: [wfNote("Reason for the refund", true, "Kept on the case and shown to Finance.")] },
+  };
+  // The answers as a readable note: "Title / Label: answer" lines, option values shown as their labels.
+  const wfRecord = (title, fields, v) => [title].concat(fields.filter((f) => f.type !== "file" && String(v[f.name] || "").trim()).map((f) => {
+    const o = f.options && f.options.find((x) => x[0] === v[f.name]);
+    return `${f.label}: ${o ? o[1] : String(v[f.name]).trim()}`;
+  })).join("\n");
+  async function wfForm(id, signal, label) {
+    const f = WF_FORMS[signal] || { title: label || "Record this step", body: "Record this step as done?", fields: [wfNote()] };
+    // A dialog that starts from what the case already says (the packet's answer, read from the filing).
+    const pre = f.prefill ? await f.prefill(id).catch(() => ({})) : {};
+    const fields = f.fields.map((x) => (pre[x.name] != null && pre[x.name] !== "" ? { ...x, value: pre[x.name] } : x));
+    const v = await UI.modal({ title: f.title, body: f.body || "", submitLabel: f.submit || "Record", danger: !!f.danger, fields });
+    if (!v) return;
+    const data = f.data ? f.data(v) : {};
+    for (const k of ["date", "how", "contact", "by", "order_number", "note"]) if (String(v[k] || "").trim()) data[k] = String(v[k]).trim();
+    data.record = wfRecord(f.title, f.fields, v);
+    // A document the step brings (AHCA's Final Order) is uploaded first and named on the step.
+    const file = f.fields.find((x) => x.type === "file");
+    if (file && v[file.name] instanceof File) {
+      try {
+        const up = await Api.cases.upload(id, v[file.name], false, "DETERMINATION");
+        data.doc_id = up.doc_id;
+        data.record += `\n${file.label}: ${v[file.name].name}`;
+      } catch (e) { UI.toast(`The file could not be uploaded: ${e.message}`, { kind: "warn", duration: 9000 }); return; }
+    }
+    wfSend(id, signal, data, f.toast || "Recorded");
   }
+  const wfAnytime = (id, signal) => wfForm(id, signal);
 
   // ---- Statutory clock helpers -------------------------------------------------
   const clockChip = (c) => {
@@ -409,8 +753,11 @@ const Views = (() => {
     if (el.textContent !== st.text) el.textContent = st.text;
     el.className = "cdown " + st.cls;
   }), 1000);
-  const nearestClock = (clocks) => clocks && clocks.length
-    ? clocks.reduce((a, b) => (a.remaining < b.remaining ? a : b)) : null;
+  // The nearest running deadline: a met step's clock and a working target don't count.
+  const nearestClock = (clocks) => {
+    const run = (clocks || []).filter((c) => !["met", "met_late"].includes(c.state) && !c.target);
+    return run.length ? run.reduce((a, b) => (a.remaining < b.remaining ? a : b)) : null;
+  };
 
   async function clockMap() {
     try {
@@ -455,9 +802,11 @@ const Views = (() => {
       fees.unpaid ? "tone-pay" : ""));
     if (tpa) {
       const cs = dash.cases || [];
-      const open = cs.filter((c) => !CLOSED_ST.includes(c.status) && c.status !== "AWAITING_PAYMENT").length;
+      // A programmed (FL) case moves on its Agency status; the basic status stays at intake.
+      const isClosed = (c) => CLOSED_ST.includes(c.status) || c.agency_status === "Closed";
+      const open = cs.filter((c) => !isClosed(c) && c.status !== "AWAITING_PAYMENT").length;
       const waitPay = cs.filter((c) => c.status === "AWAITING_PAYMENT").length;
-      const closed = cs.filter((c) => CLOSED_ST.includes(c.status)).length;
+      const closed = cs.filter(isClosed).length;
       cards.unshift(homeCard("Disputes", String(cs.length), [`${open} open`, waitPay ? `${waitPay} awaiting payment` : "", closed ? `${closed} closed` : ""], g("disputes")));
       const clients = onb.clients || [];
       const ready = clients.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length;
@@ -494,7 +843,21 @@ const Views = (() => {
       const ready = ps.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length;
       cards.push(homeCard("Parties ready to file", `${ready} of ${ps.length}`, [!ps.length ? "Add the groups, networks and facilities you file for" : `${ps.length - ready} still onboarding`], g("parties")));
     }
-    const rq = (reqs.requests || []).filter((x) => x.status === "OPEN");
+    const perm = (reqs.requests || []).filter((x) => x.status === "OPEN" && x.reason === "PERMISSION").sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+    if (perm.length) {
+      cards.push(homeCard("Permission to proceed", String(perm.length),
+        [`Your permission is needed to start the full review — soonest due ${esc(fmtDate(perm[0].due_date))} (${esc(perm[0].case_number)})`,
+          countdown(perm[0].due_date), "Without it within 15 calendar days the dispute is dismissed."],
+        "location.hash='#/document-requests'", "", perm.some((x) => x.overdue) ? "tone-bad" : "tone-warn"));
+    }
+    const ext = (reqs.requests || []).filter((x) => x.status === "OPEN" && x.reason === "EXTENSION").sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+    if (ext.length) {
+      cards.push(homeCard("More time requested", String(ext.length),
+        [`The review team asks for more time — soonest answer due ${esc(fmtDate(ext[0].due_date))} (${esc(ext[0].case_number)})`,
+          countdown(ext[0].due_date), "Agree or decline under Document requests."],
+        "location.hash='#/document-requests'", "", ext.some((x) => x.overdue) ? "tone-bad" : "tone-warn"));
+    }
+    const rq = (reqs.requests || []).filter((x) => x.status === "OPEN" && x.reason !== "PERMISSION" && x.reason !== "EXTENSION");
     const od = rq.filter((x) => x.overdue).length;
     cards.push(homeCard("Document requests", String(rq.length),
       [rq.length ? "waiting for your documents" : "Nothing requested", od ? `<span class="error">${od} overdue</span>` : ""], "location.hash='#/document-requests'", "", od ? "tone-bad" : rq.length ? "tone-warn" : ""));
@@ -595,8 +958,8 @@ const Views = (() => {
         `<div class="card"><div class="num">${s.count}</div><div class="lbl">${badge(s.status)}</div>
          <div class="muted">avg ${esc(s.amount_label || "QPA")} $${(s.avg_amount_usd ?? 0).toFixed(0)}</div></div>`).join("") + `</div>`;
       const open = cases.filter((c) => !caseClosed(prog, c));
-      const attention = open.filter((c) => clocks[c.id] && clocks[c.id].length)
-        .sort((a, b) => nearestClock(clocks[a.id]).remaining - nearestClock(clocks[b.id].remaining));
+      const attention = open.filter((c) => nearestClock(clocks[c.id]))
+        .sort((a, b) => nearestClock(clocks[a.id]).remaining - nearestClock(clocks[b.id]).remaining);
       html += `<h2>Needs your attention (${attention.length})</h2>`;
       html += attention.length
         ? `<div class="panel">` + attention.slice(0, 8).map((c) => {
@@ -604,7 +967,7 @@ const Views = (() => {
             return `<div class="att-item" onclick="location.hash='#/cases/${c.id}'">
               <span class="att-id">${esc(c.case_number)}</span>
               <span class="att-title">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()}</span>
-              ${badge(c.status)} ${clockChip(cl)}</div>`;
+              ${caseBadge(c)} ${clockChip(cl)}</div>`;
           }).join("") + `</div>`
         : `<p class="muted">Nothing needs you right now. New assignments and deadline risk appear here.</p>`;
       const { bodyHtml, pagerHtml } = initClientPager("od", open, (list) => caseTable(list, clocks, "", prog));
@@ -618,11 +981,12 @@ const Views = (() => {
 
   // Server-driven column sort, stored in the hash so it survives refresh and
   // is shareable: '#/cases?sort=-qpa_cents' (prefix '-' = descending).
-  const SORTABLE = new Set(["case_number", "status", "service_line", "qpa_cents", "opened_at", "sla"]);
+  const SORTABLE = new Set(["assigned", "case_number", "status", "service_line", "qpa_cents", "disputed_amount_cents", "opened_at", "sla"]);
   // Lever 2/3/4: triage lane chip, signed SLA badge, batch group headers.
-  const laneChip = (lane) => lane === "AUTO_REVIEW" ? `<span class="chip lane-auto" title="Everything needed for a one-click confirm is present">AUTO</span>`
-    : lane === "COMPLEX" ? `<span class="chip lane-complex" title="Batched, duplicated, escalated, or high-dollar">COMPLEX</span>`
-    : `<span class="chip lane-std">STANDARD</span>`;
+  // The triage lane: how much review a dispute needs (triage.go). The chip says what it means on hover.
+  const laneChip = (lane) => lane === "AUTO_REVIEW" ? `<span class="chip lane-auto" tabindex="0" data-tip="Auto-review lane: everything needed for a one-click confirm is on file — simple, low-value, decided on the documents.">AUTO</span>`
+    : lane === "COMPLEX" ? `<span class="chip lane-complex" tabindex="0" data-tip="Complex lane: batched, duplicated, escalated or high-dollar — it gets the most review.">COMPLEX</span>`
+    : `<span class="chip lane-std" tabindex="0" data-tip="Standard lane: the normal review — not simple enough for auto-review, not complex.">STANDARD</span>`;
   // A frozen case (awaiting payment, or found ineligible) allows only
   // correspondence -- the API enforces that (cmd/server/caselock.go); this
   // disables the controls so they are not offered in the first place.
@@ -634,7 +998,9 @@ const Views = (() => {
     if (!view) return;
     const marker = view.querySelector(".case-lock");
     const allowed = (el) => {
-      if (el.closest(".case-lock, .tabs, .pager, .view-head")) return true;
+      // .case-tabs: the case page's own tab bar -- frozen with everything else, it kept staff from reaching the
+      // "Letters & email" tab the banner says is still open (payment reminders).
+      if (el.closest(".case-lock, .tabs, .case-tabs, .pager, .view-head")) return true;
       const sec = el.closest("details.prog-sec");
       if (sec) {
         const title = (sec.querySelector("summary")?.textContent || "").trim().toLowerCase();
@@ -674,6 +1040,33 @@ const Views = (() => {
     improper_aggregation: "Claims aggregated incorrectly",
     internal_process_not_exhausted: "Contract requires the internal dispute process, and it was not exhausted",
   };
+  // Plain-language names for the program's provider types (the threshold
+  // matrix). An unlisted type falls back to the code itself.
+  const PROVIDER_TYPE_LABELS = {
+    hospital_inpatient: "Hospital — inpatient",
+    hospital_outpatient: "Hospital — outpatient",
+    physician_dentist: "Physician or dentist",
+    rural_hospital: "Rural hospital",
+    other: "Other provider",
+  };
+  const providerTypeLabel = (x) => PROVIDER_TYPE_LABELS[x] || String(x || "").replace(/_/g, " ");
+  // Fills a provider-type select with the program's types, keeping its first
+  // ("not sure") option.
+  async function fillProviderTypes(sel) {
+    if (!sel || sel.dataset.filled) return;
+    const prog = await Api.program.get().catch(() => null);
+    const cfg = (prog && prog.config) || {};
+    const types = [...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))];
+    sel.insertAdjacentHTML("beforeend", types.map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join(""));
+    sel.dataset.filled = "1";
+  }
+  // The eligibility inputs, as the Reviewer knows them.
+  const ELIG_INPUT_LABELS = {
+    provider_type: ["Provider type", "what kind of provider this is"],
+    contracted: ["In the plan's network", "whether the provider is in the health plan's network"],
+    final_determination_at: ["Final determination date", "when the health plan made its final decision on the claim (the last EOB date works)"],
+    service_date: ["Date of service", "the earliest date of service in dispute"],
+  };
   const slaBadge = (days) => {
     if (days === undefined || days === null) return '<span class="muted">—</span>';
     const cls = days < 0 ? "sla breach" : days <= 3 ? "sla risk" : days <= 7 ? "sla watch" : "sla ok";
@@ -696,16 +1089,24 @@ const Views = (() => {
     const s = q.toString();
     location.hash = "#/cases" + (s ? "?" + s : "");
   }
+  let caseListPoll = null;
+  // The grid's Opened column: this year's dates without the year (the full date is the cell's tooltip).
+  const openedShort = (d) => {
+    const t = d ? new Date(d) : null;
+    if (!t || isNaN(t)) return fmtDate(d);
+    const sameYear = t.getFullYear() === new Date().getFullYear();
+    return t.toLocaleString(undefined, { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }), hour: "numeric", minute: "2-digit" });
+  };
   const caseTable = (rows, clocks = {}, sort = "", prog = null, groupBatch = false) => {
     if (!rows.length) return `<p class="muted">No disputes.</p>`;
     const row = (c) => `<tr class="click" data-case="${c.id}">
         <td class="selcol"><input type="checkbox" class="sel-one" data-id="${c.id}" ${selection.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.case_number)}"></td>
-        <td class="mono">${esc(c.case_number)}</td><td>${badge(c.status)}</td><td>${esc(c.service_line)}</td>
+        <td class="mono">${esc(c.case_number)}</td><td>${caseBadge(c)}</td><td>${assigneeCell(c)}</td><td>${esc(c.service_line)}</td>
         <td class="num">$${((c[amtField(prog)] || 0) / 100).toLocaleString()}</td>
         <td>${laneChip(c.triage_lane)}</td>
-        <td>${slaBadge(c.sla_days_remaining)}</td>
-        <td>${clocks[c.id] && clocks[c.id].length ? clockChip(nearestClock(clocks[c.id])) : '<span class="muted">—</span>'}</td>
-        <td class="muted">${fmtDate(c.opened_at)}</td>
+        <td>${caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining)}</td>
+        <td>${nearestClock(clocks[c.id]) ? clockChip(nearestClock(clocks[c.id])) : '<span class="muted">—</span>'}</td>
+        <td class="muted" title="${esc(fmtDate(c.opened_at))}">${openedShort(c.opened_at)}</td>
         <td><button class="mini peek" data-id="${c.id}" title="Peek without losing your place">▸</button></td></tr>`;
     let body = "";
     if (groupBatch) {
@@ -722,7 +1123,7 @@ const Views = (() => {
       for (const [bid, members] of groups) {
         const sum = members.reduce((a, c) => a + (c[amtField(prog)] || 0), 0);
         const worst = Math.min(...members.map((c) => (c.sla_days_remaining ?? 9999)));
-        body += `<tr class="batch-head"><td colspan="10">▦ Batch ${esc(bid.slice(0, 8))} — ${members.length} disputes ·
+        body += `<tr class="batch-head"><td colspan="11">▦ Batch ${esc(bid.slice(0, 8))} — ${members.length} disputes ·
           $${(sum / 100).toLocaleString()} combined · ${slaBadge(worst)}
           <span class="muted">(review as one: same payer, same fact pattern)</span></td></tr>` +
           members.map((c) => row(c).replace('<tr class="click"', '<tr class="click batched"')).join("");
@@ -735,10 +1136,10 @@ const Views = (() => {
     <div class="dg-wrap">
       <table class="dg"><thead><tr>
         <th class="selcol"><input type="checkbox" id="sel-all" aria-label="Select all"></th>
-        ${[["case_number", "Case #"], ["status", "Status"], ["service_line", "Service"], [amtField(prog), amtLabel(prog)]]
+        ${[["case_number", "Case #"], ["status", "Status"], ["assigned", "Assigned"], ["service_line", "Service"], [amtField(prog), amtLabel(prog)]]
           .map(([c, l]) => sortableTh(c, l, sort)).join("")}
         <th>Lane</th>${sortableTh("sla", "SLA", sort)}
-        <th>Statutory clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
+        <th title="The nearest statutory clock on the case">Clock</th>${sortableTh("opened_at", "Opened", sort)}<th></th></tr></thead><tbody>` +
       body + `</tbody></table></div>`;
   };
 
@@ -756,6 +1157,7 @@ const Views = (() => {
         location.hash = `#/cases/${tr.dataset.case}`;
       }));
     document.querySelectorAll(".peek").forEach((b) => b.addEventListener("click", () => peek(b.dataset.id)));
+    bindAssignButtons(document.querySelector(".dg-wrap") || document);
   }
 
   function paintBulkBar() {
@@ -766,6 +1168,7 @@ const Views = (() => {
     bar.setAttribute("aria-live", "polite");
     bar.innerHTML = `<b>${selection.size} selected</b>
       <button class="mini" id="bk-assign">Assign to me</button>
+      ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button class="mini" id="bk-assign-to">Assign to…</button>` : ""}
       <button class="mini" id="bk-status">Set status…</button>
       <button class="mini" id="bk-clear">Clear</button>`;
     document.body.appendChild(bar);
@@ -775,6 +1178,29 @@ const Views = (() => {
         const r = await Api.cm.bulk({ action: "assign", case_ids: [...selection] });
         const ok = r.results.filter((x) => x.ok).length;
         UI.toast(`Assigned ${ok} of ${r.results.length} disputes to you`);
+        selection.clear(); App.rerender();
+      }, "Assigning…");
+    };
+    // PM: route the whole selection, any roles at once (e.g. when someone leaves or is overloaded): the Reviewer holds
+    // each case, the specialists are added alongside. Rows left on "Keep" are not touched.
+    const assignTo = $("#bk-assign-to");
+    if (assignTo) assignTo.onclick = async (ev) => {
+      const lists = await Promise.all(ASSIGN_ROLES.map(([r]) => Api.cm.assignees(r).catch(() => ({ assignees: [] }))));
+      const fields = ASSIGN_ROLES.map(([r, label], i) => ({ name: "p_" + r, label: r === "CASE_MANAGER" ? `${label} — holds the case` : label, value: "",
+        options: [["", "Keep as it is"], ...(lists[i].assignees || []).map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open`])] }));
+      const v = await UI.modal({ title: `People on ${selection.size} dispute${selection.size === 1 ? "" : "s"}`, wide: true, fields, submitLabel: "Assign selection" });
+      if (!v) return;
+      const picks = ASSIGN_ROLES.filter(([r]) => v["p_" + r]);
+      if (!picks.length) { UI.toast("No changes"); return; }
+      await UI.run(ev.currentTarget, async () => {
+        const said = [];
+        for (const [r, label] of picks) {
+          try {
+            const res = await Api.cm.bulk({ action: "assign", case_ids: [...selection], role: r, assignee: v["p_" + r] });
+            said.push(`${label}: ${res.results.filter((x) => x.ok).length} of ${res.results.length}`);
+          } catch (e) { said.push(`${label}: ${e.message}`); }
+        }
+        UI.toast(said.join(" · "), { duration: 9000 });
         selection.clear(); App.rerender();
       }, "Assigning…");
     };
@@ -809,7 +1235,7 @@ const Views = (() => {
       p.querySelector(".peek-b").innerHTML = `
         <div class="mono muted">${esc(c.case_number)}</div>
         <h3>${esc(c.service_line)} · $${((c[amtField(prog)] || 0) / 100).toLocaleString()}</h3>
-        <p>${badge(c.status)}</p>
+        <p>${caseBadge(c)}</p>
         ${clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}">${clockChip(cl)}</span>
           <span class="muted" style="font-size:11px">${esc(cl.label)} · ${esc(cl.cite)}</span></div>`).join("")}
         <p style="margin-top:14px"><button class="mini" onclick="location.hash='#/cases/${c.id}'">Open workspace →</button></p>`;
@@ -817,6 +1243,27 @@ const Views = (() => {
   }
 
   // ---- Disputes list -----------------------------------------------------------
+  // The Disputes address with one filter changed (the others kept), for the filter switches.
+  function casesHref(key, val) {
+    const q = new URLSearchParams(location.hash.split("?")[1] || "");
+    val ? q.set(key, val) : q.delete(key);
+    const s = q.toString();
+    return "#/cases" + (s ? "?" + s : "");
+  }
+  // The summary figures over every dispute this person can see (the search applies), from the stage counts.
+  function disputesSummary(all, mine) {
+    if (!all) return "";
+    const st = all.stages || [];
+    const sum = (k) => st.reduce((t, x) => t + (Number(x[k]) || 0), 0);
+    // Unassigned and paid: the ones waiting for a Reviewer. An unpaid filing is not given out until its fee is paid.
+    const un = sum("unassigned_paid"), unpaid = sum("awaiting_payment");
+    return ListUI.summary([
+      { label: "Disputes", value: Number(all.total) || 0, sub: "$" + Math.round(sum("disputed_cents") / 100).toLocaleString() + " disputed" },
+      { label: "Waiting for a reviewer", value: un, sub: un ? "paid, nobody assigned yet" : "every paid dispute has a reviewer", tone: un ? "warn" : "good" },
+      { label: "Awaiting payment", value: unpaid, sub: "given out once the fee is paid" },
+      mine ? { label: "Assigned to me", value: Number(mine.total) || 0, sub: "on your list" } : null,
+    ]);
+  }
   // Server-side pagination: one page at a time (Pager.size() rows), Previous /
   // Next. Saved-view status filters are pushed to the server so a filter never
   // applies to a partial page. Counts come from the server total, not the page.
@@ -827,12 +1274,22 @@ const Views = (() => {
       const sort = hq.get("sort") || "";
       const lane = hq.get("lane") || "";
       const groupBatch = hq.get("batch") === "1";
+      const search = (hq.get("q") || "").trim();
+      const assigned = ["mine", "unassigned", "assigned"].includes(hq.get("assigned")) ? hq.get("assigned") : "";
+      const assignee = canAssign() ? (hq.get("assignee") || "") : "";
       const saved = await Api.cm.views().catch(() => []);
       const sv = saved.find((s) => s.id === v);
       const status = sv && sv.filters && sv.filters.status ? sv.filters.status : "";
+      const asgParams = { ...(assigned ? { assigned } : {}), ...(assignee ? { assignee } : {}) };
       const stalled = hq.get("stalled") === "1";
-      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(stalled ? { stalled: "true" } : {}) };
-      const [page, clocks, prog] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null)]);
+      const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...(stalled ? { stalled: "true" } : {}), ...asgParams };
+      // The reviewers, for the Reviewer filter (their workload is on the Team page).
+      const team = canAssign() ? Api.cm.assignees("CASE_MANAGER").then((r) => r.assignees || []).catch(() => []) : Promise.resolve([]);
+      // Summary figures for the whole list (the search applies; the other filters are the switches below).
+      const sumOpts = search ? { q: search } : {};
+      const [page, clocks, prog, reviewers, allCounts, mineCounts] = await Promise.all([Api.cases.list(reqParams), clockMap(), Api.program.get().catch(() => null), team,
+        Api.cases.pipelineCounts("internal_status", sumOpts).catch(() => null),
+        Auth.reviewerScoped() ? Promise.resolve(null) : Api.cases.pipelineCounts("internal_status", { ...sumOpts, assigned: "mine" }).catch(() => null)]);
       let loaded = page.cases.slice();   // the rows of the page on screen
       // The default sort pages by keyset, so going back needs the cursor each
       // page started from: cursors[n] opens page n.
@@ -844,6 +1301,50 @@ const Views = (() => {
       document.body.classList.toggle("density-compact", density === "compact");
       afterRender(() => {
         bindGrid(loaded);
+        // Statuses move while the list is open (someone finishes a step, a
+        // payment lands): every 30 seconds the rows on screen get their
+        // current status and SLA again. Only those cells change; the scroll
+        // position, the selection and the page stay as they are.
+        clearInterval(caseListPoll);
+        caseListPoll = setInterval(async () => {
+          if (!location.hash.startsWith("#/cases") || location.hash.startsWith("#/cases/")) { clearInterval(caseListPoll); return; }
+          if (document.hidden) return;
+          const ids = [...document.querySelectorAll("#view tr[data-case]")].map((tr) => tr.dataset.case);
+          if (!ids.length) return;
+          try {
+            const fresh = await Api.cases.list({ ...reqParams, limit: Math.max(ids.length, reqParams.limit || 0) });
+            for (const c of fresh.cases || []) {
+              const tr = document.querySelector(`#view tr[data-case="${c.id}"]`);
+              if (!tr) continue;
+              const cells = tr.children;
+              if (cells[2]) cells[2].innerHTML = caseBadge(c);
+              if (cells[3] && (cells[3].dataset.asg || "") !== (c.assigned_to || "")) {
+                cells[3].innerHTML = assigneeCell(c); cells[3].dataset.asg = c.assigned_to || ""; bindAssignButtons(cells[3]);
+              }
+              if (cells[7]) cells[7].innerHTML = caseClosed(prog, c) ? '<span class="muted">—</span>' : slaBadge(c.sla_days_remaining);
+              const old = loaded.find((x) => x.id === c.id);
+              if (old) Object.assign(old, c);
+            }
+          } catch { /* the next round tries again */ }
+        }, 30000);
+        // Search: case number, parties (provider, health plan, TPA client) by name, email or NPI, statuses and the
+        // case's details. Kept in the hash like the lane, so a search can be shared and survives a reload.
+        const box = $("#case-search");
+        if (box) {
+          let tmr;
+          const go = () => {
+            const q = new URLSearchParams(location.hash.split("?")[1] || "");
+            const val = box.value.trim();
+            val ? q.set("q", val) : q.delete("q");
+            const s = q.toString();
+            const next = "#/cases" + (s ? "?" + s : "");
+            if (next !== location.hash) location.hash = next;
+          };
+          box.addEventListener("input", () => { clearTimeout(tmr); tmr = setTimeout(go, 350); });
+          box.addEventListener("keydown", (e) => { if (e.key === "Enter") { clearTimeout(tmr); go(); } if (e.key === "Escape") { box.value = ""; go(); } });
+          if (search) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+        }
+        $("#case-search-clear")?.addEventListener("click", () => { const b = $("#case-search"); if (b) { b.value = ""; b.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); } });
         // Lever 2: lane tabs re-filter server-side; Lever 3: batch grouping
         // toggles batch-as-one rows. Both live in the hash = shareable.
         document.querySelectorAll(".lane-tab").forEach((b) => b.addEventListener("click", () => {
@@ -852,6 +1353,15 @@ const Views = (() => {
           const s = q.toString();
           location.hash = "#/cases" + (s ? "?" + s : "");
         }));
+        // Assignment filters, in the hash like the lane.
+        const setQ = (k, val) => {
+          const q = new URLSearchParams(location.hash.split("?")[1] || "");
+          val ? q.set(k, val) : q.delete(k);
+          const s = q.toString();
+          location.hash = "#/cases" + (s ? "?" + s : "");
+        };
+        $("#asg-filter")?.addEventListener("change", (e) => setQ("assigned", e.target.value));
+        $("#asg-person")?.addEventListener("change", (e) => setQ("assignee", e.target.value));
         $("#batch-tgl")?.addEventListener("click", () => {
           const q = new URLSearchParams(location.hash.split("?")[1] || "");
           groupBatch ? q.delete("batch") : q.set("batch", "1");
@@ -864,7 +1374,7 @@ const Views = (() => {
           document.body.classList.toggle("density-compact", next === "compact");
           UI.toast(`Density: ${next}`);
         };
-        $("#grab").onclick = async (ev) => {
+        if ($("#grab")) $("#grab").onclick = async (ev) => {
           await UI.run(ev.currentTarget, async () => {
             const r = await Api.cm.grabNext();
             if (r.claimed) { UI.toast(`Claimed ${r.case_number} from the queue`); location.hash = `#/cases/${r.case_id}`; }
@@ -873,7 +1383,7 @@ const Views = (() => {
         };
         Pager.server($("#pg"), { total, shown: loaded.length }, async (limit, _offset, pg) => {
           if (pg === 0) cursors.length = 1; // also the page-size change path: old cursors are stale
-          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}) };
+          const more = { limit, ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...asgParams };
           const cursor = cursors[pg] || "";
           if (cursor.startsWith("offset:")) more.offset = cursor.slice(7); else if (cursor) more.cursor = cursor;
           const next = await Api.cases.list(more);
@@ -887,22 +1397,33 @@ const Views = (() => {
           return { total: grandTotal, shown: loaded.length };
         });
       });
-      return `<div class="view-head"><h1>Disputes</h1><span class="muted">${total} total${stalled ? ' · <span class="badge warn">stalled filter</span> <a href="#/cases">clear</a>' : ""}</span>
+      // The whole width of the page: the grid has eleven columns. Who holds how many cases is on the Team page.
+      return `<div class="wide-view"><div class="view-head"><h1>Disputes</h1><span class="muted">${search ? `${total} matching “${esc(search)}”` : `${total} total`}${stalled ? ' · <span class="badge warn">stalled: no activity 7 days+</span> <a href="#/cases">clear</a>' : ""}</span>
+        <div class="case-search"><input id="case-search" type="search" value="${esc(search)}" maxlength="100"
+          placeholder="Search case number, provider, health plan, NPI, email…" aria-label="Search disputes" />
+          ${search ? `<button class="mini" id="case-search-clear" aria-label="Clear search">Clear</button>` : ""}</div>
 
         <span style="flex:1"></span>
-        <button class="mini" id="grab">⇪ Grab next</button>
+        ${Auth.reviewerScoped() ? "" : `<button class="mini" id="grab">⇪ Grab next</button>`}
         <button class="mini" id="density">Density: ${density}</button></div>
-        <p class="lane-tabs" role="tablist" aria-label="Triage lanes">
-          ${[["", "All"], ["AUTO_REVIEW", "Auto-review"], ["STANDARD", "Standard"], ["COMPLEX", "Complex"]]
-            .map(([l, lab]) => `<button class="mini lane-tab${lane === l ? " active" : ""}" data-lane="${l}" role="tab" aria-selected="${lane === l}">${lab}</button>`).join("")}
+        ${disputesSummary(allCounts, mineCounts)}
+        <div class="list-bar">
+          ${Auth.reviewerScoped() ? "" : ListUI.segs("Whose disputes", [{ value: "", label: "All" }, { value: "unassigned", label: "Unassigned" }, { value: "mine", label: "Mine" },
+            ...(canAssign() ? [{ value: "assigned", label: "Assigned" }] : [])].map((o) => ({ ...o, href: casesHref("assigned", o.value) })), assigned)}
+          ${ListUI.segs("Triage lane", [["", "All lanes"], ["AUTO_REVIEW", "Auto-review"], ["STANDARD", "Standard"], ["COMPLEX", "Complex"]]
+            .map(([value, label]) => ({ value, label, href: casesHref("lane", value) })), lane)}
           <button class="mini" id="batch-tgl" aria-pressed="${groupBatch}" title="Collapse batched disputes into one reviewable group">${groupBatch ? "▦ Batches: grouped" : "▦ Group batches"}</button>
-        </p>
+        </div>
         <p class="viewbar">
+          ${canAssign() ? `<label class="asg-filter">Reviewer
+            <select id="asg-person"><option value="">Anyone</option>
+              ${reviewers.map((a) => `<option value="${esc(a.id)}"${assignee === a.id ? " selected" : ""}>${esc(a.username)}</option>`).join("")}</select></label>` : ""}
+          ${Auth.reviewerScoped() ? `<span class="muted">You see the cases assigned to you. New ones are given out in turn by the PM's rotation.</span>` : ""}
           <select onchange="location.hash='#/cases?view='+this.value" aria-label="Saved views">
             <option value="">All disputes</option>${opts}</select>
           <button class="mini" onclick="Views.saveCurrentView()">Save current view</button>
           ${sv ? `<span class="muted">filter: status = ${esc(sv.filters.status)}</span>` : ""}</p>` +
-        `<div data-serverpaged>` + caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch) + `</div><div id="pg"></div>`;
+        `<div data-serverpaged>` + caseTable(loaded, clocks, sort || "opened_at", prog, groupBatch) + `</div><div id="pg"></div></div>`;
     } catch (e) { return `<h1>Disputes</h1>` + err(e); }
   }
 
@@ -966,17 +1487,158 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  async function assign(caseId) {
-    const v = await UI.modal({ title: "Assign / route", fields: [
-      { name: "role", label: "Assign as", options: [["CASE_MANAGER", "Case manager"], ["ARBITRATOR", "Arbitrator"]], required: true },
-      { name: "assignee", label: "Assignee", placeholder: "blank = workload-balanced auto" },
-    ] });
+  const ASSIGN_ROLES = [["CASE_MANAGER", "Reviewer"], ["ARBITRATOR", "Arbitrator"], ["CODER", "Coder"],
+    ["NURSE_PHYSICIAN", "Clinical reviewer"], ["ATTORNEY", "Attorney"]];
+  const NEXT_IN_TURN = "__next";
+  const assigneeOptions = (list) => [["", "Auto — whoever has the fewest open cases"],
+    ...list.map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`])];
+
+  // ---- Assignment: who holds a case, and who may change that --------------------------------------------------
+  // The PM and the Tenant Admin assign and reassign; a Tenant Admin can also take a case themselves. A Reviewer
+  // takes an unassigned case ("Take"); they cannot route cases to others. The server enforces all of it.
+  const canAssign = () => can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+  const canTakeOwn = () => (Auth.claims()?.roles || []).some((r) => ["TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].includes(r));
+  const canClaim = () => canAssign(); // a Reviewer sees only their own cases (casescope.go): nothing to take
+  const myId = () => Auth.claims()?.sub || "";
+  // The list's Assigned cell: the person, or Unassigned; with the one action this viewer has on it.
+  function assigneeCell(c) {
+    const id = c.assigned_to || "";
+    const who = id ? `<span class="asg-name${id === myId() ? " me" : ""}">${esc(id === myId() ? "You" : (c.assigned_name || "Staff"))}</span>`
+      : `<span class="asg-none">Unassigned</span>`;
+    let act = "";
+    if (!id && canClaim() && !canAssign()) act = `<button class="mini asg-act" data-claim="${esc(c.id)}" data-num="${esc(c.case_number)}">Take</button>`;
+    else if (canAssign()) act = `<button class="mini ghost asg-act" data-assign="${esc(c.id)}" data-cur="${esc(id)}">${id ? "Reassign" : "Assign"}</button>`;
+    return `<span class="asg">${who}${act}</span>`;
+  }
+  function bindAssignButtons(root = document) {
+    root.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); claim(b.dataset.claim, b.dataset.num); }));
+    root.querySelectorAll("[data-assign]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); assign(b.dataset.assign); }));
+  }
+  // An answer that lost a race: tell them plainly who has it now, and redraw.
+  function assignConflict(e) {
+    UI.toast(e.message || "The assignment changed — look again.", { kind: "warn", duration: 9000 });
+    App.rerender();
+  }
+
+  // "Assigned to" on the case page: the person (or Unassigned) and the actions this viewer has.
+  async function loadCaseAssignee(caseId, isAssigner) {
+    const el = document.getElementById("case-assignee");
+    if (!el) return;
+    try {
+      const a = await Api.cm.assignment(caseId);
+      const mine = a.assigned_to && a.assigned_to === myId();
+      // One line per person on the case: their role, their name, and the few things this viewer can do about it.
+      const link = (label, call, danger) => `<button type="button" class="team-link${danger ? " team-link-danger" : ""}" onclick="${call}">${label}</button>`;
+      const acts = [];
+      if (!a.assigned_to && canClaim()) acts.push(link("Take this case", `Views.claim('${esc(caseId)}')`));
+      if (isAssigner) {
+        acts.push(link(a.assigned_to ? "Reassign" : "Assign", `Views.assign('${esc(caseId)}')`));
+        if (canTakeOwn() && !mine && a.assigned_to) acts.push(link("Assign to me", `Views.assignToMe('${esc(caseId)}')`));
+        if (a.assigned_to) acts.push(link("Unassign", `Views.unassign('${esc(caseId)}')`, true));
+      }
+      const row = (role, name, isMe, rowActs) => `<div class="team-row">
+          <span class="team-role">${esc(role)}</span>
+          <span class="team-name${isMe ? " me" : ""}">${name}</span>
+          ${rowActs.length ? `<span class="team-acts">${rowActs.join("")}</span>` : ""}</div>`;
+      const helpers = (a.helpers || []).map((h) => row(h.role_label, esc(h.id === myId() ? "You" : (h.name || "Staff")), h.id === myId(),
+        isAssigner ? [link("Change", `Views.assign('${esc(caseId)}')`), link("Remove", `Views.unassignHelper('${esc(caseId)}','${esc(h.role)}','${esc(h.id)}')`, true)] : [])).join("");
+      const missing = ASSIGN_ROLES.filter(([r]) => r !== "CASE_MANAGER" && !(a.helpers || []).some((h) => h.role === r));
+      el.innerHTML = row("Reviewer", a.assigned_to ? esc(mine ? "You" : a.name) : '<span class="asg-none">Nobody yet</span>', mine, acts)
+        + helpers
+        + (isAssigner && missing.length ? `<button type="button" class="team-add" onclick="Views.assign('${esc(caseId)}')">＋ Add a specialist</button>` : "");
+      el.dataset.assignee = a.assigned_to || "";
+    } catch { el.innerHTML = ""; }
+  }
+
+  // A Reviewer (or the PM / Tenant Admin) takes an unassigned case. Only one person can win it; the other is told.
+  async function claim(caseId, caseNumber) {
+    const ok = await UI.modal({ title: "Take this case?", submitLabel: "Take it",
+      body: `${caseNumber ? `<b>${esc(caseNumber)}</b> ` : "It "}moves to your list as its Reviewer. Other reviewers will no longer see it.` });
+    if (!ok) return;
+    try {
+      const r = await Api.cm.claim(caseId);
+      UI.toast(r.unchanged ? "It's already yours" : `${caseNumber || "The case"} is yours now`);
+      App.rerender();
+    } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // A Tenant Admin takes ownership of a case someone else holds.
+  async function assignToMe(caseId) {
+    const cur = await Api.cm.assignment(caseId).catch(() => ({}));
+    const v = await UI.modal({ title: "Assign to me", submitLabel: "Take it over", danger: !!cur.name,
+      body: cur.name ? `It is with <b>${esc(cur.name)}</b> now; they'll be told it moved to you.` : "You become its Reviewer.",
+      fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }] });
     if (!v) return;
     try {
-      const r = await Api.cm.assign(caseId, v.role, v.assignee || "");
-      UI.toast(`Assigned to ${r.assigned_to}`);
+      await Api.cm.assign(caseId, "CASE_MANAGER", myId(), v.reason || "", "", cur.assigned_to || "");
+      UI.toast("Assigned to you");
       App.rerender();
-    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // Assign the people on a case, every role at once: the Reviewer, who holds the case, and the specialists named
+  // alongside (Coder, Clinical reviewer, Attorney, Arbitrator). Each row offers "Next in turn" (the role's rotation),
+  // "Auto" (fewest open cases), a person from the list (least loaded first), or removing a specialist; a row left
+  // on "Keep" is not touched. Whoever loses a place is told.
+  const KEEP = "__keep", REMOVE = "__remove";
+  async function assign(caseId) {
+    try {
+      const cur = await Api.cm.assignment(caseId).catch(() => ({}));
+      const holderOf = (r) => (r === "CASE_MANAGER" ? cur.assigned_to || "" : ((cur.helpers || []).find((h) => h.role === r) || {}).id || "");
+      const nameOf = (r) => (r === "CASE_MANAGER" ? cur.name : ((cur.helpers || []).find((h) => h.role === r) || {}).name);
+      const lists = await Promise.all(ASSIGN_ROLES.map(([r]) => Api.cm.assignees(r).catch(() => ({ assignees: [] }))));
+      const fields = ASSIGN_ROLES.map(([r, label], i) => {
+        const res = lists[i], list = res.assignees || [], held = holderOf(r);
+        const opts = [[KEEP, held ? `Keep ${esc(nameOf(r) || "current")}` : (r === "CASE_MANAGER" ? "— nobody yet —" : "— none —")]];
+        if (res.next_in_turn && res.next_in_turn.id !== held) opts.push([NEXT_IN_TURN, `Next in turn — ${esc(res.next_in_turn.username)}`]);
+        if (list.length) opts.push(["", "Auto — whoever has the fewest open cases"]);
+        if (r === "CASE_MANAGER" && canTakeOwn() && myId() !== held && !list.some((a) => a.id === myId())) opts.push([myId(), "Me (take it myself)"]);
+        list.filter((a) => a.id !== held).forEach((a) => opts.push([a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`]));
+        if (held && r !== "CASE_MANAGER") opts.push([REMOVE, `Remove ${esc(nameOf(r) || "them")}`]);
+        return { name: "p_" + r, label: r === "CASE_MANAGER" ? `${label} — holds the case` : label, options: opts, value: KEEP,
+          hint: !list.length ? `No active ${label} on this tenant yet` : "" };
+      });
+      fields.push({ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" });
+      const v = await UI.modal({ title: "People on this case", wide: true, fields, submitLabel: "Save",
+        body: "Change any row; rows on <b>Keep</b> stay as they are. The Reviewer holds the case; the others are added alongside." });
+      if (!v) return;
+      const done = [], failed = [];
+      for (const [r, label] of ASSIGN_ROLES) {
+        const pick = v["p_" + r];
+        if (pick === undefined || pick === KEEP) continue;
+        const expected = holderOf(r);
+        try {
+          const res = pick === NEXT_IN_TURN ? await Api.cm.assignNext(caseId, r, v.reason || "", expected)
+            : pick === REMOVE ? await Api.cm.assign(caseId, r, "", v.reason || "", "unassign", expected)
+            : await Api.cm.assign(caseId, r, pick, v.reason || "", "", expected);
+          done.push(pick === REMOVE ? `${label} removed` : `${label}: ${res.name || "staff"}`);
+        } catch (e) { failed.push(`${label}: ${e.message}`); }
+      }
+      if (done.length) UI.toast(done.join(" · "), { duration: 8000 });
+      if (failed.length) UI.toast(failed.join(" · "), { kind: "warn", sticky: true });
+      if (!done.length && !failed.length) UI.toast("No changes");
+      App.rerender();
+    } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function unassignHelper(caseId, role, who) {
+    const label = (ASSIGN_ROLES.find(([k]) => k === role) || [role, role])[1];
+    const v = await UI.modal({ title: `Remove the ${label}`, body: "The Reviewer keeps the case; the person removed is told.",
+      fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }],
+      submitLabel: "Remove", danger: true });
+    if (!v) return;
+    try { await Api.cm.assign(caseId, role, "", v.reason || "", "unassign", who); UI.toast(`${label} removed`); App.rerender(); }
+    catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function unassign(caseId) {
+    const v = await UI.modal({ title: "Unassign case", body: "The case goes back to the unassigned queue; the person who had it is told.",
+      fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }],
+      submitLabel: "Unassign", danger: true });
+    if (!v) return;
+    const cur = document.getElementById("case-assignee")?.dataset.assignee;
+    try { await Api.cm.assign(caseId, "CASE_MANAGER", "", v.reason || "", "unassign", cur); UI.toast("Unassigned"); App.rerender(); }
+    catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function letter(caseId, template) {
@@ -1148,8 +1810,16 @@ const Views = (() => {
     const seg = (val, label, n) => `<a href="#/queues/${discipline}${val ? `?issue=${val}` : ""}" aria-current="${issue === val}">${label}${n == null ? "" : `<span class="n">${n}</span>`}</a>`;
     const waiting = rows.filter((r) => r.review_status === "REQUESTED").length;
     const inReview = rows.filter((r) => r.review_status === "IN_REVIEW").length;
+    const mineN = rows.filter((r) => r.mine).length;
+    const disputedSum = rows.reduce((t, r) => t + (Number(r.disputed_amount_cents) || 0), 0);
     const html = `<div class="view-head"><h1>${esc(meta.title)}</h1></div>
       <p class="muted q-blurb">${esc(meta.blurb)}</p>
+      ${ListUI.summary([
+        { label: "Waiting", value: waiting, sub: "not yet claimed", tone: waiting ? "warn" : "good" },
+        { label: "In review", value: inReview, sub: "claimed by a reviewer" },
+        { label: "On your list", value: mineN, sub: "cases you're the specialist on" },
+        { label: "Disputed", value: usd(disputedSum), sub: `across ${rows.length} open review${rows.length === 1 ? "" : "s"}` },
+      ])}
       <div class="q-toolbar">
         <div>${bundlingOn ? `<nav class="q-seg" aria-label="Filter">${seg("", "All open", counts.all)}${seg("bundling", "Bundling", counts.bundling)}</nav>` : ""}</div>
         <div class="q-right"><span class="q-summary">${waiting} waiting · ${inReview} in review</span>
@@ -1158,7 +1828,7 @@ const Views = (() => {
       ${issue === "bundling" ? `<p class="muted q-note">Showing cases flagged by document analysis (NCCI edits, modifier 59, bundled-denial wording) or whose disputed issue mentions bundling.</p>` : ""}
       <div class="q-table"><table><thead><tr><th>Case</th><th>Case status</th><th>Service line · codes</th><th class="num">Disputed</th><th>Review</th><th>Requested</th><th></th></tr></thead><tbody>` +
       (rows.length ? rows.map((r) => `<tr>
-        <td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td>
+        <td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a>${r.mine ? ' <span class="badge s-paid" title="You are the specialist on this case">yours</span>' : ""}</td>
         <td>${badge(r.status || "")}</td><td>${esc(r.service_line || "—")}${r.bundling_suspected === "true" ? ' <span class="badge s-flag" title="Bundling wording found in the case documents">bundling</span>' : ""}${dxOf(r).length ? `<div class="q-codes" title="Diagnosis codes from the documents">${dxOf(r).slice(0, 6).map(esc).join(" · ")}${dxOf(r).length > 6 ? ` +${dxOf(r).length - 6}` : ""}</div>` : ""}</td><td class="num">${usd(r.disputed_amount_cents)}</td>
         <td>${badge(r.review_status)}${r.reviewer ? ` <span class="muted">${esc(r.reviewer)}</span>` : ""}${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
         <td>${fmtDate(r.requested_at)}</td>
@@ -1215,15 +1885,21 @@ const Views = (() => {
     catch (e) { return `<div class="view-head"><h1>PM board</h1></div><p class="muted">${esc(e.message)}</p>`; }
     const escRows = data.escalations || data.queue || [];
     const open = data.open_cases || [];
-    const html = `<div class="view-head"><h1>Program manager board</h1></div>
-      <h2>Escalations</h2>
+    const lvl2 = escRows.filter((r) => (r.level || 1) > 1).length;
+    const html = `<div class="view-head"><h1>Program manager board</h1><span class="muted">escalated deadlines and every open case</span></div>
+      ${ListUI.summary([
+        { label: "Open escalations", value: escRows.length, sub: escRows.length ? "a deadline at risk" : "nothing escalated", tone: escRows.length ? "bad" : "good" },
+        { label: "Level 2 or higher", value: lvl2, sub: "escalated more than once", tone: lvl2 ? "bad" : "" },
+        { label: "Open cases", value: open.length, sub: "on the board" },
+      ])}
+      <section class="panel"><h2>Escalations <span class="n">${escRows.length}</span></h2>
       <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Reason</th><th>Raised</th></tr></thead><tbody>` +
-      (escRows.length ? escRows.map((r) => `<tr><td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td><td>${badge(r.status || "")}</td><td>${esc(r.clock || "")}${r.level > 1 ? ` · level ${r.level}` : ""}${r.detail ? `<div class="muted">${esc(r.detail)}</div>` : ""}</td><td>${fmtDate(r.created_at)}</td></tr>`).join("")
-        : `<tr><td colspan="4" class="muted">No open escalations.</td></tr>`) + `</tbody></table>
-      <h2>Open cases</h2>
+      (escRows.length ? escRows.map((r) => `<tr><td><a href="#/cases/${esc(r.case_id)}" class="mono">${esc(r.case_number || r.case_id)}</a></td><td>${badge(r.status || "")}</td><td>${esc(r.clock || "")}${r.level > 1 ? ` · <span class="due-over">level ${r.level}</span>` : ""}${r.detail ? `<div class="muted">${esc(r.detail)}</div>` : ""}</td><td>${fmtDate(r.created_at)}</td></tr>`).join("")
+        : `<tr><td colspan="4" class="muted">No open escalations.</td></tr>`) + `</tbody></table></section>
+      <section class="panel"><h2>Open cases <span class="n">${open.length}</span></h2>
       <table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Opened</th></tr></thead><tbody>` +
       (open.length ? open.map((r) => `<tr><td><a href="#/cases/${esc(r.id)}" class="mono">${esc(r.case_number)}</a></td><td>${badge(r.status)}</td><td>${fmtDate(r.opened_at)}</td></tr>`).join("")
-        : `<tr><td colspan="3" class="muted">No open cases.</td></tr>`) + `</tbody></table>`;
+        : `<tr><td colspan="3" class="muted">No open cases.</td></tr>`) + `</tbody></table></section>`;
     return html;
   }
 
@@ -1332,6 +2008,8 @@ const Views = (() => {
 
   // ---- Platform-admin feature toggles -----------------------------------------
   const FEATURE_LABELS = {
+    deid: "De-identification: scan outbound letters, scrub the lakehouse, read documents' clinical terms",
+    deid_hold_mail: "Hold a letter the scan finds direct identifiers in (off: it is flagged and goes out)",
     sealed_offers: "Sealed offers (double-blind bidding)",
     review_queues: "Specialty review queues (coding/clinical/legal)",
     party_workspace: "Party workspace (Keycloak party accounts)",
@@ -1348,31 +2026,48 @@ const Views = (() => {
     letter_citation: "Determination-letter auto-citation",
     tpa_onboarding: "TPA onboarding (profile + payment + 6-doc packages)",
     healthplan_onboarding: "Health plan onboarding (parties + payment + 6-doc packages)",
-    onboarding_required: "TPA / health plan filings need a READY package (off: clients that never started onboarding file the old way)",
+    onboarding_required: "TPA / health plan filings need a READY package and a verified payment method (off: onboarding is optional — any active client can be filed for)",
     entity360: "Entity 360 (cross-rail organization aggregate: TPA / provider / health plan)",
   };
 
+  // Case workflow rules: how strictly a case follows its SOP. Each is on unless a tenant admin turns it off.
+  const WORKFLOW_RULES = {
+    step_order: ["Follow the steps in order", "Only a case's next step can be acted on. Off: staff can take any step that isn't done yet, in any order."],
+    step_owner: ["Only a step's owner can do it", "Each step is done by the role that owns it (or an admin). Off: anyone who works the case can do any step."],
+    payment_lock: ["Freeze a case until its fee is paid", "A case awaiting its initial fee allows only correspondence. Off: staff can work it before payment."],
+    ineligible_lock: ["Freeze an ineligible case", "A case found ineligible allows only correspondence until a new eligibility review. Off: staff can keep working it."],
+    fwa_review: ["Fraud, waste or abuse review", "Staff can report suspected fraud, waste or abuse on a case; the PM assigns an independent reviewer and records the outcome. Disputes of $1,000,000 or more are flagged automatically. Off: the section is hidden and nothing is flagged (large disputes are still escalated to the PM)."],
+  };
+
   async function featuresAdmin() {
+    if (!can("TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return `<div class="view-head"><h1>Feature toggles</h1></div><p class="muted">Only a tenant admin can change these.</p>`;
     const p = await Api.program.get().catch(() => ({ features: {} }));
     const flags = p.features || {};
     const tenant = Api.getTenant();
+    const DEFAULT_OFF = { onboarding_required: true, deid_hold_mail: true }; // features.go featureDefaultOff
+    const row = (k, label, desc) => {
+      const on = DEFAULT_OFF[k] ? flags[k] === true : flags[k] !== false;
+      return `<tr><td><b>${esc(label)}</b>${desc ? `<br><span class="muted">${esc(desc)}</span>` : ""}<br><span class="muted mono" style="font-size:11px">${esc(k)}</span></td>
+        <td class="feat-state">${on ? '<span class="badge s-active">ON</span>' : '<span class="badge">OFF</span>'}
+          <button type="button" class="mini ${on ? "ghost" : ""}" data-feat="${k}" data-to="${on ? "0" : "1"}">${on ? "Turn off" : "Turn on"}</button></td></tr>`;
+    };
+    // The switch sits in the State cell: a separate column ended up scrolled out of sight beside the long descriptions.
+    const table = (rows) => `<table class="tbl feat-tbl"><thead><tr><th>Setting</th><th>State</th></tr></thead><tbody>${rows}</tbody></table>`;
     const html = `<div class="view-head"><h1>Feature toggles</h1><span class="badge">${esc(tenant).toUpperCase()}</span></div>
-      <p class="muted">Per-tenant capability switches. The server enforces every flag — turning one off makes its endpoints 404, not just hides the UI. Changes apply to the next request; users see the UI change on reload.</p>
-      <table class="tbl"><thead><tr><th>Capability</th><th>State</th><th></th></tr></thead><tbody>` +
-      Object.entries(FEATURE_LABELS).map(([k, label]) => {
-        const on = flags[k] !== false;
-        return `<tr><td>${esc(label)}<br><span class="muted mono" style="font-size:11px">${esc(k)}</span></td>
-          <td>${on ? '<span class="badge s-active">ON</span>' : '<span class="badge">OFF</span>'}</td>
-          <td><button class="btn sm ${on ? "ghost" : ""}" data-feat="${k}" data-to="${on ? "0" : "1"}">${on ? "Turn off" : "Turn on"}</button></td></tr>`;
-      }).join("") + `</tbody></table>`;
+      <p class="muted">Settings for this tenant only. The server enforces each one, so turning it off changes what the platform allows, not just what it shows. Changes apply at once; others see them on their next page load.</p>
+      <h2>Case workflow rules</h2>
+      ${table(Object.entries(WORKFLOW_RULES).map(([k, [label, desc]]) => row(k, label, desc)).join(""))}
+      <h2>Capabilities</h2>
+      ${table(Object.entries(FEATURE_LABELS).map(([k, label]) => row(k, label, "")).join(""))}`;
     return { html, wire: () => {
       document.querySelectorAll("[data-feat]").forEach((b) => b.addEventListener("click", async () => {
-        const cur = {};
-        Object.keys(FEATURE_LABELS).forEach((k) => { cur[k] = flags[k] !== false; });
-        cur[b.dataset.feat] = b.dataset.to === "1";
+        const k = b.dataset.feat, to = b.dataset.to === "1";
+        const label = (WORKFLOW_RULES[k] || [FEATURE_LABELS[k]])[0];
+        if (!to && WORKFLOW_RULES[k] && !(await UI.confirm(`Turn off "${label}"?`, WORKFLOW_RULES[k][1], "Turn off", true))) return;
         try {
-          await Api.admin.setFeatures(tenant, cur);
-          UI.toast(`${FEATURE_LABELS[b.dataset.feat]} ${cur[b.dataset.feat] ? "enabled" : "disabled"} — effective immediately`);
+          await Api.program.setFeatures({ [k]: to });
+          await App.featuresChanged();
+          UI.toast(`${label}: ${to ? "on" : "off"}`);
           App.rerender();
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       }));
@@ -1394,9 +2089,76 @@ const Views = (() => {
       box.innerHTML = ` ${feePill(f)} ${feePayable(f) ? `<button class="mini" onclick="Views.payDisputeFn('${kind}', '${id}', this, 'case')">Pay now — ${usdC(f.fee_cents)}</button>` : ""}`;
     } catch { box.innerHTML = ""; }
   }
+  // The dispute's record for its TPA or health plan: every letter sent to it, as it was sent, with the documents
+  // it carried, which download here as well as from the email's link.
+  const secureLinkRe = /https?:\/\/\S*\/(?:s|api\/share)\/[0-9a-f]{48}\S*|\/(?:s|api\/share)\/[0-9a-f]{48}\S*/g;
+  function sentRecordHtml(k, rec) {
+    const mail = rec.mail || [], docs = rec.documents || [];
+    if (!mail.length && !docs.length) return `<p class="muted">Nothing has been sent to you on this dispute yet. Letters and the documents they carry are kept here as they are sent.</p>`;
+    const docBtn = (d) => `<li><button type="button" class="linkish" onclick="Views.previewSentDoc('${k}','${d.doc_id}', this.dataset.name)" data-name="${esc(d.filename)}">${esc(prettyDocName(d.filename))}</button>
+      <button type="button" class="mini ghost" onclick="Views.sentDocGetFn('${k}','${d.doc_id}', this)" data-name="${esc(d.filename)}">Download</button></li>`;
+    const used = new Set();
+    const items = mail.map((m) => {
+      const mine = docs.filter((d) => d.case_id === m.case_id && d.subject === m.subject);
+      mine.forEach((d) => used.add(d.doc_id));
+      return `<li class="sent-mail"><details><summary><b>${esc(m.subject || "Letter")}</b> <span class="muted">· ${fmtDate(m.sent_at)}${mine.length ? ` · ${mine.length} document${mine.length === 1 ? "" : "s"}` : ""}</span></summary>
+        <div class="sent-body">${esc(String(m.body || "").replace(secureLinkRe, "[secure link — the documents are listed below]"))}</div></details>
+        ${mine.length ? `<ul class="sent-docs">${mine.map(docBtn).join("")}</ul>` : ""}</li>`;
+    }).join("");
+    const rest = docs.filter((d) => !used.has(d.doc_id));
+    return `${mail.length ? `<ul class="sent-list">${items}</ul>` : ""}
+      ${rest.length ? `<h3>Other documents sent to you</h3><ul class="sent-docs">${rest.map(docBtn).join("")}</ul>` : ""}`;
+  }
+  async function sentRecordInto(el, k, caseId) {
+    if (!el) return;
+    try { el.innerHTML = sentRecordHtml(k, await Api.program.sentRecord(k, caseId)); }
+    catch (e) { el.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function sentRecordOpen(k, caseId, caseNumber) {
+    let rec;
+    try { rec = await Api.program.sentRecord(k, caseId); } catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    await UI.modal({ title: `Letters and documents — ${esc(caseNumber || "")}`, wide: true, submitLabel: "Close", html: sentRecordHtml(k, rec) });
+  }
+  async function sentDocGetFn(k, docId, btn) {
+    try { await Api.program.sentDocGet(k, docId, btn?.dataset.name); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // A dispute as its TPA or health plan sees it (party_dispute_view.go): the parties, what is disputed, where it
+  // stands, its dates, claims and fees, and the Agency's outcome once its Final Order is issued.
+  const FEE_KIND = { INITIAL_FEE: "Initial fee", FULL_REVIEW: "Full review", DEFAULT: "Default", LATE_FEE: "Late fee" };
+  function disputeSummaryHtml(sum, kind) {
+    const c = sum.case || {}, dates = sum.dates || [], claims = sum.claims || [], fees = sum.fees || [];
+    const fact = (label, v) => v ? `<div><dt>${label}</dt><dd>${v}</dd></div>` : "";
+    return `<dl class="dsum-facts">
+        ${fact("Filed for", esc(c.client || c.initiating_party || "—") + (c.provider_group ? ` <span class="muted">· ${esc(c.provider_group)}</span>` : ""))}
+        ${fact("Against", esc(c.health_plan || "—"))}
+        ${fact("Your side", sum.side === "HEALTH_PLAN" ? "The health plan" : "The provider")}
+        ${fact("In dispute", usdC(c.disputed_amount_cents))}
+        ${fact("Filed", fmtDate(c.opened_at))}
+        ${fact("Status", c.agency_status ? `<span class="badge">${esc(c.agency_status)}</span>` : badge(c.status))}
+        ${fact("What it's about", esc(c.disputed_issue))}
+      </dl>
+      ${c.case_outcome ? `<div class="dsum-outcome"><b>Outcome:</b> ${esc(c.case_outcome)}${c.awarded_cents != null ? ` · awarded ${usdC(c.awarded_cents)}` : ""}${c.final_order_number ? ` · Final Order ${esc(c.final_order_number)}` : ""}</div>` : ""}
+      ${dates.length ? `<h3>Dates</h3><ol class="dsum-dates">${dates.map((d) => `<li><span>${esc(d.label)}</span><b>${fmtDate(d.date)}</b></li>`).join("")}</ol>` : ""}
+      ${claims.length ? `<h3>Claims <span class="muted">${claims.length}</span></h3><div class="tbl-wrap"><table class="tbl" data-nosearch><thead><tr><th>Claim</th><th>Date of service</th><th>Service</th><th>Billed</th><th>Paid</th><th>Disputed</th><th>Status</th></tr></thead><tbody>
+        ${claims.map((x) => `<tr><td class="mono">${esc(x.claim_number)}</td><td>${esc(x.date_of_service ? fmtDate(x.date_of_service) : "—")}</td><td>${esc(x.type_of_service || x.cpt || "—")}</td>
+          <td>${x.billed_cents != null ? usdC(x.billed_cents) : "—"}</td><td>${x.paid_cents != null ? usdC(x.paid_cents) : "—"}</td><td>${x.disputed_cents != null ? usdC(x.disputed_cents) : "—"}</td><td>${x.status ? badge(x.status) : "—"}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${fees.length ? `<h3>Fees billed to you</h3><div class="tbl-wrap"><table class="tbl" data-nosearch><thead><tr><th>Invoice</th><th>For</th><th>Amount</th><th>Status</th><th>Due</th></tr></thead><tbody>
+        ${fees.map((f) => `<tr><td class="mono">${esc(f.invoice_no || "—")}</td><td>${esc(FEE_KIND[f.kind] || f.kind)}</td><td>${usdC(f.amount_cents)}</td><td>${badge(f.status)}${f.paid_at ? ` <span class="muted">${fmtDate(f.paid_at)}</span>` : ""}</td><td>${f.due_date ? fmtDate(f.due_date) : "—"}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+  }
+  async function disputeSummaryInto(el, kind, caseId) {
+    if (!el) return;
+    try { el.innerHTML = disputeSummaryHtml(await Api.program.disputeSummary(kind, caseId), kind); }
+    catch (e) { el.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
   async function filerCase(id) {
     const kind = can("TPA") ? "tpa" : can("HEALTH_PLAN") ? "hp" : ""; // an invited party pays and answers elsewhere
-    if (kind) { filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind)); filerDocReqBanner(id, kind); }
+    if (kind) {
+      filerFeeBox(id, kind); feeReturn(kind, () => filerFeeBox(id, kind)); filerDocReqBanner(id, kind);
+      (async () => { let el = null; for (let i = 0; i < 50 && !(el = document.getElementById("filer-record-" + id)); i++) await new Promise((r) => setTimeout(r, 200)); sentRecordInto(el, kind, id);
+        disputeSummaryInto(document.getElementById("filer-summary-" + id), kind, id); })();
+    }
     let c;
     try { c = await Api.cases.get(id); }
     catch { return `<div class="view-head"><h1>Dispute not found</h1></div>
@@ -1407,14 +2169,17 @@ const Views = (() => {
     return `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>${badge(c.status)}</div>
       <p class="muted">Filed for ${esc(d.initiating_party || "your client")} · opened ${fmtDate(c.opened_at)}</p>
       <div id="filer-docreq-${id}"></div>
+      ${kind ? `<div class="card"><h2>Dispute details</h2><div id="filer-summary-${id}"><p class="muted">Loading…</p></div></div>` : ""}
       ${c.lock === "AWAITING_PAYMENT" ? `<div class="case-lock" role="status"><b>Awaiting payment.</b> The review starts once the initial fee is paid.
         <span id="filer-fee-${id}"></span></div>` : ""}
       ${clocks.length ? `<div class="sla-cluster">` + clocks.map((cl) => `<div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
         <span class="lbl">${esc(cl.label)}</span><span class="cite">due ${esc(cl.due)}</span>${cl.due && cl.state !== "closed" && cl.state !== "paused" ? countdown(cl.due) : ""}</div>`).join("") + `</div>` : ""}
       <div class="card"><h2>Documents</h2>${list.length && (can("TPA") || can("HEALTH_PLAN")) ? `<p><button class="mini secondary" onclick="Views.orgDocsDownload('${can("TPA") ? "tpa" : "hp"}', {case_id: '${id}'}, this)">Download all documents</button></p>` : ""}${list.length ? `<table><thead><tr><th>File</th><th>Type</th><th>Received</th><th></th></tr></thead><tbody>` +
         list.map((x) => `<tr><td>${esc(x.filename || x.name || "document")}</td><td>${esc(x.doc_type || "")}</td><td>${fmtDate(x.uploaded_at || x.created_at)}</td>
-          <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
+          <td><a href="javascript:void(0)" onclick="Views.previewCaseDoc('${id}','${x.doc_id}', this.dataset.name)" data-name="${esc(x.filename || "")}">view</a> ·
+            <a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
         : `<p class="muted">No documents yet. Use the upload link in your email to send the claim documents.</p>`}</div>
+      ${kind ? `<div class="card"><h2>Letters and documents sent to you</h2><div id="filer-record-${id}"><p class="muted">Loading…</p></div></div>` : ""}
       <p><a href="${outsideHome()}">Back to your disputes</a></p>`;
   }
 
@@ -1428,26 +2193,31 @@ const Views = (() => {
         Api.program.get().catch(() => null),
       ]);
       Palette.remember("case", c.id, c.case_number);
-      let html = `<div class="view-head"><h1><span class="mono">${esc(c.case_number)}</span></h1>
-        ${badge(c.status)}</div>
-        <div id="next-action"></div>`;
-      // Phase 2 next-action: one recommended primary action, with its reason.
-      // Clicking it emits next_action_accept; the button is advisory — the
-      // regular action row below is untouched, so choosing anything else
-      // shows up as navigation without the accept event (implicit override).
+      // The case page: a header that says what this dispute is and where it stands, one "next step" banner, and
+      // the rest in tabs by what people come to do (read the documents, review, write to the parties, bill,
+      // look back). Every section keeps its own id, so the step buttons still find and open it (CaseLayout.reveal).
+      const programmed = !!(prog && prog.config);
+      const det = c.details || {};
+      const P = { overview: "", documents: "", review: "", mail: "", billing: "", activity: "" };
+      let html = CaseLayout.header(c, prog, clocks) + `<div id="next-action"></div>`;
+      // The next-action recommender (nextaction.go) under the step banner: the steps say what is next on the
+      // dispute; this adds what else is worth doing (a QA draft, documents to look at, possible duplicates).
+      // Accepting it emits next_action_accept, as its telemetry expects; ignoring it is the implicit override.
       afterRender(() => Api.cases.nextAction(id).then((na) => {
-        const a = na && na.next_action;
-        const box = document.getElementById("next-action");
-        if (!a || !box) return;
+        const a = na && na.next_action, box = document.getElementById("next-action");
+        if (!a || !box || ["review_case", "triage", "submit_offer", "log_negotiation"].includes(a.action_id)) return;
         if (window.Telemetry) Telemetry.track("next_action_shown", a.action_id,
           { confidence: a.confidence, basis: na.confidence_basis, role: Telemetry.role(), service_line: c.service_line || "", case_id: id });
-        box.innerHTML = `<div class="sla-cluster"><div class="sla-card" style="border-left:3px solid var(--accent,#3b82f6)">
-          <button id="na-go" class="primary">${esc(a.label)}</button>
-          <span class="lbl">Suggested next step · ${esc(a.reason)} · confidence ${Math.round(a.confidence * 100)}%${na.confidence_basis === "learned" ? " (learned from this program's history)" : na.confidence_basis === "learned:role" ? " (learned from how your role acts here)" : na.confidence_basis === "learned:service_line" ? " (learned from similar cases)" : na.confidence_basis === "observed" ? " (observed accept rate)" : " (rule prior)"}</span></div></div>`;
+        box.innerHTML = `<div class="na-also"><span class="muted">Also suggested:</span>
+          <button type="button" class="mini" id="na-go">${esc(a.label)}</button> <span class="muted">${esc(a.reason)}</span></div>`;
         document.getElementById("na-go").addEventListener("click", () => {
           if (window.Telemetry) Telemetry.track("next_action_accept", a.action_id,
             { confidence: a.confidence, role: Telemetry.role(), service_line: c.service_line || "", case_id: id });
-          location.hash = a.href;
+          // Its links name a section ("#/cases/<id>#documents"): open that section of this page.
+          const section = { documents: "case-docs", correspondence: "p-send-details", checklist: "case-checklist", relationships: "case-rel" }[(a.href.split("#")[2] || "")];
+          const el = section && document.getElementById(section);
+          if (el) { CaseLayout.reveal(el); if (el.tagName === "DETAILS") el.open = true; el.scrollIntoView({ behavior: "smooth", block: "start" }); }
+          else location.hash = a.href.split("#").slice(0, 2).join("#");
         });
         // Expected path: the tenant's transition matrix read at this case's
         // current status. Present only when the model gate and the per-cell
@@ -1460,228 +2230,168 @@ const Views = (() => {
             Typical from ${esc(ep.from)} (n=${ep.sample_exits}): ${legs}${ep.median_hours_to_close != null ? ` · median to close ${h2(ep.median_hours_to_close)} (n=${ep.closed_sample})` : ""}</div>`);
         }
       }).catch(() => {}));
-      html += `
-        <p class="muted">${esc(c.service_line)} · ${amtLabel(prog)} $${((c[amtField(prog)] || 0) / 100).toLocaleString()} · opened ${fmtDate(c.opened_at)}</p>`;
       if (c.lock) {
         html += `<div class="case-lock" role="status"><b>${c.lock === "AWAITING_PAYMENT" ? "Awaiting payment" : "Ineligible"} — this case is frozen.</b>
           ${c.lock === "AWAITING_PAYMENT"
-            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Correspondence, letters, call and inquiry log) to send payment reminders."
-            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Correspondence, letters, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
+            ? "Nothing can be done on it until the initial fee is paid. You can still write to the party (Letters &amp; email, call and inquiry log) to send payment reminders."
+            : "The latest eligibility review found this dispute ineligible. You can still write to the party (Letters &amp; email, call and inquiry log); a new eligibility review is the only other action available."}</div>`;
         afterRender(() => freezeCasePage(c.lock));
       }
+      html += programmed ? `<div id="case-next" class="case-next"><p class="muted">Loading the next step…</p></div>` : "";
 
-      // Statutory clock cluster (server-projected)
-      if (clocks.length)
-        html += `<div class="sla-cluster">` + clocks.map((cl) => `
-          <div class="sla-card"><span class="sla ${cl.state}" style="font-size:16px">${clockChip(cl)}</span>
-            <span class="lbl">${esc(cl.label)}</span>
-            <span class="cite">${esc(cl.cite)} · due ${esc(cl.due)} · ${esc(cl.basis_note)}</span></div>`).join("") + `</div>`;
-
-      // Workflow actions by role + status
+      // Occasional actions live in one "More" menu. The federal IDR actions (offers, IDRE selection, party
+      // invites, batching, the federal letters) only exist on federal cases.
       const acts = [];
-      if (can("PARTY") && c.status === "INITIATED")
-        acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {})]);
-      if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN")
-        if (App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id)]);
-      if (can("PARTY"))
-        acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub })]);
-      if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }]);
-      if (can("ARBITRATOR"))
-        acts.push(["Issue determination", () => determinationForm(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id)]);
-      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {})]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Escalate", () => Views.escalate(id)]);
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        acts.push(["Link related case", () => Views.relate(id)]);
-      if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
-        if (App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id)]);
-      if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status))
-        acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents })]);
-      if (can("FINANCE"))
-        acts.push(["Post fee transfer", () => Views.feeTransfer(id)]);
-      if (acts.length)
-        html += `<div class="actions">` + acts.map((a, i) =>
-          `<button data-act="${i}">${a[0]}</button>`).join("") + `</div>`;
+      if (!programmed) {
+        if (can("PARTY") && c.status === "INITIATED") acts.push(["Respond filed", () => Api.cases.signal(id, "RESPONSE_FILED", {}), { group: "Federal IDR", icon: "inbox", hint: "Record that your response has been filed" }]);
+        if (can("PARTY") && c.status === "OFFER_WINDOW_OPEN" && App.feature("sealed_offers")) acts.push(["Submit sealed offer", () => offerForm(id), { group: "Federal IDR", icon: "money", hint: "Your offer, sealed until the window closes" }]);
+        if (can("PARTY")) acts.push(["Mark fees paid", () => Api.cases.signal(id, "FEES_PAID", { party_id: Auth.claims().sub }), { group: "Money", icon: "money", hint: "Record that your administrative fee is paid" }]);
+        if (can("ARBITRATOR", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("sealed_offers")) acts.push(["Offers panel", () => { location.hash = `#/cases/${id}/offers`; }, { group: "Federal IDR", icon: "money", hint: "See and manage both parties' offers" }]);
+        if (can("ARBITRATOR")) acts.push(["Issue determination", () => determinationForm(id), { group: "Federal IDR", icon: "letter", hint: "Choose the winning offer and record why" }]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("party_workspace")) acts.push(["Invite party", () => partyInviteForm(id), { group: "Federal IDR", icon: "assign", hint: "Give a party access to this dispute" }]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) acts.push(["Finalize IDRE selection", () => Api.cases.signal(id, "SELECTION_FINALIZED", {}), { group: "Federal IDR", icon: "assign", hint: "Lock in the certified IDR entity" }]);
+        if (can("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("batch_suggestions")) acts.push(["Batchable cases", () => batchableModal(id), { group: "Case", icon: "link", hint: "Disputes that could be batched with this one" }]);
+        if (can("FINANCE") && ["DETERMINED", "CLOSED_PAID"].includes(c.status)) acts.push(["Record payment", () => Api.cases.signal(id, "PAYMENT_RECORDED", { amount_cents: c.qpa_cents }), { group: "Money", icon: "money", hint: "Record the determination payment" }]);
+        if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
+          acts.push(["Generate offer-window notice", () => Views.letter(id, "offer_window_notice"), { group: "Federal IDR", icon: "letter", hint: "The notice that opens the offer window" }]);
+          acts.push(["Generate determination letter", () => Views.letter(id, "determination_letter"), { group: "Federal IDR", icon: "letter", hint: "The letter announcing the determination" }]);
+        }
+      }
+      const isAssigner = can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      if (isAssigner) acts.push([c.assigned_to ? "Reassign" : "Assign", () => Views.assign(id),
+        { group: "Case", icon: "assign", hint: c.assigned_to ? "Hand this case to another reviewer" : "Give this case to a reviewer" }]);
+      if (programmed && can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        const pd = c.program_dates || {};
+        if (!pd.withdrawal_requested_at)
+          acts.push(["Withdrawal requested", () => Views.wfAnytime(id, "PROVIDER_WITHDRAW"),
+            { group: "Record what happened", icon: "withdraw", hint: "The provider or the health plan asked to withdraw" }]);
+        else if (!pd.withdrawal_confirmed_at)
+          acts.push(["Confirm the withdrawal", () => Views.wfAnytime(id, "WITHDRAWAL_CONFIRMED"),
+            { group: "Record what happened", icon: "withdraw", hint: "Verified with the party: the Withdrawal letter is next" }]);
+        acts.push(["RFI response received", () => Views.wfAnytime(id, "RFI_RESPONSE_RECEIVED"),
+          { group: "Record what happened", icon: "inbox", hint: "The party answered the request for information" }]);
+        acts.push(["Outreach done", () => Views.wfAnytime(id, "OUTREACH_DONE"),
+          { group: "Record what happened", icon: "phone", hint: "Paid but no packet yet: the filer has been contacted" }]);
+      }
+      // A refund is decided by a person, never by the clock: the workflow only flags a potential refund.
+      if (programmed && can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && !(c.program_dates || {}).packet_complete_at
+          && !/^Closed/.test(c.internal_status || ""))
+        acts.push(["Close and refund", () => Views.wfAnytime(id, "REFUND_APPROVED"),
+          { group: "Record what happened", icon: "money", hint: "No complete packet is coming: close the case and refund the initial fee" }]);
+      if (can("CASE_MANAGER", "PM", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") && App.feature("review_queues")) acts.push(["Request specialty review", () => reviewRequestForm(id), { group: "Case", icon: "review", hint: "Ask a coder, clinician or attorney to look at it" }]);
+      if (can("CASE_MANAGER", "FEDERAL_ADMIN")) {
+        acts.push(["Escalate", () => Views.escalate(id), { group: "Case", icon: "escalate", hint: "Notify supervisors that a deadline needs attention" }]);
+        acts.push(["Link a related case", () => Views.relate(id), { group: "Case", icon: "link", hint: "Connect it to another dispute (duplicate, same claim…)" }]);
+      }
+      if (can("FINANCE")) acts.push(["Post fee transfer", () => Views.feeTransfer(id), { group: "Money", icon: "transfer", hint: "Admin fee, IDRE fee reserve, refund or settlement on the ledger" }]);
+      html = html.replace("<!--case-more-->", CaseLayout.moreMenu(acts));
 
-      // Copilot (Phases 1-3): grounded brief; QA-gated drafts; bounded,
-      // human-approved action batches via Temporal. Everything the model
-      // produces is advisory until a person approves it.
+      // ---- Overview: steps (filled by wfLoad), deadlines (program panel), notes ----
+      P.overview += `<div id="case-overview-prog"></div>`;
+      const notes = notesRes.notes || [];
+      const streamOpts = [["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"], ["legal", "Legal"], ["external_agency", "External agency"]];
+      const streamRoles = prog?.config?.notes_stream_roles || {};
+      const allowedStreams = streamOpts.filter(([key]) => { const roles = streamRoles[key]; return !roles || !roles.length || can(...roles); });
+      P.overview += `<section class="case-card" id="case-notes"><h3>Notes <span class="muted">${notes.length || ""}</span></h3>
+        <form id="note-form" class="note-form">
+          <textarea name="body" rows="2" placeholder="Add a note for the team…" required></textarea>
+          <div class="note-form-row"><select name="stream" aria-label="Who can read it">
+            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) => `<option value="${v}">${label}</option>`).join("")}</select>
+            <button class="mini">Add note</button></div></form>` +
+        (notes.length ? `<ul class="note-list">` + notes.map((n) => `<li><div>${esc(n.body)}</div>
+            <div class="muted">${badge(n.stream)} ${esc(n.author_name || n.author || "")} · ${fmtDate(n.created_at)}</div></li>`).join("") + `</ul>`
+          : `<p class="muted">No notes yet.</p>`) + `</section>`;
+
+      // ---- Documents: requests, then the documents by folder ----
+      P.documents += `<section class="case-card"><h3>Document requests</h3><div id="docreq-box"><p class="muted">Loading…</p></div></section>`;
+      caseDocReqBox(id);
+      P.documents += CaseLayout.documents(id, docs);
+      P.documents += `<div id="analysis"></div>`;
+
+      // ---- Review: clinical terms read from the documents, other disputes sharing them, and what each outbound
+      // letter's privacy scan found (deid.go). Loaded when opened. ----
+      if (can("CASE_MANAGER", "PM", "ATTORNEY", "CODER", "NURSE_PHYSICIAN", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        P.review += `<details class="prog-sec" id="case-privacy" data-tab="review"><summary>Clinical terms &amp; privacy <span class="muted">— from the documents, possible duplicates, and each letter's privacy scan</span></summary>
+          <div id="case-privacy-box" data-case-id="${esc(id)}"><p class="muted">Loading…</p></div></details>`;
+        afterRender(() => document.getElementById("case-privacy")?.addEventListener("toggle", (ev) => { if (ev.target.open) casePrivacyBox(id); }));
+      }
+      // ---- Review: the Copilot's advisory drafts and the SOP checklist (the program's sections join here) ----
       if (can("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Copilot <span class="badge s-review">DRAFT · advisory</span></h2>
+        P.review += `<details class="prog-sec" id="case-copilot"><summary>Copilot drafts <span class="muted">— advisory; nothing goes out without approval</span></summary>
           <div id="copilot"><p class="muted">Loading…</p></div>
           <div class="actions">
             <button class="mini" onclick="Views.copilotDraftQA('${id}','determination_rationale',this)">✍ Draft determination rationale</button>
             <button class="mini" onclick="Views.copilotDraftQA('${id}','correspondence',this)">✉ Draft correspondence</button>
             <button class="mini" onclick="Views.copilotPropose('${id}',this)">⚙ Propose action batch</button>
-          </div>
-          <div id="copilot-batches"></div>`;
-        Api.program.copilotBriefLatest(id).then((r) => {
-          const b = document.getElementById("copilot");
-          if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id);
-        }).catch(() => {
-          const b = document.getElementById("copilot");
-          if (b) b.innerHTML = copilotCard(null, null, id);
-        });
+          </div><div id="copilot-batches"></div></details>`;
+        Api.program.copilotBriefLatest(id).then((r) => { const b = document.getElementById("copilot"); if (b) b.innerHTML = copilotCard(r.brief, r.generated_at, id); })
+          .catch(() => { const b = document.getElementById("copilot"); if (b) b.innerHTML = copilotCard(null, null, id); });
         copilotLoadBatches(id);
       }
+      const stages = {};
+      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
+      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
+      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
+      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
+      if (checklist.length) {
+        const done = checklist.filter((i) => i.done).length;
+        P.review += `<details class="prog-sec" id="case-checklist"><summary>SOP checklist <span class="muted">— ${done} of ${checklist.length} done</span></summary>` +
+          Object.entries(stages).sort((x, y) => stageRank(x[0]) - stageRank(y[0])).map(([stage, items]) =>
+            `<h4>${esc(stage.charAt(0) + stage.slice(1).toLowerCase().replace(/_/g, " "))}</h4><ul class="checklist">` + items.map((i) =>
+              `<li>${i.done ? "✅" : (mayTick(i) ? `<button class="mini" onclick="Views.check('${i.id}')">Done</button>` : "⬜")}
+                ${esc(i.item)}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") + `</ul>`).join("") + `</details>`;
+      }
 
-      // Document requests — what the review team asked a side for, and what came back.
-      html += `<h2>Document requests</h2><div id="docreq-box"><p class="muted">Loading…</p></div>`;
-      caseDocReqBox(id);
-
-      // Documents — docket grouped by folder with full metadata + RBAC controls
-      const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
-      html += `<h2>Docket</h2>
-        <p><a class="button" href="javascript:void(0)" onclick="Views.downloadZip('${id}')">⬇ Download all as zip (plan-notification bundle)</a></p>
-        <form id="up" class="upload"><input type="file" name="file" required aria-label="Choose file" />
-        <select name="folder" aria-label="Folder">${FOLDERS.map((f) => `<option>${f}</option>`).join("")}</select>
-        <label><input type="checkbox" name="sealed" /> sealed (offer justification — encrypted in the vault)</label>
-        <button>Upload</button></form>`;
-      if (docs.length) {
-        const byFolder = {};
-        docs.forEach((d) => { (byFolder[d.folder || "GENERAL"] = byFolder[d.folder || "GENERAL"] || []).push(d); });
-        html += Object.entries(byFolder).map(([folder, items]) => `
-          <h3 class="doc-folder">📁 ${esc(folder)} <span class="muted">(${items.length})</span></h3>
-          <table><thead><tr><th>File</th><th>Type</th><th>Size</th><th>Scan</th><th>Sealed</th><th>Uploaded</th><th>Analysis</th><th></th></tr></thead><tbody>` +
-          items.map((d) => `<tr>
-            <td class="mono">${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</td>
-            <td>${esc(d.content_type || "—")}</td>
-            <td>${d.size_bytes > 1048576 ? (d.size_bytes / 1048576).toFixed(1) + " MB" : (d.size_bytes / 1024).toFixed(0) + " KB"}</td>
-            <td>${d.scan_status === "CLEAN" ? '<span class="badge s-paid">✓ clean</span>' : badge(d.scan_status || "PENDING")}</td>
-            <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : "—"}</td>
-            <td class="muted">${esc(d.uploaded_by || "")} · ${fmtDate(d.uploaded_at)}</td>
-            <td>${badge(d.analysis_status)}${d.doc_type ? " · " + esc(d.doc_type) : ""}</td>
-            <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${d.doc_id}')">download</a>
-            ${/\.(txt|835|edi|x12)$/i.test(d.filename || "") ? ` · <a href="javascript:void(0)" title="If this is an 835 remittance (ERA), download it as a spreadsheet table" onclick="Views.era835Fn('${id}','${d.doc_id}')">835 → table</a>` : ""}
-            ${!d.sealed ? ` · <a href="javascript:void(0)" onclick="Views.showAnalysis('${id}','${d.doc_id}')">analysis</a>` : ""}
-            ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ?
-              ` · <select class="mini" onchange="Views.moveDoc('${id}','${d.doc_id}',this.value,this)"><option value="">move…</option>
-                ${FOLDERS.filter((f) => f !== d.folder).map((f) => `<option>${f}</option>`).join("")}</select>` : ""}</td></tr>`).join("") +
-          `</tbody></table>`).join("");
-      } else html += `<p class="muted">No documents yet.</p>`;
-      html += `<div id="analysis"></div>`;
-
-      // Time — per-role effort ledger on this dispute. Append-only; the
-      // role stamped is the logger's real role. Eligibility decides whether
-      // the work is billable; this records that it happened.
+      // ---- Billing: money on this dispute and the time spent on it ----
+      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+        P.billing += `<section class="case-card"><h3>Money on this dispute</h3><div id="fin-box"><p class="muted">Loading…</p></div></section>`;
+        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
+      }
       if (can("CASE_MANAGER", "PM", "CODER", "DOCTOR", "NURSE", "NURSE_PHYSICIAN", "ARBITRATOR", "ATTORNEY", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Time</h2><div id="time-box"><p class="muted">Loading…</p></div>
+        P.billing += `<section class="case-card" id="case-time"><h3>Time on this dispute</h3><div id="time-box"><p class="muted">Loading…</p></div>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.timeAdd('${id}', this)">
             <input name="hours" type="number" step="0.25" min="0.25" max="24" placeholder="hours" required aria-label="Hours worked" />
             ${timeRoleSelect()}
             <input name="entry_date" type="date" aria-label="Date worked" />
             <input name="note" placeholder="what was done" maxlength="500" />
             <label><input type="checkbox" name="billable" checked /> billable</label>
-            <button class="mini">Log time</button>
-            <span class="muted">recorded under your name and role — corrections are compensating entries, never edits</span></form>`;
+            <button class="mini">Log time</button></form>
+          <p class="muted">Recorded under your name and role. A correction is a new entry, never an edit.</p></section>`;
         timeCaseBox(id).then((h) => { const b = document.getElementById("time-box"); if (b) b.innerHTML = h; });
       }
 
-      // Financials — every dollar tied to this dispute: fee invoices and
-      // payments, service-fee lines and allocated payments, payables
-      // (awards), and the raw event stream.
-      if (can("CASE_MANAGER", "PM", "FINANCE", "STATE_AUDITOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        html += `<h2>Financials</h2><div id="fin-box"><p class="muted">Loading…</p></div>`;
-        caseFinBox(id).then((h) => { const b = document.getElementById("fin-box"); if (b) b.innerHTML = h; });
-      }
-
-      // Program panels (per-state rules: eligibility, correspondence/QA,
-      // invoices, claims, dual status, program dates, opt-out) — rendered
-      // only when the tenant runs a custom program.
-      html += `<div id="prog"></div>`;
-      programPanel(id).then((h) => {
-        const b = document.getElementById("prog");
-        if (b) b.innerHTML = h;
-      });
-
+      // ---- Activity: what happened, related disputes ----
+      P.activity += CaseLayout.timeline(activities);
       if (rels.length)
-        html += `<h2>Related cases</h2><table><tbody>` + rels.map((r) =>
-          `<tr><td>${badge(r.rel_type)}</td><td class="mono">${esc(r.related_case_id)}</td></tr>`).join("") + `</tbody></table>`;
-
-      // GNN link-prediction panel (graph-intel; degrades gracefully offline)
-      html += `<div id="gnn-rel"></div>`;
+        P.activity += `<section class="case-card"><h3>Related disputes</h3><ul class="plain">` + rels.map((r) =>
+          `<li>${badge(r.rel_type)} <a href="#/cases/${esc(r.related_case_id)}" class="mono">${esc(r.related_case_number || r.related_case_id.slice(0, 8) + "…")}</a></li>`).join("") + `</ul></section>`;
+      P.activity += `<div id="gnn-rel"></div>`;
       Api.graph.related(id).then((g) => {
         const box = document.getElementById("gnn-rel");
-        if (!box) return;
-        const preds = (g && g.predictions) || [];
-        box.innerHTML = `<h2>Suggested related disputes <span class="muted">· GraphSAGE ${esc(g.model_version || "")}</span></h2>` +
-          (preds.length ? `<table><thead><tr><th>Case</th><th>Link score</th><th></th></tr></thead><tbody>` +
-            preds.map((p) => `<tr><td class="mono">${esc(p.case_id.slice(0, 8))}…</td>
-              <td><span class="gnn-score" style="--s:${p.score}">${(p.score * 100).toFixed(0)}%</span></td>
-              <td><a href="#/cases/${esc(p.case_id)}">open</a> ·
-                  <a href="javascript:void(0)" onclick="Views.relate('${id}')">confirm link</a></td></tr>`).join("") +
-            `</tbody></table>` :
-            `<p class="muted">${esc(g.reason || "No link predictions yet — train the model (POST /graph/train) after a few cases exist.")}</p>`);
+        const preds = ((g && g.predictions) || []).filter((x) => x.score >= 0.5);
+        if (!box || !preds.length) { if (box) box.innerHTML = ""; return; }
+        box.innerHTML = `<details class="prog-sec"><summary>Possibly related disputes <span class="muted">— suggested from shared parties and claims</span></summary>
+          <ul class="plain">${preds.map((x) => `<li><a href="#/cases/${esc(x.case_id)}" class="mono">${esc(x.case_number || x.case_id.slice(0, 8) + "…")}</a>
+            <span class="muted">${(x.score * 100).toFixed(0)}% match</span> · <a href="javascript:void(0)" onclick="Views.relate('${id}')">link it</a></li>`).join("")}</ul></details>`;
       }).catch(() => { const b = document.getElementById("gnn-rel"); if (b) b.innerHTML = ""; });
-      const stages = {};
-      checklist.forEach((i) => { (stages[i.stage] = stages[i.stage] || []).push(i); });
-      // Role-based: the server says whose each item is (owner) and whether
-      // this user may tick it (can_check). Items with no owner keep the old
-      // rule. Stages are listed in the order a case moves through them.
-      const STAGE_ORDER = ["INTAKE", "ELIGIBILITY", "PROVIDER_PERMISSION", "PLAN_NOTIFICATION", "DETERMINATION", "PAYMENT"];
-      const stageRank = (x) => (STAGE_ORDER.indexOf(x) < 0 ? 99 : STAGE_ORDER.indexOf(x));
-      const mayTick = (i) => (i.owner_role ? i.can_check : can("CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN"));
-      html += `<h2>Stage checklists</h2>` + Object.entries(stages).sort((a, b) => stageRank(a[0]) - stageRank(b[0])).map(([stage, items]) =>
-        `<h3>${esc(stage.replace(/_/g, " "))}</h3><ul class="checklist">` + items.map((i) =>
-          `<li>${i.done ? "✅" : (mayTick(i)
-            ? `<button class="mini" onclick="Views.check('${i.id}')">check</button>` : "⬜")}
-            ${esc(i.item)}${i.required ? " *" : ""}${i.owner ? ` <span class="chip">${esc(i.owner)}</span>` : ""}${i.done_by ? ` <span class="muted">(${esc(i.done_by)})</span>` : ""}</li>`).join("") +
-        `</ul>`).join("");
-      if (can("CASE_MANAGER", "FEDERAL_ADMIN"))
-        html += `<div class="actions">
-          ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<button onclick="Views.assign('${id}')">Assign / route</button>` : ""}
-          <button onclick="Views.letter('${id}','offer_window_notice')">Generate offer-window notice</button>
-          <button onclick="Views.letter('${id}','determination_letter')">Generate determination letter</button>
-        </div>`;
 
-      // Notes — addNote (POST /notes) existed with no way to read them back
-      // at all; case notes also mirror onto the activity timeline below but
-      // without the stream field, so internal/coder/clinical/legal/
-      // external_agency notes were indistinguishable there. Confirmed live.
-      const notes = notesRes.notes || [];
-      // Only offer streams this role can actually write — the server has
-      // enforced this for a while, but the dropdown kept listing all five
-      // regardless, so picking a blocked one just produced a confusing
-      // 403 on submit instead of not being offered at all.
-      const streamOpts = [
-        ["internal", "Internal"], ["coder", "Coder"], ["clinical", "Clinical"],
-        ["legal", "Legal"], ["external_agency", "External agency"],
-      ];
-      const streamRoles = prog?.config?.notes_stream_roles || {};
-      const allowedStreams = streamOpts.filter(([key]) => {
-        const roles = streamRoles[key];
-        return !roles || !roles.length || can(...roles);
+      html += CaseLayout.tabs(id, P, { programmed, billing: !!P.billing });
+      // The program's own sections (state rules) arrive after; each says which tab it belongs to.
+      html += `<div id="prog" hidden></div>`;
+      programPanel(id).then((h) => {
+        const b = document.getElementById("prog");
+        if (!b) return;
+        b.innerHTML = h;
+        CaseLayout.distribute(b);
       });
-      html += `<h2>Notes</h2>
-        <form id="note-form" class="inline-form">
-          <select name="stream" aria-label="Note stream">
-            ${(allowedStreams.length ? allowedStreams : streamOpts).map(([v, label]) =>
-              `<option value="${v}">${label}</option>`).join("")}
-          </select>
-          <textarea name="body" rows="2" placeholder="Add a note…" required></textarea>
-          <button>Add note</button></form>` +
-        (notes.length ? `<table><tbody>` + notes.map((n) => `<tr>
-            <td>${badge(n.stream)}</td><td>${esc(n.body)}</td>
-            <td class="muted">${esc(n.author || "")} · ${fmtDate(n.created_at)}</td></tr>`).join("") +
-          `</tbody></table>` : `<p class="muted">No notes yet.</p>`);
-
-      html += `<h2>Activity timeline</h2>` + (activities.length ? `<table><tbody>` +
-        activities.map((a) => `<tr><td>${badge(a.type)}</td><td>${esc(a.body)}</td>
-          <td class="muted">${fmtDate(a.at)}</td></tr>`).join("") +
-        `</tbody></table>` : `<p class="muted">No activity yet — voice calls and milestones attach automatically.</p>`);
+      afterRender(() => { loadCaseAssignee(id, isAssigner); CaseLayout.story(id); CaseLayout.bind(id); });
 
       afterRender(() => {
         acts.forEach((a, i) =>
           document.querySelector(`[data-act="${i}"]`)?.addEventListener("click", async () => {
             try { await a[1](); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
           }));
-        $("#up").addEventListener("submit", async (ev) => {
+        $("#up")?.addEventListener("submit", async (ev) => {
           ev.preventDefault();
           const f = ev.target.file.files[0];
           await UI.run(ev.target.querySelector("button"), async () => {
@@ -1701,7 +2411,15 @@ const Views = (() => {
         });
       });
       return html;
-    } catch (e) { return err(e); }
+    } catch (e) {
+      // A Reviewer opening a case that is someone else's (a shared link, an old bookmark): say so plainly.
+      if (e.status === 404 && Auth.reviewerScoped()) {
+        return `<div class="empty-state"><h1>This case isn't on your list</h1>
+          <p class="muted">You see unassigned cases and the ones assigned to you. This one is with another reviewer, or it no longer exists.
+          Ask your PM if you need it.</p><p><a class="button" href="#/cases">Back to your disputes</a></p></div>`;
+      }
+      return err(e);
+    }
   }
 
   async function moveDoc(caseId, docId, folder, sel) {
@@ -1711,6 +2429,176 @@ const Views = (() => {
       catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
   }
+
+  // The document viewer: a PDF, an image, text or one of the office's HTML pages shows in place, with Download;
+  // a file the browser can't show (Word, a ZIP) says so and downloads.
+  const VIEW_TYPES = { pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+    webp: "image/webp", tif: "image/tiff", tiff: "image/tiff", txt: "text/plain", csv: "text/plain", "835": "text/plain",
+    edi: "text/plain", html: "text/html", htm: "text/html" };
+  async function previewDoc(path, name) {
+    let got;
+    try { got = await Api.fetchBlob(path); } catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    const fname = name || got.name || "document";
+    const ext = ((fname.match(/\.([a-z0-9]+)$/i) || [])[1] || "").toLowerCase();
+    const type = VIEW_TYPES[ext] || got.blob.type || "";
+    const blob = new Blob([got.blob], { type });
+    const url = URL.createObjectURL(blob);
+    let body;
+    if (type === "application/pdf") body = `<iframe class="doc-view" src="${url}" title="${esc(fname)}"></iframe>`;
+    else if (type.startsWith("image/") && type !== "image/tiff") body = `<div class="doc-view doc-view-img"><img src="${url}" alt="${esc(fname)}" /></div>`;
+    else if (type === "text/html") body = `<iframe class="doc-view" sandbox src="${url}" title="${esc(fname)}"></iframe>`;
+    else if (type === "text/plain") body = `<pre class="doc-view doc-view-text">${esc((await blob.text()).slice(0, 300000))}</pre>`;
+    else body = `<p class="muted">This kind of file${ext ? ` (.${esc(ext)})` : ""} can't be shown here — download it to open it.</p>`;
+    await UI.modal({ title: esc(fname), wide: true, submitLabel: "Close",
+      html: `${body}<p class="doc-view-acts"><a class="button mini" href="${url}" download="${esc(fname)}">Download</a></p>` });
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+  // The compose form as a draft body (the send and the preview read it the same way).
+  function corrFormBody(f) {
+    const split = (v) => String(v || "").split(",").map((x) => x.trim()).filter(Boolean);
+    return { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value),
+      rfi_to: f.rfi_to ? f.rfi_to.value : "", auto_share: !!f.auto_share?.checked, auto_download: !!f.auto_download?.checked };
+  }
+  // How the email will read when it goes out: its recipients, subject, text, what its links carry, and the
+  // fill-ins still to do. Nothing is sent or created.
+  async function corrPreviewFn(form, caseId) {
+    let pv;
+    try { pv = await Api.cases.corrPreview(caseId, corrFormBody(form)); } catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    const list = (xs) => (xs || []).length ? xs.map(esc).join(", ") : '<span class="error">nobody yet — add an address</span>';
+    await UI.modal({ title: "Preview of the email", wide: true, submitLabel: "Close", html: `
+      <dl class="mail-pv-head"><dt>To</dt><dd>${list(pv.to)}</dd>${(pv.cc || []).length ? `<dt>Cc</dt><dd>${pv.cc.map(esc).join(", ")}</dd>` : ""}
+        <dt>Subject</dt><dd><b>${esc(pv.subject)}</b></dd></dl>
+      ${(pv.unfilled || []).length ? `<p class="due-over">Still to fill in: ${pv.unfilled.map((x) => `<code>${esc(x)}</code>`).join(" ")} — edit the message before sending.</p>` : ""}
+      <pre class="qa-body mail-pv-body">${esc(pv.body)}</pre>
+      ${pv.download_carries ? `<p class="muted"><b>The download link will carry:</b> ${esc(pv.download_carries)}</p>` : ""}
+      <p class="muted">${pv.qa_role ? `Sending puts it in the QA gate for the ${esc(String(pv.qa_role).replace(/_/g, " ").toLowerCase())}; it goes out once approved.` : "It goes out as soon as you send it."}
+        Secure links are created when it is sent.</p>` });
+  }
+  // Clinical terms & privacy on the case page (deid.go).
+  const CLIN_TYPE = { DRUG: "Drugs", CONDITION: "Conditions", PROCEDURE: "Procedures", ANATOMY: "Anatomy" };
+  async function casePrivacyBox(caseId) {
+    const box = document.getElementById("case-privacy-box");
+    if (!box || box.dataset.loaded === caseId) return;
+    box.dataset.loaded = caseId;
+    const [cl, ov, dr] = await Promise.all([Api.cases.clinical(caseId).catch(() => null), Api.cases.clinicalOverlaps(caseId).catch(() => null),
+      Api.cases.deidReports(caseId).catch(() => null)]);
+    const terms = {};
+    for (const d of (cl && cl.documents) || []) for (const e of d.entities || []) {
+      const k = e.type || "OTHER", t = String(e.text || "").toLowerCase();
+      if (t) ((terms[k] ||= {})[t] = ((terms[k] || {})[t] || 0) + 1);
+    }
+    const termHtml = Object.keys(terms).length ? `<div class="clin-terms">${Object.entries(terms).map(([k, m]) => `<div><b>${esc(CLIN_TYPE[k] || k)}</b>
+        <p>${Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 30).map(([t, n]) => `<span class="chip">${esc(t)}${n > 1 ? ` ×${n}` : ""}</span>`).join(" ")}</p></div>`).join("")}</div>`
+      : `<p class="muted">No clinical terms read yet. They are read from documents analyzed after de-identification was turned on.</p>`;
+    const overlaps = (ov && ov.overlaps) || [];
+    const ovHtml = overlaps.length ? `<table class="tbl" data-nosearch><thead><tr><th>Dispute</th><th>Shared terms</th></tr></thead><tbody>
+        ${overlaps.map((o) => `<tr><td><a class="mono" href="#/cases/${esc(o.case_id)}">${esc(o.case_number || o.case_id.slice(0, 8))}</a></td><td>${o.overlap}: ${(o.shared_terms || []).map(esc).join(", ")}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="muted">No other dispute shares two or more of these clinical terms.</p>`;
+    const reps = (dr && dr.reports) || [];
+    const ACTION = { SCAN: ["Scanned", ""], FLAG: ["Flagged — sent", "s-ck-review"], BLOCK: ["Held", "s-rejected"] };
+    const repHtml = reps.length ? `<table class="tbl" data-nosearch><thead><tr><th>When</th><th>What</th><th>Result</th><th>Found</th></tr></thead><tbody>
+        ${reps.map((x) => { const [t, c] = ACTION[x.action] || [x.action, ""]; const counts = Object.entries(x.counts || {}).map(([k, n]) => `${esc(k.toLowerCase().replace(/_/g, " "))} ${n}`).join(", ");
+          return `<tr><td>${fmtDate(x.created_at)}</td><td>${esc(String(x.artifact || "").replace(/_/g, " "))}</td><td><span class="badge ${c}">${t}</span></td><td class="muted">${counts || "nothing"}</td></tr>`; }).join("")}</tbody></table>`
+      : `<p class="muted">No letter on this dispute has been scanned yet.</p>`;
+    box.innerHTML = `<h3>Clinical terms in the documents</h3>${termHtml}
+      <h3>Other disputes with the same clinical picture</h3><p class="muted">Two or more shared drugs, conditions or procedures — a possible duplicate or the same episode of care.</p>${ovHtml}
+      <h3>Privacy scan of outgoing letters</h3><p class="muted">Each letter is scanned for direct identifiers before it goes out.
+        ${App.feature("deid_hold_mail") ? "A letter with them is held until it is redacted." : "Holding is off: a letter with them is flagged here and still goes (Feature toggles → Hold a letter…)."}</p>${repHtml}`;
+  }
+  // QA draft quality by template (qa_learning.go): how often each template's drafts pass QA untouched.
+  async function qaDraftQualityBox() {
+    const box = document.getElementById("qa-dq-box");
+    if (!box || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    let r;
+    try { r = await Api.cases.qaDraftQuality(90); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const ts = r.templates || [];
+    const pct = (a, b) => (b ? Math.round((100 * a) / b) + "%" : "—");
+    box.innerHTML = ts.length ? `<div class="tbl-wrap"><table class="tbl qa-tbl"><thead><tr><th>Template</th><th>Drafts</th><th>Approved as written</th><th>Approved after edits</th><th>Sent back</th><th>Edited, on average</th><th>Reviewers</th></tr></thead><tbody>
+        ${ts.map((x) => `<tr><td class="qa-tbl-main">${esc(qaTpl(x.artifact))} <span class="muted">${esc(x.channel || "")}</span></td><td data-label="Drafts">${x.drafts}</td>
+          <td data-label="As written">${pct(x.approved_unedited, x.drafts)}</td><td data-label="After edits">${pct(x.approved - x.approved_unedited, x.drafts)}</td>
+          <td data-label="Sent back">${pct(x.rejected, x.drafts)}</td><td data-label="Edited">${x.avg_edit_ratio != null ? Math.round(x.avg_edit_ratio * 100) + "% of the text" : "—"}</td><td data-label="Reviewers">${x.reviewers}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No QA decisions recorded yet in the last ${r.days || 90} days. Each approval or send-back from now on is counted here.</p>`;
+  }
+  // Portal productivity (telemetry.go): how much work each screen takes, and how often the suggestions are taken.
+  async function productivityBox() {
+    const box = document.getElementById("rpt-productivity");
+    if (!box) return;
+    let r;
+    try { r = await Api.cases.telemetryMetrics(30); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const ws = r.workflows || [], tasks = r.tasks || [];
+    const rate = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+    const TASK = { file_dispute: "File a dispute", bulk_filing: "Bulk filing", qa_decision: "QA decision", send_letter: "Send a letter",
+      answer_document_request: "Answer a document request" };
+    const secs = (v) => (v == null ? "—" : v < 90 ? `${Math.round(v)} s` : `${(v / 60).toFixed(1)} min`);
+    const taskHtml = tasks.length ? `<h3>Tasks</h3><p class="muted">Each job from its first touch to done: how many, how often refused, and what a typical one takes.</p>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Task</th><th>Where</th><th>Done</th><th>Refused</th><th>Typical time</th><th>Clicks</th><th>Keystrokes</th><th>With prefill</th></tr></thead><tbody>
+      ${tasks.map((t) => `<tr><td><b>${esc(TASK[t.task] || t.task.replace(/_/g, " "))}</b></td><td class="muted">${esc(String(t.workflow).replace(/_/g, " "))}</td>
+        <td>${t.done}</td><td>${t.errors ? `<span class="badge s-ck-review">${t.errors}</span>` : 0}</td><td>${secs(t.median_seconds)}</td>
+        <td>${t.avg_clicks == null ? "—" : Number(t.avg_clicks).toFixed(1)}</td><td>${t.avg_keys == null ? "—" : Math.round(t.avg_keys)}</td><td>${t.with_prefill || 0}</td></tr>`).join("")}</tbody></table></div>` : "";
+    const n1 = (v) => (v == null ? "—" : Number(v).toFixed(1));
+    box.innerHTML = taskHtml + (ws.length ? `<h3>Screens</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Screen</th><th>Sessions</th><th>Clicks per session</th><th>Keystrokes per session</th><th>Submits</th><th>Prefill kept</th><th>Suggestion taken</th></tr></thead><tbody>
+        ${ws.map((x) => `<tr><td>${esc(String(x.workflow || "").replace(/_/g, " "))}</td><td>${x.sessions}</td><td>${n1(x.clicks_per_session)}</td><td>${n1(x.keystrokes_per_session)}</td><td>${x.submits}</td>
+          <td>${rate(x.prefill_accept_rate)}</td><td>${rate(x.next_action_accept_rate)}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">Nothing recorded yet in the last ${r.days || 30} days. The portal records clicks, typing and submits per screen (never what is typed).</p>`);
+  }
+
+  // The mail tracker (mail_tracker.go): each email of the case with where it stands, from draft to delivery.
+  const MAIL_STATE = {
+    IN_QA: ["Waiting for QA", "s-ck-review"], APPROVED: ["Approved — not sent yet", "s-ck-review"], SENT_BACK: ["Sent back", "s-rejected"],
+    PENDING: ["Sending", "s-ck-review"], SENT: ["Sent", "s-filed"], DELIVERED: ["Delivered", "s-paid"], BOUNCED: ["Bounced", "s-rejected"],
+    FAILED: ["Failed to send", "s-rejected"], REJECTED: ["Sent back", "s-rejected"], RECEIVED: ["Received", ""] };
+  const mailState = (st) => { const [t, c] = MAIL_STATE[st] || [st, ""]; return `<span class="badge ${c}">${esc(t)}</span>`; };
+  async function mailTrackerBox(caseId, filter) {
+    const box = document.getElementById("p-mail-tracker");
+    if (!box || box.dataset.caseId !== caseId) return;
+    let r;
+    try { r = await Api.cases.mailTracker(caseId); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    if (box.dataset.caseId !== caseId) return;
+    const all = r.mail || [], n = r.counts || {};
+    mailTrackerBox._data = all;
+    const groups = { "": all.length, waiting: (n.IN_QA || 0) + (n.APPROVED || 0) + (n.PENDING || 0), sent: (n.SENT || 0) + (n.DELIVERED || 0),
+      problem: (n.FAILED || 0) + (n.BOUNCED || 0) + (n.SENT_BACK || 0) + (n.REJECTED || 0), received: n.RECEIVED || 0 };
+    const inGroup = (m, g) => !g || (g === "waiting" && ["IN_QA", "APPROVED", "PENDING"].includes(m.status)) || (g === "sent" && ["SENT", "DELIVERED"].includes(m.status))
+      || (g === "problem" && ["FAILED", "BOUNCED", "SENT_BACK", "REJECTED"].includes(m.status)) || (g === "received" && m.status === "RECEIVED");
+    const f = filter ?? mailTrackerBox._filter ?? "";
+    mailTrackerBox._filter = f;
+    const shown = all.filter((m) => inGroup(m, f));
+    const linkLine = (l) => {
+      const used = l.kind === "upload" ? (l.uploads ? `${plural(l.uploads, "file")} uploaded` : "nothing uploaded yet")
+        : (l.downloads ? `opened ${l.downloads} time${l.downloads === 1 ? "" : "s"}` : "not opened yet");
+      return `<li>${l.kind === "upload" ? "Upload link" : "Download link"}: <b>${used}</b>${l.last_used ? ` · last ${fmtDate(l.last_used)}` : ""}
+        <span class="muted">· ${Math.max(l.max_uses - l.uses, 0)} of ${l.max_uses} uses left · ${new Date(l.expires_at) < new Date() ? "expired" : "expires"} ${fmtDate(l.expires_at)}</span></li>`;
+    };
+    const opened = (m) => (m.links || []).some((l) => l.downloads || l.uploads);
+    box.innerHTML = all.length ? `<div class="list-bar">${ListUI.segs("Show", [
+        { value: "", label: "All", count: groups[""] }, { value: "waiting", label: "Waiting", count: groups.waiting },
+        { value: "sent", label: "Sent", count: groups.sent }, { value: "problem", label: "Problems", count: groups.problem },
+        { value: "received", label: "Received", count: groups.received }].filter((o) => !o.value || o.count), f, "Views.mailTrackerFilter")}</div>
+      ${shown.length ? `<ul class="mail-track">${shown.map((m, i) => `<li class="mail-track-row">
+        <details><summary>
+          <span class="mt-when">${fmtDate(m.at)}</span>
+          <span class="mt-subj"><b>${esc(m.subject || "(no subject)")}</b><span class="muted">${esc(m.direction === "IN" ? "from " + (m.by || "—") : "to " + ((m.to || []).join(", ") || "nobody"))}</span></span>
+          <span class="mt-state">${mailState(m.status)}${opened(m) ? ' <span class="badge s-paid" title="The recipient used a link in it">link used</span>' : ""}</span>
+        </summary>
+        <div class="mt-detail">
+          <dl class="mail-pv-head">${m.direction === "IN" ? `<dt>From</dt><dd>${esc(m.by || "—")}</dd>` : `<dt>To</dt><dd>${esc((m.to || []).join(", ") || "—")}</dd>${(m.cc || []).length ? `<dt>Cc</dt><dd>${esc(m.cc.join(", "))}</dd>` : ""}`}
+            ${m.template ? `<dt>Template</dt><dd>${esc(m.template.replace(/_/g, " "))}</dd>` : ""}
+            ${m.drafted_by ? `<dt>Drafted by</dt><dd>${esc(m.drafted_by)}</dd>` : m.direction === "OUT" && m.by ? `<dt>Sent by</dt><dd>${esc(m.by)}</dd>` : ""}
+            ${m.approved_by ? `<dt>QA</dt><dd>${esc(m.approved_by)}${m.approved_at ? ", " + fmtDate(m.approved_at) : ""}</dd>` : ""}
+            ${m.status_at && m.status !== "IN_QA" ? `<dt>Status since</dt><dd>${fmtDate(m.status_at)}</dd>` : ""}</dl>
+          ${m.error ? `<p class="due-over">${esc(m.status === "SENT_BACK" ? "QA note: " : "")}${esc(m.error)}</p>` : ""}
+          ${(m.links || []).length ? `<ul class="mt-links">${m.links.map(linkLine).join("")}</ul>` : ""}
+          ${(m.documents || []).length ? `<div><b>Documents it carries</b><ul class="sent-docs">${m.documents.map((d) => `<li><button type="button" class="linkish" data-name="${esc(d.filename)}" onclick="Views.previewCaseDoc('${esc(caseId)}','${d.doc_id}', this.dataset.name)">${esc(d.filename || "document")}</button></li>`).join("")}</ul></div>` : ""}
+          <pre class="qa-body mail-pv-body">${esc(m.body || "")}</pre>
+          ${m.qa_id || m.status === "IN_QA" ? `<p><a class="button mini" href="#/qa">Open the QA gate</a></p>` : ""}
+        </div></details></li>`).join("")}</ul>` : `<p class="muted">No email in this group.</p>`}`
+      : `<p class="muted">No email on this dispute yet. Letters you write below, and the ones its steps draft, are tracked here from draft to delivery.</p>`;
+  }
+  function mailTrackerFilter(g) { const b = document.getElementById("p-mail-tracker"); if (b) mailTrackerBox(b.dataset.caseId, g); }
+
+  function previewCaseDoc(caseId, docId, name) { return previewDoc(Api.cases.downloadUrl(caseId, docId), name); }
+  function previewSentDoc(k, docId, name) { return previewDoc(Api.program.sentDocPath(k, docId), name); }
 
   async function downloadDoc(caseId, docId) {
     try { await Api.download(Api.cases.downloadUrl(caseId, docId)); }
@@ -2219,6 +3107,8 @@ const Views = (() => {
     return `<div class="view-head"><h1>Reports</h1>
       <span class="muted">charted on-platform, exportable — statutory reporting without external BI</span></div>
       ${geoLink ? `<p>${geoLink}</p>` : ""}
+      ${(afterRender(productivityBox), "")}
+      <details class="prog-sec" open><summary>Portal productivity <span class="muted">— last 30 days, per screen</span></summary><div id="rpt-productivity"><p class="muted">Loading…</p></div></details>
       <div class="kpi-row rpt-kpi-strip">
         <div class="kpi"><span class="kpi-n" id="kpi-open">—</span><span class="kpi-l">Open disputes</span></div>
         <div class="kpi kpi-danger"><span class="kpi-n" id="kpi-breaches">—</span><span class="kpi-l">SLA breaches</span></div>
@@ -2406,18 +3296,15 @@ const Views = (() => {
     const c = await Api.cases.get(id).catch(() => ({}));
     const det = c.details || {};
     const facts = [];
-    if (det.filing_party_type) facts.push(`<span class="chip">Filed by: ${det.filing_party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"}</span>`);
-    if (det.packet_complete_at) facts.push(`<span class="chip">Packet complete: ${fmtDate(det.packet_complete_at)} (10-day review clock basis)</span>`);
     if (det.volume_large) {
       const vv = det.volume_violations || [];
       facts.push(vv.length
         ? `<span class="badge warn" title="${esc(vv.join("; "))}">⚠ Large-volume policy: ${vv.length} violation(s) — ineligible per Capitol Bridge policy, resubmission permitted</span>`
         : `<span class="chip">Large-volume dispute — policy compliant</span>`);
     }
-    let html = `<h2>Program — ${esc(prog.program || "state rules")}</h2>
-      ${facts.length ? `<p class="fact-row">${facts.join(" ")}</p>` : ""}
-      <div id="wf-steps" class="card wf-card"><p class="muted">Loading the steps…</p></div>
-      <details class="prog-sec" data-wf-admin><summary>Dual status (admin override)</summary>
+    let html = `${facts.length ? `<p class="fact-row" data-tab="overview">${facts.join(" ")}</p>` : ""}
+      <div id="wf-steps" class="card wf-card" data-tab="overview"><p class="muted">Loading the steps…</p></div>
+      <details class="prog-sec" data-wf-admin data-tab="activity"><summary>Status override (admin)</summary>
       <p class="muted">Current: ${c.internal_status ? badge(c.internal_status) : "<em>none</em>"} / ${c.agency_status ? badge(c.agency_status) : "<em>none</em>"}</p>
       <p class="muted">Case details: ${c.details && Object.keys(c.details).length
         ? Object.entries(c.details).filter(([, v]) => v === null || typeof v !== "object").map(([k, v]) => `<span class="mono">${esc(k)}=${esc(v)}</span>`).join(", ")
@@ -2429,14 +3316,18 @@ const Views = (() => {
           ${(cfg.statuses?.agency || []).map((s) => `<option ${s === c.agency_status ? "selected" : ""}>${esc(s)}</option>`).join("")}</select>
         <button>Update status</button></form></details>
 
-      <details class="prog-sec"><summary>Program dates (clock bases)</summary>
+      <details class="prog-sec" id="p-deadlines" data-tab="overview"><summary>Deadlines</summary>
+      <p class="muted">Each deadline as it stands, from its program date.${can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
+        ? " As the PM or an admin you can extend any of them except the statutory filing window — the reason is kept on the case." : ""}</p>
+      <div id="p-clock-proj"><p class="muted">Loading…</p></div></details>
+
+      <details class="prog-sec" data-tab="overview"><summary>Program dates <span class="muted">— the dates the deadlines run from</span></summary>
       <p class="muted">Statutory clocks run <b>from</b> these dates — recording one starts or restarts its clock.
         Record the date once; every deadline that depends on it re-projects automatically.</p>
       <div id="p-dates-list"></div>
-      <div id="p-clock-proj"></div>
       <form id="p-date" class="inline-form">
-        <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.basis)} (${esc(cl.label)})</option>`).join("")}</select>
-        <input type="date" name="value" required /><button>Record date</button></form></details>
+        <label>Date <select name="key">${(cfg.clocks || []).map((cl) => `<option value="${esc(cl.basis)}">${esc(cl.label)}</option>`).join("")}</select></label>
+        <label>On <input type="date" name="value" required /></label><button>Record date</button></form></details>
 
       <details class="prog-sec" id="p-elig-details" data-wf="eligibility aor_confirm letter:acceptance letter:ineligible" data-wf-roles="CASE_MANAGER ATTORNEY" data-wf-hide><summary>Eligibility review</summary>
       <p class="muted">The engine applies this program's rules in order and records the evidence with the verdict:
@@ -2452,51 +3343,68 @@ const Views = (() => {
       <div class="actions"><button id="p-elig-auto" title="Derives every rule input from the case record and analyzed documents, then decides — or tells you exactly which inputs are still missing">⚡ Auto-adjudicate from case + documents</button></div>
       <div id="p-elig-auto-out"></div>
       <form id="p-elig" class="form">
-        <div class="inline-form">
-        <select name="provider_type" required title="provider type"><option value="">provider type…</option>
-          ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option>${esc(x)}</option>`).join("")}</select>
-        <label>contracted <input type="checkbox" name="contracted" /></label>
-        <input name="amount" type="number" step="0.01" placeholder="aggregate disputed $" required />
-        <label>final determination <input name="fd" type="date" required title="Final determination date — the last EOB date, service date or appeal documents are accepted as proof. The 12-month filing window runs from it." /></label>
-        <label>date of service <input name="service_date" type="date" title="Earliest date of service in dispute${(cfg.eligibility || {}).services_after ? ` — must be after ${esc(cfg.eligibility.services_after)}` : ""}" /></label>
-        ${((cfg.eligibility || {}).dispute_types || []).length ? `<select name="dispute_type" title="claim type"><option value="">claim type…</option>
-          ${cfg.eligibility.dispute_types.map((x) => `<option value="${esc(x)}">${esc(x.replace(/_/g, " "))}</option>`).join("")}</select>` : ""}
-        <label>AOR valid <input type="checkbox" name="aor_valid" checked /></label>
-        <input name="aor_reason" placeholder="AOR: reason it is valid / not valid" title="Recorded with the review. If the AOR is not valid, the Attorney confirms." style="min-width:18em" />
+        <div class="field-grid">
+        <label>Provider type <select name="provider_type" required><option value="">choose…</option>
+          ${[...new Set(((cfg.eligibility || {}).thresholds || []).map((x) => x.provider_type))].map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join("")}</select></label>
+        <label>In the plan's network <select name="contracted" title="Whether the provider has a contract with the health plan — it picks a hospital's minimum amount"><option value="">not stated</option><option value="no">No</option><option value="yes">Yes</option></select></label>
+        <label>Disputed amount, all claims ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required /></label>
+        <label>Final determination date <input name="fd" type="date" required title="Final determination date — the last EOB date, service date or appeal documents are accepted as proof. The 12-month filing window runs from it." /></label>
+        <label>Date of service <input name="service_date" type="date" title="Earliest date of service in dispute${(cfg.eligibility || {}).services_after ? ` — must be after ${esc(cfg.eligibility.services_after)}` : ""}" /></label>
+        ${((cfg.eligibility || {}).dispute_types || []).length ? `<label>Claim type <select name="dispute_type"><option value="">choose…</option>
+          ${cfg.eligibility.dispute_types.map((x) => `<option value="${esc(x)}">${esc(x.charAt(0).toUpperCase() + x.slice(1).replace(/_/g, " "))}</option>`).join("")}</select></label>` : ""}
+        </div>
+        <div class="field-grid">
+        <label><input type="checkbox" name="aor_valid" checked /> The AOR is valid</label>
+        <label class="wide">Why the AOR is valid or not <input name="aor_reason" placeholder="e.g. signed by the provider, on file" title="Recorded with the review. If the AOR is not valid, the Attorney confirms." /></label>
         </div>
         <fieldset class="elig-flags"><legend>Tick any that apply — each one makes the dispute ineligible</legend>
           ${((cfg.eligibility || {}).ineligibility_reasons || []).map((x) => `<label><input type="checkbox" name="flag" value="${esc(x)}" /> ${esc(ELIG_REASON_LABELS[x] || x.replace(/_/g, " "))}</label>`).join("")}
         </fieldset>
+        <label class="elig-notes">Notes <span class="muted">(optional — saved with this review; the PM and Attorney can add to them)</span>
+          <textarea name="notes" rows="2" maxlength="4000" placeholder="Your working notes on this review"></textarea></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
 
-      <details class="prog-sec" id="p-send-details"><summary>Correspondence</summary>
-      <form id="p-send" class="inline-form">
+      <details class="prog-sec" id="p-mail-track" data-tab="mail" open><summary>Mail tracker <span class="muted">— every email of this dispute: where it is, who got it, what they did with its links</span></summary>
+        <div id="p-mail-tracker" data-case-id="${esc(id)}"><p class="muted">Loading…</p></div></details>
+
+      <details class="prog-sec" id="p-send-details" data-tab="mail" open><summary>Write to the parties</summary>
+      <form id="p-send" class="form" data-task="send_letter" data-case-id="${esc(id)}">
         ${corrTplCache = cfg.correspondence?.templates || [], ""}
         ${(setTimeout(() => corrTemplatesFor(id, "#p-send"), 0), "")}
-        <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(cfg.correspondence?.templates || [])}</select>
-        <select name="rfi_to" title="only used for the rfi template"><option value="provider">RFI to: provider</option><option value="plan">RFI to: health plan</option></select>
-        <input name="to" placeholder="to emails (comma-separated)" required />
-        <input name="cc" placeholder="cc emails" />
-        <textarea name="body" rows="3" placeholder="message body — {share_link} inserts a secure upload link, {download_link} a link to the latest generated document; both are minted on send" required></textarea>
-        <label><input type="checkbox" name="auto_share" checked /> Attach a secure upload link (minted on send)</label>
-        <label><input type="checkbox" name="auto_download" /> Attach a download link to the latest generated document (minted on send)</label>
-        <button>Send / submit for QA</button></form><div id="p-corr"></div></details>
+        <div class="field-grid">
+          <label>Template <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(cfg.correspondence?.templates || [])}</select></label>
+          <label>Request for information goes to <select name="rfi_to" title="only used for the Request for Additional Information template" onchange="Views.corrFillRecipientsFn(this.form)"><option value="provider">The provider</option><option value="plan">The health plan</option></select></label>
+          <label>To <input name="to" type="text" placeholder="name@example.com, …" required /></label>
+          <label>Cc <input name="cc" type="text" placeholder="optional" /></label>
+          <span class="muted rcpt-hint wide"></span>
+          <label class="wide">Message
+            <textarea name="body" rows="5" placeholder="Write the message. {share_link} puts in a secure upload link and {download_link} a link to the latest generated document; both are created when it is sent." required></textarea></label>
+          <div class="wide" style="display:flex;flex-wrap:wrap;gap:4px 24px">
+            <label><input type="checkbox" name="auto_share" checked /> Attach a secure upload link</label>
+            <label><input type="checkbox" name="auto_download" /> Attach a link to the latest generated document</label></div>
+        </div>
+        <div class="actions"><button type="button" class="btn-secondary" onclick="Views.corrPreviewFn(this.form, '${esc(id)}')">Preview</button>
+          <button>Send / submit for QA</button></div></form><div id="p-corr"></div></details>
 
-      <details class="prog-sec" id="p-inv-details"><summary>Invoices & claims</summary>
+      <details class="prog-sec" id="p-inv-details" data-tab="billing" open><summary>Invoices &amp; claim lines</summary>
       ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form" data-wf="invoice">
-        <select name="party"><option>HEALTH_PLAN</option><option>PROVIDER</option></select>
-        <select name="kind"><option>INITIAL_FEE</option><option>FULL_REVIEW</option><option>DEFAULT</option></select>
-        <input name="amount" type="number" step="0.01" placeholder="amount $" required />
+        <label>Bill to <select name="party"><option value="HEALTH_PLAN">Health plan</option><option value="PROVIDER">Provider</option></select></label>
+        <label>Invoice for <select name="kind"><option value="INITIAL_FEE">Initial fee</option><option value="FULL_REVIEW">Full review</option><option value="DEFAULT">Default</option></select></label>
+        <label>Amount ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required /></label>
         <button>Issue invoice</button></form>` : `<p class="muted">Invoices are created by the PM.</p>`}<div id="p-inv-list" data-case-id="${esc(id)}"></div>
-      <form id="p-claims" class="inline-form">
-        <textarea name="csv" rows="3" placeholder="claim_number,cpt,billed,paid per line (bulk import)"></textarea>
-        <p class="mhint">For disputes at/crossing 100 claims (Capitol Bridge large-volume policy), add 9 more
-          columns per line: patient_first_name,patient_last_name,type_of_service,denial_reason,
-          date_of_service(YYYY-MM-DD),date_claim_submitted(YYYY-MM-DD),provider_name,facility_name,evidence_location
-          — the import is rejected with the exact missing fields per line if any are blank.</p>
-        <button>Import claims</button></form><div id="p-claims-list"></div></details>
+      <div class="claims-csv">
+        <h3>Claims</h3>
+        <p class="muted">Upload the dispute's claims as a CSV, one row per claim, with a header row. Only the claim number is
+          required; a claim already on the case is updated from its row. Disputes of 100 claims or more need every column
+          filled (Capitol Bridge large-volume policy).</p>
+        <div class="inline-form">
+          <label class="mini button-like">Upload claims (CSV)…<input type="file" hidden accept=".csv,text/csv" onchange="Views.claimsCsvUpload('${esc(id)}', this)" /></label>
+          <button type="button" class="mini ghost" onclick="Views.claimsCsvTemplate()">Download the CSV template</button></div>
+      </div><div id="p-claims-list"></div></details>
 
-      <details class="prog-sec"><summary>Share links & opt-out</summary>
+      ${Letters.caseSecHtml(id, cfg)}
+
+      <details class="prog-sec" data-tab="mail"><summary>Secure links &amp; plan opt-out</summary>
       <div class="actions">
         <button id="p-share-up">Create upload link</button>
         <button id="p-share-dl">Create download link</button></div><div id="p-share-out"></div>
@@ -2504,38 +3412,33 @@ const Views = (() => {
         <label>eligible to opt out <input type="checkbox" name="eligible" /></label>
         <input name="rationale" placeholder="rationale" required /><button>Record opt-out decision</button></form>` : ""}</details>
 
-      ${can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<details class="prog-sec"><summary>At any time</summary>
-      <p class="muted">These are not steps: they can happen at any point in a case. Everything else follows the step list at the top.</p>
-      <div class="actions">
-        <button type="button" onclick="Views.wfAnytime('${id}','PROVIDER_WITHDRAW')">Provider asked to withdraw</button>
-        <button type="button" onclick="Views.wfAnytime('${id}','RFI_RESPONSE_RECEIVED')">RFI response received</button>
-        <button type="button" onclick="Views.wfAnytime('${id}','OUTREACH_DONE')">Outreach done (payment arrived, packet didn't)</button>
-      </div></details>` : ""}
+
 
       ${sopCaseInfoHtml(id, c, cfg)}
+      ${sopPacketFormHtml(id, c)}
       ${sopFwaHtml(id, c)}
       ${sopNotesHtml(id, c)}
       ${sopSummaryHtml(id, c, cfg)}
 
-      <details class="prog-sec"><summary>Call log</summary>
+      <details class="prog-sec" data-tab="activity"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
-        <select name="direction"><option>OUTBOUND</option><option>INBOUND</option></select>
-        <input name="phone" placeholder="phone number" required />
-        <input name="summary" placeholder="brief description" required /><button>Log call</button></form>
+        <label>Direction <select name="direction"><option value="OUTBOUND">We called</option><option value="INBOUND">They called</option></select></label>
+        <label>Phone number <input name="phone" type="tel" placeholder="(555) 123-4567" required /></label>
+        <label style="flex:1;min-width:240px">What was discussed <input name="summary" placeholder="a brief description" required /></label><button>Log call</button></form>
       <div id="p-call-list"></div></details>
 
-      <details class="prog-sec"><summary>Inquiries log</summary>
+      <details class="prog-sec" data-tab="activity"><summary>Inquiries log</summary>
       <form id="p-inquiry" class="inline-form">
-        <select name="method"><option>EMAIL</option><option>PHONE_CALL</option></select>
-        <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
+        <label>How <select name="method"><option value="EMAIL">Email</option><option value="PHONE_CALL">Phone call</option></select></label>
+        <label>Kind <select name="inquiry_type"><option value="GENERAL_QUESTION">General question</option>
           <option value="GENERAL_INQUIRY">General inquiry</option>
-          <option value="SUBMISSION_DOCUMENTS">Submission of documents</option></select>
-        <input name="detail" placeholder="detail (optional)" /><button>Log inquiry</button></form>
+          <option value="SUBMISSION_DOCUMENTS">Submission of documents</option></select></label>
+        <label style="flex:1;min-width:240px">Detail <input name="detail" placeholder="optional" /></label><button>Log inquiry</button></form>
       <div id="p-inquiry-list"></div></details>`;
 
     afterRender(() => {
       const money = (v) => Math.round(parseFloat(v) * 100);
-      wfLoad(id, cfg);
+      wfLoad(id, cfg); wfStartPolling();
       $("#p-status")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;
@@ -2562,23 +3465,113 @@ const Views = (() => {
         Api.cm.clocks(id).then((cls) => {
           const el = document.getElementById("p-clock-proj"); if (!el) return;
           const arr = Array.isArray(cls) ? cls : (cls.clocks || []);
-          if (!arr.length) { el.innerHTML = ""; return; }
-          el.innerHTML = `<p><b>Projected deadlines</b></p><table><thead><tr><th>Clock</th><th>Due</th><th>State</th><th>Basis</th></tr></thead><tbody>` +
-            arr.map((cl) => `<tr><td>${esc(cl.label || cl.clock || "")}</td>
-              <td>${fmtDate(cl.due)}</td><td>${badge(cl.state || "")}</td>
-              <td class="muted">${esc(cl.basis_note || cl.basis || "")}</td></tr>`).join("") + `</tbody></table>`;
+          if (!arr.length) { el.innerHTML = `<p class="muted">No deadline is running yet — they start when their program dates are recorded.</p>`; return; }
+          // PM deadline extensions: an extended clock shows its extra days (each grant in the tooltip), and the PM
+          // can extend any clock except the statutory filing window.
+          const canExtend = Auth.can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+          const extNote = (cl) => cl.extended_days ? ` <span class="badge" title="${esc((cl.extensions || []).map((x) =>
+            `+${x.days}d by ${x.granted_by} (${fmtDate(x.at)}): ${x.reason}`).join("\n"))}">+${cl.extended_days}d extended</span>` : "";
+          // A step's clock stops when the step is done: met on a day, on time or late. A working target is shown, never a breach.
+          const stateHtml = (cl) => cl.state === "met" ? `<span class="badge s-paid">Met ${esc(fmtDate(cl.met_on))}</span>`
+            : cl.state === "met_late" ? `<span class="badge warn">Met late ${esc(fmtDate(cl.met_on))}</span>`
+            : cl.state === "over_target" ? `<span class="badge warn">Over target</span>`
+            : badge(cl.state || "");
+          el.innerHTML = `<p><b>Timelines</b></p><table><thead><tr><th>Step</th><th>Due</th><th>State</th><th>Rule</th>${canExtend ? "<th></th>" : ""}</tr></thead><tbody>` +
+            arr.map((cl) => `<tr><td>${esc(cl.label || cl.clock || "")}${cl.target ? ' <span class="chip" title="A working target, not a contract deadline">target</span>' : ""}</td>
+              <td>${fmtDate(cl.due)}${extNote(cl)}</td><td>${stateHtml(cl)}</td>
+              <td class="muted">${esc(cl.cite || cl.basis_note || cl.basis || "")}</td>
+              ${canExtend ? `<td>${cl.extendable && !cl.met_on ? `<details class="clock-extend"><summary>Extend</summary>
+                <form data-clock="${esc(cl.clock)}" class="clock-extend-form">
+                  <label>Days <input name="days" type="number" min="1" max="90" value="5" required /></label>
+                  <textarea name="reason" rows="2" minlength="10" maxlength="2000" required placeholder="Why more time is needed (kept on the case record, and shown to the side you ask)"></textarea>
+                  <button class="mini">Extend deadline</button>
+                  <span class="clock-ask"><span class="muted">or ask a side to agree first:</span>
+                    <select name="side" aria-label="Who is asked"><option value="">The side that filed (the TPA)</option><option value="PROVIDER">The provider's side</option><option value="HEALTH_PLAN">The health plan</option></select>
+                    <label>Answer within <input name="due_days" type="number" min="1" max="30" value="5" /> days</label>
+                    <button type="button" class="mini secondary" data-ask="1">Ask for agreement</button></span></form></details>` : `<span class="muted" title="Statutory window — cannot be extended">fixed</span>`}</td>` : ""}</tr>`).join("") + `</tbody></table>`;
+          // Asking for agreement: the side answers in its portal; agreeing extends the deadline by itself.
+          el.querySelectorAll(".clock-extend-form [data-ask]").forEach((b) => b.addEventListener("click", async () => {
+            const f = b.form, days = parseInt(f.days.value, 10), reason = f.reason.value.trim();
+            if (!(days >= 1 && days <= 90)) { UI.toast("An extension is 1 to 90 days", { kind: "warn" }); return; }
+            if (reason.length < 10) { UI.toast("Give the reason for the extension (at least 10 characters)", { kind: "warn" }); return; }
+            await UI.run(b, async () => {
+              try {
+                const r = await Api.cm.requestExtension(id, f.dataset.clock, { days, reason, side: f.side.value, due_days: parseInt(f.due_days.value, 10) || 5 });
+                UI.toast(`Asked ${r.asked || "the side"} for ${days} more day${days === 1 ? "" : "s"} — the deadline moves when they agree`, { duration: 7000 });
+                loadDates();
+              } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+            }, "Asking…");
+          }));
+          el.querySelectorAll(".clock-extend-form").forEach((f) => f.addEventListener("submit", async (ev) => {
+            ev.preventDefault();
+            const days = parseInt(f.days.value, 10), reason = f.reason.value.trim();
+            if (!(days >= 1 && days <= 90)) { UI.toast("An extension is 1 to 90 days", { kind: "warn" }); return; }
+            if (reason.length < 10) { UI.toast("Give the reason for the extension (at least 10 characters)", { kind: "warn" }); return; }
+            await UI.run(f.querySelector("button"), async () => {
+              try {
+                const r = await Api.cm.extendClock(id, f.dataset.clock, days, reason);
+                UI.toast(r.workflow_signalled ? `Deadline extended by ${days} day${days === 1 ? "" : "s"}`
+                  : `Deadline extended by ${days} day${days === 1 ? "" : "s"} (the case's workflow wasn't reachable — its reminders keep the old date)`,
+                  r.workflow_signalled ? {} : { kind: "warn" });
+                loadDates();
+              } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+            }, "Extending…");
+          }));
         }).catch(() => {});
       };
       loadDates();
       const eligBadge = (v) => `${badge(v.result)}${v.borderline ? ` <span class="badge warn" title="Borderline call — PM second review required">borderline</span>` : ""}${v.override ? ` <span class="badge" title="Human override of the computed result">override</span>` : ""}`;
+      // What a review decided and on what: the reason in words, and the figures it used (recorded with it).
+      const ELIG_REASON = {
+        over_filing_window: "Filed after the filing window", below_threshold: "Below the minimum disputed amount",
+        service_before_program_start: "Service before the program's start date", unrecognized_provider_type: "Provider type not recognised",
+        not_an_eligible_dispute_type: "Not an eligible type of claim dispute", aor_invalid_pending_attorney: "AOR not valid — with the Attorney",
+      };
+      const eligReasonHtml = (v) => {
+        let ev = v.evidence || {};
+        if (typeof ev === "string") { try { ev = JSON.parse(ev); } catch { ev = {}; } }
+        const d = (x) => (x ? fmtDate(x + "T12:00:00") : "—");
+        const usd0 = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+        const facts = [];
+        if (ev.final_determination_at) facts.push(`final determination ${d(ev.final_determination_at)}${ev.determination_from ? ` (from ${esc(ev.determination_from)})` : ""}`);
+        if (ev.filing_deadline) facts.push(`deadline ${d(ev.filing_deadline)}`);
+        if (ev.filed_on) facts.push(`filed ${d(ev.filed_on)}`);
+        if (ev.threshold_min_cents != null) facts.push(`minimum ${usd0(ev.threshold_min_cents)}${ev.disputed_amount_cents != null ? `, disputed ${usd0(ev.disputed_amount_cents)}` : ""}`);
+        if (ev.service_date && ev.services_after) facts.push(`service ${d(ev.service_date)}, program starts ${d(ev.services_after)}`);
+        const label = v.reason ? (ELIG_REASON[v.reason] || v.reason.replace(/_/g, " ")) : "";
+        return `${label ? esc(label) : '<span class="muted">—</span>'}${v.reason ? ` <span class="mono muted" style="font-size:11px">${esc(v.reason)}</span>` : ""}${facts.length ? `<div class="muted elig-facts">${facts.join(" · ")}</div>` : ""}`;
+      };
       const loadElig = () => Api.program.eligibilityHistory(id).then((r) => {
         const el = document.getElementById("p-elig-history"); if (!el) return;
         const revs = r.reviews || [];
+        const canNote = Auth.can("CASE_MANAGER", "PM", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+        const ROLE_LABEL = { CASE_MANAGER: "Reviewer", PM: "PM", ATTORNEY: "Attorney", TENANT_ADMIN: "Admin", FEDERAL_ADMIN: "Admin", PLATFORM_ADMIN: "Admin" };
+        const notesRow = (v) => {
+          const ns = v.notes || [];
+          if (!ns.length && !canNote) return "";
+          return `<tr class="elig-notes-row"><td colspan="5">
+            ${ns.map((n) => `<div class="elig-note"><div class="elig-note-head"><b>${esc(n.author || "")}</b>
+              <span class="muted">${esc(ROLE_LABEL[n.author_role] || n.author_role || "")} · ${fmtDate(n.created_at)}</span></div>
+              <div class="elig-note-body">${esc(n.body || "")}</div></div>`).join("")}
+            ${canNote ? `<details class="elig-note-add"><summary>${ns.length ? "Add a note" : "Add a note to this review"}</summary>
+              <form data-review="${esc(v.id)}" class="elig-note-form"><textarea name="body" rows="2" maxlength="4000" required placeholder="Note on this review"></textarea>
+              <button class="mini">Save note</button></form></details>` : ""}
+          </td></tr>`;
+        };
         el.innerHTML = revs.length ? `<table><thead><tr><th>Result</th><th>Reason</th><th>Rules</th><th>By</th><th>When</th></tr></thead><tbody>` +
-          revs.map((v) => `<tr><td>${eligBadge(v)}</td><td>${esc(v.reason || "—")}${v.override_reason ? `<div class="muted">override: ${esc(v.override_reason)}</div>` : ""}</td>
+          revs.map((v) => `<tr><td>${eligBadge(v)}</td><td>${eligReasonHtml(v)}${v.override_reason ? `<div class="muted">override: ${esc(v.override_reason)}</div>` : ""}</td>
             <td class="mono muted" title="rule version that produced this decision">${esc(v.rule_version || "—")}</td>
-            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>`).join("") +
+            <td>${esc(v.decided_by || "")}</td><td class="muted">${fmtDate(v.created_at)}</td></tr>${notesRow(v)}`).join("") +
           `</tbody></table>` : `<p class="muted">No eligibility review on record yet.</p>`;
+        el.querySelectorAll(".elig-note-form").forEach((f) => f.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const body = f.body.value.trim();
+          if (!body) return;
+          await UI.run(f.querySelector("button"), async () => {
+            try { await Api.program.eligibilityNote(id, f.dataset.review, body); UI.toast("Note saved"); loadElig(); }
+            catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          }, "Saving…");
+        }));
       }).catch(() => {});
       // Result renderer shared by manual + auto paths: verdict, rule version,
       // borderline callout, and — on INELIGIBLE — the override form (a written
@@ -2607,8 +3600,16 @@ const Views = (() => {
           try {
             const r = await Api.program.eligibilityAuto(id);
             if (r.result === "NEEDS_HUMAN") {
-              out.innerHTML = `<p class="warn-box">⚠ Can't auto-decide — missing rule inputs:
-                <b>${(r.missing || []).map(esc).join(", ")}</b>. Fill them in the form below and compute manually.</p>`;
+              const missing = r.missing || [];
+              const f = document.getElementById("p-elig");
+              const filled = f ? eligPrefill(f, r.inputs || {}, missing) : [];
+              const bad = /not a valid calendar date/.test(r.detail || "");
+              out.innerHTML = `<div class="warn-box elig-need"><p><b>We need a little more to decide this one automatically.</b>
+                ${bad ? "A date read from the documents isn't a real calendar date, so it needs entering by hand:" : "The case and its documents don't say:"}</p>
+                <ul>${missing.map((k) => `<li>${esc((ELIG_INPUT_LABELS[k] || [])[1] || k.replace(/_/g, " "))}</li>`).join("")}</ul>
+                <p>${filled.length ? `We've filled in what we found (${filled.map(esc).join(", ")}). ` : ""}Complete the highlighted ${missing.length === 1 ? "field" : "fields"} in the form below, then click <b>Compute eligibility</b>.</p></div>`;
+              const first = f && f.querySelector(".need");
+              if (first) { first.scrollIntoView({ behavior: "smooth", block: "center" }); first.focus({ preventScroll: true }); }
             } else {
               // A decided result (ELIGIBLE/INELIGIBLE/HOLD_AOR) moves the
               // case's internal/agency status server-side -- rerender so the
@@ -2624,17 +3625,34 @@ const Views = (() => {
           } catch (e) { UI.toast(e.message, { kind: "warn" }); }
         }, "Evaluating…");
       });
+      // Fills the eligibility form with what auto-adjudication found and marks
+      // the inputs it could not; returns the labels of the fields it filled.
+      const eligPrefill = (f, inp, missing) => {
+        const filled = [];
+        const put = (el, v, label) => { if (el && v !== undefined && v !== null && v !== "" && !el.value) { el.value = v; filled.push(label); } };
+        put(f.provider_type, inp.provider_type, "provider type");
+        if (inp.contracted === true || inp.contracted === false) { f.contracted.value = inp.contracted ? "yes" : "no"; filled.push("network status"); }
+        if (inp.disputed_amount_cents) put(f.amount, (inp.disputed_amount_cents / 100).toFixed(2), "disputed amount");
+        put(f.fd, inp.final_determination_at, "final determination date");
+        put(f.service_date, inp.service_date, "date of service");
+        if (f.dispute_type) put(f.dispute_type, inp.dispute_type, "claim type");
+        const field = { provider_type: f.provider_type, contracted: f.contracted, final_determination_at: f.fd, service_date: f.service_date };
+        f.querySelectorAll(".need").forEach((el) => el.classList.remove("need"));
+        missing.forEach((k) => { const el = field[k]; if (el) { el.classList.add("need"); el.addEventListener("change", () => el.classList.remove("need"), { once: true }); } });
+        return filled;
+      };
       $("#p-elig")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const f = ev.target;
         const payload = () => ({
-          provider_type: f.provider_type.value, contracted: f.contracted.checked,
+          provider_type: f.provider_type.value, contracted: f.contracted.value === "" ? null : f.contracted.value === "yes",
           disputed_amount_cents: money(f.amount.value),
           final_determination_at: f.fd.value || "",
           service_date: f.service_date.value || "",
           dispute_type: f.dispute_type ? f.dispute_type.value : "",
           flags: [...f.querySelectorAll('input[name="flag"]:checked')].map((x) => x.value),
           aor_valid: f.aor_valid.checked, aor_reason: f.aor_reason.value,
+          notes: f.notes ? f.notes.value : "",
         });
         const out = document.getElementById("p-elig-out");
         const resubmit = async (reason) => {
@@ -2671,10 +3689,16 @@ const Views = (() => {
         const f = ev.target;
         const split = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
         try {
+          // Fill-ins left in the text ("[insert amount]") are asked about before anything is sent.
+          const pv = await Api.cases.corrPreview(id, corrFormBody(f)).catch(() => null);
+          if (pv && (pv.unfilled || []).length && !(await UI.confirm("Some fill-ins aren't filled in", `The email still says ${pv.unfilled.map(esc).join(", ")}. Send it like this?`, "Send anyway", true))) return;
           const r = await Api.program.send(id, { template: f.template.value, body: f.body.value, to: split(f.to.value), cc: split(f.cc.value), rfi_to: f.rfi_to.value, auto_share: f.auto_share.checked, auto_download: f.auto_download.checked });
           UI.toast(r.status === "PENDING" ? "Draft submitted to QA gate" : "Sent — logged to correspondence");
+          if (window.Telemetry) Telemetry.taskDone("send_letter", { template: f.template.value });
+          mailTrackerBox(id);
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
+      mailTrackerBox(id);
       Api.program.correspondence(id).then((r) => {
         const el = document.getElementById("p-corr"); if (!el) return;
         const rows = r.correspondence || [];
@@ -2709,14 +3733,32 @@ const Views = (() => {
           `<tr><td class="mono">${esc(v.invoice_no)}</td><td>${esc(v.party)}</td><td>$${(v.amount_cents / 100).toFixed(2)}</td>
            <td>${badge(v.status)}</td>
            <td>${v.status === "OPEN" ? `<button class="mini" onclick="Views.payInvoice('${v.id}')">Pay now</button>${canSettle ? ` ·
-             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY',this)">mark paid</a> ·
-             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>` : ""}` : ""}</td></tr>`).join("") +
+             <a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','PAY',this)">mark paid</a>` : ""}`
+             : v.status === "PAID" && canSettle ? `<a href="javascript:void(0)" onclick="Views.settleInvoice('${v.id}','REFUND',this)">refund</a>`
+             : v.status === "REFUND_PENDING" ? '<span class="muted">waiting on Stripe</span>' : ""}</td></tr>`).join("") +
           `</tbody></table>` : `<p class="muted">No invoices on this case.</p>`;
       };
       // Invoices belong to the money roles; everyone else's case page leaves the list out.
       const seesInvoices = can("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN");
       const refreshInv = () => (seesInvoices ? Api.program.invoices(id).then(renderInvoices).catch(() => {}) : Promise.resolve());
       refreshInv();
+      // The claims table: lines imported by CSV and the ones document analysis read from the filing packet,
+      // remittances and UB-04s (evidence_location names the document).
+      Api.program.claims(id).then((r) => {
+        const el = document.getElementById("p-claims-list");
+        if (!el) return;
+        const rows = r.claims || [];
+        const usd = (x) => (x == null ? "—" : "$" + (Number(x) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }));
+        const name = (x) => [x.patient_first_name, x.patient_last_name].filter(Boolean).join(" ") || "—";
+        el.innerHTML = rows.length ? `<div class="tbl-scroll"><table class="tbl"><thead><tr><th>Claim #</th><th>Patient</th><th>Type of service</th>
+          <th>Date of service</th><th>Billed</th><th>Paid</th><th>In dispute</th><th>Submitted</th><th>Denied</th><th>Final determination</th>
+          <th>Denial reason</th><th>From</th></tr></thead><tbody>` + rows.map((x) => `<tr><td class="mono">${esc(x.claim_number)}</td>
+          <td>${esc(name(x))}</td><td>${esc(x.type_of_service || "—")}</td><td>${fmtDate(x.date_of_service)}</td>
+          <td>${usd(x.billed_cents)}</td><td>${usd(x.paid_cents)}</td><td>${usd(x.disputed_cents)}</td><td>${fmtDate(x.date_claim_submitted)}</td>
+          <td>${fmtDate(x.date_of_denial)}</td><td>${fmtDate(x.date_of_final_determination)}</td><td>${esc(x.denial_reason || "—")}</td>
+          <td class="muted">${esc(x.evidence_location || "")}</td></tr>`).join("") + `</tbody></table></div>`
+          : `<p class="muted">No claim lines yet — they fill in when the filing packet or remittances are uploaded, or import them above.</p>`;
+      }).catch(() => {});
       // Card payments settle via Stripe webhook — poll so status flips live
       // instead of requiring a manual reload.
       const invPoll = setInterval(() => {
@@ -2728,41 +3770,10 @@ const Views = (() => {
         ev.preventDefault();
         const f = ev.target;
         try { await Api.program.issueInvoice(id, { party: f.party.value, kind: f.kind.value, amount_cents: money(f.amount.value) });
-          UI.toast("Invoice issued (number = case number)"); refreshInv(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+          UI.toast(f.kind.value === "INITIAL_FEE" ? "Invoice issued (number = case number)"
+            : "Invoice issued — its PDF is being made; when it passes QA, the email sending it to the billed party is drafted for you", { duration: 9000 }); refreshInv(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
-      $("#p-claims")?.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const lines = ev.target.csv.value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-          const [claim_number, cpt, billed, paid, patient_first_name, patient_last_name, type_of_service,
-                 denial_reason, date_of_service, date_claim_submitted, provider_name, facility_name,
-                 evidence_location] = l.split(",").map((s) => s.trim());
-          return {
-            claim_number, cpt, billed_cents: money(billed || 0), paid_cents: money(paid || 0),
-            patient_first_name, patient_last_name, type_of_service, denial_reason,
-            date_of_service, date_claim_submitted, provider_name, facility_name, evidence_location,
-          };
-        });
-        try {
-          const r = await Api.program.importClaims(id, lines);
-          const vc = r.volume_check;
-          if (vc && vc.large_volume && (vc.violations || []).length) {
-            UI.toast(`⚠ ${r.imported} imported — large-volume policy violation(s): ${vc.violations.join("; ")}`, { kind: "warn", sticky: true });
-          } else if (vc && vc.large_volume) {
-            UI.toast(`${r.imported} claim lines imported — large-volume dispute, policy compliant`, { kind: "info" });
-          } else {
-            UI.toast(`${r.imported} claim lines imported`);
-          }
-          App.rerender();
-        }
-        catch (e) {
-          // e.details echoes back claim_number from the submitted CSV --
-          // escape before it reaches toast's innerHTML.
-          const msg = e.details
-            ? `${esc(e.message)}<br>${e.details.map(esc).join("<br>")}`
-            : esc(e.message);
-          UI.toast(msg, { kind: "warn", sticky: !!e.details });
-        }
-      });
+
       const share = async (kind) => {
         try {
           const r = await Api.program.shareLink(id, kind, 7);
@@ -2853,20 +3864,142 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  async function settleInvoice(invId, action, el) {
-    let ref = "";
+  // Not applied: money received that pays no fee (a check for more than its fee, a payment for a fee already
+  // paid). Each amount is resolved by refunding it to the payer or applying it to another open fee (unapplied.go).
+  function unappliedHtml(d, usd) {
+    const items = (d && d.items) || [];
+    if (!items.length) return "";
+    return `<section class="panel" id="fin-unapplied"><h2>Not applied <span class="n">${usd(d.total_cents)}</span></h2>
+      <p class="panel-sub">Money received that pays no fee — kept out of Collected. Refund it to the payer, or apply it to another fee they owe.</p>
+      <div class="dg-wrap"><table><thead><tr><th>Received</th><th>Case</th><th>Came with</th><th class="num">Amount</th><th class="num">Left to resolve</th><th></th></tr></thead><tbody>` +
+      items.map((x) => `<tr><td>${fmtDate(x.at)}</td>
+        <td>${x.case_id ? `<a class="mono" href="#/cases/${esc(x.case_id)}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}${x.invoice_no ? `<span class="cell-sub">against invoice ${esc(x.invoice_no)}</span>` : ""}</td>
+        <td class="mono">${esc(x.source && x.source !== "—" ? x.source : "check")}</td>
+        <td class="num">${usd(x.amount_cents)}</td><td class="num"><b>${usd(x.left_cents)}</b></td>
+        <td>${d.can_resolve ? `<button class="mini" onclick="Views.resolveUnappliedFn(${x.id}, ${x.left_cents}, this)">Resolve…</button>` : '<span class="muted">Finance resolves</span>'}</td></tr>`).join("") +
+      `</tbody></table></div></section>`;
+  }
+  async function resolveUnappliedFn(id, left, el) {
+    const dollars = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+    const v = await UI.modal({ title: `Resolve ${dollars(left)} not applied`, submitLabel: "Resolve",
+      body: "Refund: you return the money to the payer by check or ACH, then record it here. Apply: it pays another open fee in full — enter that fee's invoice number (or the case number, when the case has one open fee).",
+      fields: [
+        { name: "action", label: "What happens to it", required: true, value: "refund", options: [["refund", "Refund to the payer (check / ACH)"], ["apply", "Apply to another fee"]] },
+        { name: "amount", label: "Amount to refund ($)", type: "number", step: "0.01", placeholder: `all of it — ${dollars(left)}`, hint: "Refund only. Leave empty to refund all that is left." },
+        { name: "reference", label: "Check / ACH reference", placeholder: "Refund only — required" },
+        { name: "invoice", label: "Invoice or case number of the fee to pay", placeholder: "Apply only — e.g. FL26-021345" },
+      ] });
+    if (!v) return;
+    const body = { action: v.action };
+    if (v.action === "refund") {
+      if (!String(v.reference || "").trim()) { UI.toast("Enter the check or ACH reference of the refund.", { kind: "warn" }); return; }
+      body.reference = v.reference.trim();
+      if (v.amount) body.amount_cents = Math.round(parseFloat(v.amount) * 100);
+    } else {
+      if (!String(v.invoice || "").trim()) { UI.toast("Enter the invoice or case number of the fee to pay.", { kind: "warn" }); return; }
+      body.invoice = v.invoice.trim();
+    }
+    await UI.run(el, async () => {
+      try {
+        const r = await Api.program.resolveUnapplied(id, body);
+        UI.toast(r.status === "refunded" ? `${dollars(r.amount_cents)} recorded as refunded` : `${dollars(r.amount_cents)} applied — that fee is paid`);
+        App.rerender();
+      } catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+    });
+  }
+
+  // Refunds due: cases closed "Closed-Refunded" by a person's Close and refund (no complete packet) whose
+  // initial fee is still paid. Refund here does what the case page's Billing tab does (settleInvoice REFUND): a
+  // Stripe refund of the fee for a card payment (in progress until Stripe confirms), otherwise recorded as refunded
+  // outside the platform with the check / ACH reference.
+  // Potential refunds: no complete packet 7 days after outreach. Nothing is closed or refunded until a person chooses.
+  function potentialRefundsHtml(d, usd) {
+    const rows = (d && d.potential) || [];
+    if (!rows.length) return "";
+    return `<section class="fin-sec fin-refunds"><h2 id="refunds-potential">Potential refunds <span class="badge">${rows.length} waiting for a decision</span></h2>
+      <p class="fin-sec-sub">Paid filings with no complete packet 7 days after outreach. Nothing has been refunded: if the packet isn't coming, choose <b>Close and refund</b>; otherwise keep waiting — the case carries on when the packet arrives.</p>
+      <div class="dg-wrap"><table><thead><tr><th>Case</th><th>Filer</th><th class="num">Fee paid</th><th>Flagged</th><th class="num">Waiting</th><th></th></tr></thead><tbody>` +
+      rows.map((x) => `<tr><td class="mono"><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td><td>${esc(x.filer || "—")}</td>
+        <td class="num">${x.amount_cents ? usd(x.amount_cents) : "—"}</td><td>${fmtDate(x.flagged_at)}</td>
+        <td class="num">${x.days_waiting} day${x.days_waiting === 1 ? "" : "s"}</td>
+        <td>${d.can_approve ? `<button class="mini" onclick="Views.wfAnytime('${esc(x.case_id)}','REFUND_APPROVED')">Close and refund</button>` : '<span class="muted">The Reviewer or PM decides</span>'}</td></tr>`).join("") +
+      `</tbody></table></div></section>`;
+  }
+
+  function refundsDueHtml(d, usd) {
+    if (!d) return "";
+    const rows = d.refunds || [];
+    const when = (t) => (t ? fmtDate(t) : "—");
+    const head = `<h2 id="refunds-due">Refunds due ${rows.length ? `<span class="badge warn">${rows.length} · ${usd(d.total_cents)}</span>` : ""}</h2>`;
+    if (!rows.length) return potentialRefundsHtml(d, usd) + `<section class="fin-sec fin-refunds">${head}<p class="muted">No refunds due. A case appears here once someone chooses Close and refund on it, until its initial fee is refunded.</p></section>`;
+    return potentialRefundsHtml(d, usd) + `<section class="fin-sec fin-refunds">${head}
+      <p class="fin-sec-sub">Cases closed for a refund (someone chose Close and refund). The filer has been told; refund the initial fee.
+        A card payment goes back to the card through Stripe; anything else you return yourself (check / ACH) and record here with its reference.</p>
+      <div class="dg-wrap"><table id="refunds-due-tb" data-page-size="10"><thead><tr><th>Case</th><th>Filer</th><th>Bill to</th><th class="num">Amount</th><th>Paid</th>
+        <th>Paid via</th><th>Refund ordered</th><th class="num">Waiting</th><th></th></tr></thead><tbody>` +
+      rows.map((x) => `<tr><td class="mono"><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td>
+        <td>${esc(x.filer || "—")}${x.filer_email ? `<br><span class="muted">${esc(x.filer_email)}</span>` : ""}</td>
+        <td>${esc(x.party === "HEALTH_PLAN" ? "Health plan" : "Provider")}</td>
+        <td class="num">${usd(x.amount_cents)}</td><td>${when(x.paid_at)}</td>
+        <td>${x.by_card ? '<span class="badge s-paid">card — Stripe refund</span>' : '<span class="badge">check / ACH / other</span>'}</td>
+        <td>${when(x.ordered_at)}</td>
+        <td class="num">${x.days_waiting >= 3 ? `<span class="badge warn">${x.days_waiting} days</span>` : `${x.days_waiting} day${x.days_waiting === 1 ? "" : "s"}`}</td>
+        <td>${x.state === "IN_PROGRESS" ? '<span class="badge">Refund in progress — waiting on Stripe</span>'
+          : d.can_refund ? `<button class="mini" onclick="Views.settleInvoice('${esc(x.invoice_id)}','REFUND',this,${x.by_card ? "true" : "false"})">Refund ${usd(x.amount_cents)}</button>` : '<span class="muted">Finance refunds</span>'}
+          ${x.last_failure && x.state !== "IN_PROGRESS" ? `<br><span class="badge warn" title="${esc(x.last_failure)}">last attempt failed: ${esc(x.last_failure)}</span>` : ""}</td></tr>`).join("") +
+      `</tbody></table></div></section>`;
+  }
+
+  // byCard: true / false when the caller knows how the fee was paid (Refunds due), undefined otherwise.
+  async function settleInvoice(invId, action, el, byCard) {
+    let ref = "", refundMethod = "";
     if (action === "PAY") {
       const v = await UI.modal({ title: "Mark invoice paid", submitLabel: "Mark paid",
         fields: [{ name: "ref", label: "Remittance reference (RA/ERA)", placeholder: "Optional" }] });
       if (!v) return;
       ref = v.ref;
-    } else if (!(await UI.confirm("Refund this invoice?", "A refund entry is posted to the ledger and the payer is notified.", "Refund", true))) return;
+    } else {
+      // A card payment goes back to the card unless Finance chooses otherwise: after a card refund failed, the card
+      // usually can't take another, and the money goes back by check or ACH instead.
+      const how = byCard === true
+        ? "This fee was paid by card. Back to the card: Stripe refunds this fee's amount (5–10 days to reach the payer) and it shows Refund in progress until Stripe confirms. Outside Stripe: you return the money by check or ACH and record it here."
+        : byCard === false
+          ? "This fee was not paid by card: return the money yourself (check / ACH), then record it here with the reference. It is recorded as refunded now."
+          : "Paid by card: choose back to the card (Stripe refunds this fee's amount) or outside Stripe. Paid another way: return the money yourself (check / ACH) and enter the reference; it is recorded as refunded now.";
+      const fields = [];
+      if (byCard !== false) fields.push({ name: "method", label: "How is it refunded?", value: "", options: [["", "Back to the card (Stripe)"], ["outside", "Outside Stripe — check or ACH"]] });
+      fields.push({ name: "ref", label: "Check / ACH reference", placeholder: "For a refund made outside Stripe" });
+      const v = await UI.modal({ title: "Refund this fee", submitLabel: "Refund", danger: true, body: how, fields });
+      if (!v) return;
+      ref = v.ref || "";
+      refundMethod = v.method || "";
+    }
     await UI.run(el, async () => {
-      try { await Api.program.settleInvoice(invId, action, ref); UI.toast(`Invoice ${action === "PAY" ? "paid" : "refunded"}`); App.rerender(); }
-      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+      try {
+        const r = await Api.program.settleInvoice(invId, action, ref, refundMethod);
+        UI.toast(action === "PAY" ? "Invoice paid" : r && r.status === "REFUND_PENDING" ? "Refund sent to Stripe — waiting for confirmation" : "Refunded");
+        App.rerender();
+      } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     });
   }
 
+  // ---- QA gate ---------------------------------------------------------------------
+  // A list of the drafts waiting on the left, the one being reviewed on the right.
+  const QA_CHANNEL = { email: "Email", letter: "Letter (PDF)", note: "Rationale note" };
+  const qaTpl = (a) => String(a || "").replace(/^copilot_/, "copilot · ").replace(/_/g, " ");
+  function qaAge(t) {
+    if (!t) return "";
+    const m = Math.max(0, Math.round((Date.now() - new Date(t)) / 60000));
+    return m < 60 ? `${m || 1}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+  }
+  const qaCase = (i) => i.case_id ? `<a class="mono" href="#/cases/${esc(i.case_id)}" onclick="event.stopPropagation()">${esc(i.case_number || i.case_id.slice(0, 8) + "…")}</a>` : "";
+
+  // The statutory date a QA draft's case is up against (its offer window or open-negotiation end), and how this
+  // template's drafts have fared at the gate (qaTemplateStats): evidence for the reviewer, not a verdict.
+  const qaDue = (i) => { const ds = [i.open_negotiation_end, i.offer_window_ends_at].filter(Boolean).sort(); return ds.length ? fmtDate(ds[0]) : ""; };
+  const qaTrackRecord = (ts) => ts && ts.drafts
+    ? `<p class="muted">Template track record (90 days): ${ts.drafts} drafts · ${ts.approved_unedited} approved as written (${Math.round(100 * ts.approved_unedited / ts.drafts)}%) · ${ts.rejected} sent back${ts.avg_edit_ratio != null ? ` · ~${Math.round(ts.avg_edit_ratio * 100)}% of the text rewritten on average` : ""}</p>`
+    : "";
   async function qaQueue() {
     try {
       const r = await Api.program.qaQueue();
@@ -2874,106 +4007,143 @@ const Views = (() => {
       const recent = r.recent || [];
       const toSend = r.to_send || [];
       const me = Auth.claims()?.sub;
-      const maySend = (i) => i.requested_by_sub === me || can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      // A drafter's own view (Coder) lists only what is theirs: their drafts and those on cases they're now named on.
+      const maySend = (i) => r.own_only || i.requested_by_sub === me || can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
       const list = (v) => (Array.isArray(v) ? v : []).join(", ");
+      const oldest = q.length ? qaAge(q[q.length - 1].created_at) : ""; // newest first: the oldest is last
+      const sum = ListUI.summary([
+        { label: "Awaiting review", value: q.length, sub: q.length ? `oldest waiting ${oldest}` : "nothing waiting", tone: q.length ? "warn" : "good" },
+        { label: "Ready to send", value: toSend.length, sub: "approved, back with the drafter", tone: toSend.length ? "warn" : "" },
+        { label: "Recently decided", value: recent.length, sub: "approved or sent back" },
+      ]);
       const sendHtml = toSend.length
-        ? `<h2>Passed QA — ready to send</h2>
-          <p class="muted">These drafts were approved and are back with the Reviewer. Check the addresses and send; the send is logged and the case's dates are set.</p>
-          <table><thead><tr><th>Subject</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
-          toSend.map((i) => `<tr><td>${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</td><td>${esc(i.reviewed_by || "—")}</td><td class="muted">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
-            <td>${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
-          `</tbody></table>` : "";
-      const intro = sendHtml + `<details class="prog-sec" ${q.length ? "" : "open"}><summary>What the QA gate does</summary>
+        ? `<section class="panel"><h2>Passed QA — ready to send <span class="n">${toSend.length}</span></h2>
+          <p class="panel-sub">Approved and back with the person who drafted them. Check the addresses and send; the send is logged and the case's dates are set.</p>
+          <table class="qa-tbl"><thead><tr><th>Subject</th><th>Case</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
+          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span></td><td data-label="Case">${qaCase(i)}</td>
+            <td data-label="Approved by">${esc(i.reviewed_by || "—")}</td><td class="muted" data-label="To">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
+            <td class="qa-tbl-act">${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
+          `</tbody></table></section>` : "";
+      const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
+          <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
+          <span class="qa-item-meta">${qaCase(i)}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span>${qaDue(i) ? `<span class="badge" title="The statutory date on this case">due ${esc(qaDue(i))}</span>` : ""}</span>
+          <span class="qa-item-by">drafted by ${esc(i.drafted_by || "—")}${r.own_only ? " · waiting for QA" : ""}</span></button>`).join("")
+        : `<p class="kc-empty">Queue empty — no drafts awaiting review.</p>`;
+      const detailEmpty = q.length
+        ? `<div class="qa-empty"><b>Pick a draft to review it.</b><p class="muted">You'll see exactly what the party will get — subject, recipients and text — and approve it or send it back with a note.</p></div>`
+        : `<div class="qa-empty"><b>Nothing to review.</b><p class="muted">Drafts on templates that need QA stop here before anything reaches a party.</p></div>`;
+      const recentHtml = recent.length
+        ? `<section class="panel"><h2>Recently decided <span class="n">${recent.length}</span></h2><table class="qa-tbl"><thead><tr><th>Subject</th><th>Case</th><th>Status</th><th>Reviewed by</th><th>When</th></tr></thead><tbody>` +
+          recent.map((i) => `<tr><td class="qa-tbl-main">${esc(i.subject)}</td><td data-label="Case">${qaCase(i)}</td><td data-label="Status">${badge(i.status)}</td>
+            <td data-label="Reviewed by">${esc(i.reviewed_by || "—")}</td><td class="muted" data-label="When">${fmtDate(i.reviewed_at)}</td></tr>`).join("") +
+          `</tbody></table></section>` : "";
+      const explain = `<details class="prog-sec"><summary>What the QA gate does</summary>
         <p class="muted">Every correspondence template in this program's rules either sends <b>immediately</b>
         or carries a <b>QA role</b> (e.g. attorney, program manager). Drafts on gated templates stop here as
         <b>PENDING</b> — the named role reviews the exact subject, body, recipients, and any secure links, then
         approves (email is delivered and logged) or rejects with a note back to the drafter. Ungated templates
         never appear here. An empty queue simply means no gated draft is waiting right now.</p></details>`;
-      let dqHtml = "";
-      // Phase 3-lite panel: which templates produce drafts reviewers send
-      // untouched. Staff-only, advisory — no model, just graded decisions.
-      if (can("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-        try {
-          const dq = await Api.qaDraftQuality(90);
-          if (dq.templates && dq.templates.length) {
-            dqHtml = `<h2>Draft quality (last ${dq.days} days)</h2>
-              <p class="muted">An untouched approval means the template produced text a reviewer sent as-is; edit ratio is how much of the draft the reviewer rewrote.</p>
-              <table><thead><tr><th>Template</th><th>Channel</th><th>Drafts</th><th>Approved</th><th>Untouched</th><th>Rejected</th><th>Avg edit ratio</th></tr></thead><tbody>` +
-              dq.templates.map((x) => `<tr><td>${esc(x.artifact)}</td><td>${esc(x.channel)}</td><td>${x.drafts}</td>
-                <td>${x.approved}</td><td>${x.approved_unedited} (${x.drafts ? Math.round(100 * x.approved_unedited / x.drafts) : 0}%)</td>
-                <td>${x.rejected}</td><td>${x.avg_edit_ratio == null ? "—" : Math.round(x.avg_edit_ratio * 100) + "%"}</td></tr>`).join("") +
-              `</tbody></table>`;
-          }
-        } catch { /* stats are advisory */ }
-      }
-      const recentHtml = recent.length
-        ? `<h2>Recently decided</h2><table><thead><tr><th>Subject</th><th>Status</th><th>Reviewed by</th><th>When</th></tr></thead><tbody>` +
-          recent.map((i) => `<tr><td>${esc(i.subject)}</td><td>${badge(i.status)}</td>
-            <td>${esc(i.reviewed_by || "—")}</td><td class="muted">${fmtDate(i.reviewed_at)}</td></tr>`).join("") +
-          `</tbody></table>` : "";
-      if (!q.length)
-        return `<div class="view-head"><h1>QA gate</h1>
-          <span class="muted">nothing reaches a party without approval on gated templates</span></div>
-          ${intro}<p class="muted">Queue empty — no drafts awaiting review.</p><div id="qa-detail"></div>${recentHtml}${dqHtml}`;
-      const due = (i) => {
-        const ds = [i.open_negotiation_end, i.offer_window_ends_at].filter(Boolean).sort();
-        return ds.length ? fmtDate(ds[0]) : "—";
-      };
-      const rowsHtml = (list) => list.map((i) => `<tr><td>${esc(i.subject)}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</td><td class="mono">${esc((i.case_id || "").slice(0, 8))}…</td>
-            <td>${esc(i.drafted_by)}</td><td>${due(i)}</td>
-            <td><button class="mini" onclick="Views.qaReview('${i.id}')">review</button></td></tr>`).join("");
-      const { bodyHtml, pagerHtml } = initClientPager("qa", q, rowsHtml);
-      afterRender(() => bindClientPager("qa", "#qa-tb tbody"));
-      return `<div class="view-head"><h1>QA gate</h1>
-        <span class="muted">nothing reaches a party without approval on gated templates</span></div>
-        ${intro}<h2>Awaiting review (${q.length})</h2>
-        <table id="qa-tb"><thead><tr><th>Subject</th><th>Case</th><th>Drafted by</th><th>Statutory due</th><th></th></tr></thead>
-        <tbody>${bodyHtml}</tbody></table>${pagerHtml}<div id="qa-detail"></div>${recentHtml}${dqHtml}`;
+      return `<div class="wide-view qa-view"><div class="view-head"><h1>QA gate</h1>
+        <span class="muted">${r.own_only ? "your drafts: waiting for QA, and ready for you to send" : "nothing reaches a party without approval on gated templates"}</span></div>
+        ${sum}${sendHtml}
+        <div class="qa-layout">
+          <section class="panel qa-list"><h2>Awaiting review <span class="n">${q.length}</span></h2><div class="qa-items">${items}</div></section>
+          <section class="panel qa-pane" id="qa-detail" aria-live="polite">${detailEmpty}</section>
+        </div>
+        ${recentHtml}
+        <details class="prog-sec" id="qa-dq" ontoggle="if (this.open) Views.qaDraftQualityBox()"><summary>Draft quality by template <span class="muted">— last 90 days: how often each template's drafts pass QA as written</span></summary>
+          <div id="qa-dq-box"><p class="muted">Loading…</p></div></details>
+        ${explain}</div>`;
     } catch (e) { return err(e); }
   }
 
   async function qaReview(qaId) {
     const box = $("#qa-detail");
+    if (!box) return;
+    document.querySelectorAll(".qa-item").forEach((b) => b.classList.toggle("on", b.dataset.qa === qaId));
+    box.innerHTML = `<p class="muted">Loading the draft…</p>`;
+    if (window.Telemetry) Telemetry.taskStart("qa_decision");
+    // On a phone the draft is under the list: go to it.
+    const narrow = matchMedia("(max-width:1100px)").matches;
+    if (narrow) box.scrollIntoView({ behavior: "smooth", block: "start" });
     try {
       const d = await Api.program.qaGet(qaId);
       const to = (d.to_recipients || []).join(", ");
       const cc = (d.cc_recipients || []).join(", ");
       const isNote = d.channel === "note";
+      const isLetter = d.channel === "letter"; // a generated PDF: approved as a document, emailed later with its email
       const isCopilot = (d.artifact || "").startsWith("copilot_");
       box.dataset.channel = d.channel || "email";
       // Copilot drafts are accept/EDIT/reject: the reviewer rewrites in place
       // and the edited text is what gets approved (server records the edit).
       const bodyHtml = isCopilot
-        ? `<textarea id="qa-edit" rows="14" style="width:100%">${esc(d.body)}</textarea>
+        ? `<textarea id="qa-edit" rows="16" class="qa-editor">${esc(d.body)}</textarea>
            <p class="muted">Copilot draft — edit freely; the approved text is what gets ${isNote ? "filed" : "sent"}, and the edit is recorded.</p>`
         : `<pre class="qa-body">${esc(d.body)}</pre>`;
-      // Recipients are editable here, not just displayed -- confirmed live:
-      // a case with no provider/payer account linked resolves to ZERO
-      // recipients at draft time, nothing caught that before the draft
-      // reached this screen, and approving it used to fail at the raw SMTP
-      // layer ("503 need RCPT command") with no way to actually supply an
-      // address and retry, despite the error text promising one.
-      const recipientsHtml = isNote ? "" : `
-        <div class="form" style="margin:8px 0">
+      // Recipients are editable here, not just displayed: a case with no party account linked resolves to no
+      // recipients at draft time, and approving it then needs an address supplied here.
+      const recipientsHtml = isNote || isLetter ? "" : `
+        <div class="qa-rcpt">
           <label>To <input id="qa-to" value="${esc(to)}" placeholder="recipient emails, comma-separated" /></label>
           <label>Cc <input id="qa-cc" value="${esc(cc)}" placeholder="cc emails, comma-separated" /></label>
+          ${!to && !cc ? `<p class="due-over">No recipients on file — add at least one before approving.</p>` : ""}
         </div>`;
-      // Phase 3-lite reviewer context: this template's track record at the
-      // gate — evidence, not a recommendation.
-      const ts = d.template_stats;
-      const tsHtml = ts && ts.drafts
-        ? `<p class="muted">Template track record (90d): ${ts.drafts} drafts · ${ts.approved_unedited} approved untouched (${Math.round(100 * ts.approved_unedited / ts.drafts)}%) · ${ts.rejected} rejected${ts.avg_edit_ratio != null ? ` · reviewers rewrite ~${Math.round(ts.avg_edit_ratio * 100)}% when editing` : ""}</p>`
-        : "";
-      box.innerHTML = `<div class="card"><h3>${esc(d.subject)}</h3>
-        <p class="muted">${isNote ? "determination rationale · files to the case timeline on approval" : `channel ${esc(d.channel)}`}
-          ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
-        ${tsHtml}
+      const what = isNote ? "A determination rationale — approving files it to the case timeline. Nothing is emailed."
+        : isLetter ? "A generated letter — approving clears it to go out with the email that carries it. Nothing is emailed now."
+        : "An email — approving delivers it to the recipients now and logs it.";
+      box.innerHTML = `<div class="qa-head">
+          <div><h3>${esc(d.subject)}</h3>
+            <p class="qa-head-meta"><span class="kc-tag">${esc(QA_CHANNEL[d.channel] || d.channel || "Email")}</span>
+              <span class="qa-tpl">${esc(qaTpl(d.artifact))}</span>${isCopilot ? ' <span class="badge s-review">COPILOT DRAFT</span>' : ""}
+              ${d.case_id ? ` · <a class="mono" href="#/cases/${esc(d.case_id)}">open the case</a>` : ""} · drafted by ${esc(d.drafted_by || "—")}, ${esc(fmtDate(d.created_at))}</p></div>
+          <div class="qa-actions">${qaActionsHtml(d, qaId, isNote, isLetter)}</div>
+        </div>
+        <p class="panel-sub">${what}</p>
+        ${qaTrackRecord(d.template_stats)}
         ${recipientsHtml}
-        ${bodyHtml}
-        <div class="actions">
-          <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
-          <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Reject</button></div></div>`;
-    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+        ${qaUnfilledHtml(d)}
+        ${isLetter && (d.documents || []).length ? `<div class="qa-letter" id="qa-letter-view"><p class="muted">Loading the letter as it will print…</p></div>` : ""}
+        <div class="qa-sheet">${bodyHtml}</div>
+        ${!isLetter && (d.documents || []).length ? `<div class="qa-carries"><b>This email's link carries</b>
+          <ul class="sent-docs">${d.documents.map((x) => `<li><button type="button" class="linkish" data-name="${esc(x.filename)}" onclick="Views.previewCaseDoc('${esc(d.case_id)}','${x.doc_id}', this.dataset.name)">${esc(x.filename || "document")}</button></li>`).join("")}</ul></div>` : ""}`;
+      // A letter is reviewed as the party will get it: its PDF, in place.
+      if (isLetter && (d.documents || []).length) {
+        const doc = d.documents[0], el = document.getElementById("qa-letter-view");
+        Api.fetchBlob(Api.cases.downloadUrl(d.case_id, doc.doc_id)).then(({ blob }) => {
+          if (!el || !el.isConnected) return;
+          const pdf = /\.pdf$/i.test(doc.filename || "") || blob.type === "application/pdf";
+          if (!pdf) { el.innerHTML = `<p><button type="button" class="mini" data-name="${esc(doc.filename)}" onclick="Views.previewCaseDoc('${esc(d.case_id)}','${doc.doc_id}', this.dataset.name)">Open ${esc(doc.filename)}</button></p>`; return; }
+          const url = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
+          el.innerHTML = `<iframe class="doc-view" src="${url}" title="${esc(doc.filename)}"></iframe>
+            <p class="doc-view-acts"><a class="button mini" href="${url}" download="${esc(doc.filename)}">Download</a></p>`;
+        }).catch((e2) => { if (el) el.innerHTML = `<p class="error">${esc(e2.message)}</p>`; });
+      }
+    } catch (e) { box.innerHTML = err(e); UI.toast(e.message, { kind: "warn" }); }
+  }
+  // Fill-ins the case couldn't answer, still in the text ("[insert amount]"): fix them before it goes out.
+  const UNFILLED_RE = /\[[A-Za-z][^\[\]\n]{1,60}\]/g;
+  function unfilledOf(...texts) { return [...new Set(texts.join("\n").match(UNFILLED_RE) || [])].filter((x) => !/^\[secure /i.test(x)); }
+  function qaUnfilledHtml(d) {
+    const left = unfilledOf(d.subject || "", d.body || "");
+    return left.length ? `<p class="due-over">Still to fill in before this goes out: ${left.map((x) => `<code>${esc(x)}</code>`).join(" ")}</p>` : "";
+  }
+
+  // What a draft's detail offers follows its state: only a pending draft can be approved or sent back. One that has
+  // passed QA waits to be sent (by its drafter or a Reviewer); a decided one just says what happened. Offering
+  // Approve on an approved draft sent a second approval the server then refused.
+  function qaActionsHtml(d, qaId, isNote, isLetter) {
+    if (d.status === "PENDING")
+      return `<button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Send back</button>
+        <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : isLetter ? "Approve the letter" : "Approve & send"}</button>`;
+    const by = d.reviewed_by ? ` by ${esc(d.reviewed_by)}` : "", when = d.reviewed_at ? `, ${esc(fmtDate(d.reviewed_at))}` : "";
+    if (d.status === "APPROVED" && !d.sent_at && d.channel === "email") {
+      const maySend = d.requested_by_sub === Auth.claims()?.sub || can("CASE_MANAGER", "CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+      const list = (v) => (Array.isArray(v) ? v : []).join(", ");
+      return `<span class="badge s-paid">Passed QA${by}${when}</span>
+        ${maySend ? `<button onclick="Views.qaSendFn('${qaId}','${esc(list(d.to_recipients))}','${esc(list(d.cc_recipients))}')">Send it</button>` : '<span class="muted">waiting for the drafter or a Reviewer to send it</span>'}`;
+    }
+    const label = { APPROVED: d.channel === "email" ? "Approved" : isNote ? "Approved and filed" : "Letter approved", SENT: "Sent", REJECTED: "Sent back" }[d.status] || d.status;
+    return `<span class="badge">${esc(label)}${by}${when}</span>${d.status === "REJECTED" && d.review_note ? ` <span class="muted">— ${esc(d.review_note)}</span>` : ""}`;
   }
 
   // The Reviewer sends a draft that has passed QA (SOP stage 0): the
@@ -2995,10 +4165,11 @@ const Views = (() => {
   async function qaDecide(qaId, decision, el) {
     let note = "";
     const isNote = $("#qa-detail")?.dataset.channel === "note";
+    const isLetter = $("#qa-detail")?.dataset.channel === "letter";
     const edited = $("#qa-edit") ? $("#qa-edit").value : "";
     const splitEmails = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
-    const to = isNote ? undefined : splitEmails($("#qa-to")?.value);
-    const cc = isNote ? undefined : splitEmails($("#qa-cc")?.value);
+    const to = isNote || isLetter ? undefined : splitEmails($("#qa-to")?.value);
+    const cc = isNote || isLetter ? undefined : splitEmails($("#qa-cc")?.value);
     if (decision === "REJECT") {
       const v = await UI.modal({ title: "Reject draft", danger: true, submitLabel: "Reject",
         fields: [{ name: "note", label: "Rejection note", type: "textarea", required: true,
@@ -3007,6 +4178,8 @@ const Views = (() => {
       note = v.note;
     } else if (isNote) {
       if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
+    } else if (isLetter) {
+      if (!(await UI.confirm("Approve this letter?", "The letter is cleared to go out with the email that carries it. Nothing is emailed now.", "Approve the letter"))) return;
     } else if (!to.length && !cc.length) {
       UI.toast("Add at least one recipient before approving — this draft has none on file.", { kind: "warn" });
       return;
@@ -3014,7 +4187,12 @@ const Views = (() => {
     await UI.run(el, async () => {
       try {
         const r = await Api.program.qaDecision(qaId, decision, note, edited, to, cc);
-        if (r.next && r.status === "APPROVED" && !r.first_check) {
+        if (window.Telemetry) Telemetry.taskDone("qa_decision", { decision });
+        if (r.unchanged) {
+          UI.toast(`Already approved — the draft is ${r.next}. Nothing changed.`, { kind: "info", duration: 7000 });
+        } else if (r.letter) {
+          UI.toast("Letter approved — ready to go out with its email", { duration: 6000 });
+        } else if (r.next && r.status === "APPROVED" && !r.first_check) {
           UI.toast(`Approved — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
         } else if (r.first_check) {
           UI.toast(`Your check is recorded — the draft is now ${r.next}. Nothing has been sent yet.`, { kind: "info", duration: 9000 });
@@ -3047,10 +4225,25 @@ const Views = (() => {
     // which is what opening an intake does. Matches createIntake/bulkIntake.
     const canCreate = can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
     afterRender(() => {
-      intakeBox("");
+      intakeSegs();
+      intakeBox(intakeStatus);
       $("#intake-form")?.addEventListener("submit", async (ev) => {
         ev.preventDefault();
         await newIntake(ev.target);
+      });
+      // The filing packet, when the request came by phone or email with the packet: a PDF the filer sent fills
+      // it in, and the requester fields above it fill from the packet's provider (or plan) contact.
+      packetInit("intake-packet", {});
+      document.getElementById("intake-packet")?.addEventListener("packetfilled", (ev) => {
+        const f = document.getElementById("intake-form"), d = ev.detail.details || {};
+        const set = (name, v) => { if (f && f.elements[name] && !f.elements[name].value && v) f.elements[name].value = v; };
+        set("email", d.provider_email); set("contact_name", d.provider_contact);
+        set("org", d.filing_party_type === "HEALTH_PLAN" ? d.health_plan : (d.provider_org || d.provider_legal_entity));
+        if (f) packetToShortForm(f, d, d.filing_party_type === "HEALTH_PLAN");
+      });
+      document.getElementById("intake-packet")?.addEventListener("input", () => {
+        const f = document.getElementById("intake-form"), h = document.getElementById("intake-packet");
+        if (f && h) { const d = PacketForm.read(h).packet.details; packetToShortForm(f, d, d.filing_party_type === "HEALTH_PLAN"); }
       });
       // Bulk intake (CSV): parse on file pick, submit posts the idempotent
       // batch and renders the per-row receipt.
@@ -3058,12 +4251,9 @@ const Views = (() => {
       $("#intake-bulk-file")?.addEventListener("change", (ev) => bulkIntakeFile(ev.target));
       $("#intake-bulk-btn")?.addEventListener("click", (ev) => { ev.preventDefault(); bulkIntakeSubmit(ev.target); });
     });
-    const statusFilter = `<select id="intake-status" onchange="Views.intakeFilter(this.value)">
-      <option value="" selected>All statuses</option>
-      ${INTAKE_STATUSES.map((s) => `<option value="${s}">${s}</option>`).join("")}</select>`;
-    return `<div class="view-head"><h1>Pre-case intake</h1>${statusFilter}</div>
-      <p class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</p>` +
-      (canCreate ? `<details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
+    return `<div class="view-head"><h1>Pre-case intake</h1><span class="muted">every request to open a dispute, newest first — legacy tracker rows and real cases opened directly both land here</span></div>` +
+      (canCreate ? `<details class="panel" id="intake-new"><summary>New intake request — one filer, or a CSV batch</summary>
+      <details class="card" style="margin-bottom:12px"><summary><b>Bulk intake (CSV)</b> — third-party batch filing; idempotent by batch reference, up to 500 rows</summary>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
           <input type="file" id="intake-bulk-file" accept=".csv,text/csv" />
           <input id="intake-bulk-ref" placeholder="batch reference — the idempotency key" style="flex:1;min-width:220px" />
@@ -3075,11 +4265,27 @@ const Views = (() => {
       <form id="intake-form" class="inline-form">
         <input name="email" type="email" placeholder="requester email" required />
         <input name="contact_name" placeholder="contact" /><input name="org" placeholder="organization" />
+        <input name="other_party_name" placeholder="health plan the dispute is against" required />
+        <input name="other_party_email" type="email" data-email-check placeholder="health plan's email for notices" required />
         <button>New intake request</button></form>
+      ${packetBlockHtml("intake-packet", "<b>Filing packet</b> — took the request by phone or email? Fill in the packet's sections here, or pick the filled PDF the filer sent")}
+      <div id="intake-packet-out"></div>
       <p class="muted">Filing party defaults to Provider. Everything else — amount, service line,
         eligibility inputs — comes from the claim packet the filing party uploads via the link emailed to them,
-        not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p>` : "") +
+        not manual entry here. Need to fill this out by talking it through instead? Use the <a href="#/assistant">Assistant</a>.</p></details>` : "") +
+      `<div class="list-bar">${SrvSearch.html("intake", "Search email, contact, organization, case #…")}<div id="intake-segs"></div></div>` +
       `<div id="intake-box"><p class="muted">Loading…</p></div>`;
+  }
+  SrvSearch.on("intake", () => { intakeSegs(); intakeBox(intakeStatus); });
+  let intakeStatus = "";
+  // The status switch, each status with its number of requests (the search applies).
+  async function intakeSegs() {
+    const box = document.getElementById("intake-segs");
+    if (!box) return;
+    const sts = ["", ...INTAKE_STATUSES];
+    const counts = await Promise.all(sts.map((st) => Api.program.intake({ limit: 1, status: st, ...SrvSearch.params("intake") }).then((r) => r.total ?? null).catch(() => null)));
+    const label = (st) => st ? st.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase()) : "All";
+    box.innerHTML = ListUI.segs("Intake status", sts.map((st, i) => ({ value: st, label: label(st), count: counts[i] })), intakeStatus, "Views.intakeFilter");
   }
 
   async function intakeBox(status) {
@@ -3087,7 +4293,7 @@ const Views = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status }), Api.program.get().catch(() => null)]);
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status, ...SrvSearch.params("intake") }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
       const intakeTotal = r.total ?? rows.length;
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
@@ -3098,10 +4304,10 @@ const Views = (() => {
       const label = amtLabel(prog);
       box.innerHTML = (rows.length ? `<table id="intake-tb" data-serverpaged><thead><tr><th>Case #</th><th>Email</th><th>Org</th><th>Filing party</th><th>Service</th><th>${esc(label)}</th><th>Status</th><th>Outreach</th><th>Packet complete</th><th></th></tr></thead><tbody>` +
           rows.map(intakeRowHtml).join("") +
-          `</tbody></table>` : `<p class="muted">No intake requests${status ? ` with status ${status}` : ""}.</p>`) +
+          `</tbody></table>` : `<p class="muted">${SrvSearch.q("intake") ? `No intake request matches “${esc(SrvSearch.q("intake"))}”` : `No intake requests${status ? ` with status ${status}` : ""}`}.</p>`) +
         (rows.length ? `<div id="intake-pg"></div>` : "");
       Pager.server(document.getElementById("intake-pg"), { total: intakeTotal, shown: rows.length }, async (limit, offset) => {
-        const pr = await Api.program.intake({ limit, offset, status });
+        const pr = await Api.program.intake({ limit, offset, status, ...SrvSearch.params("intake") });
         const prows = pr.intake || [];
         document.querySelector("#intake-tb tbody").innerHTML = prows.map(intakeRowHtml).join("");
         return { total: pr.total ?? intakeTotal, shown: prows.length };
@@ -3114,7 +4320,7 @@ const Views = (() => {
     UI.toast("Noted — complete this step manually; the row shows the detail", { duration: 5000 });
   }
 
-  function intakeFilter(status) { intakeBox(status); }
+  function intakeFilter(status) { intakeStatus = status; intakeSegs(); intakeBox(status); }
 
   // Shared by intake()'s initial render and every later page --
   // a real-case row (origin:"case", from startAhcaCase) has no intake
@@ -3230,8 +4436,14 @@ const Views = (() => {
       // automated instructions email, and doc-intel's analysis backfills
       // all of that from the documents (backfill_case_fields in doc-intel-
       // py/main.py) -- never hand-typed at intake.
+      // The packet's own answers, when staff filled in the filing packet form below the intake fields.
+      const packet = packetFrom("intake-packet", document.getElementById("intake-packet-out"));
+      if (packet === false) return;
       const r = await Api.program.createIntake({
         email: form.email.value, contact_name: form.contact_name.value, org: form.org.value,
+        other_party_name: form.other_party_name.value.trim(), other_party_email: form.other_party_email.value.trim(),
+        ...(packet ? { packet, filing_party_type: packet.details.filing_party_type || "PROVIDER",
+          disputed_amount_cents: packet.disputed_amount_cents || 0 } : {}),
       });
       if (r.programmed) {
         UI.toast(r.payment_required
@@ -3242,7 +4454,7 @@ const Views = (() => {
         UI.toast("Intake request opened — submission instructions queued");
         App.rerender();
       }
-    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    } catch (e) { UI.toast(packetErr(e), { kind: "warn", duration: 12000 }); }
   }
 
   async function advanceIntake(id, status, sel) {
@@ -3380,11 +4592,14 @@ const Views = (() => {
       return `<div class="view-head"><h1>Financials</h1></div><p class="muted">Requires PM, FINANCE, or admin.</p>`;
     try {
       const FIN_PAGE = Pager.size();
-      const [fin, pays, chks] = await Promise.all([
+      const [fin, pays, chks, due, chkReview] = await Promise.all([
         Api.program.financial(),
-        Api.program.payments(null, { limit: FIN_PAGE }).catch(() => ({ payments: [] })),
-        Api.program.checks("", { limit: FIN_PAGE }).catch(() => ({ checks: [] })),
+        Api.program.payments(null, { limit: FIN_PAGE, ...SrvSearch.params("fin-pay") }).catch(() => ({ payments: [] })),
+        Api.program.checks(finCkStatus, { limit: FIN_PAGE, ...SrvSearch.params("fin-ck") }).catch(() => ({ checks: [] })),
+        Api.program.refundsDue().catch(() => null),
+        Api.program.checks("REVIEW", { limit: 1 }).catch(() => null), // only for the count in Needs attention
       ]);
+      const unap = Number(fin.kpi?.unapplied_cents) > 0 ? await Api.program.unapplied().catch(() => null) : null;
       // first page of each server-paged list
       finPager = {
         checks: { rows: chks.checks || [], next: chks.next_offset ?? -1, total: chks.total ?? (chks.checks || []).length },
@@ -3392,38 +4607,78 @@ const Views = (() => {
       };
       const k = fin.kpi || {};
       const usd = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+      const num = (n) => (Number(n) || 0).toLocaleString();
+      const partyName = (pt) => ({ PROVIDER: "Provider", HEALTH_PLAN: "Health plan" })[pt] || (pt || "—");
+      const rec = fin.receivables || [];
+      const aging = fin.aging || [];
+      const sumOf = (rows, f) => rows.reduce((t, x) => t + (f(x) ? Number(x.total_cents) || 0 : 0), 0);
+      const cntOf = (rows, f) => rows.reduce((t, x) => t + (f(x) ? Number(x.n) || 0 : 0), 0);
+      const openCents = sumOf(rec, (x) => x.status === "OPEN"), openN = cntOf(rec, (x) => x.status === "OPEN");
+      const overdueCents = sumOf(aging, (x) => x.bucket !== "current"), overdueN = cntOf(aging, (x) => x.bucket !== "current");
+      const dueRows = (due && due.refunds) || [];
+      const reviewN = chkReview && chkReview.total != null ? chkReview.total : (chkReview?.checks || []).length;
+
       let html = `<div class="view-head"><h1>Financials</h1>
-        <span class="muted">every payment and transaction through the platform · tenant <b>${esc(Api.getTenant()).toUpperCase()}</b>
-        ${fin.stripe_enabled ? ' · <span class="badge s-paid">stripe live</span>' : ' · <span class="badge">stripe not configured</span>'}</span></div>
-        <div class="kpi-row">
-          <div class="kpi"><span class="kpi-n">${usd(k.collected_cents)}</span><span class="kpi-l">Collected (all time)</span></div>
-          <div class="kpi"><span class="kpi-n">${usd(k.collected_30d_cents)}</span><span class="kpi-l">Collected (30 days)</span></div>
-          <div class="kpi"><span class="kpi-n">${usd(k.refunded_cents)}</span><span class="kpi-l">Refunded</span></div>
-          <div class="kpi"><span class="kpi-n">${esc(String(k.payments_count ?? 0))}</span><span class="kpi-l">Payments settled</span></div>
+        <span class="muted">Every payment, refund and receivable for ${esc(Api.getTenant()).toUpperCase()}</span>
+        ${fin.stripe_enabled ? '<span class="badge s-paid">Stripe connected</span>' : '<span class="badge">Stripe not configured</span>'}</div>
+        <div class="fin-kpis">
+          <div class="fin-kpi"><span class="fin-kpi-l">Collected</span><span class="fin-kpi-n">${usd(k.collected_cents)}</span><span class="fin-kpi-s">${num(k.payments_count)} payments, all time</span></div>
+          <div class="fin-kpi"><span class="fin-kpi-l">Last 30 days</span><span class="fin-kpi-n">${usd(k.collected_30d_cents)}</span><span class="fin-kpi-s">collected</span></div>
+          <div class="fin-kpi"><span class="fin-kpi-l">Outstanding</span><span class="fin-kpi-n">${usd(openCents)}</span><span class="fin-kpi-s">${num(openN)} open invoice${openN === 1 ? "" : "s"}</span></div>
+          <div class="fin-kpi ${overdueCents > 0 ? "is-warn" : ""}"><span class="fin-kpi-l">Overdue</span><span class="fin-kpi-n">${usd(overdueCents)}</span><span class="fin-kpi-s">${overdueN ? `${num(overdueN)} past due` : "nothing past due"}</span></div>
+          <div class="fin-kpi"><span class="fin-kpi-l">Refunded</span><span class="fin-kpi-n">${usd(k.refunded_cents)}</span><span class="fin-kpi-s">all time</span></div>
+          ${Number(k.unapplied_cents) > 0 ? `<div class="fin-kpi is-warn"><span class="fin-kpi-l" data-tip="Money received that pays no fee: a check for more than its fee, or a payment for a fee already paid. Refund it to the payer or apply it to another fee. It is not in Collected.">Not applied</span><span class="fin-kpi-n">${usd(k.unapplied_cents)}</span><span class="fin-kpi-s">received, pays no fee</span></div>` : ""}
         </div>`;
 
-      // Receivables + aging
-      const rec = fin.receivables || [];
-      if (rec.length)
-        html += `<h2>Receivables by status</h2><table><thead><tr><th>Status</th><th>Party</th><th>#</th><th>Total</th></tr></thead><tbody>` +
-          rec.map((x) => `<tr><td>${badge(x.status)}</td><td>${esc(x.party)}</td><td>${x.n}</td><td>${usd(x.total_cents)}</td></tr>`).join("") +
-          `</tbody></table>`;
-      const aging = fin.aging || [];
-      if (aging.length)
-        html += `<h2>A/R aging (open invoices)</h2><div class="aging-row">` +
-          ["current", "1-30", "31-60", "60+"].map((b) => {
-            const row = aging.find((a) => a.bucket === b);
-            return `<div class="aging-cell ${b === "60+" ? "bad" : b === "current" ? "" : "warn"}">
-              <span class="kpi-n">${row ? usd(row.total_cents) : "$0"}</span>
-              <span class="kpi-l">${b === "current" ? "Current" : b + " days past due"}${row ? ` · ${row.n} inv` : ""}</span></div>`;
-          }).join("") + `</div>`;
+      // What needs a person today, each linking to its section.
+      const attn = [];
+      if (dueRows.length) attn.push(`<a class="fin-attn-i is-warn" href="javascript:void(0)" onclick="document.getElementById('refunds-due').scrollIntoView({behavior:'smooth'})"><b>${dueRows.length}</b> refund${dueRows.length === 1 ? "" : "s"} to make · ${usd(due.total_cents)}</a>`);
+      if (reviewN) attn.push(`<a class="fin-attn-i is-warn" href="javascript:void(0)" onclick="Views.finChecksFilter('REVIEW')"><b>${num(reviewN)}</b> check${reviewN === 1 ? "" : "s"} to review</a>`);
+      if (Number(k.unapplied_cents) > 0) attn.push(`<a class="fin-attn-i is-warn" href="javascript:void(0)" onclick="document.getElementById('fin-unapplied')?.scrollIntoView({behavior:'smooth'})"><b>${usd(k.unapplied_cents)}</b> received but not applied to a fee — refund or apply</a>`);
+      if (overdueN) attn.push(`<a class="fin-attn-i is-bad" href="javascript:void(0)" onclick="document.getElementById('fin-aging').scrollIntoView({behavior:'smooth'})"><b>${num(overdueN)}</b> overdue invoice${overdueN === 1 ? "" : "s"} · ${usd(overdueCents)}</a>`);
+      html += `<div class="fin-attn" role="status"><span class="fin-attn-l">Needs attention</span>${attn.length ? attn.join("") : '<span class="muted">Nothing waiting — no refunds due, no checks to review, nothing overdue.</span>'}</div>`;
 
-      // Payment rails
+      // Receivables (status × party) and aging, side by side.
+      const parties = [...new Set(rec.map((x) => x.party))].sort();
+      // Collected = card + scanned checks + fees recorded by hand: the rails below add up to it.
+      const statuses = ["OPEN", "PAID", "REFUND_PENDING", "REFUNDED", "VOID"].filter((st) => rec.some((x) => x.status === st))
+        .concat([...new Set(rec.map((x) => x.status))].filter((st) => !["OPEN", "PAID", "REFUND_PENDING", "REFUNDED", "VOID"].includes(st)));
+      const cell = (rows) => rows.length ? `<span class="fin-amt">${usd(sumOf(rows, () => true))}</span><span class="fin-cnt">${num(cntOf(rows, () => true))}</span>` : '<span class="muted">—</span>';
+      const recHtml = rec.length ? `<table class="fin-matrix"><thead><tr><th>Status</th>${parties.map((pt) => `<th class="num">${esc(partyName(pt))}</th>`).join("")}<th class="num">Total</th></tr></thead><tbody>` +
+        statuses.map((st) => `<tr><td>${badge(st)}</td>${parties.map((pt) => `<td class="num">${cell(rec.filter((x) => x.status === st && x.party === pt))}</td>`).join("")}
+          <td class="num">${cell(rec.filter((x) => x.status === st))}</td></tr>`).join("") + `</tbody></table>`
+        : '<p class="muted">No invoices yet.</p>';
+      const buckets = [["current", "Current", "ok"], ["1-30", "1–30 days", "warn"], ["31-60", "31–60 days", "warn2"], ["60+", "60+ days", "bad"]];
+      const agingTotal = sumOf(aging, () => true);
+      const agingHtml = agingTotal > 0 ? `<div class="aging-bar" role="img" aria-label="Open invoices by age">${buckets.map(([b, , cls]) => {
+          const c = sumOf(aging, (x) => x.bucket === b);
+          return c > 0 ? `<span class="aging-seg ${cls}" style="flex:${c}" title="${esc(b)}: ${usd(c)}"></span>` : "";
+        }).join("")}</div>
+        <ul class="aging-list">${buckets.map(([b, label, cls]) => {
+          const row = aging.find((x) => x.bucket === b);
+          return `<li><span class="aging-dot ${cls}"></span><span>${label}${b === "current" ? "" : " past due"}</span>
+            <span class="fin-amt">${row ? usd(row.total_cents) : "$0.00"}</span><span class="fin-cnt">${row ? num(row.n) : 0}</span></li>`;
+        }).join("")}</ul>` : '<p class="muted">No open invoices.</p>';
+      html += `<div class="fin-grid">
+        <section class="fin-sec"><h2>Receivables</h2><p class="fin-sec-sub">Invoices by status and who is billed: amount, then count.</p>${recHtml}</section>
+        <section class="fin-sec" id="fin-aging"><h2>A/R aging</h2><p class="fin-sec-sub">Open invoices by how far past due: ${usd(agingTotal)} in all.</p>${agingHtml}</section>
+      </div>`;
+
+      // Payment rails: one row per rail, its money by outcome.
       const bm = fin.by_method || [];
-      if (bm.length)
-        html += `<h2>Payment rails</h2><table><thead><tr><th>Provider</th><th>Status</th><th>#</th><th>Total</th></tr></thead><tbody>` +
-          bm.map((x) => `<tr><td>${esc(x.provider)}</td><td>${badge(x.status)}</td><td>${x.n}</td><td>${usd(x.total_cents)}</td></tr>`).join("") +
-          `</tbody></table>`;
+      if (bm.length) {
+        const rails = [...new Set(bm.map((x) => x.provider))];
+        const outcome = { Settled: ["PAID", "CLEARED", "SUCCEEDED"], Pending: ["PENDING", "PROCESSING", "OPEN"],
+          "Failed / expired": ["FAILED", "EXPIRED", "CANCELLED", "CANCELED", "REJECTED"], Refunded: ["REFUNDED", "REFUNDING", "REFUND_DUE"] };
+        const railName = (r) => ({ stripe: "Card (Stripe)", check: "Check (scanned)", mojaloop: "Mojaloop", manual: "Recorded by hand (check / ACH / other)" })[r] || r;
+        html += `<section class="fin-sec"><h2>Payment rails</h2><p class="fin-sec-sub">How money arrives, and what became of each payment: amount, then count.</p>
+          <table class="fin-matrix"><thead><tr><th>Rail</th>${Object.keys(outcome).map((o) => `<th class="num">${o}</th>`).join("")}</tr></thead><tbody>` +
+          rails.map((r) => `<tr><td><b>${esc(railName(r))}</b></td>${Object.values(outcome).map((sts) => `<td class="num">${cell(bm.filter((x) => x.provider === r && sts.includes(x.status)))}</td>`).join("")}</tr>`).join("") +
+          `</tbody></table></section>`;
+      }
+
+      html += unappliedHtml(unap, usd);
+      html += refundsDueHtml(due, usd);
 
       // Physical check intake (OCR/ICR — image is evidence, clearing settles)
       // Field names here match checks.go's real SELECT (confirmed directly):
@@ -3444,44 +4699,54 @@ const Views = (() => {
             <td class="muted">${c.confidence ? esc(c.confidence) : "—"}</td>
             <td>${c.status === "MATCHED" ? `<button class="mini" onclick="Views.clearCheck('${c.id}', this)">✓ clear funds</button>` : ""}
                 ${["PROCESSED", "REVIEW", "MATCHED"].includes(c.status) ? `<button class="mini" onclick="Views.correctCheck('${c.id}', this)">✎ correct</button>` : ""}
-                ${c.status === "REVIEW" && c.case_id ? `<button class="mini" onclick="Views.requestRescan('${c.id}','${c.case_id}', this)">↻ request rescan</button>` : ""}</td></tr>`;
+                ${c.status === "REVIEW" && c.case_id ? `<button class="mini" onclick="Views.requestRescan('${c.id}','${c.case_id}', this)">↻ request rescan</button>` : ""}
+                <button class="mini secondary" onclick="Views.checkOpen('${c.id}')">Preview</button></td></tr>`;
       payRow = (p) => `<tr><td class="mono">${esc((p.case_id || "").slice(0, 8))}…</td>
-            <td>${esc(p.payer_email || "—")}</td><td>${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
+            <td>${esc(p.payer_email || "—")}</td><td class="num">${usd(p.amount_cents)}</td><td>${badge(p.status)}</td>
             <td class="mono">${esc(p.payment_intent || p.session_id || "")}</td>
             <td class="muted">${fmtDate(p.created_at)}</td></tr>`;
       const ck = finPager.checks.rows;
       const reviewCk = ck.filter((c) => c.status === "REVIEW");
-      html += `<h2>Check intake (OCR/ICR)</h2>
+      // Checks live here (the old Checks page sends you to this section): deposit, filter, preview, link, clear.
+      html += `<section class="fin-sec" id="fin-checks"><h2>Checks</h2>
+        <p class="fin-sec-sub">Scan or photograph a check: its amounts are read and matched to a fee, and a person clears it before the money counts.</p>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
           <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
-          <span class="muted">MICR + courtesy + legal amount extracted automatically; a human clears before funds move</span></form>` +
-        (ck.length ? `<table data-serverpaged><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
-          ck.map(checkRow).join("") + `</tbody></table>` +
+          </form>
+        <p class="fin-ck-filter">${["", "RECEIVED", "PROCESSED", "MATCHED", "REVIEW", "CLEARED", "REJECTED"].map((st) =>
+          `<button class="mini ${st === finCkStatus ? "" : "secondary"}" aria-pressed="${st === finCkStatus}" onclick="Views.finChecksFilter('${st}')">${st ? st.charAt(0) + st.slice(1).toLowerCase() : "All"}</button>`).join(" ")}</p>` +
+        (ck.length || SrvSearch.q("fin-ck") ? SrvSearch.html("fin-ck", "Search check #, payer, memo, case, invoice…") : "") +
+        (ck.length ? `<div class="dg-wrap"><table data-serverpaged><thead><tr><th>Check</th><th>Payee</th><th>Date</th><th>Routing · Account</th><th>Courtesy</th><th>Legal (ICR)</th><th>Memo</th><th>Match</th><th>Status</th><th>Conf</th><th></th></tr></thead><tbody id="fin-ck-body">` +
+          ck.map(checkRow).join("") + `</tbody></table></div>` +
           (reviewCk.length ? `<p class="muted">⚠ ${reviewCk.length} check(s) awaiting manual review — OCR could not match them to an open invoice.</p>` : "") :
-          `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`) +
-        (ck.length ? `<div id="fin-ck-pg"></div>` : "");
+          (SrvSearch.q("fin-ck") ? `<p class="muted">No check matches “${esc(SrvSearch.q("fin-ck"))}”.</p>`
+            : finCkStatus ? `<p class="muted">No ${esc(finCkStatus.toLowerCase())} checks.</p>` : `<p class="muted">No checks received yet — upload a scan or photo to start intake.</p>`)) +
+        (ck.length ? `<div id="fin-ck-pg"></div>` : "") +
+        `<div class="card" id="check-detail-card" style="display:none"><h2>Scan preview</h2><div id="check-detail"></div></div></section>`;
 
       // Card payments
       const plist = finPager.payments.rows;
+      if (!plist.length && SrvSearch.q("fin-pay"))
+        html += `<section class="fin-sec"><h2>Card payments</h2>${SrvSearch.html("fin-pay", "Search payer, email, case, status, Stripe ref…")}<p class="muted">No card payment matches “${esc(SrvSearch.q("fin-pay"))}”.</p></section>`;
       if (plist.length)
-        html += `<h2>Card payments</h2><table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th>Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
-          plist.map(payRow).join("") + `</tbody></table>` +
-          `<div id="fin-pay-pg"></div>`;
+        html += `<section class="fin-sec"><h2>Card payments</h2><p class="fin-sec-sub">Every card checkout, newest first.</p>${SrvSearch.html("fin-pay", "Search payer, email, case, status, Stripe ref…")}<div class="dg-wrap"><table data-serverpaged><thead><tr><th>Case</th><th>Payer</th><th class="num">Amount</th><th>Status</th><th>Stripe ref</th><th>When</th></tr></thead><tbody id="fin-pay-body">` +
+          plist.map(payRow).join("") + `</tbody></table></div>` +
+          `<div id="fin-pay-pg"></div></section>`;
 
       // Unified event stream
       const ev = fin.events || [];
       if (ev.length) {
         const evRowsHtml = (list) => list.map((e) => `<tr><td>${badge(e.kind)}</td>
-            <td>${e.direction === "IN" ? "↓ in" : e.direction === "OUT" ? "↑ out" : "—"}</td>
-            <td>${usd(e.amount_cents)}</td><td>${esc(e.party || "—")}</td>
+            <td>${e.direction === "IN" ? '<span class="fin-in">↓ in</span>' : e.direction === "OUT" ? '<span class="fin-out">↑ out</span>' : "—"}</td>
+            <td class="num">${usd(e.amount_cents)}</td><td>${esc(partyName(e.party) || "—")}</td>
             <td class="mono">${esc(e.ref || "")}</td><td>${esc(e.actor || "")}</td>
             <td class="muted">${fmtDate(e.created_at)}</td></tr>`).join("");
         const evPage = initClientPager("txn", ev, evRowsHtml);
-        html += `<h2>Transaction stream</h2><table id="txn-tb"><thead><tr><th>Event</th><th>Dir</th><th>Amount</th><th>Party</th><th>Reference</th><th>Actor</th><th>When</th></tr></thead>
-          <tbody>${evPage.bodyHtml}</tbody></table>${evPage.pagerHtml}`;
+        html += `<section class="fin-sec"><h2>Transaction stream</h2><p class="fin-sec-sub">Every money event in order: invoices, payments, refunds.</p><div class="dg-wrap"><table id="txn-tb"><thead><tr><th>Event</th><th>Direction</th><th class="num">Amount</th><th>Party</th><th>Reference</th><th>By</th><th>When</th></tr></thead>
+          <tbody>${evPage.bodyHtml}</tbody></table></div>${evPage.pagerHtml}</section>`;
       } else {
-        html += `<h2>Transaction stream</h2><p class="muted">No financial events yet — issue an invoice to start the stream.</p>`;
+        html += `<section class="fin-sec"><h2>Transaction stream</h2><p class="muted">No financial events yet — issue an invoice to start the stream.</p></section>`;
       }
       afterRender(() => {
         for (const kind of ["checks", "payments"]) {
@@ -3489,8 +4754,8 @@ const Views = (() => {
           Pager.server(document.getElementById(kind === "checks" ? "fin-ck-pg" : "fin-pay-pg"),
             { total: st.total, shown: st.rows.length }, async (limit, offset) => {
               const r = kind === "checks"
-                ? await Api.program.checks("", { limit, offset })
-                : await Api.program.payments(null, { limit, offset });
+                ? await Api.program.checks(finCkStatus, { limit, offset, ...SrvSearch.params("fin-ck") })
+                : await Api.program.payments(null, { limit, offset, ...SrvSearch.params("fin-pay") });
               st.rows = kind === "checks" ? (r.checks || []) : (r.payments || []);
               st.total = r.total ?? st.total;
               document.getElementById(kind === "checks" ? "fin-ck-body" : "fin-pay-body").innerHTML =
@@ -3505,6 +4770,20 @@ const Views = (() => {
 
   // finance() pager state — survives only for the rendered page
   let finPager = null;
+  let finCkStatus = ""; // the Checks section's status filter ("" = all)
+  function finChecksFilter(st) {
+    finCkStatus = st;
+    App.rerender();
+    setTimeout(() => scrollToChecks(), 500); // after the redraw, not the page being replaced
+  }
+  // Financials draws after its data arrives: wait (up to ~5 s) for the Checks section, then bring it into view.
+  function scrollToChecks(tries = 25) {
+    const el = document.getElementById("fin-checks");
+    if (el) el.scrollIntoView({ block: "start" });
+    else if (tries > 0) setTimeout(() => scrollToChecks(tries - 1), 200);
+  }
+  SrvSearch.on("fin-ck", () => App.rerender());
+  SrvSearch.on("fin-pay", () => App.rerender());
   let checkRow = null, payRow = null; // row renderers set by finance()
 
   async function requestRescan(checkId, caseId, btn) {
@@ -4091,6 +5370,7 @@ const Views = (() => {
       <div class="asst-body">${esc(bodyText)}</div>
       <div class="asst-fab-list" style="margin-top:8px">
         ${row("Email", fields.email)}${row("Contact", fields.contact_name)}${row("Organization", fields.org)}
+        ${row("Dispute against", fields.other_party_name)}${row("Their notices to", fields.other_party_email)}
       </div>
       ${statusHtml || ""}`;
   }
@@ -4121,6 +5401,9 @@ const Views = (() => {
         asstIntakeDraft = null;
         const created = await Api.program.createIntake({
           email: fields.email, contact_name: fields.contact_name, org: fields.org,
+          other_party_name: fields.other_party_name || "", other_party_email: fields.other_party_email || "",
+          ...(fields.filing_party_type ? { filing_party_type: fields.filing_party_type } : {}),
+          ...(fields.disputed_amount_cents ? { disputed_amount_cents: fields.disputed_amount_cents } : {}),
         });
         const successMsg = created.programmed
           ? `✓ Case <a href="#/cases/${created.case_id}">${esc(created.case_number)}</a> opened — filing instructions emailed to ${esc(fields.email || "")}.`
@@ -4248,7 +5531,8 @@ const Views = (() => {
       <td class="mono">${esc(d.filename || d.doc_id.slice(0, 8) + "…")}</td>
       <td>${esc(d.folder || "GENERAL")}</td>
       <td>${d.sealed ? '<span class="badge s-sealed">🔒 sealed</span>' : badge(d.analysis_status || "—")}</td>
-      <td><a href="javascript:void(0)" onclick="Views.downloadDoc('${caseId}','${d.doc_id}')">download</a></td></tr>`).join("");
+      <td><a href="javascript:void(0)" onclick="Views.previewCaseDoc('${caseId}','${d.doc_id}', this.dataset.name)" data-name="${esc(d.filename || "")}">view</a> ·
+        <a href="javascript:void(0)" onclick="Views.downloadDoc('${caseId}','${d.doc_id}')">download</a></td></tr>`).join("");
     return `<div class="card"><h3>📄 Documents — ${(docs || []).length} on the docket</h3>
       <p class="muted">${Object.entries(byFolder).map(([f, n]) => `${esc(f)} ${n}`).join(" · ") || "none yet"}${pending.length ? ` · ⚠ ${pending.length} awaiting analysis` : ""}</p>
       ${rows ? `<table><thead><tr><th>File</th><th>Folder</th><th>Analysis</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : ""}
@@ -4653,7 +5937,7 @@ const Views = (() => {
       if (!q.length) { box.innerHTML = ""; return; }
       const cards = await Promise.all(q.map(async (i) => {
         const d = await Api.program.qaGet(i.id);
-        const isNote = d.channel === "note";
+        const isNote = d.channel === "note", isLetter = d.channel === "letter";
         const isCopilot = (d.artifact || "").startsWith("copilot_");
         const bodyHtml = isCopilot
           ? `<textarea id="asst-qa-edit-${d.id}" rows="10" style="width:100%">${esc(d.body)}</textarea>
@@ -4661,11 +5945,11 @@ const Views = (() => {
           : `<pre class="qa-body">${esc(d.body)}</pre>`;
         return `<div class="card asst-qa-card" data-qa="${d.id}" data-channel="${esc(d.channel || "email")}">
           <h3>⛨ Gate: ${esc(d.subject)}</h3>
-          <p class="muted">${esc(d.drafted_by)} · ${isNote ? "determination rationale · files to timeline" : `to: ${esc((d.to_recipients || []).join(", "))}`}
+          <p class="muted">${esc(d.drafted_by)} · ${isNote ? "determination rationale · files to timeline" : isLetter ? "generated letter · goes out with its email" : `to: ${esc((d.to_recipients || []).join(", "))}`}
             ${isCopilot ? ' · <span class="badge s-review">COPILOT DRAFT</span>' : ""}</p>
           ${bodyHtml}
           <div class="actions">
-            <button onclick="Views.asstQaDecide('${caseId}','${d.id}','APPROVE',this)">${isNote ? "Approve & file" : "Approve & send"}</button>
+            <button onclick="Views.asstQaDecide('${caseId}','${d.id}','APPROVE',this)">${isNote ? "Approve & file" : isLetter ? "Approve the letter" : "Approve & send"}</button>
             <button class="danger" onclick="Views.asstQaDecide('${caseId}','${d.id}','REJECT',this)">Reject</button></div></div>`;
       }));
       box.innerHTML = `<h3 style="margin:10px 0 6px">${q.length} item(s) at the QA gate for this case</h3>` + cards.join("");
@@ -4674,7 +5958,7 @@ const Views = (() => {
 
   async function asstQaDecide(caseId, qaId, decision, btn) {
     const card = document.querySelector(`.asst-qa-card[data-qa="${qaId}"]`);
-    const isNote = card?.dataset.channel === "note";
+    const isNote = card?.dataset.channel === "note", isLetter = card?.dataset.channel === "letter";
     const edited = document.getElementById(`asst-qa-edit-${qaId}`)?.value || "";
     let note = "";
     if (decision === "REJECT") {
@@ -4685,6 +5969,8 @@ const Views = (() => {
       note = v.note;
     } else if (isNote) {
       if (!(await UI.confirm("Approve and file?", "The rationale is recorded on the case timeline. Nothing is emailed.", "Approve & file"))) return;
+    } else if (isLetter) {
+      if (!(await UI.confirm("Approve this letter?", "The letter is cleared to go out with the email that carries it. Nothing is emailed now.", "Approve the letter"))) return;
     } else if (!(await UI.confirm("Approve and send?", "The email is delivered to all recipients now and logged to correspondence.", "Approve & send"))) return;
     await UI.run(btn, async () => {
       try {
@@ -4693,7 +5979,8 @@ const Views = (() => {
         asstAppend(caseId, "assistant",
           decision === "APPROVE"
             ? (r.email_delivery_error ? `⚠ Approved but email failed: ${r.email_delivery_error}`
-              : isNote ? "Rationale approved and filed to the case timeline." : "Draft approved and sent — logged to correspondence.")
+              : isNote ? "Rationale approved and filed to the case timeline." : isLetter ? "Letter approved — ready to go out with its email."
+              : "Draft approved and sent — logged to correspondence.")
             : "Draft rejected and returned to the drafter.", "");
         const box = document.getElementById("asst-qa");
         if (box && !box.querySelector(".asst-qa-card")) box.innerHTML = "";
@@ -4760,6 +6047,7 @@ const Views = (() => {
         const cur = sel.value;
         sel.innerHTML = corrTemplateOptions(tpls);
         if (tpls.some((t) => t.key === cur)) sel.value = cur;
+        corrFillRecipients(sel.form);
       }
       return tpls;
     } catch { return []; }
@@ -4775,6 +6063,25 @@ const Views = (() => {
     const ta = form.body;
     const untouched = corrTplCache.some((t) => t.body && t.body === ta.value);
     if (!ta.value.trim() || untouched) ta.value = tp.body;
+    corrFillRecipients(form);
+  }
+  // To and Cc from the dispute itself (the template's parties, as the send resolves them: CRM contacts, else the
+  // filing -- the TPA or filer, the health plan's email for notices). Only fields nobody typed in are changed.
+  async function corrFillRecipients(form) {
+    const caseId = form && form.dataset.caseId;
+    if (!caseId || !form.to || !form.template || !form.template.value) return;
+    const mine = (el) => el && el.value.trim() && el.dataset.auto !== el.value;
+    if (mine(form.to) && mine(form.cc)) return;
+    let pv;
+    try { pv = await Api.cases.corrPreview(caseId, { template: form.template.value, body: "", to: [], cc: [], rfi_to: form.rfi_to ? form.rfi_to.value : "" }); }
+    catch { return; }
+    for (const [el, list] of [[form.to, pv.to], [form.cc, pv.cc]]) {
+      if (!el || mine(el)) continue;
+      el.value = (list || []).join(", ");
+      el.dataset.auto = el.value;
+    }
+    const hint = form.querySelector(".rcpt-hint");
+    if (hint) hint.textContent = (pv.to || []).length ? "Filled in from the dispute's parties — change them if needed." : "No address on file for this template's recipients — type one.";
   }
 
   // ---- Time entries (per-role effort, per dispute) ------------------------
@@ -4791,12 +6098,18 @@ const Views = (() => {
   // as a selectable option. Confirmed live.
   const TIME_ENTRY_ROLES = ["DOCTOR", "NURSE", "CODER", "ARBITRATOR", "ATTORNEY", "CASE_MANAGER",
     "PM", "FINANCE", "STATE_AUDITOR", "NURSE_PHYSICIAN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
+  // A Nurse / Physician logs each entry as a Nurse or as a Physician: the two are billed at different rates, so
+  // the combined role is never an entry's role (the server refuses it) and there is no "primary" to fall back on.
+  const TIME_ROLE_WORDS = { DOCTOR: "Physician", NURSE: "Nurse", CODER: "Coder", ARBITRATOR: "Arbitrator", ATTORNEY: "Attorney",
+    CASE_MANAGER: "Reviewer", PM: "PM", FINANCE: "Finance", STATE_AUDITOR: "State auditor", FEDERAL_ADMIN: "Federal admin", PLATFORM_ADMIN: "Platform admin" };
   const timeRoleSelect = () => {
-    const roles = (Auth.claims()?.roles || []).filter((r) => TIME_ENTRY_ROLES.includes(r));
+    const held = (Auth.claims()?.roles || []).filter((r) => TIME_ENTRY_ROLES.includes(r));
+    const combined = held.includes("NURSE_PHYSICIAN");
+    const roles = [...new Set(held.flatMap((r) => (r === "NURSE_PHYSICIAN" ? ["NURSE", "DOCTOR"] : [r])))];
     if (roles.length < 2) return "";
-    return `<select name="role" aria-label="Role performed" title="Role being performed for this entry">
-      <option value="">role: primary</option>
-      ${roles.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join("")}</select>`;
+    return `<select name="role" aria-label="Role performed" title="Role being performed for this entry" ${combined ? "required" : ""}>
+      <option value="">${combined ? "role: Nurse or Physician…" : "role: primary"}</option>
+      ${roles.map((r) => `<option value="${esc(r)}">${esc(TIME_ROLE_WORDS[r] || r)}</option>`).join("")}</select>`;
   };
 
   async function timeCaseBox(caseId) {
@@ -5037,6 +6350,8 @@ const Views = (() => {
     afterRender(tplHealthLoad);
     return `<div class="view-head"><h1>Templates</h1>
       <span class="muted">the emails this program sends, and which one is used when</span></div>
+      ${Letters.variablesCardHtml()}
+      ${Letters.settingsCardHtml()}
       <div id="tpl-health"></div>
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
   }
@@ -5828,7 +7143,7 @@ const Views = (() => {
         `</div>
         <h2>Change history <span class="muted">append-only audit trail, newest first</span></h2>
         ${window._rulesAudit.length ? `<p><input placeholder="Filter by who changed it or the note…" oninput="Views.rulesAuditFilter(this.value)" style="min-width:280px" /></p>` : ""}
-        <div id="rules-audit-box">${rulesAuditHtml(window._rulesAudit)}</div>`;
+        <div id="rules-audit-box" data-nosearch>${rulesAuditHtml(window._rulesAudit)}</div>`;
     } catch (e) { return err(e); }
   }
 
@@ -5990,43 +7305,261 @@ const Views = (() => {
   // row never gets action buttons -- the backend rejects self-suspend/
   // self-delete too, but hiding them here avoids a round-trip just to find
   // that out, and stops an admin from locking themselves out by accident.
+  // The tenant's staff roles, as the Team page shows and edits them (staffroles.go: staffEditableRoles).
+  const TEAM_ROLES = [["CASE_MANAGER", "Reviewer"], ["PM", "PM"], ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Clinical reviewer"],
+    ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"], ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"],
+    ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"], ["TENANT_ADMIN", "Tenant Admin"]];
+  const staffRoleLabel = (r) => (TEAM_ROLES.find(([k]) => k === r) || [r, r])[1];
+  const staffRolesOf = (m) => (m.roles || []).filter((r) => TEAM_ROLES.some(([k]) => k === r));
+  let teamStaff = [], staffRoleFilter = "";
+
   function staffTableHtml(members, scope, tenant) {
     if (!members.length) return `<p class="muted">No staff found.</p>`;
     const me = Auth.claims()?.name;
-    return `<table><thead><tr><th>Username</th><th>Email</th><th>Roles</th><th>Status</th><th></th></tr></thead><tbody>` +
+    const tenantScope = scope === "tenant";
+    const present = tenantScope ? TEAM_ROLES.filter(([r]) => members.some((m) => (m.roles || []).includes(r))) : [];
+    // Staff have at least one staff role; the rest are portal sign-ins (TPA, health plan, party logins), kept apart.
+    const isPortal = (m) => tenantScope && !staffRolesOf(m).length;
+    const chip = (key, label, n) => `<button type="button" class="wl-chip${staffRoleFilter === key ? " active" : ""}" data-staff-role="${key}"
+        onclick="Views.staffFilter('${key}')">${esc(label)} <b>${n}</b></button>`;
+    const filter = tenantScope ? `<div class="staff-filter" role="group" aria-label="Filter by role">
+        ${chip("", "All staff", members.filter((m) => !isPortal(m)).length)}
+        ${present.map(([r, l]) => chip(r, l, members.filter((m) => (m.roles || []).includes(r)).length)).join("")}
+        ${members.some(isPortal) ? chip("__portal", "Portal sign-ins", members.filter(isPortal).length) : ""}</div>` : "";
+    return filter + `<div class="dg-wrap"><table id="${tenantScope ? "staff-table" : ""}" class="staff-tbl" data-page-size="15"><thead><tr><th>Name</th><th>Email</th><th>Roles</th>
+        ${tenantScope ? `<th class="num">Open cases</th>` : ""}<th>Status</th><th></th></tr></thead><tbody>` +
       members.map((m) => {
         const isSelf = m.username === me;
         const actions = isSelf ? '<span class="muted">(you)</span>' : (
           (m.enabled
-            ? `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',false)">Suspend</button>`
-            : `<button class="mini" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',true)">Reactivate</button>`) +
-          ` <button class="mini" onclick="Views.deleteStaffMember('${scope}','${esc(tenant || "")}','${esc(m.username)}')">Delete</button>`
+            ? `<button class="mini ghost" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',false)">Suspend</button>`
+            : `<button class="mini ghost" onclick="Views.setStaffEnabled('${scope}','${esc(tenant || "")}','${esc(m.username)}',true)">Reactivate</button>`) +
+          ` <button class="mini ghost danger-text" onclick="Views.deleteStaffMember('${scope}','${esc(tenant || "")}','${esc(m.username)}')">Delete</button>`
         );
-        return `<tr><td class="mono">${esc(m.username)}</td><td>${esc(m.email || "—")}</td>
-        <td>${(m.roles || []).map((r) => badge(r)).join(" ") || "—"}</td>
-        <td>${m.enabled ? '<span class="badge s-paid">enabled</span>' : '<span class="badge s-denied">disabled</span>'}</td>
-        <td>${actions}</td></tr>`;
+        const roles = m.roles || [];
+        const portal = isPortal(m);
+        const shown = !tenantScope || (staffRoleFilter === "__portal" ? portal : staffRoleFilter ? roles.includes(staffRoleFilter) : !portal);
+        const name = tenantScope ? `<button class="linkish" onclick="Views.staffOpen('${esc(m.username)}')">${esc(m.username)}</button>` : esc(m.username);
+        const open = teamOpen[m.id];
+        return `<tr data-roles="${esc(roles.join(" "))}" data-portal="${portal ? 1 : 0}"${shown ? "" : ' class="flt-out"'}><td>${name}</td><td class="muted">${esc(m.email || "—")}</td>
+        <td>${(tenantScope ? staffRolesOf(m) : roles).map((r) => `<span class="badge s-${esc(r).toLowerCase().replace(/_/g, "-")}">${esc(tenantScope ? staffRoleLabel(r) : r)}</span>`).join(" ") || '<span class="muted">portal sign-in</span>'}</td>
+        ${tenantScope ? `<td class="num">${open != null ? `<a href="#/cases?assignee=${encodeURIComponent(m.id)}">${open.toLocaleString()}</a>` : '<span class="muted">—</span>'}</td>` : ""}
+        <td>${m.enabled ? '<span class="badge s-paid">active</span>' : '<span class="badge s-denied">suspended</span>'}</td>
+        <td class="row-actions">${actions}</td></tr>`;
       }).join("") +
-      `</tbody></table>`;
+      `</tbody></table></div>`;
   }
+
+  // "" = every staff member (not portal sign-ins), "__portal" = the portal sign-ins, else one role.
+  function staffFilter(role) {
+    staffRoleFilter = role;
+    document.querySelectorAll("#staff-table tbody tr").forEach((tr) => {
+      const portal = tr.dataset.portal === "1";
+      const show = role === "__portal" ? portal : role ? tr.dataset.roles.split(" ").includes(role) : !portal;
+      tr.classList.toggle("flt-out", !show); // the pager counts and pages only the rows the chip keeps
+    });
+    const t = document.getElementById("staff-table");
+    if (t && t._pg) t._pg.page = 0;
+    Pager.scan();
+    document.querySelectorAll("[data-staff-role]").forEach((b) => b.classList.toggle("active", b.dataset.staffRole === role));
+  }
+
+  // One staff member: what they do, their open cases and the rotations they are in; the PM / Tenant Admin changes
+  // their roles here. Giving or taking away Tenant Admin stays with the platform admins; nobody edits their own.
+  async function staffOpen(username) {
+    const m = teamStaff.find((x) => x.username === username);
+    if (!m) return;
+    const isAdmin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const isSelf = m.username === Auth.claims()?.name;
+    const theirs = ASSIGN_ROLES.filter(([r]) => (m.roles || []).includes(r));
+    const rot = await Promise.all(theirs.map(([r]) => Api.cm.autoAssign(r).catch(() => null)));
+    let open = 0;
+    const rotLines = theirs.map(([r, label], i) => {
+      const a = rot[i];
+      const row = a && (a.people || []).find((x) => x.id === m.id);
+      if (row) open = Math.max(open, row.open_cases);
+      if (!a) return `<li>${esc(label)}: <span class="muted">unavailable</span></li>`;
+      const state = !row ? "not active" : !row.in_rotation ? "taken out of the rotation" : !a.enabled ? "rotation is off"
+        : a.next === m.id ? "in the rotation — <b>next in turn</b>" : "in the rotation";
+      return `<li>${esc(label)}: ${state}</li>`;
+    }).join("");
+    const boxes = TEAM_ROLES.map(([r, label]) => {
+      const has = (m.roles || []).includes(r);
+      const locked = isSelf || (r === "TENANT_ADMIN" && !isAdmin);
+      return `<label class="sr-role"><input type="checkbox" name="role_${r}" ${has ? "checked" : ""} ${locked ? "disabled" : ""} /> ${esc(label)}</label>`;
+    }).join("");
+    const v = await UI.modal({
+      title: esc(m.username), submitLabel: isSelf ? "Close" : "Save roles",
+      body: `${esc(m.email || "")}${m.enabled ? "" : " · <b>suspended</b>"} · ${open} open case${open === 1 ? "" : "s"}
+        ${rotLines ? `</p><ul class="sr-rot">${rotLines}</ul><p class="modal-body">` : "<br>"}
+        <span class="sr-head">Roles</span></p><div class="sr-roles">${boxes}</div><p class="mhint">
+        ${isSelf ? "You can't change your own roles — ask another PM or an admin." : "Changes apply the next time they sign in."}
+        ${!isAdmin ? " Tenant Admin is given or taken away by a platform admin." : ""}`,
+    });
+    if (!v || isSelf) return;
+    const roles = TEAM_ROLES.filter(([r]) => {
+      const locked = r === "TENANT_ADMIN" && !isAdmin;
+      return locked ? (m.roles || []).includes(r) : v["role_" + r] === "on";
+    }).map(([r]) => r);
+    if (!roles.length) { UI.toast("Keep at least one role — suspend the account instead to stop them working.", { kind: "warn" }); return; }
+    try {
+      const r = await Api.admin.setTenantStaffRoles(Api.getTenant(), m.username, roles);
+      const said = [...(r.added || []).map((x) => "+" + staffRoleLabel(x)), ...(r.removed || []).map((x) => "−" + staffRoleLabel(x))];
+      UI.toast(said.length ? `${m.username}: ${said.join(", ")}` : "No change");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
   async function teamAdmin() {
     if (!can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN"))
       return `<div class="view-head"><h1>Team</h1></div><p class="muted">Your role doesn't have access to Team.</p>`;
     const isAdmin = can("FEDERAL_ADMIN", "PLATFORM_ADMIN");
     const tenant = Api.getTenant();
-    let html = `<div class="view-head"><h1>Team</h1>
-      <span class="muted">add staff accounts to ${isAdmin ? "any activated tenant" : "your own tenant"}</span></div>
-      <p><button onclick="Views.addTenantStaffFlow()">＋ Add tenant staff</button>
-      ${isAdmin ? ` <button onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>` : ""}</p>`;
+    const head = (n) => `<div class="view-head"><h1>Team</h1>${n || ""}<span style="flex:1"></span>
+      <button class="mini" onclick="Views.addTenantStaffFlow()">＋ Add staff</button>
+      ${isAdmin ? `<button class="mini secondary" onclick="Views.createFederalAdminFlow()">＋ Create federal admin</button>` : ""}</div>`;
     try {
       const [staff, federal] = await Promise.all([
         Api.admin.listTenantStaff(tenant),
         isAdmin ? Api.admin.listFederalAdmins().catch(() => []) : Promise.resolve(null),
       ]);
-      html += `<h2>Staff — tenant ${esc(tenant.toUpperCase())}</h2>${staffTableHtml(staff, "tenant", tenant)}`;
-      if (federal) html += `<h2>Federal / platform admins <span class="muted">cross-tenant</span></h2>${staffTableHtml(federal, "federal")}`;
-      return html;
-    } catch (e) { return html + err(e); }
+      teamStaff = staff;
+      // Who does the case work: each assignable role that someone holds, with its rotation (open cases per person).
+      const held = ASSIGN_ROLES.filter(([r]) => staff.some((m) => (m.roles || []).includes(r)));
+      const rotations = await Promise.all(held.map(([r]) => Api.cm.autoAssign(r).catch(() => null)));
+      teamOpen = {};
+      rotations.forEach((a) => (a?.people || []).forEach((x) => { teamOpen[x.id] = x.open_cases; }));
+      const staffN = staff.filter((m) => staffRolesOf(m).length).length;
+      let html = head(`<span class="muted">${staffN} staff · ${staff.length - staffN} portal sign-ins · tenant ${esc(tenant.toUpperCase())}</span>`);
+      html += teamWorkloadHtml(held, rotations);
+      html += `<div id="aa-box">${await autoAssignBox()}</div>`;
+      html += `<section class="team-sec"><h2>People</h2>${staffTableHtml(staff, "tenant", tenant)}</section>`;
+      if (federal) html += `<section class="team-sec"><h2>Federal / platform admins <span class="muted">cross-tenant</span></h2>${staffTableHtml(federal, "federal")}</section>`;
+      return `<div class="wide-view team">${html}</div>`;
+    } catch (e) { return head() + err(e); }
+  }
+
+  // Workload: for each role that does case work, everyone holding it with their open cases (a bar against the
+  // busiest), where they stand in the rotation, and a link to their cases; for Reviewers, the cases nobody holds.
+  let teamOpen = {};
+  function teamWorkloadHtml(held, rotations) {
+    if (!held.length) return "";
+    const panels = held.map(([role, label], i) => {
+      const a = rotations[i];
+      if (!a) return `<div class="load-role"><h3>${esc(label)}s</h3><p class="muted">Workload unavailable.</p></div>`;
+      const people = (a.people || []).slice().sort((x, y) => y.open_cases - x.open_cases || x.username.localeCompare(y.username));
+      const max = Math.max(1, ...people.map((x) => x.open_cases));
+      const total = people.reduce((n, x) => n + x.open_cases, 0);
+      const state = (x) => !a.enabled ? `<span class="load-state">rotation off</span>`
+        : !x.in_rotation ? `<span class="load-state out">out of rotation</span>`
+        : a.next === x.id ? `<span class="load-state next">next in turn</span>` : `<span class="load-state">in rotation</span>`;
+      const rows = people.map((x) => `<tr>
+          <td><button class="linkish" onclick="Views.staffOpen('${esc(x.username)}')">${esc(x.username)}</button></td>
+          <td class="load-bar-cell"><a class="load-bar" href="#/cases?assignee=${encodeURIComponent(x.id)}" title="See ${esc(x.username)}'s open cases">
+            <span class="load-fill" style="width:${Math.round((x.open_cases / max) * 100)}%"></span></a></td>
+          <td class="num"><a href="#/cases?assignee=${encodeURIComponent(x.id)}">${x.open_cases.toLocaleString()}</a></td>
+          <td>${state(x)}</td></tr>`).join("");
+      const backlog = a.new_cases && a.unassigned_open
+        ? `<a class="load-unassigned" href="#/cases?assigned=unassigned">${a.unassigned_open.toLocaleString()} open case${a.unassigned_open === 1 ? "" : "s"} waiting for a Reviewer →</a>` : "";
+      return `<div class="load-role"><h3>${esc(label)}s <span class="muted">${people.length} · ${total.toLocaleString()} open case${total === 1 ? "" : "s"}</span></h3>
+        ${backlog}
+        ${people.length ? `<table class="load-tbl" data-page-size="5" data-nosearch><thead><tr><th>Person</th><th>Open cases</th><th class="num"></th><th>Rotation</th></tr></thead><tbody>${rows}</tbody></table>`
+          : `<p class="muted">Nobody active in this role.</p>`}</div>`;
+    }).join("");
+    return `<section class="team-sec"><h2>Workload</h2>
+      <p class="muted">Open cases each person holds. Click a number or a bar to see those cases; click a name to see or change their roles.</p>
+      <div class="load-grid">${panels}</div></section>`;
+  }
+
+  // Automatic assignment: one rotation per role -- the fewest open cases first, ties in turn. Reviewers get new cases
+  // as they come in; for every role the PM
+  // can hand a case to "Next in turn". The PM / Tenant Admin turns a rotation on or off and takes people out of it;
+  // any assignment can still be changed by hand on the case.
+  let aaRole = "CASE_MANAGER";
+  async function autoAssignBox() {
+    if (!canAssign()) return "";
+    let a;
+    try { a = await Api.cm.autoAssign(aaRole); } catch (e) {
+      return `<h2>Automatic assignment</h2><p class="muted">${esc(e.message)}</p>`;
+    }
+    const label = a.role_label || "Reviewer";
+    const people = a.people || [];
+    const next = people.find((p) => p.id === a.next);
+    const inTurn = people.filter((p) => p.in_rotation).length;
+    const status = a.new_cases
+      ? (!a.enabled ? "Off — new cases wait in the unassigned pool for the PM to assign or a Reviewer to take."
+        : !inTurn ? "On, but nobody is in the rotation — new cases wait in the unassigned pool."
+        : `On — the next new case goes to <strong>${esc(next?.username || "—")}</strong>.`)
+      : (!a.enabled ? `Off — a ${esc(label)} is named on a case by hand.`
+        : !inTurn ? `On, but nobody is in the rotation — name a ${esc(label)} on the case by hand.`
+        : `On — the next case that reaches a ${esc(label)} step (or is handed to one with "Next in turn") goes to <strong>${esc(next?.username || "—")}</strong>. The Reviewer keeps the case.`);
+    const tabs = ASSIGN_ROLES.map(([r, l]) =>
+      `<button type="button" class="tab ${r === aaRole ? "active" : ""}" onclick="Views.autoAssignRole('${r}')">${esc(l)}</button>`).join("");
+    const rows = people.map((p) => `<tr>
+        <td><button class="linkish mono" onclick="Views.staffOpen('${esc(p.username)}')">${esc(p.username)}</button>${p.id === a.next && a.enabled ? ' <span class="badge s-paid">next</span>' : ""}</td>
+        <td class="num">${p.open_cases}</td>
+        <td><label class="aa-in"><input type="checkbox" ${p.in_rotation ? "checked" : ""}
+          onchange="Views.autoAssignRotation('${esc(p.id)}', this.checked, this)" /> In rotation</label></td></tr>`).join("");
+    return `<h2>Automatic assignment</h2>
+      <div class="tabs aa-tabs" role="tablist">${tabs}</div>
+      <div class="card aa-card">
+        <label class="aa-toggle"><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="Views.autoAssignToggle(this.checked, this)" />
+          ${a.new_cases ? "Assign new cases to Reviewers automatically, in turn" : `Add a ${esc(label)} automatically, in turn, when a case reaches their step`}</label>
+        <p class="muted">${status} Whoever in the rotation has the fewest open cases goes first; people with the same number take turns. You can change who has any case on the case itself.${a.updated_by ? ` Last changed by ${esc(a.updated_by)}.` : ""}</p>
+        ${a.new_cases && a.unassigned_open ? `<div class="aa-backlog"><span><strong>${a.unassigned_open}</strong> open case${a.unassigned_open === 1 ? "" : "s"}
+          nobody holds (from before automatic assignment, or filed while it was off). Reviewers can't see them until they're assigned.</span>
+          <button class="mini" onclick="Views.autoAssignBacklog(this)" ${!a.enabled || !inTurn ? "disabled" : ""}>Assign them now, in turn</button></div>` : ""}
+        ${people.length
+          ? `<table data-page-size="10"><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
+          : `<p class="muted">No active ${esc(label)} on this tenant yet — add one above, or give someone the role.</p>`}
+      </div>`;
+  }
+
+  async function aaRefresh() {
+    const box = document.getElementById("aa-box");
+    if (box) box.innerHTML = await autoAssignBox(); else App.rerender();
+  }
+
+  async function autoAssignRole(role) { aaRole = role; await aaRefresh(); }
+
+  // The unassigned backlog to the Reviewers, by the same rule as new cases; 500 per round, repeated until done.
+  async function autoAssignBacklog(el) {
+    const a = await Api.cm.autoAssign("CASE_MANAGER").catch(() => null);
+    const n = a?.unassigned_open || 0;
+    if (!n || !(await UI.confirm(`Assign ${n} case${n === 1 ? "" : "s"} now?`,
+      "They go to the Reviewers in the rotation, oldest first: whoever has the fewest open cases goes first. Each Reviewer is told how many they got. Cases waiting on their fee stay as they are.",
+      "Assign them"))) return;
+    await UI.run(el, async () => {
+      let total = 0;
+      const per = {};
+      try {
+        for (let round = 0; round < 40; round++) {
+          const r = await Api.cm.assignOpen();
+          total += r.assigned;
+          (r.people || []).forEach((p) => { per[p.username] = (per[p.username] || 0) + p.cases; });
+          if (!r.remaining || !r.assigned) break;
+        }
+        UI.toast(`Assigned ${total} case${total === 1 ? "" : "s"}: ${Object.entries(per).map(([u, c]) => `${u} ${c}`).join(", ") || "none"}`, { duration: 9000 });
+      } catch (e) { UI.toast(e.message, { kind: "error", sticky: true }); }
+      await aaRefresh();
+    }, "Assigning…");
+  }
+
+  async function autoAssignToggle(on, el) {
+    try {
+      const a = await Api.cm.setAutoAssign({ role: aaRole, enabled: on });
+      UI.toast(on ? `${a.role_label} rotation is on` : `${a.role_label} rotation is off`);
+      await aaRefresh();
+    } catch (e) { if (el) el.checked = !on; UI.toast(e.message, { kind: "error", sticky: true }); }
+  }
+
+  async function autoAssignRotation(id, inRotation, el) {
+    try {
+      const a = await Api.cm.autoAssign(aaRole);
+      const out = (a.people || []).filter((p) => (p.id === id ? !inRotation : !p.in_rotation)).map((p) => p.id);
+      await Api.cm.setAutoAssign({ role: aaRole, excluded: out });
+      await aaRefresh();
+    } catch (e) { if (el) el.checked = !inRotation; UI.toast(e.message, { kind: "error", sticky: true }); }
   }
 
   // Suspend (enabled=false) or reactivate (enabled=true) a staff account.
@@ -6162,11 +7695,11 @@ const Views = (() => {
           <input name="action" placeholder="filter by action (e.g. NPI_VERIFICATION_DEGRADED)" />
           <button>Filter</button>
         </form>
-        <div id="al-list">${auditRows(r.entries || [])}</div></div>
+        <div id="al-list" data-nosearch>${auditRows(r.entries || [])}</div></div>
         <div id="al-own" hidden><form class="inline-form" onsubmit="event.preventDefault(); Views.orgAuditBox('al-own-box', 'mine')">
           <input name="q" placeholder="Search: dispute, action" aria-label="Search your actions">
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('al-own-box', 'mine')"> Include page views</label>
-          <button>Search</button></form><div id="al-own-box"></div></div>`;
+          <button>Search</button></form><div id="al-own-box" data-nosearch></div></div>`;
     } catch (e) { return err(e); }
   }
 
@@ -6226,6 +7759,7 @@ const Views = (() => {
         <button>Generate DRAFT</button></form>
       <p class="muted">Idempotent per period — an existing active invoice for the same period is reported, never duplicated. Billable time without a role rate blocks generation (configurable).</p>
       <div id="billing-gen-out"></div></div>
+      ${Letters.settingsCardHtml()}
       <div id="billing-list"><p class="muted">Loading…</p></div>
       <div id="billing-detail"></div>`;
   }
@@ -6409,7 +7943,7 @@ const Views = (() => {
           <select id="arap-ar-bucket" onchange="Views.arapArFilter()"><option value="">All buckets</option>
             ${buckets.map((b) => `<option value="${b}">${b}</option>`).join("")}</select>
           <input id="arap-ar-q" placeholder="Filter by party…" oninput="Views.arapArFilter()" /></p>` : ""}
-        <div id="arap-ar-results">${arapArResultsHtml(window._arapAr, "", "")}</div>`;
+        <div id="arap-ar-results" data-nosearch>${arapArResultsHtml(window._arapAr, "", "")}</div>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6633,7 +8167,7 @@ const Views = (() => {
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("paymethods", "Payment methods", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
+        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("groups", "Provider groups", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("paymethods", "Payment methods", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -6645,7 +8179,7 @@ const Views = (() => {
             <p class="muted">Every dispute you filed, for every client. Open a case number for its details, payment and documents.</p>
             <div id="tpa-fees"></div>
             <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
-            <div id="tpa-cases"><p class="muted">Loading…</p></div></div>
+            <div id="tpa-cases" data-nosearch><p class="muted">Loading…</p></div></div>
         </section>
 
 
@@ -6655,53 +8189,63 @@ const Views = (() => {
             <div id="tpa-own-methods"><p class="muted">Loading…</p></div></div>
         </section>
 
+        <section data-tpa-panel="groups" style="display:none">
+          <div class="card"><div class="cl-head"><h2>Provider groups</h2>
+            <span class="cl-head-act"><button class="mini" onclick="Views.tpaGroupAddOpen()">Add a provider group</button></span></div>
+            <p class="muted">The practices and health systems your providers belong to. Put a provider in a group from the Clients tab; in a bulk filing, a row's <code>provider_group</code> names one of these.</p>
+            <div id="tpa-groups"><p class="muted">Loading…</p></div></div>
+        </section>
+
         <section data-tpa-panel="clients" style="display:none">
-          <div class="card"><h2>Add a client</h2>
-            ${onb ? `<ol class="tpa-steps"><li><b>Add the client</b></li><li><b>Profile</b> — NPI, TIN, address</li><li><b>Payment</b> — card or ACH</li><li><b>File</b> — each dispute with its six documents</li></ol>` : ""}
-            <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaAddClientFn(this)">
-              <input name="party_name" placeholder="organization name" required />
-              <select name="party_type"><option value="PROVIDER">Provider</option><option value="HEALTH_PLAN">Health plan</option></select>
-              <input name="contact_email" type="email" placeholder="contact email" />
-              <button class="mini">Add client</button></form>
+          <div class="card">
+            <div class="cl-head"><h2>Clients</h2><span class="muted" id="tpa-cl-summary"></span>
+              <span class="cl-head-act"><button class="mini" onclick="Views.tpaClientAddOpen()">Add a client</button>
+                <button class="mini ghost" onclick="Views.tpaGroupAddOpen()">Add a provider group</button></span></div>
+            <p class="muted">The providers and plans you file for, each under the provider group (practice or health system) it belongs to.
+              ${onb ? "A client is <b>ready to file</b> once its profile (NPI, TIN, address) and a payment method are set. Documents belong to each dispute: you add them when you file it." : ""}</p>
+            <div class="cl-tools">
+              <input type="search" placeholder="Find a client" aria-label="Find a client" oninput="Views.tpaClientFilter({ q: this.value })" />
+              <select aria-label="Show" onchange="Views.tpaClientFilter({ show: this.value })">
+                <option value="">All clients</option><option value="setup">Needs setting up</option><option value="ready">Ready to file</option>
+                <option value="owes">Fees owed</option><option value="suspended">Suspended</option></select></div>
+            <div id="tpa-clients"><p class="muted">Loading…</p></div>
             ${onb ? `<details class="tpa-more"><summary>Add many clients from a spreadsheet (CSV)</summary>
               <p class="muted">Columns: <code>party_name,party_type,contact_email,npi,tin,address</code>. Each row is checked on its own; the report lists every row.</p>
               <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaImportFn(this)">
                 <input name="file" type="file" accept=".csv,text/csv" required />
                 <button class="mini">Import clients</button></form>
-              <div id="tpa-import-result"></div></details>` : ""}</div>
-          ${onb ? `<div class="card"><h2>Where each client stands</h2>
-            <p class="muted">A client is <b>Ready</b> once its profile and payment method are done. Each dispute then brings its own six documents: in <b>Bulk filing</b>, or as a document set made here for one dispute. Each time you pay, you choose who pays: each client's own saved card or bank account, your organization's, or a card or bank account on Stripe's page.</p>
-            <div id="tpa-onboarding"><p class="muted">Loading…</p></div>
-            <details class="tpa-more"><summary>Upload documents to many clients at once (ZIP)</summary>
-              <p class="muted">One folder per client, named exactly like the client, holding its six documents (<code>eob.pdf</code>, <code>itemized_bill.pdf</code>, <code>proof_of_coverage.pdf</code>, <code>open_negotiation_notice.pdf</code>, <code>offer_substantiation.pdf</code>, <code>idre_attestation.pdf</code>) or one <code>merged.pdf</code>. To file many disputes, each with its own documents, use <b>Bulk filing</b> instead.</p>
-              <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaZipFn(this)">
-                <input name="file" type="file" accept=".zip,application/zip" required />
-                <button class="mini">Upload ZIP</button></form>
-              <div id="tpa-zip-result"></div></details></div>` : ""}
-          <div class="card"><h2>All clients</h2>
-            <div id="tpa-clients"><p class="muted">Loading…</p></div></div>
+              <div id="tpa-import-result"></div></details>` : ""}
+          </div>
         </section>
 
         <section data-tpa-panel="file" style="display:none">
           <div class="card"><h2>File one dispute</h2>
-            <p class="muted">${onb ? "Pick the client, then one of its ready document sets (made in the Clients tab). To file many disputes, each with its own documents, use Bulk filing." : "Pick the client and enter the disputed amount."}</p>
-            <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
-              <select name="client_id" id="tpa-file-client" required onchange="Views.filingPackagesFilter('tpa-file-client','tpa-file-package','client')"></select>
-              <select name="package_id" id="tpa-file-package"><option value="">— no package —</option></select>
+            <p class="muted">${onb ? "Pick the client and add this dispute's documents. To file many disputes, each with its own documents, use Bulk filing." : "Pick the client and enter the disputed amount."}</p>
+            <form class="inline-form" data-task="file_dispute" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
+              <select name="client_id" id="tpa-file-client" required onchange="Views.tpaFileDocsReset()"></select>
+              <input type="hidden" name="package_id" id="tpa-file-package" />
               <input name="contact_name" placeholder="client contact for this dispute" />
               <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
               <input name="other_party_name" placeholder="health plan the dispute is against" required />
               <input name="other_party_email" type="email" data-email-check placeholder="health plan's email for notices" required />
               <input name="other_party_naic" placeholder="plan NAIC (optional)" />
+              <select name="provider_type" id="tpa-file-ptype" title="What kind of provider the client is — used to check the dispute meets the minimum amount"><option value="">Provider type — not sure</option></select>
+              <select name="in_network" title="Whether the client has a contract with this health plan"><option value="">In the plan's network? — not sure</option><option value="no">Not in the plan's network</option><option value="yes">In the plan's network</option></select>
               <input name="notes" placeholder="notes" />
               <button class="mini">File dispute</button></form>
-            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all) and manage documents for the client. Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p>
-            <div id="tpa-file-result"></div></div>
+            <div id="tpa-file-prefill"></div>
+            <div id="tpa-file-result" aria-live="assertive"></div>
+            ${onb ? `<div class="file-docs"><b>Documents for this dispute</b> <span class="muted">— optional: every document the dispute relies on, as many as it needs — claim forms, EOBs and denials, the itemized bill, proof of coverage, the Florida license, the contract, medical records, correspondence… Each one is read and flagged if it doesn't look like what it's filed as; nothing is refused for that, and the reviewer checks them.</span>
+              <div id="tpa-file-docs"></div></div>` : ""}
+            ${packetBlockHtml("tpa-packet", "<b>Filing packet</b> — fill in the packet's sections here, or pick the filled packet PDF")}
+            ${(setTimeout(() => packetInit("tpa-packet", {}), 0), "")}
+            <p class="muted">Provider type and network status decide the minimum amount a dispute must reach. If you're not sure, leave them: we read them from the documents where they say, and the reviewer confirms.</p>
+            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all). Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p></div>
         </section>
 
         <section data-tpa-panel="bulk" style="display:none">
           ${onb ? `<div class="card"><h2>File many disputes at once</h2>
-            <p class="muted">Upload one ZIP with a list of the disputes and a folder of documents for each. Every dispute is filed by itself as soon as its six documents are accepted; one that needs a fix waits in the report below.</p>
+            <p class="muted">Upload one ZIP with a list of the disputes and a folder of documents for each. Every dispute is filed by itself as soon as its documents have been read — whatever documents it has, as many as it relies on. A document that doesn't look like what it's named is flagged for the reviewer, not refused.</p>
             <details class="tpa-more" open><summary>How to prepare the ZIP</summary>
               <div class="tpa-zip-howto">
                 <pre class="tpa-tree">disputes.zip
@@ -6713,16 +8257,22 @@ const Views = (() => {
 │   ├── open_negotiation_notice.pdf
 │   ├── offer_substantiation.pdf
 │   └── idre_attestation.pdf
+│   └── medical_records.pdf ← any other document, under any name
 └── CLAIM-002/
-    └── merged.pdf        ← or one PDF holding all six</pre>
-                <div><p><b>disputes.csv</b> — one row per dispute:</p>
-                  <pre class="tpa-tree">dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes
-CLAIM-001,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14
-CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
-                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. Up to 500 disputes per ZIP.</p>
-                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div></details>
+    └── merged.pdf        ← or one PDF holding them</pre>
+                <p class="muted" style="grid-column:1/-1;margin:0">The six named files are the usual documents, not a limit or a requirement: put in every document the dispute relies on and leave out any that don't apply.</p>
+                <div><p>Any other file in a dispute's folder (medical records, the contract, claim forms, the Florida license…) goes onto that dispute too, as one more of its documents.</p><p><b>disputes.csv</b> — one row per dispute:</p>
+                  <pre class="tpa-tree">dispute_ref,provider_group,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes,provider_type,in_network
+CLAIM-001,Gulf Coast Medical Group,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14,physician_dentist,no
+CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
+                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>provider_group</code> is the provider group that client is in (optional): fill it in when two of your providers share a name — a provider that isn't in the group named is refused, so nothing is filed for the wrong provider. <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. <code>provider_type</code> (<code>hospital_inpatient</code>, <code>hospital_outpatient</code>, <code>physician_dentist</code>, <code>rural_hospital</code> or <code>other</code>) and <code>in_network</code> (<code>yes</code> or <code>no</code>) are optional: leave them blank if you're not sure. Up to 500 disputes per ZIP.</p>
+                  <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div>
+              <div class="tpa-samples"><p><b>Sample ZIPs to copy</b> — open one to see the exact layout. They are filled in with your clients where you have them;
+                every sample document says what the real one must show. Replace the sample PDFs before uploading: a ZIP that still holds them is refused.</p>
+                <button type="button" class="mini" onclick="Views.tpaBdSample('separate', this)">Download sample — six separate documents</button>
+                <button type="button" class="mini" onclick="Views.tpaBdSample('merged', this)">Download sample — one merged PDF per dispute</button></div></details>
             <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
-            <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
+            <form class="inline-form" data-task="bulk_filing" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
               <input name="file" type="file" accept=".zip,application/zip" required />
               <button class="mini">Upload disputes ZIP</button></form>
@@ -6751,7 +8301,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
             <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('tpa-audit', 'tpa')"> Include page views</label>
             <button>Search</button></form>
-          <div id="tpa-audit"><p class="muted">Loading…</p></div></div></section>
+          <div id="tpa-audit" data-nosearch><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-tpa-panel="oversight" style="display:none">
@@ -6760,6 +8310,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <div class="card"><h2>Documents waiting for review</h2>
           <p class="muted">Documents the reader could not decide on. Open each one, then accept it or say why it is rejected — the filer sees the note.</p>
           <div id="tpa-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>Possible exclusion-list matches</h2>
+          <p class="muted">These clients match an entry on the HHS-OIG List of Excluded Individuals/Entities by NPI or by name. Compare the details (address, specialty, dates) and decide: <b>Clear</b> when it is a different provider, <b>Excluded</b> when it is the same one. Either way, say how you decided. The client can't file until then.</p>
+          <div id="tpa-ex-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>NPIs waiting for review</h2>
           <p class="muted">The national NPI registry holds these NPIs under a different name than the client's. Confirm when it is the same provider (a former or trading name); reject with a note when it is not — the TPA sees the note and must enter the right NPI. The client can't file until then.</p>
           <div id="tpa-npi-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}` : ""}`;
@@ -6781,15 +8334,17 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     // the background, so what was loaded with the page goes stale.
     if (tpaTab._booted) ({
       disputes: () => { tpaFeesBox(); tpaDashBox(); },
-      clients: () => { tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox(); },
+      clients: () => tpaClientsBox(),
+      groups: () => tpaGroupsBox(),
       bulk: () => tpaBdBatchesBox(),
-      reviews: () => { onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); },
+      reviews: () => { onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); exclusionReviewsBox("tpa-ex-reviews", "tpa"); },
       oversight: () => tpaAdminBox(),
       audit: () => orgAuditBox("tpa-audit", "tpa"),
       docreq: () => orgDocReqBox("tpa-docreq", "tpa"),
       paymethods: () => tpaOwnMethodsBox(),
     }[k] || (() => {}))();
     if (k === "paymethods" && !tpaTab._booted) tpaOwnMethodsBox();
+    if (k === "groups" && !tpaTab._booted) tpaGroupsBox();
     if (k === "audit" && !tpaTab._booted) orgAuditBox("tpa-audit", "tpa");
     if (k === "docreq" && !tpaTab._booted) orgDocReqBox("tpa-docreq", "tpa");
     tpaTab._booted = true;
@@ -6798,7 +8353,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     const el = document.getElementById("tpa-tc-" + k);
     if (el) el.textContent = text ? String(text) : "";
   }
-  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", NPI_REVIEW: "NPI under review", NPI_REJECTED: "NPI rejected", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
+  const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", NPI_REVIEW: "NPI under review", NPI_REJECTED: "NPI rejected", EXCLUSION_REVIEW: "Exclusion check under review", EXCLUDED: "On the exclusion list", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
   // The national NPI registry's answer on a client's NPI.
   function npiLine(c) {
     if (!c.npi) return "";
@@ -6809,9 +8364,23 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       : c.npi_status === "REJECTED" ? `<div class="error">${esc(c.npi_review_note || "Rejected by the review team")}. Enter the correct NPI under Profile.</div>`
       : c.npi_status === "UNVERIFIED" ? `<div class="muted">The registry could not be reached; it is checked again automatically.</div>`
       : `<div class="muted">${esc(c.npi)}${reg}</div>`;
-    return `<div><span class="badge s-${st[0]}">${st[1]}</span>${why}</div>`;
+    return `<div><span class="badge s-${st[0]}">${st[1]}</span>${why}</div>${checksLine(c)}`;
   }
-  const PKG_STATUS = { ASSEMBLING: "started", VALIDATING: "checking", REJECTED: "needs a fix", READY: "ready to file", FILED: "filed" };
+  // The other checks: the federal exclusion list, and the TIN.
+  function checksLine(c) {
+    const ck = c.checks || {};
+    const ex = ck.EXCLUSION && ck.EXCLUSION.status, tin = ck.TIN && ck.TIN.status;
+    const exb = { CLEAR: ["ck-clear", "Not on the exclusion list"], CLEARED: ["ck-clear", "Exclusion list: cleared by the review team"],
+      NEEDS_REVIEW: ["ck-review", "Possible exclusion-list match — under review"], EXCLUDED: ["ck-excluded", "On the federal exclusion list"],
+      UNAVAILABLE: ["ck-unavailable", "Exclusion list not checked yet"] }[ex];
+    const parts = [];
+    if (exb) parts.push(`<span class="badge s-${exb[0]}" title="HHS-OIG List of Excluded Individuals/Entities">${exb[1]}</span>`);
+    if (ex === "EXCLUDED" && ck.EXCLUSION.note) parts.push(`<div class="error">${esc(ck.EXCLUSION.note)}</div>`);
+    if (ex === "UNAVAILABLE") parts.push('<div class="muted">The list could not be loaded yet; it is checked automatically once it is.</div>');
+    if (tin === "NOT_CONFIGURED") parts.push('<div class="muted">TIN: format checked · matching against IRS records is not set up</div>');
+    return parts.length ? `<div class="checks-line">${parts.join("")}</div>` : "";
+  }
+  const PKG_STATUS = { ASSEMBLING: "started", VALIDATING: "reading the documents", REJECTED: "could not be read", READY: "ready to file", FILED: "filed" };
   const onbStatus = (st) => `<span class="badge s-${esc(String(st || "")).toLowerCase().replace(/_/g, "-")}">${esc(ONB_STATUS[st] || st || "—")}</span>`;
   function tpaPkgClose() {
     const card = document.getElementById("tpa-pkg-card");
@@ -6832,17 +8401,22 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         ${App.feature("entity360") && isStaff ? `<button class="mini" onclick="CrmViews.openEntity360('tpas','${r.tpa.id}')">Entity 360</button>` : ""}
         ${isStaff ? `<button class="mini" onclick="Views.tpaUnlinkFn()">Stop acting as this TPA</button>` : ""}</div>`;
       document.getElementById("tpa-team").innerHTML = `
-        <div class="card"><h2>Add a teammate</h2>
-          <p class="muted">Give this code to a colleague to let them log into their own portal account and join your organization — Profile → Claim TPA, or the form here when they're not linked to any org yet. Generating a new code replaces the old one.</p>
+        <div class="card"><h2>Employees</h2>
+          <p class="muted">Everyone at ${esc(r.tpa.name)} who signs in to this portal. <b>Admins</b> add and remove employees; <b>Staff</b> file, pay and track disputes. Each employee gets their own login, emailed to them.</p>
+          <div id="tpa-team-list"><p class="muted">Loading…</p></div>
+          <div id="tpa-team-add"></div></div>
+        <div class="card"><details class="tpa-more"><summary>Already have a portal login? Join with a code</summary>
+          <p class="muted">A colleague who already has a portal account can join your organization with this code — Profile → Claim TPA. Generating a new code replaces the old one.</p>
           <p id="tpa-invite-code">${code ? `<span class="mono" style="font-weight:600;font-size:1.1em">${esc(code)}</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate new code</button>`
-            : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></div>`;
+            : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></details></div>`;
+      tpaTeamBox();
       const tpaBody = document.getElementById("tpa-body");
       if (!tpaBody) return; // the page was left while it loaded
       tpaBody.style.display = "";
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
       tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
-      tpaClientsBox(); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
+      tpaGroupsBox().then(tpaClientsBox); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
       feeReturn("tpa", () => { tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); });
       tpaSetupReturn();
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
@@ -6862,53 +8436,13 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <input name="code" placeholder="TPA-XXXXXX" required /><button class="mini">Claim</button></form></div>`;
     }
     if (can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox();
+      tpaAdminBox(); onboardingReviewsBox("tpa-reviews", "tpa"); npiReviewsBox(); exclusionReviewsBox("tpa-ex-reviews", "tpa");
       if (document.getElementById("tpa-body")?.style.display === "none") tpaTab("oversight", true);  // not acting for a TPA
     }
   }
 
-  async function tpaOnboardingBox() {
-    const box = document.getElementById("tpa-onboarding");
-    if (!box) return;
-    try {
-      const [r, dash] = await Promise.all([Api.program.tpaOnboarding(), Api.program.tpaDashboard().catch(() => ({ cases: [] }))]);
-      const cs = r.clients || [];
-      const readyPkgs = [];
-      // What each client owes now (for display; the checkout works out the amount itself).
-      const owed = {};
-      for (const x of dash.cases || []) {
-        if (!feePayable(x)) continue;
-        const o = owed[x.client_id] || (owed[x.client_id] = { n: 0, cents: 0 });
-        o.n++; o.cents += Number(x.fee_cents || 0);
-      }
-      tpaTabCount("clients", cs.length ? `${cs.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length}/${cs.length} ready` : "");
-      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr>
-          <th>Client</th><th>Profile</th><th>Payment</th><th>Document sets ready</th><th>Status</th><th>Fees</th><th>Actions</th></tr></thead><tbody>
-        ${cs.map((c) => {
-          (c.open_packages || []).forEach((p) => { if (p.status === "READY") readyPkgs.push({ client: c.client_id, id: p.id, name: c.party_name }); });
-          return `<tr><td>${esc(c.party_name)}<br><span class="muted">${badge(c.party_type)}</span></td>
-          <td>${c.profile_complete ? badge("COMPLETE") : badge("INCOMPLETE")}${npiLine(c)}</td>
-          <td>${c.verified_payments > 0 ? badge(c.verified_payments + " VERIFIED") : badge("NONE")}</td>
-          <td>${c.ready_packages > 0 ? c.ready_packages : '<span class="muted">—</span>'}</td>
-          <td>${onbStatus(c.onboarding_status)}</td>
-          <td>${owed[c.client_id] ? `<span class="badge s-needs-review">${owed[c.client_id].n} unpaid · ${usdC(owed[c.client_id].cents)}</span>
-            <div><button class="mini" onclick="Views.payClientFn('${c.client_id}', this)">Pay all — ${usdC(owed[c.client_id].cents)}</button></div>`
-            : '<span class="muted">Nothing owed</span>'}</td>
-          <td>
-            <button class="mini" onclick="Views.tpaProfileForm('${c.client_id}')">Profile</button>
-            <button class="mini" onclick="Views.tpaPaymentForm('${c.client_id}')">Payment</button>
-            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','DISCRETE')">New set: 6 files</button>
-            <button class="mini" onclick="Views.tpaPackageStart('${c.client_id}','MERGED')">New set: merged PDF</button>
-            ${(c.open_packages || []).map((p) => `<button class="mini ghost" onclick="Views.tpaPackageBox('${p.id}')">${p.mode === "MERGED" ? "Merged PDF" : "6 files"}: ${esc(PKG_STATUS[p.status] || p.status)}</button>`).join("")}
-          </td></tr>`;
-        }).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one below or import a roster CSV.</p>';
-      // READY packages feed the filing form.
-      const sel = document.getElementById("tpa-file-package");
-      if (sel) sel.innerHTML = `<option value="">— choose a ready document set —</option>` +
-        readyPkgs.map((p) => `<option value="${p.id}" data-client="${p.client}">${esc(p.name)} · READY package ${esc(p.id.slice(0, 8))}</option>`).join("");
-      filingPackagesFilter('tpa-file-client','tpa-file-package','client');
-    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
-  }
+  // Where each client stands is part of the Clients list now (tpaClientsBox).
+  async function tpaOnboardingBox() { await tpaClientsBox(); }
 
   async function tpaImportFn(form) {
     const out = document.getElementById("tpa-import-result");
@@ -6918,7 +8452,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <table class="tbl"><thead><tr><th>Row</th><th>Party</th><th>Result</th></tr></thead><tbody>
         ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.party_name || "—")}</td>
           <td>${x.ok ? badge("IMPORTED") + (x.npi_status === "NEEDS_REVIEW" ? ' <span class="badge s-npi-review">NPI under review</span>' : x.npi_status === "UNVERIFIED" ? ' <span class="badge s-npi-unverified">NPI not checked yet</span>' : "") : `<span class="error">${esc(x.error || "failed")}</span>`}</td></tr>`).join("")}</tbody></table>`;
-      form.reset(); tpaOnboardingBox(); tpaClientsBox();
+      form.reset(); tpaClientsBox();
     } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -6932,7 +8466,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     try {
       const r = await Api.program.tpaClientProfile(clientId, {
         npi: v.npi.trim(), tin: v.tin.trim(), address: v.address.trim() });
-      tpaOnboardingBox(); tpaClientsBox();
+      tpaClientsBox();
       const npiMsg = { VERIFIED: "NPI verified in the national registry.",
         NEEDS_REVIEW: `The registry holds this NPI under another name${r.npi_registry_name ? ` (${r.npi_registry_name})` : ""}. The review team will confirm it; until then this client can't file.`,
         UNVERIFIED: "The NPI registry could not be reached; the NPI is checked again automatically." }[r.npi_status] || "";
@@ -6966,33 +8500,70 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     if (!tpaPackageBox._open || tpaPackageBox._open !== packageId) { tpaPackageBox._open = packageId; card.scrollIntoView({ behavior: "smooth", block: "start" }); }
     try {
       const p = await Api.program.tpaPackage(packageId);
-      box.innerHTML = `<p>${badge(p.status)} · mode ${esc(p.mode)} · package <code>${esc(packageId)}</code>
+      // Until the set is filed, any slot can be uploaded, replaced or removed; every earlier file is kept and shown.
+      const open = p.status !== "FILED";
+      const when = (t) => (t ? fmtDate(t) : "");
+      // The automatic check flags a document that doesn't look like its slot; it never stops the filing.
+      const checkBadge = (st) => st === "MISSING" ? `<span class="badge">optional — not added</span>` : st === "ACCEPTED" ? `<span class="badge s-ck-clear">looks right</span>`
+        : st === "REJECTED" || st === "NEEDS_REVIEW" ? `<span class="badge s-ck-review" title="The reviewer looks at it; it does not stop the filing">flagged</span>` : badge(st);
+      const verdict = (s) => `${checkBadge(s.status)}${s.uploaded_by ? `<div class="muted">${esc(s.uploaded_by)}${s.uploaded_at ? " · " + when(s.uploaded_at) : ""}</div>` : ""}`;
+      const why = (rs) => (rs || []).map((r2) => esc(r2.detail || r2.code)).join("; ");
+      const change = (s) => !open ? "" : `<label class="mini button-like">${s.status === "MISSING" ? "Add…" : "Replace…"}
+          <input type="file" hidden accept=".pdf,application/pdf,image/*" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this,'${esc(s.status)}')" /></label>
+        ${s.status !== "MISSING" ? `<button type="button" class="mini ghost" onclick="Views.tpaSlotRemove('${packageId}','${s.slot}','${esc(s.filename || "")}')">Remove</button>` : ""}`;
+      const history = (s) => (s.history || []).length ? `<tr class="pkg-hist"><td></td><td colspan="4"><details><summary class="muted">Earlier versions (${s.history.length})</summary>
+          <table class="tbl" data-nosearch><thead><tr><th>File</th><th>Verdict</th><th>Why</th><th>Uploaded</th><th>What happened</th></tr></thead><tbody>
+          ${s.history.map((h) => `<tr><td>${esc(h.filename || "—")}</td><td>${badge(h.status)}</td><td class="muted">${why(h.reasons) || "—"}</td>
+            <td class="muted">${esc(h.uploaded_by || "")}${h.uploaded_at ? " · " + when(h.uploaded_at) : ""}</td>
+            <td class="muted">${h.ended_how === "REMOVED" ? "Removed" : "Replaced"} by ${esc(h.ended_by || "—")} · ${when(h.ended_at)}</td></tr>`).join("")}
+          </tbody></table></details></td></tr>` : "";
+      const needsFix = p.slots.filter((s) => ["REJECTED", "NEEDS_REVIEW"].includes(s.status)).length;
+      box.innerHTML = `<p>${badge(p.status)} · ${p.mode === "MERGED" ? "merged PDF" : "separate files"} · set <code>${esc(packageId)}</code>
           <button class="mini" onclick="Views.tpaPackageBox('${packageId}')">Refresh</button></p>
-        <table class="tbl"><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>Upload</th></tr></thead><tbody>
-        ${p.slots.map((s) => `<tr><td><code>${esc(s.slot)}</code></td>
+        ${needsFix && open ? `<p class="warn-line">${needsFix} document${needsFix === 1 ? " was" : "s were"} flagged by the automatic check — the reason is beside each. That doesn't stop the filing: every document goes onto the dispute and the reviewer looks at the flagged ones. Use <b>Replace…</b> only if it's the wrong file.</p>` : ""}
+        ${open ? `<p class="muted">You can upload, replace or remove any document until this set is filed with a dispute. Every earlier file is kept and every change is in your Audit log.</p>`
+          : `<p class="muted">This set has been filed with a dispute; its documents can no longer be changed. To send a corrected document, use the dispute's document requests.</p>`}
+        ${open ? `<p class="muted"><b>All of these are optional.</b> Add the ones you have, and any other document the dispute relies on below — a dispute can be filed with any of them, or with none.</p>` : ""}
+        <table class="tbl" data-nosearch><thead><tr><th>Document</th><th>File</th><th>Check</th><th>Why</th><th>${open ? "Change" : ""}</th></tr></thead><tbody>
+        ${p.slots.map((s) => `<tr class="${["REJECTED", "NEEDS_REVIEW"].includes(s.status) ? "pkg-bad" : s.status === "MISSING" ? "pkg-optional" : ""}"><td>${esc(SLOT_NAME[s.slot] || s.slot)} <span class="muted">(optional)</span></td>
           <td>${esc(s.filename || "—")}${s.page_start && !/\(pages /.test(s.filename || "") ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
-          <td>${badge(s.status)}</td>
-          <td class="muted">${(s.reasons || []).map((r2) => esc(r2.code + ": " + r2.detail)).join("; ") || "—"}</td>
-          <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
-            ? `<input type="file" id="pkg-${s.slot}" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this)" />` : ""}</td>
-        </tr>`).join("")}</tbody></table>
-        ${p.mode === "MERGED" && !["READY", "FILED"].includes(p.status) ? `
+          <td>${verdict(s)}</td>
+          <td class="muted">${why(s.reasons) || "—"}</td>
+          <td>${change(s)}</td></tr>${history(s)}`).join("")}</tbody></table>
+        ${p.mode === "MERGED" && open ? `
           <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaMergedFn(this,'${packageId}')">
             <input name="file" type="file" accept=".pdf,application/pdf" required />
-            <button class="mini">Upload merged PDF</button></form>` : ""}
-        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when filing.</p>' : ""}`;
-      // The filing list is filled by the board: redraw it once the package is
-      // ready, or a READY package only showed up there after a page reload.
-      if (p.status === "READY" || p.status === "FILED") tpaOnboardingBox();
+            <button class="mini">Upload a new merged PDF</button></form>` : ""}
+        ${p.status === "READY" ? '<p class="ok">Every document has been read — this set can be used to file a dispute.</p>' : ""}
+        ${moreDocsHtml(p, "tpa")}`;
+      // The dispute being filed shows where its documents stand.
+      if (tpaFileDocs && tpaFileDocs.id === packageId) {
+        const six = p.slots.filter((x) => x.status !== "MISSING").length, more = (p.more || []).length;
+        if (tpaFileDocs.status !== p.status || tpaFileDocs.six !== six || tpaFileDocs.more !== more) {
+          Object.assign(tpaFileDocs, { status: p.status, six, more }); tpaFileDocsDraw();
+        }
+      }
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
-  async function tpaSlotUpload(packageId, slot, input) {
+  async function tpaSlotUpload(packageId, slot, input, current) {
     if (!input.files[0]) return;
+    if (current === "ACCEPTED" && !(await UI.confirm("Replace an accepted document?",
+      `The ${slot.replace(/_/g, " ").toLowerCase()} was accepted. Replacing it sends the set back to be checked; the current file is kept in its history.`, "Replace"))) {
+      input.value = ""; return;
+    }
     try {
       await Api.program.tpaAttachDoc(packageId, slot, input.files[0]);
+      UI.toast(current && current !== "MISSING" ? "Replaced — the new file is being checked" : "Uploaded — the file is being checked");
       setTimeout(() => tpaPackageBox(packageId), 300);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function tpaSlotRemove(packageId, slot, filename) {
+    if (!(await UI.confirm("Remove this document?",
+      `${filename || "The file"} is taken out of the ${slot.replace(/_/g, " ").toLowerCase()} slot. It stays in the slot's history, and the change is in your Audit log.`, "Remove", true))) return;
+    try { await Api.program.tpaRemoveDoc(packageId, slot); UI.toast("Removed"); tpaPackageBox(packageId); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function tpaMergedFn(form, packageId) {
@@ -7070,17 +8641,21 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <section data-hp-panel="file" style="display:none">
         <div id="hp-fees"></div>
         <div class="card"><h2>Submit a dispute on behalf of a party</h2>
-          <form class="inline-form" onsubmit="event.preventDefault(); Views.hpFileFn(this)">
+          <form class="inline-form" data-task="file_dispute" onsubmit="event.preventDefault(); Views.hpFileFn(this)">
             <select name="party_id" id="hp-file-party" required onchange="Views.filingPackagesFilter('hp-file-party','hp-file-package','party')"></select>
-            <select name="package_id" id="hp-file-package"><option value="">— no package —</option></select>
+            <select name="package_id" id="hp-file-package" onchange="if (this.value) Views.filePrefillFn('hp', this.form, this.value, true)"><option value="">— no package —</option></select>
             <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
             <input name="other_party_name" placeholder="provider the dispute is against" required />
             <input name="other_party_email" type="email" data-email-check placeholder="provider's email for notices" required />
             <input name="other_party_npi" placeholder="provider NPI (optional)" />
             <input name="notes" placeholder="notes" />
             <button class="mini">Submit dispute</button></form>
+          <div id="hp-file-prefill"></div>
+          <div id="hp-file-result" aria-live="assertive"></div>
+          ${packetBlockHtml("hp-packet", "<b>Filing packet</b> — fill in the packet's sections here, or pick the filled packet PDF")}
+          ${(setTimeout(() => packetInit("hp-packet", {}, { partyFixed: "HEALTH_PLAN" }), 0), "")}
           <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all above) and manage documents on behalf of the party. Once the reviewer finds it eligible, the provider is emailed that the dispute is against it, with a secure link to send its response.</p>
-          <div id="hp-file-result"></div></div>
+          </div>
         </section>
         <section data-hp-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
           <p class="muted">Documents the review team asked you for. Upload and send them here.</p>
@@ -7091,13 +8666,16 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
             <input name="q" placeholder="Search: dispute, person, action" aria-label="Search the audit log">
             <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('hp-audit', 'hp')"> Include page views</label>
             <button>Search</button></form>
-          <div id="hp-audit"><p class="muted">Loading…</p></div></div></section>
+          <div id="hp-audit" data-nosearch><p class="muted">Loading…</p></div></div></section>
       </div>
       ${staff ? `
       <section data-hp-panel="oversight" style="display:none">
         <div class="card"><h2>All health plans in this program</h2><div id="hp-admin"><p class="muted">Loading…</p></div></div></section>
       <section data-hp-panel="reviews" style="display:none">
         <div class="card"><h2>Documents waiting for review</h2><div id="hp-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
+        <div class="card"><h2>Possible exclusion-list matches</h2>
+          <p class="muted">These parties match an entry on the HHS-OIG exclusion list by NPI or by name. Clear it when it is a different provider, mark it Excluded when it is the same one, and say how you decided. The party can't file until then.</p>
+          <div id="hp-ex-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div>
         <div class="card"><h2>NPIs waiting for review</h2>
           <p class="muted">The national NPI registry holds these networks' and facilities' NPIs under a different name. Confirm when it is the same provider; reject with a note when it is not — the health plan sees the note. The party can't file until then.</p>
           <div id="hp-npi-reviews" class="onb-reviews"><p class="muted">Loading…</p></div></div></section>` : ""}`;
@@ -7113,7 +8691,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       against: () => respondListBox("hp"),
       parties: () => hpOnboardingBox(),
       file: () => hpOnboardingBox(),
-      reviews: () => { onboardingReviewsBox("hp-reviews", "hp"); npiReviewsBox("hp-npi-reviews", "hp"); },
+      reviews: () => { onboardingReviewsBox("hp-reviews", "hp"); npiReviewsBox("hp-npi-reviews", "hp"); exclusionReviewsBox("hp-ex-reviews", "hp"); },
       oversight: () => hpAdminBox(),
       audit: () => orgAuditBox("hp-audit", "hp"),
       docreq: () => orgDocReqBox("hp-docreq", "hp"),
@@ -7278,11 +8856,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       const p = await Api.program.hpPackage(packageId);
       box.innerHTML = `<p>${badge(p.status)} · mode ${esc(p.mode)} · package <code>${esc(packageId)}</code>
           <button class="mini" onclick="Views.hpPackageBox('${packageId}')">Refresh</button></p>
-        <table class="tbl"><thead><tr><th>Slot</th><th>File</th><th>Verdict</th><th>Why</th><th>Upload</th></tr></thead><tbody>
-        ${p.slots.map((s) => `<tr><td><code>${esc(s.slot)}</code></td>
+        ${!["FILED"].includes(p.status) ? `<p class="muted"><b>All of these are optional.</b> Add the ones you have — a dispute can be filed with any of them, or with none.</p>` : ""}
+        <table class="tbl"><thead><tr><th>Document</th><th>File</th><th>Check</th><th>Why</th><th>Add</th></tr></thead><tbody>
+        ${p.slots.map((s) => `<tr class="${s.status === "MISSING" ? "pkg-optional" : ""}"><td>${esc(SLOT_NAME[s.slot] || s.slot)} <span class="muted">(optional)</span></td>
           <td>${esc(s.filename || "—")}${s.page_start && !/\(pages /.test(s.filename || "") ? ` <span class="muted">(pages ${s.page_start}-${s.page_end})</span>` : ""}</td>
-          <td>${badge(s.status)}</td>
-          <td class="muted">${(s.reasons || []).map((r2) => esc(r2.code + ": " + r2.detail)).join("; ") || "—"}</td>
+          <td>${s.status === "MISSING" ? '<span class="badge">optional — not added</span>' : ["REJECTED", "NEEDS_REVIEW"].includes(s.status) ? '<span class="badge s-ck-review" title="The reviewer looks at it; it does not stop the filing">flagged</span>' : badge(s.status)}</td>
+          <td class="muted">${(s.reasons || []).map((r2) => esc(r2.detail || r2.code)).join("; ") || "—"}</td>
           <td>${p.mode === "DISCRETE" && ["MISSING", "REJECTED", "NEEDS_REVIEW"].includes(s.status)
             ? `<input type="file" id="hppkg-${s.slot}" onchange="Views.hpSlotUpload('${packageId}','${s.slot}',this)" />` : ""}</td>
         </tr>`).join("")}</tbody></table>
@@ -7290,11 +8869,47 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <form class="inline-form" onsubmit="event.preventDefault(); Views.hpMergedFn(this,'${packageId}')">
             <input name="file" type="file" accept=".pdf,application/pdf" required />
             <button class="mini">Upload merged PDF</button></form>` : ""}
-        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when submitting.</p>' : ""}`;
+        ${p.status === "READY" ? '<p class="ok">All six documents ACCEPTED — this package can be referenced when submitting.</p>' : ""}
+        ${moreDocsHtml(p, "hp")}`;
       // The filing list is filled by the board: redraw it once the package is
       // ready, or a READY package only showed up there after a page reload.
       if (p.status === "READY" || p.status === "FILED") hpOnboardingBox();
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  // Every other document of the dispute, besides its six (tpa_onboarding.go, moreDocKinds): as many as it relies
+  // on, each with what it is. Taken as filed and put on the dispute with the six; they never hold a set back.
+  const MORE_LABEL = { CLAIM_FORMS: "Claim forms", DENIALS_EOBS: "Denials / EOBs", FLORIDA_LICENSE: "Florida license",
+    FINAL_DETERMINATION_LETTER: "Final determination letter", CONTRACT: "Contract", WAIVER_OF_PAYMENT: "Waiver of payment",
+    NOTICE_OF_OVERPAYMENT: "Notice of overpayment", OVERPAYMENT_RESPONSE: "Overpayment response", MEDICAL_RECORDS: "Medical records",
+    CODING_RULES: "Coding rules / policies", OTHER: "Other" };
+  function moreDocsHtml(p, kind) {
+    const open = p.status !== "FILED", more = p.more || [], canRemove = open && kind === "tpa";
+    const kinds = p.more_kinds || Object.keys(MORE_LABEL);
+    return `<h3 class="pkg-more-h">All the dispute's other documents${more.length ? ` <span class="muted">(${more.length})</span>` : ""}</h3>
+      <p class="muted">Every other document the dispute relies on: claim forms, denials, the Florida license, the final determination letter, the contract, medical records, coding rules — as many as you have. They go onto the dispute with the rest. They aren't checked one by one and never hold the set back.</p>
+      ${more.length ? `<table class="tbl" data-nosearch><thead><tr><th>Document</th><th>File</th><th>Added</th>${canRemove ? "<th></th>" : ""}</tr></thead><tbody>
+        ${more.map((d) => `<tr><td>${esc(MORE_LABEL[d.kind] || d.kind)}</td><td>${esc(d.filename || "—")}</td>
+          <td class="muted">${esc(d.uploaded_by || "")}${d.uploaded_at ? " · " + fmtDate(d.uploaded_at) : ""}</td>
+          ${canRemove ? `<td><button type="button" class="mini ghost" onclick="Views.tpaSlotRemove('${p.package_id}','${d.slot}','${esc((d.filename || "").replace(/'/g, ""))}')">Remove</button></td>` : ""}</tr>`).join("")}</tbody></table>`
+        : '<p class="muted">None added yet.</p>'}
+      ${open ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.moreDocsAdd(this,'${kind}','${p.package_id}')">
+        <select name="kind" aria-label="What the document is">${kinds.map((k) => `<option value="${k}">${esc(MORE_LABEL[k] || k)}</option>`).join("")}</select>
+        <input name="file" type="file" multiple accept=".pdf,application/pdf,image/*" required aria-label="Files" />
+        <button class="mini">Add documents</button></form>` : ""}`;
+  }
+  async function moreDocsAdd(form, kind, packageId) {
+    const files = [...form.file.files];
+    if (!files.length) return;
+    const btn = form.querySelector("button");
+    btn.disabled = true; btn.textContent = "Adding…";
+    let ok = 0;
+    for (const f of files) {
+      try { await (kind === "hp" ? Api.program.hpAttachDoc : Api.program.tpaAttachDoc)(packageId, "MORE_" + form.kind.value, f); ok++; }
+      catch (e) { UI.toast(`${f.name}: ${e.message}`, { kind: "warn", duration: 8000 }); }
+    }
+    if (ok) UI.toast(`${plural(ok, "document")} added`);
+    (kind === "hp" ? hpPackageBox : tpaPackageBox)(packageId);
   }
 
   async function hpSlotUpload(packageId, slot, input) {
@@ -7328,15 +8943,29 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
 
   async function hpFileFn(form) {
     const out = document.getElementById("hp-file-result");
+    const btn = form.querySelector("button");
+    out.innerHTML = "";
+    const packetHost = document.getElementById("hp-packet");
+    const packetProblems = packetHost && PacketForm.touched(packetHost) ? PacketForm.read(packetHost).problems : [];
+    if (packetProblems.length) { fileAlert(form, out, "This dispute wasn't filed.", "The filing packet isn't complete:", packetProblems); return; }
+    const packet = packetFrom("hp-packet", out);
+    if (packet === false) return;
+    if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = "Filing…"; }
     try {
       const r = await Api.program.hpIntake({
+        packet: packet || undefined,
         party_id: form.party_id.value, package_id: form.package_id ? form.package_id.value : "",
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
         other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_npi: form.other_party_npi.value,
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.party)}</b>. ${r.payment_required ? `Pay its fee to open it: <a href="#/cases/${r.case_id}">Pay now</a>.` : ""}</p>`;
-      form.reset(); hpOnboardingBox();
-    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+      if (window.Telemetry) Telemetry.taskDone("file_dispute", prefillOutcome(form));
+      const pn = document.getElementById("hp-file-prefill"); if (pn) pn.innerHTML = "";
+      form.reset(); packetInit("hp-packet", {}, { partyFixed: "HEALTH_PLAN" }); hpOnboardingBox();
+      out.scrollIntoView({ behavior: "smooth", block: "center" });
+      UI.toast(`Dispute ${r.case_number} filed`);
+    } catch (e) { if (window.Telemetry) Telemetry.taskError("file_dispute", e.message); fileAlert(form, out, "This dispute wasn't filed.", e.message, e.problems); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || "Submit dispute"; } }
   }
 
   async function hpAdminBox() {
@@ -7369,26 +8998,315 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
+  // ── Clients: one list, each client under the provider group it belongs to ──
+  // The roster (group, email, disputes, status), where each client stands (profile, payment method, NPI and
+  // exclusion-list checks; tpa_onboarding) and what it owes (the dashboard), drawn as one row per client.
+  const tpaCl = { rows: [], q: "", show: "", onb: false };
+  const tpaClReady = (c) => c.status === "ACTIVE" && (!tpaCl.onb || ["READY", "DOCS_PENDING"].includes(c.onb && c.onb.onboarding_status));
   async function tpaClientsBox() {
     const box = document.getElementById("tpa-clients");
+    const onb = App.feature("tpa_onboarding");
     try {
-      const r = await Api.program.tpaClients();
+      const [r, o, dash] = await Promise.all([Api.program.tpaClients(),
+        onb ? Api.program.tpaOnboarding().catch(() => ({ clients: [] })) : Promise.resolve({ clients: [] }),
+        Api.program.tpaDashboard().catch(() => ({ cases: [] }))]);
+      if (!window._tpaGroups) await tpaGroupsBox();
+      const st = Object.fromEntries((o.clients || []).map((c) => [c.client_id, c]));
+      const owed = {};
+      for (const x of dash.cases || []) {
+        if (!feePayable(x)) continue;
+        const w = owed[x.client_id] || (owed[x.client_id] = { n: 0, cents: 0 });
+        w.n++; w.cents += Number(x.fee_cents || 0);
+      }
       const cs = r.clients || [];
-      box.innerHTML = cs.length ? `<table class="tbl"><thead><tr><th>Party</th><th>Type</th><th>Email</th><th>Cases</th><th>Status</th><th></th></tr></thead><tbody>
-        ${cs.map((c) => `<tr><td>${esc(c.party_name)}</td><td>${badge(c.party_type)}</td><td>${esc(c.contact_email || "—")}</td>
-          <td>${c.case_count}</td><td>${badge(c.status)}</td>
-          <td><button class="mini" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></td></tr>`).join("")}</tbody></table>` : '<p class="muted">No initiating parties yet — add one above.</p>';
+      tpaCl.rows = cs.map((c) => ({ ...c, onb: st[c.id] || null, owed: owed[c.id] || null }));
+      tpaCl.onb = onb;
+      tpaClientsDraw();
+      fillProviderTypes(document.getElementById("tpa-file-ptype"));
+      // The filing list puts each group's providers under the group's name.
       const sel = document.getElementById("tpa-file-client");
-      if (sel) sel.innerHTML = cs.filter((c) => c.status === "ACTIVE").map((c) => `<option value="${c.id}">${esc(c.party_name)} (${esc(c.party_type)})</option>`).join("");
-    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+      if (sel) {
+        const keep = sel.value;
+        const active = cs.filter((c) => c.status === "ACTIVE");
+        const opt = (c) => `<option value="${c.id}">${esc(c.party_name)} (${esc(c.party_type)})</option>`;
+        const byGroup = new Map();
+        for (const c of active) { const k = c.group_name || ""; if (!byGroup.has(k)) byGroup.set(k, []); byGroup.get(k).push(c); }
+        sel.innerHTML = [...byGroup.entries()].map(([g, list]) => g ? `<optgroup label="${esc(g)}">${list.map(opt).join("")}</optgroup>`
+          : (byGroup.size > 1 ? `<optgroup label="Not in a group">${list.map(opt).join("")}</optgroup>` : list.map(opt).join(""))).join("");
+        if (keep && active.some((c) => c.id === keep)) sel.value = keep;
+      }
+      tpaFileDocsDraw();
+    } catch (e) { if (box) box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  function tpaClientFilter(f) { Object.assign(tpaCl, f); tpaClientsDraw(); }
+  function tpaClientsDraw() {
+    const box = document.getElementById("tpa-clients");
+    if (!box) return;
+    const { rows, q, show, onb } = tpaCl;
+    const nReady = rows.filter(tpaClReady).length;
+    const sum = document.getElementById("tpa-cl-summary");
+    if (sum) sum.textContent = rows.length ? `${plural(rows.length, "client")}${onb ? ` · ${nReady} ready to file` : ""}` : "";
+    tpaTabCount("clients", rows.length && onb ? `${nReady}/${rows.length} ready` : rows.length || "");
+    if (!rows.length) { box.innerHTML = '<p class="muted">No clients yet. Add one, or import a spreadsheet of them below.</p>'; return; }
+    const needle = (q || "").trim().toLowerCase();
+    const match = (c) => (!needle || [c.party_name, c.contact_email, c.group_name].join(" ").toLowerCase().includes(needle))
+      && (!show || (show === "ready" ? tpaClReady(c) : show === "setup" ? c.status === "ACTIVE" && !tpaClReady(c)
+        : show === "owes" ? !!c.owed : show === "suspended" ? c.status !== "ACTIVE" : true));
+    const groups = window._tpaGroups || [];
+    const sections = groups.map((g) => ({ g, list: rows.filter((c) => c.group_id === g.id) }));
+    sections.push({ g: null, list: rows.filter((c) => !c.group_id || !groups.some((g) => g.id === c.group_id)) });
+    const filtering = !!(needle || show);
+    const shown = sections.map((x) => ({ ...x, list: x.list.filter(match) })).filter((x) => x.list.length || (x.g && !filtering));
+    if (!shown.some((x) => x.list.length) && filtering) { box.innerHTML = '<p class="muted">No client matches.</p>'; return; }
+    const cols = onb ? 5 : 4;
+    const groupHead = (g) => `<b>${esc(g.name)}</b>
+      <span class="muted">${[g.tin && "TIN " + esc(g.tin), g.npi && "NPI " + esc(g.npi), g.contact_email && esc(g.contact_email)].filter(Boolean).join(" · ")}</span>
+      ${g.status !== "ACTIVE" ? '<span class="badge">Suspended</span>' : ""}
+      <span class="cl-grp-act"><button class="mini ghost" onclick="Views.tpaGroupRenameFn('${g.id}', '${esc(g.name.replace(/'/g, ""))}')">Rename</button>
+        <button class="mini ghost" onclick="Views.tpaGroupStatusFn('${g.id}','${g.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${g.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></span>`;
+    const setup = (c) => {
+      if (c.status !== "ACTIVE") return '<span class="badge">Suspended</span>';
+      if (!onb) return '<span class="badge s-ck-clear">Active</span>';
+      const o = c.onb || {};
+      const step = (done, label, fn) => done ? `<span class="cl-step">✓ ${label}</span>` : `<button class="mini" onclick="${fn}">Add ${label.toLowerCase()}</button>`;
+      const pill = tpaClReady(c) ? '<span class="badge s-ck-clear">Ready to file</span>'
+        : `<span class="badge ${["NPI_REJECTED", "EXCLUDED"].includes(o.onboarding_status) ? "s-ck-excluded" : "s-ck-review"}">${esc(ONB_STATUS[o.onboarding_status] || "Needs setting up")}</span>`;
+      return `${pill}<div class="cl-steps">${step(o.profile_complete, "Profile", `Views.tpaProfileForm('${c.id}')`)}${step(o.verified_payments > 0, "Payment method", `Views.tpaPaymentForm('${c.id}')`)}</div>`;
+    };
+    const checks = (c) => {
+      const o = c.onb || {}, out = [];
+      if (o.npi) {
+        const m = { VERIFIED: ["ck-clear", "NPI ✓"], NEEDS_REVIEW: ["ck-review", "NPI under review"], REJECTED: ["ck-excluded", "NPI rejected"],
+          UNVERIFIED: ["ck-unavailable", "NPI not checked yet"] }[o.npi_status] || ["", "NPI"];
+        const reg = o.npi_registry_name && o.npi_registry_name !== "(test NPI)" ? ` — registry: ${o.npi_registry_name}` : "";
+        out.push(`<span class="badge s-${m[0]}" title="${esc(`NPI ${o.npi}${reg}`)}">${m[1]}</span>`);
+      }
+      const ex = o.checks && o.checks.EXCLUSION && o.checks.EXCLUSION.status;
+      const e = { CLEAR: ["ck-clear", "Exclusion list ✓"], CLEARED: ["ck-clear", "Exclusion list ✓"], NEEDS_REVIEW: ["ck-review", "Exclusion list: under review"],
+        EXCLUDED: ["ck-excluded", "On the exclusion list"], UNAVAILABLE: ["ck-unavailable", "Exclusion list: not checked yet"] }[ex];
+      if (e) out.push(`<span class="badge s-${e[0]}" title="HHS-OIG List of Excluded Individuals/Entities">${e[1]}</span>`);
+      const note = o.npi_status === "REJECTED" ? `${o.npi_review_note || "Rejected by the review team"} — correct it under Profile`
+        : o.npi_status === "NEEDS_REVIEW" ? "The registry holds this NPI under another name; the review team confirms it before filing"
+        : ex === "EXCLUDED" ? (o.checks.EXCLUSION.note || "") : "";
+      return out.length ? `<div class="cl-chips">${out.join("")}</div>${note ? `<div class="muted cl-note">${esc(note)}</div>` : ""}`
+        : '<span class="muted">After the profile</span>';
+    };
+    const disputes = (c) => `${c.case_count || 0} filed${c.owed ? `<div class="cl-owed"><span class="badge s-ck-review">${c.owed.n} unpaid · ${usdC(c.owed.cents)}</span>
+      <button class="mini" onclick="Views.payClientFn('${c.id}', this)">Pay ${usdC(c.owed.cents)}</button></div>` : ""}`;
+    const groupSel = (c) => groups.length ? `<select class="mini" aria-label="Provider group for ${esc(c.party_name)}" onchange="Views.tpaClientGroupFn('${c.id}', this.value)">
+        <option value="">No group</option>${groups.map((g) => `<option value="${g.id}"${g.id === c.group_id ? " selected" : ""}>${esc(g.name)}</option>`).join("")}</select>` : "";
+    const actions = (c) => `<div class="cl-act">${tpaClReady(c) ? `<button class="mini" onclick="Views.tpaFileFor('${c.id}')">File a dispute</button>` : ""}
+      ${onb ? `<button class="mini ghost" onclick="Views.tpaProfileForm('${c.id}')">Profile</button><button class="mini ghost" onclick="Views.tpaPaymentForm('${c.id}')">Payment</button>` : ""}
+      ${groupSel(c)}
+      <button class="mini ghost" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></div>`;
+    const row = (c) => `<tr class="${c.status !== "ACTIVE" ? "cl-off" : ""}"><td><b>${esc(c.party_name)}</b>
+        <div class="muted">${c.party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"} · ${esc(c.contact_email || "no email")}</div></td>
+      <td>${setup(c)}</td>${onb ? `<td>${checks(c)}</td>` : ""}<td>${disputes(c)}</td><td>${actions(c)}</td></tr>`;
+    box.innerHTML = `<table class="tbl cl-tbl" data-nosearch><thead><tr><th>Client</th><th>Set up</th>${onb ? "<th>Checks</th>" : ""}<th>Disputes</th><th></th></tr></thead>
+      ${shown.map(({ g, list }) => `<tbody>${g || groups.length ? `<tr class="cl-grp"><td colspan="${cols}">${g ? groupHead(g) : "<b>Not in a provider group</b>"}</td></tr>` : ""}
+        ${list.length ? list.map(row).join("") : `<tr><td colspan="${cols}" class="muted">No providers in this group yet: pick the group in a client's row.</td></tr>`}</tbody>`).join("")}</table>`;
+  }
+  async function tpaClientAddOpen() {
+    const gs = (window._tpaGroups || []).filter((g) => g.status === "ACTIVE");
+    const v = await UI.modal({ title: "Add a client", submitLabel: "Add client", fields: [
+      { name: "party_name", label: "Organization name", required: true },
+      { name: "party_type", label: "Type", options: [["PROVIDER", "Provider"], ["HEALTH_PLAN", "Health plan"]], value: "PROVIDER" },
+      { name: "contact_email", label: "Contact email", type: "email" },
+      ...(gs.length ? [{ name: "group_id", label: "Provider group", options: [["", "Not in a group"], ...gs.map((g) => [g.id, g.name])] }] : []),
+    ], body: tpaCl.onb ? "Next, add its profile (NPI, TIN, address) and a payment method; then it's ready to file." : "" });
+    if (!v) return;
+    try {
+      await Api.program.tpaAddClient({ party_name: v.party_name.trim(), party_type: v.party_type, contact_email: v.contact_email.trim(), group_id: v.group_id || "" });
+      UI.toast(`${v.party_name.trim()} added`);
+      if (v.group_id) await tpaGroupsBox();
+      tpaClientsBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function tpaGroupAddOpen() {
+    const v = await UI.modal({ title: "Add a provider group", submitLabel: "Add group",
+      body: "A practice or health system you act for. Put its providers in it from each client's row.", fields: [
+        { name: "name", label: "Group name", required: true, placeholder: "e.g. Coastal Physicians Group" },
+        { name: "tin", label: "Group TIN", placeholder: "optional" },
+        { name: "npi", label: "Group NPI", placeholder: "optional" },
+        { name: "contact_email", label: "Contact email", type: "email", placeholder: "optional" }] });
+    if (!v) return;
+    try {
+      await Api.program.tpaGroupAdd({ name: v.name, tin: v.tin, npi: v.npi, contact_email: v.contact_email });
+      UI.toast("Provider group added");
+      await tpaGroupsBox(); tpaClientsBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  // "File a dispute" on a ready client: the File tab, with the client picked.
+  function tpaFileFor(clientId) {
+    tpaTab("file");
+    const sel = document.getElementById("tpa-file-client");
+    if (sel) { sel.value = clientId; tpaFileDocsReset(); sel.focus(); }
+  }
+
+  // ── Documents for the dispute being filed ──
+  // Its own set, made for it here: six files or one merged PDF, each checked before the dispute is filed (a set
+  // named on a filing must have all six accepted). A set started earlier for the same client and not filed yet
+  // can be used instead.
+  let tpaFileDocs = null; // { id, client, mode, status }
+  function tpaFileDocsReset() {
+    tpaFileDocs = null;
+    const h = document.getElementById("tpa-file-package");
+    if (h) h.value = "";
+    tpaFileDocsDraw();
+  }
+  function tpaFileDocsUse(id, client, mode, status) {
+    tpaFileDocs = { id, client, mode, status };
+    const h = document.getElementById("tpa-file-package");
+    if (h) h.value = id;
+    tpaFileDocsDraw();
+  }
+  async function tpaFileDocsStart(mode) {
+    const client = (document.getElementById("tpa-file-client") || {}).value;
+    if (!client) { UI.toast("Pick the client first.", { kind: "warn" }); return; }
+    try {
+      const r = await Api.program.tpaCreatePackage(client, mode);
+      tpaFileDocsUse(r.package_id, client, mode, "ASSEMBLING");
+      Object.assign(tpaFileDocs, { six: 0, more: 0 });
+      tpaPackageBox(r.package_id);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  function tpaFileDocsDraw() {
+    const box = document.getElementById("tpa-file-docs");
+    if (!box) return;
+    const client = (document.getElementById("tpa-file-client") || {}).value;
+    if (tpaFileDocs && tpaFileDocs.client !== client) {
+      tpaFileDocs = null;
+      const h = document.getElementById("tpa-file-package");
+      if (h) h.value = "";
+    }
+    if (tpaFileDocs) {
+      // Filed with the dispute once every document has been read; a flagged one goes too, for the reviewer.
+      const d = tpaFileDocs, more = d.more || 0, onlyMore = !d.six && more > 0;
+      const ready = d.status === "READY" || onlyMore;
+      const others = more ? ` and ${plural(more, "other document")}` : "";
+      if (ready && d.prefilledFor !== d.id) {
+        d.prefilledFor = d.id;
+        filePrefillFn("tpa", document.getElementById("tpa-file-client")?.form, d.id, true);
+      }
+      box.innerHTML = `<p>${d.mode === "MERGED" ? "The documents as one PDF" : "The documents"}: <span class="badge ${ready ? "s-ck-clear" : "s-ck-review"}">${onlyMore ? "ready to file" : esc(PKG_STATUS[d.status] || d.status)}</span>${more ? ` <span class="muted">+ ${plural(more, "other document")}</span>` : ""}
+          <button type="button" class="mini" onclick="Views.tpaPackageBox('${d.id}')">${ready ? "See or add documents" : "Upload the documents"}</button>
+          <button type="button" class="mini ghost" onclick="Views.filePrefillFn('tpa', document.getElementById('tpa-file-client').form, '${d.id}', false)">Fill in from the documents</button>
+          <button type="button" class="mini ghost" onclick="Views.tpaFileDocsReset()">File without them</button></p>
+        <p class="muted">${ready ? `Every document has been read${others}: they are all filed with this dispute, flagged ones too.`
+          : "The documents are being read — this takes a minute. File once they are, or file without them."}</p>`;
+      return;
+    }
+    const c = (tpaCl.rows || []).find((x) => x.id === client);
+    const started = ((c && c.onb && c.onb.open_packages) || []).filter((pk) => pk.status !== "FILED");
+    box.innerHTML = `<p><button type="button" class="mini" onclick="Views.tpaFileDocsStart('DISCRETE')">Add the documents</button>
+      <button type="button" class="mini" onclick="Views.tpaFileDocsStart('MERGED')">Add them as one merged PDF</button>
+      ${started.length ? `<span class="muted">or use one started earlier:</span> ${started.map((pk) => `<button type="button" class="mini ghost" onclick="Views.tpaFileDocsUse('${pk.id}','${esc(client)}','${pk.mode}','${pk.status}')">${pk.mode === "MERGED" ? "Merged PDF" : "Six files"} — ${esc(PKG_STATUS[pk.status] || pk.status)}</button>`).join(" ")}` : ""}</p>`;
+  }
+
+  // ── TPA employees (tpa_team.go) ──
+  async function tpaTeamBox() {
+    const list = document.getElementById("tpa-team-list"), add = document.getElementById("tpa-team-add");
+    if (!list) return;
+    try {
+      const r = await Api.program.tpaTeam();
+      const team = r.team || [], admin = r.can_manage;
+      const roleCell = (m) => admin && !m.is_me
+        ? `<select class="mini" aria-label="Role for ${esc(m.full_name || m.email)}" onchange="Views.tpaTeamRoleFn('${m.user_sub}', this.value)">
+            <option value="STAFF"${m.team_role === "STAFF" ? " selected" : ""}>Staff</option><option value="ADMIN"${m.team_role === "ADMIN" ? " selected" : ""}>Admin</option></select>`
+        : badge(m.team_role === "ADMIN" ? "Admin" : "Staff");
+      list.innerHTML = team.length ? `<table class="tbl"><thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Role</th><th>Since</th><th></th></tr></thead><tbody>
+        ${team.map((m) => `<tr><td>${esc(m.full_name || "—")}${m.is_me ? ' <span class="muted">(you)</span>' : ""}</td><td>${esc(m.email || "—")}</td>
+          <td class="mono">${esc(m.username || "—")}</td><td>${roleCell(m)}</td><td>${fmtDate(m.linked_at)}</td>
+          <td>${admin && !m.is_me ? `<button class="mini ghost" onclick="Views.tpaTeamRemoveFn('${m.user_sub}', '${esc((m.full_name || m.email || "").replace(/'/g, ""))}')">Remove</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+        : '<p class="muted">No employees yet.</p>';
+      add.innerHTML = admin ? `<h3>Add an employee</h3>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaTeamAddFn(this)">
+          <input name="full_name" placeholder="full name" required />
+          <input name="email" type="email" data-email-check placeholder="work email — sign-in details go here" required />
+          <select name="team_role"><option value="STAFF">Staff</option><option value="ADMIN">Admin</option></select>
+          <button class="mini">Add employee</button></form><div id="tpa-team-msg"></div>`
+        : '<p class="muted">Ask one of your admins to add or remove employees.</p>';
+    } catch (e) { list.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaTeamAddFn(form) {
+    const msg = document.getElementById("tpa-team-msg"), btn = form.querySelector("button");
+    btn.disabled = true;
+    try {
+      const r = await Api.program.tpaTeamAdd({ full_name: form.full_name.value, email: form.email.value, team_role: form.team_role.value });
+      msg.innerHTML = `<p class="ok">Added — ${esc(r.note)}. Their username is <span class="mono">${esc(r.username)}</span>.</p>`;
+      form.reset(); tpaTeamBox();
+    } catch (e) { msg.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+    finally { btn.disabled = false; }
+  }
+
+  async function tpaTeamRoleFn(sub, role) {
+    try { await Api.program.tpaTeamRole(sub, role); UI.toast(role === "ADMIN" ? "Now an admin" : "Now staff"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    tpaTeamBox();
+  }
+
+  async function tpaTeamRemoveFn(sub, name) {
+    if (!confirm(`Remove ${name || "this employee"}? Their login stops working for your organization.`)) return;
+    try { await Api.program.tpaTeamRemove(sub); UI.toast("Employee removed"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    tpaTeamBox();
+  }
+
+  // ── Provider groups: TPA -> groups -> providers ──
+  async function tpaGroupsBox() {
+    const box = document.getElementById("tpa-groups");
+    try {
+      const [r, cl] = await Promise.all([Api.program.tpaGroups(), box ? Api.program.tpaClients().catch(() => ({ clients: [] })) : Promise.resolve({ clients: [] })]);
+      const gs = window._tpaGroups = r.groups || [];
+      const members = (g) => (cl.clients || []).filter((c) => c.group_id === g.id).map((c) => c.party_name);
+      if (box) box.innerHTML = gs.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Group</th><th>TIN</th><th>NPI</th><th>Contact</th><th>Providers</th><th>Disputes</th><th>Status</th><th></th></tr></thead><tbody>
+        ${gs.map((g) => `<tr><td><b>${esc(g.name)}</b>${members(g).length ? `<div class="muted">${members(g).map(esc).join(", ")}</div>` : ""}</td><td class="mono">${esc(g.tin || "—")}</td><td class="mono">${esc(g.npi || "—")}</td>
+          <td>${esc(g.contact_email || "—")}</td><td>${g.provider_count}</td><td>${g.case_count}</td><td>${badge(g.status)}</td>
+          <td><button class="mini" onclick="Views.tpaGroupRenameFn('${g.id}', '${esc(g.name.replace(/'/g, ""))}')">Rename</button>
+            <button class="mini ghost" onclick="Views.tpaGroupStatusFn('${g.id}','${g.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${g.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></td></tr>`).join("")}</tbody></table></div>`
+        : '<p class="muted">No provider groups yet. Add one, then put its providers in it from the Clients tab.</p>';
+      document.querySelectorAll(".tpa-group-select").forEach((sel) => {
+        const keep = sel.value;
+        sel.innerHTML = `<option value="">No provider group</option>` + gs.filter((g) => g.status === "ACTIVE").map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
+        sel.value = keep;
+      });
+    } catch (e) { if (box) box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  async function tpaGroupAddFn(form) {
+    try {
+      await Api.program.tpaGroupAdd({ name: form.name.value, tin: form.tin.value, npi: form.npi.value, contact_email: form.contact_email.value });
+      form.reset(); UI.toast("Provider group added");
+      await tpaGroupsBox(); tpaClientsBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function tpaGroupRenameFn(id, name) {
+    const next = prompt("New name for the provider group", name);
+    if (!next || next.trim() === name) return;
+    try { await Api.program.tpaGroupUpdate(id, { name: next }); await tpaGroupsBox(); tpaClientsBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function tpaGroupStatusFn(id, status) {
+    try { await Api.program.tpaGroupUpdate(id, { status }); await tpaGroupsBox(); tpaClientsBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function tpaClientGroupFn(clientId, groupId) {
+    try { await Api.program.tpaClientGroup(clientId, groupId); UI.toast(groupId ? "Moved to the group" : "Taken out of its group"); await tpaGroupsBox(); tpaClientsBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); tpaClientsBox(); }
   }
 
   async function tpaAddClientFn(form) {
     try {
-      await Api.program.tpaAddClient({ party_name: form.party_name.value, party_type: form.party_type.value, contact_email: form.contact_email.value });
+      await Api.program.tpaAddClient({ party_name: form.party_name.value, party_type: form.party_type.value, contact_email: form.contact_email.value,
+        group_id: form.group_id ? form.group_id.value : "" });
+      if (form.group_id && form.group_id.value) tpaGroupsBox();
       // The readiness board lists clients too: without this the new client
       // only showed up there after a reload, so it couldn't be onboarded.
-      form.reset(); tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
+      form.reset(); tpaClientsBox();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
@@ -7397,27 +9315,121 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     catch (e) { alert(e.message); }
   }
 
+  // The six usual documents, by the name people use. None is required.
+  const SLOT_NAME = { EOB: "EOB (explanation of benefits)", ITEMIZED_BILL: "Itemized bill", PROOF_OF_COVERAGE: "Proof of coverage",
+    OPEN_NEGOTIATION_NOTICE: "Open negotiation notice", OFFER_SUBSTANTIATION: "Offer substantiation", IDRE_ATTESTATION: "Attestation" };
+  // File a dispute filled in from its own document set (org_prefill.go): empty fields only -- never over what the
+  // filer typed -- each marked with the document it came from. The filer checks and files; on filing, each field
+  // kept or changed is counted (telemetry: prefill_accept / prefill_override).
+  const PREFILL_LABEL = { client_id: "client", amount: "amount", other_party_name: "other side", other_party_email: "email for notices",
+    other_party_naic: "NAIC", other_party_npi: "NPI", provider_type: "provider type", in_network: "network" };
+  async function filePrefillFn(kind, form, packageId, auto) {
+    const note = document.getElementById(kind === "hp" ? "hp-file-prefill" : "tpa-file-prefill");
+    if (!form || !packageId) return;
+    let r;
+    try { r = await Api.program.orgPrefill(kind, packageId); } catch (e) { if (!auto) UI.toast(e.message, { kind: "warn" }); return; }
+    const filled = [], skipped = [];
+    for (const [name, v] of Object.entries(r.fields || {})) {
+      const el = form.elements[name];
+      if (!el || !v.value) continue;
+      if (name === "client_id") { // the client is chosen before the documents: only say if they point elsewhere
+        if (el.value && el.value !== v.value) skipped.push(`these documents look like they are for another client (${esc(v.why)})`);
+        continue;
+      }
+      if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === v.value)) continue;
+      if (String(el.value || "").trim() && el.dataset.prefill === undefined) continue; // typed by the filer
+      el.value = v.value;
+      el.dataset.prefill = v.value;
+      el.classList.add("prefilled");
+      el.title = `Filled in from ${v.from}: ${v.why}`;
+      const clear = () => { el.classList.remove("prefilled"); };
+      el.addEventListener("input", clear, { once: true }); el.addEventListener("change", clear, { once: true });
+      filled.push(`<li><b>${esc(PREFILL_LABEL[name] || name)}</b>: ${esc(v.value)} <span class="muted">— ${esc(v.why)}</span></li>`);
+    }
+    if (note) note.innerHTML = filled.length || skipped.length ? `<div class="prefill-note"><b>Filled in from your documents — check before filing.</b>
+        ${filled.length ? `<ul>${filled.join("")}</ul>` : ""}${skipped.map((x) => `<p class="warn-line">${x}</p>`).join("")}</div>`
+      : auto ? "" : `<p class="muted">The documents don't state any of the form's fields${r.documents ? "" : " yet"}.</p>`;
+  }
+  // On filing: what was kept as filled in, and what the filer changed.
+  function prefillOutcome(form) {
+    let kept = 0, changed = 0;
+    form.querySelectorAll("[data-prefill]").forEach((el) => {
+      const same = String(el.value) === el.dataset.prefill;
+      same ? kept++ : changed++;
+      if (window.Telemetry) Telemetry.track(same ? "prefill_accept" : "prefill_override", el.name);
+      delete el.dataset.prefill; el.classList.remove("prefilled");
+    });
+    return { prefilled: kept + changed, kept, changed };
+  }
+
+  // Why a filing was refused, where it can't be missed: a red box under the form (scrolled to), a toast, and the
+  // field it is about outlined until it's changed.
+  const FILE_FIELD_HINTS = [
+    [/e-?mail/i, "other_party_email", "the health plan's email"], [/naic/i, "other_party_naic", "the plan NAIC"],
+    [/minimum|threshold|amount/i, "amount", "the disputed amount"], [/provider type/i, "provider_type", "the provider type"],
+    [/network/i, "in_network", "the network answer"],
+    [/health plan|other.?party|plan name|respondent/i, "other_party_name", "the health plan"],
+    [/contact/i, "contact_name", "the client contact"],
+    [/client|party|npi|tin|profile|payment method|suspended|roster/i, "client_id", "the client"],
+    [/npi|provider/i, "other_party_npi", "the provider's NPI"],
+    [/party|profile|payment method|suspended|roster/i, "party_id", "the party you file for"],
+  ];
+  function fileAlert(form, out, title, msg, problems) {
+    form.querySelectorAll(".field-bad").forEach((el) => { el.classList.remove("field-bad"); el.removeAttribute("aria-invalid"); });
+    const text = [msg, ...(problems || [])].join(" ");
+    const hit = /packet/i.test(text) && !(problems || []).length ? null : FILE_FIELD_HINTS.find(([re, name]) => re.test(text) && form.elements[name]);
+    const field = hit && form.elements[hit[1]];
+    if (field) {
+      field.classList.add("field-bad"); field.setAttribute("aria-invalid", "true");
+      const clear = () => { field.classList.remove("field-bad"); field.removeAttribute("aria-invalid"); };
+      field.addEventListener("input", clear, { once: true }); field.addEventListener("change", clear, { once: true });
+    }
+    const packetBad = /packet/i.test(text);
+    out.innerHTML = `<div class="file-alert" role="alert"><b>${esc(title)}</b>
+      <p>${esc(msg)}</p>${(problems || []).length ? `<ul>${problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${field ? `<p class="muted">Check ${esc(hit[2])} — it's outlined in red above.</p>` : packetBad ? `<p class="muted">Check the filing packet below.</p>` : ""}</div>`;
+    out.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (field) setTimeout(() => field.focus({ preventScroll: true }), 400);
+    UI.toast(`${title} ${msg}`, { kind: "warn", duration: 9000 });
+  }
+
   async function tpaFileFn(form) {
     const out = document.getElementById("tpa-file-result");
+    const btn = form.querySelector("button");
+    out.innerHTML = "";
+    const packetHost = document.getElementById("tpa-packet");
+    const packetProblems = packetHost && PacketForm.touched(packetHost) ? PacketForm.read(packetHost).problems : [];
+    if (packetProblems.length) { fileAlert(form, out, "This dispute wasn't filed.", "The filing packet isn't complete:", packetProblems); return; }
+    const packet = packetFrom("tpa-packet", out);
+    if (packet === false) return;
+    if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = "Filing…"; }
     try {
       const r = await Api.program.tpaIntake({
+        packet: packet || undefined,
         client_id: form.client_id.value, package_id: form.package_id ? form.package_id.value : "",
         contact_name: form.contact_name.value,
         disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
         other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_naic: form.other_party_naic.value,
+        provider_type: form.provider_type ? form.provider_type.value : "", in_network: form.in_network ? form.in_network.value : "",
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? `Pay its fee to open it: <a href="#/cases/${r.case_id}">Pay now</a>.` : ""}</p>`;
+      if (window.Telemetry) Telemetry.taskDone("file_dispute", prefillOutcome(form));
+      const pn = document.getElementById("tpa-file-prefill"); if (pn) pn.innerHTML = "";
       // A filed package leaves the board and the "file with" list.
-      form.reset(); tpaDashBox(); tpaClientsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
-    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+      form.reset(); packetInit("tpa-packet", {}); tpaFileDocsReset(); tpaPkgClose(); tpaDashBox(); tpaClientsBox();
+      out.scrollIntoView({ behavior: "smooth", block: "center" });
+      UI.toast(`Dispute ${r.case_number} filed`);
+    } catch (e) { if (window.Telemetry) Telemetry.taskError("file_dispute", e.message); fileAlert(form, out, "This dispute wasn't filed.", e.message, e.problems); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || "File dispute"; } }
   }
 
   // The TPA's disputes, grouped under the provider (client) they were filed
   // for: each provider opens and closes, shows what it owes, and pays all of
   // its unpaid disputes at once; each dispute can also be paid on its own.
   window._tpaProvOpen = window._tpaProvOpen || {};
-  function tpaCasesHtml(cases, status, q) {
+  function tpaCasesHtml(cases, status, q, pay = "") {
     let shown = cases;
+    if (pay) shown = shown.filter((x) => x.fee_state === pay);
     if (status) shown = shown.filter((x) => x.status === status || x.fee_state === status);
     if (q) shown = shown.filter((x) => (x.client_name || "").toLowerCase().includes(q) || (x.case_number || "").toLowerCase().includes(q));
     if (!shown.length) return '<p class="muted">No disputes match this filter.</p>';
@@ -7441,9 +9453,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
         ${g.rows.map((x) => `<tr>
           <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
-          <td>${badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${x.fee_cents ? usdC(x.fee_cents) : "—"}</td>
+          <td>${x.agency_status && x.status !== "AWAITING_PAYMENT" ? `<span class="badge" title="The dispute's status with the Agency">${esc(x.agency_status)}</span>` : badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${x.fee_cents ? usdC(x.fee_cents) : "—"}</td>
           <td>${feePill(x)}</td><td>${esc(x.filed)}</td>
-          <td class="row-actions">${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
+          <td class="row-actions">${(window._tpaSent || {})[x.case_id] ? `<button class="mini ghost" onclick="Views.sentRecordOpen('tpa', '${x.case_id}', '${esc(x.case_number || "")}')" title="The letters sent to you on this dispute, with their documents">Letters (${window._tpaSent[x.case_id]})</button>` : ""}
+            ${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
             ${x.status === "AWAITING_PAYMENT" && canPay ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}
         </tbody></table></div></details>`;
     }).join("");
@@ -7485,25 +9498,52 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     const status = document.getElementById("tpa-cases-status")?.value || "";
     const q = (document.getElementById("tpa-cases-q")?.value || "").trim().toLowerCase();
     const box = document.getElementById("tpa-cases");
-    if (box) box.innerHTML = tpaCasesHtml(window._tpaCases || [], status, q);
+    if (box) box.innerHTML = tpaCasesHtml(window._tpaCases || [], status, q, window._tpaPay || "");
+  }
+  // The payment switch over the TPA's disputes, each state with its count.
+  function tpaPaySegs() {
+    const cs = window._tpaCases || [];
+    const n = (st) => cs.filter((x) => x.fee_state === st).length;
+    return ListUI.segs("Fee payment", [{ value: "", label: "All", count: cs.length }, { value: "UNPAID", label: "Unpaid", count: n("UNPAID") },
+      { value: "PENDING", label: "Pending", count: n("PENDING") }, { value: "PAID", label: "Paid", count: n("PAID") }, { value: "FAILED", label: "Failed", count: n("FAILED") }]
+      .filter((o) => !o.value || o.count), window._tpaPay || "", "Views.tpaPayFilter");
+  }
+  function tpaPayFilter(st) {
+    window._tpaPay = st;
+    const segs = document.getElementById("tpa-pay-segs");
+    if (segs) segs.innerHTML = tpaPaySegs();
+    tpaCasesFilter();
   }
   async function tpaDashBox(tpaId) {
     const roll = document.getElementById("tpa-rollup"), box = document.getElementById("tpa-cases"),
       filtersBox = document.getElementById("tpa-cases-filters");
     try {
-      const r = await Api.program.tpaDashboard(tpaId);
+      const [r, rec] = await Promise.all([Api.program.tpaDashboard(tpaId),
+        tpaId ? Promise.resolve({}) : Api.program.sentRecord("tpa").catch(() => ({}))]);
       window._tpaCases = r.cases || [];
+      window._tpaSent = {};
+      for (const m of rec.mail || []) window._tpaSent[m.case_id] = (window._tpaSent[m.case_id] || 0) + 1;
       // Editable only on the caller's own org view, not staff oversight of another TPA.
       window._tpaCanEdit = !tpaId;
-      roll.innerHTML = "";
-      const statuses = [...new Set(window._tpaCases.map((x) => x.status))].sort();
-      if (filtersBox) filtersBox.innerHTML = window._tpaCases.length ? `<p>
-        <select id="tpa-cases-status" onchange="Views.tpaCasesFilter()"><option value="">All statuses</option>
-          ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}
-          <optgroup label="Payment"><option value="UNPAID">Unpaid</option><option value="PENDING">Pending</option><option value="FAILED">Failed</option><option value="PAID">Paid</option></optgroup></select>
-        <input id="tpa-cases-q" placeholder="Filter by party or case #…" oninput="Views.tpaCasesFilter()" />
-        ${window._tpaCanEdit ? `<button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {}, this)">Download all documents</button>` : ""}</p>` : "";
-      box.innerHTML = tpaCasesHtml(window._tpaCases, "", "");
+      const cs = window._tpaCases;
+      const by = (st) => cs.filter((x) => x.fee_state === st);
+      const unpaid = cs.filter(feePayable);
+      roll.innerHTML = cs.length ? ListUI.summary([
+        { label: "Disputes", value: cs.length, sub: `for ${new Set(cs.map((x) => x.client_id || x.client_name)).size} client(s)` },
+        { label: "Fees unpaid", value: unpaid.length, sub: unpaid.length ? usdC(unpaid.reduce((n, x) => n + Number(x.fee_cents || 0), 0)) + " to pay" : "nothing owed", tone: unpaid.length ? "warn" : "good" },
+        { label: "Paid", value: by("PAID").length, sub: by("PENDING").length ? `${by("PENDING").length} waiting for the bank` : "fees settled" },
+        { label: "Disputed", value: usdC(cs.reduce((n, x) => n + Number(x.disputed_amount_cents || 0), 0)), sub: "across all your disputes" },
+      ]) : "";
+      window._tpaPay = window._tpaPay || "";
+      const statuses = [...new Set(cs.map((x) => x.status))].sort();
+      if (filtersBox) filtersBox.innerHTML = cs.length ? `<div class="list-bar">
+        <input id="tpa-cases-q" class="pipe-q" placeholder="Search client or case #…" oninput="Views.tpaCasesFilter()" aria-label="Search disputes" />
+        <div id="tpa-pay-segs">${tpaPaySegs()}</div>
+        <select id="tpa-cases-status" onchange="Views.tpaCasesFilter()" aria-label="Case status"><option value="">Any case status</option>
+          ${statuses.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+        <span class="spacer"></span>
+        ${window._tpaCanEdit ? `<button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {}, this)">Download all documents</button>` : ""}</div>` : "";
+      box.innerHTML = tpaCasesHtml(cs, "", "", window._tpaPay);
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -7610,8 +9650,9 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <td>${x.mode ? esc(x.mode === "MERGED" ? "merged PDF" : (x.attached || []).length + " of 6 files") : "—"}</td>
           <td>${x.status === "WAITING_DOCS" ? '<span class="badge s-validating">Checking documents</span>' : '<span class="badge s-rejected">Refused</span>'}${(x.errors || []).length ? `<br><span class="muted">${(x.errors || []).map(esc).join("<br>")}</span>` : ""}</td></tr>`).join("")}
         </tbody></table>`;
+      if (window.Telemetry) Telemetry.taskDone("bulk_filing", { rows: (r.rows || []).length, refused: r.refused || 0 });
       form.reset(); await tpaBdBatchesBox(); tpaBdToggle(r.batch_id, true);
-    } catch (e) { out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+    } catch (e) { if (window.Telemetry) Telemetry.taskError("bulk_filing", e.message); out.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
     finally { btn.disabled = false; }
   }
   async function tpaBdBatchesBox() {
@@ -7684,12 +9725,157 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       + (x.fee_state === "UNPAID" && x.fee_checkout_open ? '<div class="muted fee-note">A checkout is open</div>' : "");
   }
   // Every Pay button: the server works out the amount and opens Stripe's checkout.
+  // ---- Claims from a CSV (the dispute's Billing tab) ----
+  // Columns are matched by name, in any order, the way people head them ("Claim #", "Amount billed", "DOS"...).
+  const CLAIM_COLS = [
+    ["claim_number", ["claimnumber", "claim", "claimno", "claimid"]],
+    ["cpt", ["cpt", "cptcode", "code", "procedurecode", "hcpcs", "cpthcpcs"]],
+    ["billed", ["billed", "amountbilled", "billedamount", "charges", "billedcharges", "totalcharges"]],
+    ["paid", ["paid", "amountpaid", "paidamount", "allowed", "amountallowed"]],
+    ["disputed", ["disputed", "amountindispute", "disputedamount", "indispute", "amountdisputed"]],
+    ["patient_first_name", ["patientfirstname", "firstname", "memberfirstname"]],
+    ["patient_last_name", ["patientlastname", "lastname", "memberlastname"]],
+    ["patient_name", ["patientname", "membername", "patient", "member"]],
+    ["type_of_service", ["typeofservice", "servicetype"]],
+    ["denial_reason", ["denialreason", "reasonfordenial"]],
+    ["date_of_service", ["dateofservice", "dos", "servicedate", "datesofservice"]],
+    ["date_claim_submitted", ["dateclaimsubmitted", "datesubmitted", "submitted", "submissiondate"]],
+    ["date_of_denial", ["dateofdenial", "denialdate", "datedenied"]],
+    ["date_of_final_determination", ["dateoffinaldetermination", "finaldeterminationdate", "finaldetermination"]],
+    ["provider_name", ["providername", "provider", "renderingprovider"]],
+    ["facility_name", ["facilityname", "facility"]],
+    ["evidence_location", ["evidencelocation", "evidence", "document", "source"]],
+  ];
+  const CLAIM_TEMPLATE_HEAD = ["claim_number", "cpt", "billed", "paid", "disputed", "patient_first_name", "patient_last_name",
+    "type_of_service", "denial_reason", "date_of_service", "date_claim_submitted", "date_of_denial",
+    "date_of_final_determination", "provider_name", "facility_name", "evidence_location"];
+  function csvRows(text) {
+    const rows = []; let row = [], cell = "", q = false;
+    text = text.replace(/^\uFEFF/, "");
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (q) {
+        if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ",") { row.push(cell); cell = ""; }
+      else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+      else cell += ch;
+    }
+    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+    return rows.filter((r) => r.some((c) => c.trim() !== ""));
+  }
+  const csvDate = (v) => {
+    v = (v || "").trim();
+    if (!v) return "";
+    let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+    m = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})$/);
+    if (m) { const y = m[3].length === 2 ? "20" + m[3] : m[3]; return `${y}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`; }
+    return null;
+  };
+  const csvCents = (v) => {
+    v = (v || "").trim().replace(/[$,\s]/g, "");
+    if (!v) return 0;
+    if (/^\(.*\)$/.test(v)) return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) : null;
+  };
+  function claimsFromCsv(text) {
+    const rows = csvRows(text);
+    if (rows.length < 2) return { error: "The file needs a header row and at least one claim." };
+    const norm = (h) => h.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const idx = {};
+    rows[0].forEach((h, i) => { const n = norm(h); const hit = CLAIM_COLS.find(([, names]) => names.includes(n)); if (hit && idx[hit[0]] == null) idx[hit[0]] = i; });
+    if (idx.claim_number == null) return { error: "No claim number column found — head it “claim_number” (see the CSV template)." };
+    const unknown = rows[0].filter((h) => h.trim() && !CLAIM_COLS.some(([, names]) => names.includes(norm(h))));
+    const out = [], problems = [];
+    rows.slice(1).forEach((r, n) => {
+      const get = (k) => (idx[k] == null ? "" : (r[idx[k]] || "").trim());
+      const line = n + 2, num = get("claim_number");
+      if (!num) { problems.push(`Row ${line}: no claim number — skipped`); return; }
+      const c = { claim_number: num, cpt: get("cpt"), type_of_service: get("type_of_service"), denial_reason: get("denial_reason"),
+        provider_name: get("provider_name"), facility_name: get("facility_name"), evidence_location: get("evidence_location"),
+        patient_first_name: get("patient_first_name"), patient_last_name: get("patient_last_name") };
+      if (!c.patient_first_name && !c.patient_last_name && get("patient_name")) {
+        const parts = get("patient_name").split(/\s+/);
+        c.patient_last_name = parts.length > 1 ? parts.pop() : ""; c.patient_first_name = parts.join(" ");
+      }
+      for (const [k, key] of [["billed", "billed_cents"], ["paid", "paid_cents"], ["disputed", "disputed_cents"]]) {
+        const v = csvCents(get(k));
+        if (v === null) problems.push(`Row ${line} (${num}): “${get(k)}” isn't an amount`); else c[key] = v;
+      }
+      for (const k of ["date_of_service", "date_claim_submitted", "date_of_denial", "date_of_final_determination"]) {
+        const v = csvDate(get(k));
+        if (v === null) problems.push(`Row ${line} (${num}): “${get(k)}” isn't a date (use MM/DD/YYYY or YYYY-MM-DD)`); else c[k] = v;
+      }
+      out.push(c);
+    });
+    return { claims: out, problems, unknown };
+  }
+  async function claimsCsvUpload(caseId, input) {
+    const file = input.files && input.files[0];
+    input.value = "";
+    if (!file) return;
+    const parsed = claimsFromCsv(await file.text());
+    if (parsed.error) { UI.toast(parsed.error, { kind: "warn", duration: 9000 }); return; }
+    const { claims, problems, unknown } = parsed;
+    if (!claims.length) { UI.toast("No claims found in the file.", { kind: "warn" }); return; }
+    const usd = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+    const preview = claims.slice(0, 8).map((c) => `<tr><td class="mono">${esc(c.claim_number)}</td><td>${esc(c.cpt || "—")}</td>
+      <td>${esc([c.patient_first_name, c.patient_last_name].filter(Boolean).join(" ") || "—")}</td><td>${esc(c.date_of_service || "—")}</td>
+      <td class="num">${usd(c.billed_cents || 0)}</td><td class="num">${usd(c.paid_cents || 0)}</td></tr>`).join("");
+    const total = claims.reduce((n, c) => n + (c.billed_cents || 0), 0);
+    const ok = await UI.modal({ title: `Import ${claims.length} claim${claims.length === 1 ? "" : "s"}`, wide: true,
+      submitLabel: problems.length ? "Import the rest" : "Import claims",
+      body: `From <b>${esc(file.name)}</b> — ${usd(total)} billed in all.
+        <div class="tbl-scroll"><table class="tbl" data-nosearch><thead><tr><th>Claim #</th><th>CPT</th><th>Patient</th><th>Date of service</th><th class="num">Billed</th><th class="num">Paid</th></tr></thead>
+        <tbody>${preview}</tbody></table></div>${claims.length > 8 ? `<p class="muted">…and ${claims.length - 8} more.</p>` : ""}
+        ${problems.length ? `<p class="warn-line">${problems.length} problem${problems.length === 1 ? "" : "s"} — the cells named are left blank:</p><ul class="muted">${problems.slice(0, 12).map((x) => `<li>${esc(x)}</li>`).join("")}${problems.length > 12 ? `<li>…${problems.length - 12} more</li>` : ""}</ul>` : ""}
+        ${unknown.length ? `<p class="muted">Columns not used: ${unknown.map(esc).join(", ")}.</p>` : ""}` });
+    if (ok === null) return;
+    try {
+      const r = await Api.program.importClaims(caseId, claims);
+      const vc = r.volume_check;
+      const said = `${r.added ?? r.imported} added${r.updated ? `, ${r.updated} updated` : ""}`;
+      if (vc && vc.large_volume && (vc.violations || []).length) UI.toast(`${said} — large-volume policy: ${vc.violations.join("; ")}`, { kind: "warn", sticky: true });
+      else UI.toast(`Claims imported: ${said}`);
+      App.rerender();
+    } catch (e) {
+      const msg = e.details ? `${esc(e.message)}<br>${e.details.map(esc).join("<br>")}` : esc(e.message);
+      UI.toast(msg, { kind: "warn", sticky: true });
+    }
+  }
+  function claimsCsvTemplate() {
+    const rows = [CLAIM_TEMPLATE_HEAD,
+      ["CLAIM-001", "99285", "1980.00", "0.00", "1980.00", "Ann", "Lee", "Professional", "Not medically necessary", "08/14/2026",
+        "08/20/2026", "09/15/2026", "10/01/2026", "Gulf Coast Clinic", "", "UB-04 page 2"]];
+    const csv = rows.map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(",")).join("\r\n") + "\r\n";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = "claims-template.csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
   async function payGo(req, btn) {
     if (btn) btn.disabled = true;
     try { window.location.assign((await req).checkout_url); }
     catch (e) { if (btn) btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
   }
-  const payDisputeFn = (kind, caseId, btn, from) => kind === "tpa" ? tpaPayDialog({ case_id: caseId }, btn, from) : payGo(Api.program.payDispute(kind, caseId, from), btn);
+  // How a fee is paid on Stripe's page: a card adds the credit card transaction fee, a bank account doesn't.
+  async function payWay(amount, cardFee) {
+    const known = amount != null;
+    const v = await UI.modal({ title: "How would you like to pay?", submitLabel: "Continue to payment",
+      fields: [{ name: "method", label: "Pay with", required: true, value: "card", options: [
+        ["card", known ? `Card — ${usdC(amount + (cardFee || 0))}${cardFee ? ` (includes the ${usdC(cardFee)} credit card transaction fee)` : ""}` : "Card — adds the credit card transaction fee"],
+        ["bank", known ? `Bank account (ACH) — ${usdC(amount)}, no card fee; clears in 3–5 business days` : "Bank account (ACH) — no card fee; clears in 3–5 business days"]] }] });
+    return v ? v.method : null;
+  }
+  const payDisputeFn = async (kind, caseId, btn, from) => {
+    if (kind === "tpa") return tpaPayDialog({ case_id: caseId }, btn, from);
+    const method = await payWay();
+    if (method) payGo(Api.program.payDispute(kind, caseId, from, { method }), btn);
+  };
   const payClientFn = (clientId, btn) => tpaPayDialog({ client_id: clientId }, btn);
 
   // ---- A TPA pays: it chooses each time who pays (tpa_saved_payments.go) ----
@@ -7743,12 +9929,23 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           : `<span class="muted">Nothing saved yet.</span> <button type="button" class="mini" onclick="Views.tpaMethodAdd('')">Add a card or bank account</button>`}</div>
         <label class="pay-opt"><input type="radio" name="source" value="CHECKOUT" ${!clientsReady && !ownReady.length ? "checked" : ""} />
           <span><b>Card or bank account on Stripe's page</b><span class="muted"> — enter it now, nothing is saved</span></span></label>
-        <p class="muted">A bank account (ACH debit) takes 3–5 business days to clear; the disputes open when it does. A card opens them straight away.</p>
-        <div class="modal-f"><button type="button" class="btn-secondary m-cancel">Cancel</button><button type="submit" class="btn-primary">Pay ${usdC(o.amount_cents)}</button></div>
+        <div class="pay-sub" data-for="CHECKOUT">
+          <label class="pay-opt"><input type="radio" name="method" value="card" checked /> <span>Card — <b>${usdC(o.amount_cents + (o.card_fee_cents || 0))}</b>${o.card_fee_cents ? ` <span class="muted">(includes ${usdC(o.card_fee_cents)} in credit card transaction fees)</span>` : ""}</span></label>
+          <label class="pay-opt"><input type="radio" name="method" value="bank" /> <span>Bank account (ACH) — <b>${usdC(o.amount_cents)}</b> <span class="muted">no card fee</span></span></label></div>
+        <p class="muted">${o.card_fee_cents ? `Paying by card adds the credit card transaction fee to each dispute's fee (${usdC(o.card_fee_cents)} in all here); a bank account or check pays the fee alone. ` : ""}A bank account (ACH debit) takes 3–5 business days to clear; the disputes open when it does. A card opens them straight away.</p>
+        <div class="modal-f"><button type="button" class="btn-secondary m-cancel">Cancel</button><button type="submit" class="btn-primary">Pay</button></div>
       </form>`);
     const form = scrim.querySelector("form");
+    // What the button pays: by card on Stripe's page, the fees and their card fees; a saved card adds them too.
+    const payLabel = () => {
+      const v = (form.querySelector("input[name=source]:checked") || {}).value;
+      const card = (form.querySelector("input[name=method]:checked") || {}).value !== "bank";
+      if (v === "CHECKOUT") return `Pay ${usdC(o.amount_cents + (card ? o.card_fee_cents || 0 : 0))}`;
+      return `Pay ${usdC(o.amount_cents)}${o.card_fee_cents ? " + card fees if by card" : ""}`;
+    };
     const sync = () => { const v = (form.querySelector("input[name=source]:checked") || {}).value;
-      form.querySelectorAll(".pay-sub").forEach((d) => { d.classList.toggle("dim", d.dataset.for !== v); }); };
+      form.querySelectorAll(".pay-sub").forEach((d) => { d.classList.toggle("dim", d.dataset.for !== v); });
+      form.querySelector("button[type=submit]").textContent = payLabel(); };
     form.addEventListener("change", sync); sync();
     form.querySelector("input[name=source]:checked")?.focus();
     form.onsubmit = async (e) => {
@@ -7756,6 +9953,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       const source = (form.querySelector("input[name=source]:checked") || {}).value;
       if (!source) return;
       const body = { source };
+      if (source === "CHECKOUT") body.method = (form.querySelector("input[name=method]:checked") || {}).value || "card";
       if (source === "TPA") body.payment_method_id = form.own.value;
       if (source === "CLIENT") { body.client_methods = {}; form.querySelectorAll("select[name^=cm-]").forEach((s) => { body.client_methods[s.name.slice(3)] = s.value; }); }
       const sbtn = form.querySelector("button[type=submit]"); sbtn.disabled = true; sbtn.textContent = "Paying…";
@@ -7765,7 +9963,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         const r = await call;
         if (r.checkout_url) { window.location.assign(r.checkout_url); return; }
         close(); tpaRunWatch(r);
-      } catch (err) { sbtn.disabled = false; sbtn.textContent = `Pay ${usdC(o.amount_cents)}`; UI.toast(err.message, { kind: "warn", duration: 8000 }); }
+      } catch (err) { sbtn.disabled = false; sbtn.textContent = payLabel(); UI.toast(err.message, { kind: "warn", duration: 8000 }); }
     };
   }
   // A saved-method payment as it goes: each charge, until all have an outcome.
@@ -7828,7 +10026,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       tpaOwnMethodsBox(); if (App.feature("tpa_onboarding")) tpaOnboardingBox();
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
-  const hpFeesPay = (btn) => payGo(Api.program.hpFeesCheckout(), btn);
+  async function hpFeesPay(btn) {
+    let f = {};
+    try { f = await Api.program.hpFees(); } catch { /* amounts unknown: the choice still says what a card adds */ }
+    const method = await payWay(f.amount_cents, f.card_fee_cents);
+    if (method) payGo(Api.program.hpFeesCheckout({ method }), btn);
+  }
   // Back from Stripe (?paid=1&g=<checkout>) or cancelled at it (?cancelled=<checkout>).
   async function feeReturn(kind, refresh) {
     const qs = new URLSearchParams(location.hash.split("?")[1] || "");
@@ -7883,8 +10086,8 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
         .filter((c) => c.status === "ACTIVE" && ["READY", "DOCS_PENDING"].includes(c.onboarding_status));
       if (!cs.length) { UI.toast("No client is ready yet: finish a client's profile and payment method in the Clients tab first.", { kind: "warn" }); return; }
       const q = (v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
-      const csv = "dispute_ref,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes\n" +
-        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.party_name), "", "", "", "", "", ""].join(",")).join("\n") + "\n";
+      const csv = "dispute_ref,provider_group,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes,provider_type,in_network\n" +
+        cs.map((c, i) => [`CLAIM-${String(i + 1).padStart(3, "0")}`, q(c.provider_group || ""), q(c.party_name), "", "", "", "", "", "", "", ""].join(",")).join("\n") + "\n";
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
       a.download = "disputes.csv"; document.body.appendChild(a); a.click(); a.remove();
@@ -7892,6 +10095,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       UI.toast(`disputes.csv with ${cs.length} ready client${cs.length === 1 ? "" : "s"} downloaded — add amounts, one row per dispute.`);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
     finally { btn.disabled = false; }
+  }
+  async function tpaBdSample(layout, btn) {
+    await UI.run(btn, async () => {
+      try { await Api.program.tpaBulkSample(layout); UI.toast("Sample ZIP downloaded — see README.txt inside"); }
+      catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    }, "Preparing…");
   }
   const tpaBdPay = (batchId, btn) => tpaPayDialog({ batch_id: batchId }, btn);
   // Eligibility as decided by the Reviewer (eligibility_reviews), in words.
@@ -7937,7 +10146,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <button class="mini" onclick="Views.tpaBdReport('${batchId}')">Refresh</button></p>
         <div class="bd-wrap"><table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Against</th><th>Amount</th><th>Documents</th><th>Eligibility</th><th>Status</th><th>Fee</th><th>Case</th></tr></thead><tbody>
         ${items.map((x, n) => `<tr class="bd-row" tabindex="0" onclick="Views.tpaBdItem('${batchId}',${n})" onkeydown="if(event.key==='Enter')Views.tpaBdItem('${batchId}',${n})">
-          <td>${x.row_no}</td><td>${esc(String(x.dispute_ref).replace(/ \(row \d+\)$/, ""))}</td><td>${esc(x.party || "—")}</td><td>${esc(x.other_party || "—")}</td>
+          <td>${x.row_no}</td><td>${esc(String(x.dispute_ref).replace(/ \(row \d+\)$/, ""))}</td><td>${esc(x.party || "—")}${x.provider_group ? `<br><span class="muted">${esc(x.provider_group)}</span>` : ""}</td><td>${esc(x.other_party || "—")}</td>
           <td>${x.disputed_amount_cents ? usdC(x.disputed_amount_cents) : "—"}</td>
           <td>${docs(x)}</td><td>${eligBadge(x)}</td>
           <td>${bdStatus(x)}${x.status === "ERROR" && x.error ? `<br><span class="muted">${esc(x.error)}</span>` : ""}</td>
@@ -7973,7 +10182,10 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     ["CLEARER_COPY", "Clearer copy needed"], ["RFI", "Request for information"], ["OTHER", "Other"]];
   const DOCREQ_STATUS = { OPEN: ["needs-review", "Waiting for documents"], SUBMITTED: ["validating", "Documents received"],
     COMPLETE: ["filed", "Complete"], CANCELLED: ["", "Withdrawn"] };
-  const docReqBadge = (x) => { const [c, t] = DOCREQ_STATUS[x.status] || ["", x.status]; return `<span class="badge s-${c}">${t}</span>` + (x.overdue ? ' <span class="badge s-rejected">Overdue</span>' : ""); };
+  // A request answered with a yes or no (permission, more time) waits for an answer, not documents.
+  const docReqBadge = (x) => { const [c, t0] = DOCREQ_STATUS[x.status] || ["", x.status];
+    const t = x.status === "OPEN" && (x.reason === "PERMISSION" || x.reason === "EXTENSION") ? "Waiting for an answer"
+      : x.status === "SUBMITTED" && x.reason === "EXTENSION" ? "Answered" : t0; return `<span class="badge s-${c}">${t}</span>` + (x.overdue ? ' <span class="badge s-rejected">Overdue</span>' : ""); };
   const docReqItems = (x) => (x.items || []).length ? `<ul class="docreq-items">${x.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : "";
   const docReqFiles = (x) => (x.files || []).length ? `<div class="muted">Received: ${x.files.map((f) => esc(f.filename)).join(", ")}</div>` : "";
   const docReqCanAsk = () => can("CASE_MANAGER", "PM", "ARBITRATOR", "ATTORNEY", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
@@ -8045,7 +10257,21 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <div class="muted">${esc(x.filer || "")}${x.other_party ? " · against " + esc(x.other_party) : ""}</div>
           ${docReqItems(x)}${x.message ? `<p>${esc(x.message)}</p>` : ""}
           ${(x.files || []).length ? `<div><b>Uploaded:</b> ${x.files.map((f) => esc(f.filename)).join(", ")}</div>` : ""}
-          ${x.status === "OPEN" ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.docReqUploadFn(this, '${kind}', '${x.id}', '${boxId}')">
+          ${x.status === "OPEN" && x.reason === "PERMISSION" ? `<div class="docreq-perm">
+              <p><b>Step: Provider submits authorization/permission</b> — within 15 calendar days · due ${esc(fmtDate(x.due_date))} ${countdown(x.due_date)}</p>
+              <form class="inline-form" onsubmit="event.preventDefault(); Views.docReqUploadFn(this, '${kind}', '${x.id}', '${boxId}')">
+                <input type="file" name="file" multiple required aria-label="Signed authorization (optional)"><button class="ghost">Upload a signed authorization (optional)</button></form>
+              <form class="inline-form" onsubmit="event.preventDefault()">
+                <textarea name="note" rows="2" placeholder="A note for the reviewer (optional)"></textarea>
+                <button type="button" class="primary" onclick="Views.docReqPermissionFn(this.form, '${kind}', '${x.id}', '${boxId}', 'PROCEED')">Give permission to proceed</button>
+                <button type="button" class="btn-secondary" onclick="Views.docReqPermissionFn(this.form, '${kind}', '${x.id}', '${boxId}', 'DECLINE')">Do not proceed</button></form></div>`
+          : x.status === "OPEN" && x.reason === "EXTENSION" ? `<div class="docreq-perm">
+              <p><b>The review team asks for more time.</b> Answer by ${esc(fmtDate(x.due_date))} ${countdown(x.due_date)}</p>
+              <form class="inline-form" onsubmit="event.preventDefault()">
+                <textarea name="note" rows="2" placeholder="A note for the review team (optional)"></textarea>
+                <button type="button" class="primary" onclick="Views.docReqExtensionFn(this.form, '${kind}', '${x.id}', '${boxId}', 'AGREE')">Agree to the extra time</button>
+                <button type="button" class="btn-secondary" onclick="Views.docReqExtensionFn(this.form, '${kind}', '${x.id}', '${boxId}', 'DECLINE')">Decline</button></form></div>`
+          : x.status === "OPEN" ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.docReqUploadFn(this, '${kind}', '${x.id}', '${boxId}')">
               <input type="file" name="file" multiple required aria-label="Choose files"><button>Upload</button></form>
             <form class="inline-form" onsubmit="event.preventDefault(); Views.docReqSubmitFn(this, '${kind}', '${x.id}', '${boxId}')">
               <textarea name="note" rows="2" placeholder="A note for the reviewer (optional)"></textarea>
@@ -8062,10 +10288,31 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       orgDocReqBox(boxId, kind);
     } catch (e) { btn.disabled = false; UI.toast(e.message, { kind: "warn" }); }
   }
+  async function docReqPermissionFn(form, kind, reqId, boxId, decision) {
+    const yes = decision === "PROCEED";
+    if (!(await UI.confirm(yes ? "Give permission to proceed?" : "Decline to proceed?", yes
+      ? "The full review goes ahead at the estimated cost, and the health plan is notified of the dispute."
+      : "The dispute will not go to full review: it is dismissed and closed, and no invoice is generated.", yes ? "Give permission" : "Do not proceed", !yes))) return;
+    try {
+      await Api.program.orgDocRequestSubmit(kind, reqId, form.note.value.trim(), decision);
+      UI.toast(yes ? "Permission given — the review team is told" : "Recorded: you do not wish to proceed"); orgDocReqBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function docReqExtensionFn(form, kind, reqId, boxId, decision) {
+    const yes = decision === "AGREE";
+    if (!(await UI.confirm(yes ? "Agree to the extra time?" : "Decline the extra time?", yes
+      ? "The deadline moves by the days asked for, and the review team is told."
+      : "The deadline stays as it is, and the review team is told.", yes ? "Agree" : "Decline", !yes))) return;
+    try {
+      await Api.program.orgDocRequestSubmit(kind, reqId, form.note.value.trim(), decision);
+      UI.toast(yes ? "Agreed — the deadline is extended" : "Declined — the review team is told"); orgDocReqBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   async function docReqSubmitFn(form, kind, reqId, boxId) {
     if (!(await UI.confirm("Send these documents?", "The reviewer is told at once. You can't add to this request afterwards.", "Send"))) return;
     try {
       await Api.program.orgDocRequestSubmit(kind, reqId, form.note.value.trim());
+      if (window.Telemetry) Telemetry.taskDone("answer_document_request");
       UI.toast("Documents sent to the reviewer"); orgDocReqBox(boxId, kind);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
@@ -8076,6 +10323,18 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     if (!box) return;
     try {
       const open = ((await Api.program.orgDocRequests(kind)).requests || []).filter((x) => x.case_id === caseId && x.status === "OPEN");
+      const perm = open.find((x) => x.reason === "PERMISSION");
+      const ext = open.find((x) => x.reason === "EXTENSION");
+      if (ext && !perm) {
+        box.innerHTML = `<div class="case-lock" role="status"><b>The review team asks for more time.</b> ${esc((ext.items || [])[0] || "")} — answer by ${esc(fmtDate(ext.due_date))} ${countdown(ext.due_date)}
+          <a class="button mini" href="#/document-requests">Answer it</a></div>`;
+        return;
+      }
+      if (perm) {
+        box.innerHTML = `<div class="case-lock" role="status"><b>Your permission to proceed is needed.</b> ${esc((perm.items || [])[0] || "")} — due ${esc(fmtDate(perm.due_date))} ${countdown(perm.due_date)}
+          <a class="button mini" href="#/document-requests">Answer it</a></div>`;
+        return;
+      }
       box.innerHTML = open.length ? `<div class="case-lock" role="status"><b>Documents requested.</b> The review team needs ${open.length === 1 ? "a document" : open.length + " sets of documents"} for this dispute (due ${esc(open[0].due_date)}).
         <a class="button mini" href="#/document-requests">Upload them</a></div>` : "";
     } catch { box.innerHTML = ""; }
@@ -8097,7 +10356,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <input name="q" placeholder="Search: dispute, action" aria-label="Search your activity">
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('my-audit', 'mine')"> Include page views</label>
           <button>Search</button></form>
-        <div id="my-audit"><p class="muted">Loading…</p></div></div>`;
+        <div id="my-audit" data-nosearch><p class="muted">Loading…</p></div></div>`;
   }
   // The sidebar's Audit log for a TPA or plan account: its organization's trail.
   function orgAuditPage() {
@@ -8113,7 +10372,7 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
           <label class="muted"><input type="checkbox" name="mine" onchange="Views.orgAuditBox('org-audit', '${kind}')"> Only my actions</label>
           <label class="muted"><input type="checkbox" name="views" onchange="Views.orgAuditBox('org-audit', '${kind}')"> Include page views</label>
           <button>Search</button></form>
-        <div id="org-audit"><p class="muted">Loading…</p></div></div>`;
+        <div id="org-audit" data-nosearch><p class="muted">Loading…</p></div></div>`;
   }
   // An organization's own audit trail (orgaudit.go): the TPA or plan page's "Audit log" tab.
   async function orgAuditBox(boxId, kind) {
@@ -8143,19 +10402,36 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
     const box = document.getElementById(`${k}-rsp-list`);
     if (!box) return;
     try {
-      const rows = (await Api.program.respondList(k)).cases || [];
-      const waiting = rows.filter((x) => x.response_status === "AWAITING").length;
+      const all = (await Api.program.respondList(k)).cases || [];
+      const waiting = all.filter((x) => x.response_status === "AWAITING").length;
       if (k === "hp") hpTabCount("against", waiting || "");
-      box.innerHTML = rows.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Filed by</th>${k === "tpa" ? "<th>Your client</th>" : ""}<th>Disputed</th><th>Response due</th><th>Status</th><th></th></tr></thead><tbody>
+      const dueSoon = all.filter((x) => x.response_status === "AWAITING" && x.response_due
+        && (new Date(x.response_due_at || x.response_due) - Date.now()) / 864e5 <= 3).length;
+      const st = respondListBox.filter[k] || "";
+      const rows = st ? all.filter((x) => (x.response_status || "") === st) : all;
+      const count = (v) => all.filter((x) => (x.response_status || "") === v).length;
+      const head = ListUI.summary([
+          { label: "Against you", value: all.length, sub: usdC(all.reduce((n, x) => n + Number(x.disputed_amount_cents || 0), 0)) + " disputed" },
+          { label: "Waiting for you", value: waiting, sub: waiting ? "send your response" : "nothing waiting", tone: waiting ? "warn" : "good" },
+          { label: "Due within 3 days", value: dueSoon, sub: "response deadlines", tone: dueSoon ? "bad" : "" },
+          { label: "Responded", value: count("SUBMITTED"), sub: count("OPT_OUT_REQUESTED") ? `${count("OPT_OUT_REQUESTED")} opt-out requested` : "responses sent" },
+        ]) + (all.length ? `<div class="list-bar">${ListUI.segs("Response", [{ value: "", label: "All", count: all.length }, { value: "AWAITING", label: "Waiting for you", count: waiting },
+          { value: "SUBMITTED", label: "Responded", count: count("SUBMITTED") }, { value: "OPT_OUT_REQUESTED", label: "Opt-out requested", count: count("OPT_OUT_REQUESTED") }]
+          .filter((o) => !o.value || o.count), st, `Views.respondFilterFor('${k}')`)}</div>` : "");
+      box.innerHTML = head + (rows.length ? `<table class="tbl"><thead><tr><th>Case</th><th>Filed by</th>${k === "tpa" ? "<th>Your client</th>" : ""}<th>Disputed</th><th>Response due</th><th>Status</th><th></th></tr></thead><tbody>
         ${rows.map((x) => `<tr><td class="mono">${esc(x.case_number)}<br><span class="muted">${esc(x.internal_status || x.status)}</span></td>
           <td>${esc(x.initiating_party || "—")}${x.filed_by ? `<br><span class="muted">filed by ${esc(x.filed_by)}</span>` : ""}</td>
           ${k === "tpa" ? `<td>${esc(x.your_client || "—")}</td>` : ""}
           <td>${usdC(x.disputed_amount_cents)}</td><td>${x.response_status !== "AWAITING" ? '<span class="muted">—</span>' : x.response_due ? `${fmtDate(x.response_due)}<br>${countdown(x.response_due_at || x.response_due)}` : '<span class="muted">starts when you are notified</span>'}</td>
           <td>${rspBadge(x.response_status)}</td>
           <td><button class="mini" onclick="Views.respondOpen('${k}','${x.case_id}')">${x.response_status === "AWAITING" ? "Respond" : "Open"}</button></td></tr>`).join("")}</tbody></table>`
-        : `<p class="muted">No disputes against you right now. When the review team finds a dispute against you eligible, it appears here with its response deadline, and you are emailed.</p>`;
+        : all.length ? `<p class="muted">No disputes with this response status.</p>`
+        : `<p class="muted">No disputes against you right now. When the review team finds a dispute against you eligible, it appears here with its response deadline, and you are emailed.</p>`);
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
+  respondListBox.filter = {};
+  // The response switch's handler (the switch calls fn('<status>')): k is the portal (hp | tpa).
+  function respondFilterFor(k) { return (st) => { respondListBox.filter[k] = st; respondListBox(k); }; }
   async function respondOpen(k, caseId) {
     const panel = document.getElementById(`${k}-rsp-panel`);
     if (!panel) return;
@@ -8169,9 +10445,12 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
       panel.innerHTML = `<div class="tpa-pkg-head"><h2>${esc(c.case_number)} — ${esc(c.initiating_party || "")} vs ${esc(c.respondent || "")}</h2>
           <button class="mini" onclick="document.getElementById('${k}-rsp-panel').style.display='none'">Close</button></div>
         <p>${rspBadge(c.response_status)} · disputed ${usdC(c.disputed_amount_cents)}${c.disputed_issue ? ` · ${esc(c.disputed_issue)}` : ""}${c.filed_by ? ` · filed by ${esc(c.filed_by)}` : ""}</p>
-        ${open && c.response_due ? `<div class="rsp-due"><div><span class="lbl">Your response is due</span> <b>${fmtDate(c.response_due)}</b> <span class="muted">end of day, Eastern</span></div>
+        ${open && c.response_due ? `<div class="rsp-due"><div><span class="lbl">Health Plan response period — up to 15 calendar days</span></div>
+          <div><span class="lbl">Your response is due</span> <b>${fmtDate(c.response_due)}</b> <span class="muted">end of day, Eastern · a reminder of the due date is sent on the 13th day</span></div>
           <div class="rsp-due-cd">${countdown(c.response_due_at || c.response_due)}</div>
           <div class="muted">${c.response_clock && c.response_clock.source === "recorded" ? "Date set by the review team." : c.response_clock ? `${c.response_clock.days} ${c.response_clock.day_type} days from when you were notified${c.response_clock.started ? ` (${fmtDate(c.response_clock.started)})` : ""}. No response by then becomes a default determination.` : ""}</div></div>` : ""}
+        <details class="rsp-record" open><summary><b>Dispute details</b></summary><div id="${k}-rsp-summary"><p class="muted">Loading…</p></div></details>
+        <details class="rsp-record" open><summary><b>Letters and documents sent to you</b></summary><div id="${k}-rsp-record"><p class="muted">Loading…</p></div></details>
         <div class="rsp-grid"><div><h3>What the filer submitted</h3>${docRows(theirs)}</div>
           <div><h3>Your response documents</h3>${docRows(ours)}
           ${open ? `<form class="inline-form" style="padding-left:0" onsubmit="event.preventDefault(); Views.respondUploadFn(this,'${k}','${caseId}')">
@@ -8182,6 +10461,8 @@ CLAIM-002,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,</pre>
               ${k === "hp" ? `<button type="button" class="mini" onclick="Views.respondOptOutFn('${caseId}')">Ask to opt out</button>` : ""}</div>
             <p class="muted">Submitting counts as your response straight away; the reviewer is told and the case moves on.</p></form>`
           : `<p class="muted">${c.response_status === "SUBMITTED" ? `Submitted ${fmtDate(c.responded_at)}.` : `Opt-out requested ${fmtDate(c.responded_at)} — the attorney decides.`}${c.response_note ? ` “${esc(c.response_note)}”` : ""}</p>`}`;
+      sentRecordInto(document.getElementById(`${k}-rsp-record`), k, caseId);
+      disputeSummaryInto(document.getElementById(`${k}-rsp-summary`), k, caseId);
       panel.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) { panel.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
@@ -8293,6 +10574,35 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
             <button class="mini danger" onclick="Views.npiReviewDecideFn('${kind}','${x.id}','REJECT','${boxId}')">Reject</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
+  async function exclusionReviewsBox(boxId, kind) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const decides = can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    try {
+      const r = await Api.program.verificationReviews();
+      const rows = (r.reviews || []).filter((x) => x.kind === kind);
+      const listNote = r.list_rows ? `<p class="muted">Exclusion list loaded ${fmtDate(r.list_loaded_at)} (${Number(r.list_rows).toLocaleString()} entries); it refreshes weekly.</p>`
+        : '<p class="warn">The exclusion list has not loaded yet, so nothing has been checked against it. It loads automatically; clients are checked once it does.</p>';
+      if (!rows.length) { box.innerHTML = listNote + '<p class="muted">Nothing waiting — no possible matches.</p>'; return; }
+      box.innerHTML = listNote + `<table class="tbl"><thead><tr><th>${kind === "hp" ? "Health plan · party" : "TPA · client"}</th><th>NPI</th><th>The exclusion list holds</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td>${esc(x.organization)}<br><span class="muted">${esc(x.party_name)}</span></td><td>${esc(x.npi || "—")}</td>
+          <td>${(x.matches || []).map((m) => `<b>${esc(m.name)}</b> <span class="badge s-ck-review">matched on ${m.matched_on === "npi" ? "NPI" : "name"}</span>
+            <br><span class="muted">${esc([m.npi && "NPI " + m.npi, m.general, m.specialty, m.state, m.excluded_since && "excluded since " + m.excluded_since.replace(/(\d{4})(\d{2})(\d{2})/, "$2/$3/$1"), m.exclusion_type].filter(Boolean).join(" · "))}</span>`).join("<br>")}
+            <br><a class="muted" href="https://exclusions.oig.hhs.gov/" target="_blank" rel="noopener">search the OIG site</a></td>
+          <td style="white-space:nowrap">${decides ? `<button class="mini" onclick="Views.exclusionDecideFn('${x.review_id}','CLEAR','${boxId}','${kind}')">Clear</button>
+            <button class="mini danger" onclick="Views.exclusionDecideFn('${x.review_id}','EXCLUDED','${boxId}','${kind}')">Excluded</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function exclusionDecideFn(reviewId, decision, boxId, kind) {
+    const q = decision === "CLEAR" ? "How do you know this is a different provider? (for example: different address and specialty)" : "What confirmed it is the same provider? The filer sees this note.";
+    const note = (prompt(q) || "").trim();
+    if (!note) return;
+    try {
+      await Api.program.verificationReviewDecide(reviewId, decision, note);
+      UI.toast(decision === "CLEAR" ? "Cleared — filing can go ahead" : "Marked as excluded — filing stays blocked");
+      exclusionReviewsBox(boxId, kind);
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
   async function npiReviewDecideFn(kind, id, decision, boxId) {
     let note = "";
     if (decision === "REJECT") {
@@ -8338,27 +10648,16 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
   // ── Physical check intake + scan preview ───────────────────────────
+  // Checks are part of Financials now: the old address opens that section.
   function checksView() {
-    if (!can(...finRoles))
-      return `<div class="view-head"><h1>Checks</h1></div><p class="muted">Requires PM or FINANCE.</p>`;
-    afterRender(() => checksBox(""));
-    return `<div class="view-head"><h1>Checks</h1>
-      <span class="muted">photo/scan → MICR + OCR extraction → invoice match → clearing</span></div>
-      <div class="card"><h2>Deposit a check</h2>
-        <form class="inline-form" onsubmit="event.preventDefault(); Views.checkUploadFn(this)">
-          <input name="check" type="file" accept="image/jpeg,image/png,image/tiff,image/webp" required />
-          <button class="mini">Upload & scan</button></form>
-        <div id="check-upload-result"></div></div>
-      <div class="card"><h2>Scanned checks</h2>
-        <p>${["", "RECEIVED", "PROCESSED", "MATCHED", "REVIEW", "CLEARED", "REJECTED"].map((st) =>
-          `<button class="mini" onclick="Views.checksFilter('${st}')">${st || "All"}</button>`).join(" ")}</p>
-        <div id="checks-list"><p class="muted">Loading…</p></div></div>
-      <div class="card" id="check-detail-card" style="display:none"><h2>Scan preview</h2>
-        <div id="check-detail"></div></div>`;
+    location.replace("#/finance");
+    scrollToChecks();
+    return `<p class="muted">Checks are on Financials — opening…</p>`;
   }
 
   async function checksBox(status) {
     const box = document.getElementById("checks-list");
+    if (!box) { App.rerender(); return; } // on Financials: redraw its Checks section
     try {
       const r = await Api.program.checks(status, { limit: 500 });
       const cs = r.checks || [];
@@ -8837,7 +11136,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
         <select name="type" aria-label="Who">
           <option value="">Anyone</option>${Object.entries(SCR_TYPE).map(([k, v]) => `<option value="${k}" ${scrFilter.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       </form>
-      <div id="scr-list"><p class="muted">Loading…</p></div>`;
+      <div id="scr-list" data-nosearch><p class="muted">Loading…</p></div>`;
   }
 
   const SCR_TYPE = { MANUAL: "Other", PARTY: "Provider or health plan", TPA: "Third-party administrator", VENDOR: "Vendor", ARBITRATOR: "Independent reviewer",
@@ -8890,7 +11189,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
 
 
   async function productivity() {
-    if (!can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
+    if (!can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
     try {
       const [m, p] = await Promise.all([Api.cases.telemetryMetrics(30), Api.cases.telemetryPaths(30)]);
       const pct = (x) => x == null ? "—" : Math.round(x * 100) + "%";
@@ -9031,7 +11330,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
   }
 
   async function docReview() {
-    if (!can("CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
+    if (!can("CASE_MANAGER", "PM", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return err(new Error("forbidden"));
     try {
       const r = await Api.cases.docReviewQueue();
       const q = r.queue || [];
@@ -9060,5 +11359,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { npiReviewDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, intakeStepGo, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, productivity, productivityDetail, attentionGo, docReview, docAck, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, myActivityPage, auditMineToggle, orgGo, orgDocsDownload };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

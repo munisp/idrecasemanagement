@@ -31,6 +31,13 @@ type ClockView struct {
 	Cite      string `json:"cite"`               // 45 CFR citation
 	BasisNote string `json:"basis_note"`         // provenance of the start timestamp
 	HardDue   string `json:"hard_due,omitempty"` // contract hard limit, when later than Due (state "late" in between)
+	// PM deadline extensions (deadline_extensions.go): days added to Due/HardDue, and each extension granted.
+	ExtendedDays int              `json:"extended_days,omitempty"`
+	Extensions   []map[string]any `json:"extensions,omitempty"`
+	Extendable   bool             `json:"extendable,omitempty"`
+	// MetOn: the day the step this clock times was done (state met / met_late); the clock no longer counts.
+	MetOn  string `json:"met_on,omitempty"`
+	Target bool   `json:"target,omitempty"` // a working target, not a deadline (state over_target when passed)
 }
 
 // addBusinessDays returns the date n business days after start (weekend-aware;
@@ -193,6 +200,30 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t := sanitizeTenant(tenant)
+	// Bulk assign: anyone allowed here may take cases themselves; only the PM (or an admin) routes them to someone
+	// else -- the same rule as the single-case assign (assignment.go). A named assignee must be real staff.
+	bulkAssignee, bulkAssigneeName := p.Subject, displayName(p)
+	if in.Action == "assign" {
+		if in.Role == "" {
+			in.Role = "CASE_MANAGER"
+		}
+		if in.Assignee != "" && in.Assignee != p.Subject {
+			if !hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+				http.Error(w, `{"error":"forbidden: only the PM assigns cases to someone else"}`, http.StatusForbidden)
+				return
+			}
+			name, err := s.validAssignee(r.Context(), tenant, in.Role, in.Assignee)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "staff directory unavailable: " + err.Error()})
+				return
+			}
+			if name == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("that person is not an active %s on this tenant", assignableRoles[in.Role])})
+				return
+			}
+			bulkAssignee, bulkAssigneeName = in.Assignee, name
+		}
+	}
 	results := []map[string]any{}
 	for _, id := range in.CaseIDs {
 		res := map[string]any{"case_id": id}
@@ -204,20 +235,36 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 		var err error
 		switch in.Action {
 		case "assign":
-			role, assignee := in.Role, in.Assignee
-			if role == "" {
-				role = "CASE_MANAGER"
-			}
-			if assignee == "" {
-				assignee = p.Subject
+			role, assignee := in.Role, bulkAssignee
+			var prev *string
+			var cn string
+			_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number, assigned_to FROM tenant_%s.cases WHERE id=$1`, t), id).Scan(&cn, &prev)
+			if isHelperRole(role) { // a specialist is named alongside the Reviewer, who keeps the case (helpers.go)
+				was := s.caseHelpers(r.Context(), tenant, id)[role]
+				_, err = s.db.Exec(r.Context(), upsertHelperSQL, tenant, id, role, assignee, p.Subject)
+				if err == nil && was != assignee {
+					s.logActivity(r.Context(), tenant, id, "MILESTONE", fmt.Sprintf("%s: %s, added by %s (bulk)", assignableRoles[role], bulkAssigneeName, displayName(p)))
+					s.logAudit(r.Context(), tenant, id, "CASE_HELPER_ASSIGNED", map[string]any{"by": p.Subject, "role": role, "assigned_to": assignee, "previous": was, "bulk": true})
+					if was != "" {
+						s.notify(r, tenant, was, "ASSIGNMENT", fmt.Sprintf("%s's %s place went to %s (%s)", cn, assignableRoles[role], bulkAssigneeName, displayName(p)), "#/cases/"+id)
+					}
+					s.notify(r, tenant, assignee, "ASSIGNMENT", fmt.Sprintf("You are the %s on %s (%s)", assignableRoles[role], cn, displayName(p)), "#/cases/"+id)
+				}
+				break
 			}
 			_, err = s.db.Exec(r.Context(), fmt.Sprintf(
 				`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now() WHERE id=$3`, t), assignee, role, id)
 			if err == nil {
-				s.logActivity(r.Context(), tenant, id, "MILESTONE", fmt.Sprintf("Bulk-assigned to %s (%s) by %s", assignee, role, p.Subject))
+				s.logActivity(r.Context(), tenant, id, "MILESTONE", fmt.Sprintf("Assigned to %s (%s) by %s (bulk)", bulkAssigneeName, assignableRoles[role], displayName(p)))
 				s.logAudit(r.Context(), tenant, id, "CASE_ASSIGNED", map[string]any{
 					"by": p.Subject, "assigned_to": assignee, "role": role, "bulk": true,
 				})
+				if prev != nil && *prev != "" && *prev != assignee && *prev != "unassigned-pool" {
+					s.notify(r, tenant, *prev, "ASSIGNMENT", fmt.Sprintf("%s was reassigned to %s by %s", cn, bulkAssigneeName, displayName(p)), "#/cases/"+id)
+				}
+				if assignee != p.Subject {
+					s.notify(r, tenant, assignee, "ASSIGNMENT", fmt.Sprintf("You were assigned %s by %s", cn, displayName(p)), "#/cases/"+id)
+				}
 			}
 		case "status":
 			oldStatus := s.caseStatusNow(r.Context(), tenant, id)
@@ -254,6 +301,10 @@ func (s *server) grabNext(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "ARBITRATOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
+	if reviewerScoped(p) { // see casescope.go: a Reviewer does not pick from the unassigned cases
+		http.Error(w, `{"error":"cases are given out in turn or by the PM — there is nothing to grab"}`, http.StatusForbidden)
 		return
 	}
 	t := sanitizeTenant(tenant)

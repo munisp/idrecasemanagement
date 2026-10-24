@@ -1,6 +1,6 @@
 // caselock.go — cases that are frozen except for correspondence.
 //
-// Two states freeze a case:
+// Two states freeze a case (each one a tenant rule that is on unless a tenant admin turns it off):
 //
 //	AWAITING_PAYMENT  the initial fee has not been paid. Nothing may be done
 //	                  on the case until it is; staff may only write to the
@@ -36,8 +36,17 @@ func (s *server) caseLock(ctx context.Context, tenant, caseID string) string {
 		`SELECT status FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&status); err != nil {
 		return "" // unknown case: let the handler answer 404
 	}
+	// Each freeze is a tenant rule a tenant admin can turn off (features.go: payment_lock, ineligible_lock).
+	flags := s.featureFlagsCtx(ctx, tenant)
+	on := func(k string) bool { v, ok := flags[k]; return !ok || v }
 	if status == "AWAITING_PAYMENT" {
-		return lockAwaitingPayment
+		if on("payment_lock") {
+			return lockAwaitingPayment
+		}
+		return ""
+	}
+	if !on("ineligible_lock") {
+		return ""
 	}
 	var latest string
 	_ = s.db.QueryRow(ctx, `
@@ -55,8 +64,24 @@ func caseLockMessage(lock string) string {
 		return "this case is awaiting payment of the initial fee: only correspondence is allowed until the fee is paid"
 	case lockIneligible:
 		return "this dispute was found ineligible: only correspondence is allowed (a new eligibility review can change the result)"
+	case lockNotVisible:
+		return "not found"
 	}
 	return ""
+}
+
+// lockNotVisible is not a lock but the same refusal: a Reviewer naming, in a request body, a case assigned to
+// someone else (casescope.go). Answered as "not found", like the routes that name it in their path.
+const lockNotVisible = "NOT_VISIBLE"
+
+// writeLockRefusal answers a request refused by caseLockedForRequest: 423 for a frozen case, 404 for a case the
+// caller may not see (indistinguishable from one that does not exist).
+func writeLockRefusal(w http.ResponseWriter, lock string) {
+	if lock == lockNotVisible {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
 }
 
 // caseActionAllowed reports whether a case sub-path (the part after
@@ -116,8 +141,12 @@ func (s *server) caseLockedForRequest(r *http.Request, tenant, caseID string) st
 	if caseID == "" {
 		return ""
 	}
-	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && contains(p.Roles, serviceRole) {
+	p, ok := r.Context().Value(ctxPrincipal{}).(principal)
+	if ok && contains(p.Roles, serviceRole) {
 		return ""
+	}
+	if ok && !s.caseVisible(r.Context(), p, tenant, caseID) {
+		return lockNotVisible
 	}
 	return s.caseLock(r.Context(), tenant, caseID)
 }
