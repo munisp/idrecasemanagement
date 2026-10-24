@@ -162,13 +162,20 @@ func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calIt
 
 	// Its own tasks.
 	if rows, err := s.db.Query(ctx, fmt.Sprintf(`
-		SELECT k.id::text, k.subject, k.due_date::text, coalesce(k.case_id,''), coalesce(c.case_number,'')
+		SELECT k.id::text, k.subject, k.due_date::text, coalesce(k.case_id,''), coalesce(c.case_number,''),
+		       k.status='DONE', coalesce(to_char(k.completed_at,'YYYY-MM-DD"T"HH24:MI'),'')
 		FROM public.tasks k LEFT JOIN tenant_%s.cases c ON c.id::text=k.case_id
-		WHERE k.tenant=$1 AND k.assignee=$2 AND k.status='OPEN' AND k.due_date IS NOT NULL`, t), tenant, "tpa:"+tpaID); err == nil {
+		WHERE k.tenant=$1 AND k.assignee=$2 AND k.due_date IS NOT NULL
+		  AND (k.status='OPEN' OR (k.status='DONE' AND k.completed_at > now() - interval '45 days'))`, t), tenant, "tpa:"+tpaID); err == nil {
 		for rows.Next() {
 			var it calItem
-			if rows.Scan(&it.Ref, &it.Label, &it.Due, &it.CaseID, &it.CaseNumber) == nil {
+			var done bool
+			var doneAt string
+			if rows.Scan(&it.Ref, &it.Label, &it.Due, &it.CaseID, &it.CaseNumber, &done, &doneAt) == nil {
 				it.Kind = "TASK"
+				if done { // shown ticked, with when
+					it.Kind, it.Detail = "TASK_DONE", "done "+doneAt
+				}
 				add(it)
 			}
 		}

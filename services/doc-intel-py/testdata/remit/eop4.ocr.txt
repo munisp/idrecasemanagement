@@ -1,0 +1,288 @@
+<!-- image -->
+
+## Claim Information
+
+## Claim Details
+
+Transaction Group Number:
+
+52
+
+Claim Status Code:
+
+Claim Charge Amount:
+
+28,095.16
+
+Claim Paid Amount:
+
+1 (Processed as Primary)
+
+0.00
+
+Patient Responsibility Amount:
+
+Claim Filing Indicator Code:
+
+HM (Health maintenance organization)
+
+Payer Control Number:
+
+Z035MPEB6165
+
+Facility Code Value:
+
+Diagnosis Related Group Code:
+
+11
+
+794
+
+Claim Frequency Type Code:
+
+Diagnosis Related Group Weight:
+
+1
+
+0
+
+Discharge Fraction:
+
+## Claim Entity Information
+
+Entity Type ID Type
+
+Patient
+
+Insured or subscriber
+
+Additional Claim Information
+
+## 三 Service Line Summary
+
+Total Billed Total Paid Reason Code
+
+V
+
+Amount
+
+28,095.16
+
+0.00
+
+CO197
+
+28,095.16
+
+## 三Service Line Information
+
+## 1 - Rev Code 0171
+
+Billed
+
+24,960.00
+
+Reason Code
+
+0.00
+
+Paid Mods Qty
+
+Amount
+
+CO197
+
+24,960.00
+
+6
+
+Svc Dt
+
+01/22/26
+
+Remark Codes
+
+Supplemental Information
+
+## 2 – Rev Code 0250
+
+Billed Paid Mods
+
+571.19
+
+0.00
+
+Reason Code Amount Qty
+
+4
+
+Svc Dt
+
+MI
+
+MI
+
+<!-- image -->
+
+| CO197                    | 571.19    | 01/22/26   |
+|--------------------------|-----------|------------|
+| Remark Codes             |           |            |
+| Supplemental Information |           |            |
+| 3 - Rev Code 0300        |           |            |
+| Billed                   | Paid Mods | Qty        |
+| 90.38                    | 0.00      | 1          |
+| Reason Code              | Amount    | Svc Dt     |
+| CO197                    | 90.38     | 01/22/26   |
+| Remark Codes             |           |            |
+| Supplemental Information |           |            |
+| 4 - Rev Code 0301        |           |            |
+| Billed                   | Paid Mods | Qty        |
+| 1,457.35                 | 0.00      | 8          |
+| Reason Code              | Amount    | Svc Dt     |
+| CO197                    | 1,457.35  | 01/22/26   |
+| Remark Codes             |           |            |
+| Supplemental Information |           | V          |
+| 5 - Rev Code 0410        |           |            |
+| Billed                   | Paid Mods | Qty        |
+| 244.32                   | 0.00      | 1          |
+| Reason Code              | Amount    | Svc Dt     |
+| CO197                    | 244.32    | 01/22/26   |
+| Remark Codes             |           |            |
+| Supplemental Information |           | V          |
+| 6 - Rev Code 0471        |           |            |
+| Billed                   | Paid Mods | Qty        |
+| 771.92                   | 0.00      | 1          |
+| Reason Code              | Amount    | Svc Dt     |
+| CO197                    |           |            |
+| Remark Codes             | 771.92    | 01/22/26   |
+
+<!-- image -->
+
+## Provider Adjustment (PLB) Information
+
+| Prov ID      | Fisc Period Dt   | Adj Identifier   |   Adj Amount |
+|--------------|------------------|------------------|--------------|
+| P10004799762 | 12/31/2026       | L6 - 20260219    |       -27.43 |
+
+<!-- image -->
+
+## Financial Information
+
+Source File
+
+/epic/prdfiles/HBremittance/jax/load/ufjpijaxfl.68069.592142859.20260221.rd3i6hly.835
+
+Remittance Option
+
+## JX HB SUNSHINE [1080109]
+
+Billing System:
+
+Issue Date:
+
+Total Amount in File:
+
+Tx Handling Code:
+
+Tx Set Control Number:
+
+Hospital Billing 02/19/2026 218,566.61
+
+I
+
+0001
+
+Transaction Type:
+
+Credit
+
+Payment Method:
+
+ACH
+
+Payment Format:
+
+CCP
+
+Payer Identifier:
+
+1203174593
+
+Payer Code:
+
+Sender DFI ID Qualifier:
+
+01
+
+Sender DFI Identifier:
+
+000000000
+
+Sender Account Qualifier:
+
+Sender Account Number:
+
+Demand Deposit
+
+0000000000
+
+Receiver DFI ID Qualifier:
+
+01
+
+Receiver DFI Identifier:
+
+Receiver Account Qualifier:
+
+000000000
+
+Demand Deposit
+
+Receiver Account Number:
+
+0000000000
+
+<!-- image -->
+
+## Trace Information
+
+| Trace Code Type:                            | 1          |
+|---------------------------------------------|------------|
+| Check/EFT Trace Number:                     | 0930634001 |
+| Payer Identifier:                           | 1203174593 |
+| Payer Additional Code: Date/Time Qualifier: | Production |
+| Production Date:                            | 02/19/2026 |
+
+## Reference Information
+
+Reference ID Qualifier
+
+EV
+
+2U
+
+<!-- image -->
+
+V
+
+<!-- image -->
+
+<!-- image -->
+
+<!-- image -->
+
+<!-- image -->
+
+<!-- image -->
+
+| Reference ID Qualifier TJ                                       | Reference ID Qualifier TJ   |                                                                      |                                                                      |    |
+|-----------------------------------------------------------------|-----------------------------|----------------------------------------------------------------------|----------------------------------------------------------------------|----|
+| Payer Information                                               | Payer Information           |                                                                      |                                                                      | 公 |
+| Name: Address:                                                  |                             | AMBETTER 7700 FORSYTH ST LOUIS, MO 63105                             |                                                                      |    |
+| Payer Qualifier: Payer ID:                                      |                             |                                                                      |                                                                      |    |
+| Payer Contact Information                                       | Payer Contact Information   |                                                                      |                                                                      |    |
+| Function Code                                                   | Name                        | Comm Qualifier                                                       | Comm Number                                                          |    |
+| Payers Claim Office                                             | EDI SUPPORT DESK            | TE                                                                   | 8002252573                                                           |    |
+| Technical Department Payee Qualifier: Payee ID:  <!-- image --> | EDI HELPDESK                | TE XX 1821186313                                                     | 8002252573                                                           |    |
+| Payee Information                                               | Payee Information           |                                                                      |                                                                      |    |
+| Name: Address:                                                  | Name: Address:              | SHANDS JACKSONVILLE MEDICAL CENTER I PO BOX 748275 ATLANTA, GA 30374 | SHANDS JACKSONVILLE MEDICAL CENTER I PO BOX 748275 ATLANTA, GA 30374 |    |

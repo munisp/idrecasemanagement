@@ -176,8 +176,9 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id) VALUES ($1,$2,$3)`,
-		tenant, userID, id); err != nil {
+		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id, team_role, full_name, email, username, added_by)
+		VALUES ($1,$2,$3,'ADMIN',nullif($4,''),$5,$6,'registration')`,
+		tenant, userID, id, in.ContactName, strings.ToLower(in.ContactEmail), username); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "organization and login were created, but linking them failed — sign in and use claim code " + code + " (Profile → Claim TPA) to finish linking",
 		})
@@ -192,7 +193,8 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 	// The mail log records that the email went out, not what it said: the
 	// sign-in details belong to the recipient only.
 	logBody := tpaWelcomeLogNote
-	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
+	// A queued email (the provider's limit was reached) still arrives: the registration stands.
+	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
 		// Without the email nobody holds the password, so the account would
 		// be unusable and the address could not be registered again. Undo
 		// the registration and let the person retry.
@@ -383,9 +385,14 @@ func (s *server) tpaAddClient(w http.ResponseWriter, r *http.Request) {
 		PartyName    string `json:"party_name"`
 		PartyType    string `json:"party_type"` // PROVIDER | HEALTH_PLAN
 		ContactEmail string `json:"contact_email"`
+		GroupID      string `json:"group_id"` // the provider group it belongs to ("" = none)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PartyName == "" {
 		http.Error(w, `{"error":"party_name required"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := s.tpaGroupUsable(r, tenant, org.ID, in.GroupID); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
 	pt := strings.ToUpper(strings.TrimSpace(in.PartyType))
@@ -398,8 +405,8 @@ func (s *server) tpaAddClient(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.tpa_clients (tenant, tpa_id, party_name, party_type, contact_email)
-		VALUES ($1,$2,$3,$4,$5) RETURNING id`, tenant, org.ID, in.PartyName, pt, in.ContactEmail).Scan(&id)
+		INSERT INTO public.tpa_clients (tenant, tpa_id, party_name, party_type, contact_email, group_id)
+		VALUES ($1,$2,$3,$4,$5,nullif($6,'')::uuid) RETURNING id`, tenant, org.ID, in.PartyName, pt, in.ContactEmail, in.GroupID).Scan(&id)
 	if err != nil {
 		http.Error(w, `{"error":"client already exists for this TPA"}`, http.StatusConflict)
 		return
@@ -425,8 +432,10 @@ func (s *server) tpaListClients(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, _ := s.queryRows(r, `
 		SELECT c.id, c.party_name, c.party_type, c.contact_email, c.status, c.created_at,
-		       (SELECT count(*) FROM public.case_origin o WHERE o.client_id=c.id) AS case_count
-		FROM public.tpa_clients c WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY c.party_name`, tenant, org.ID)
+		       (SELECT count(*) FROM public.case_origin o WHERE o.client_id=c.id) AS case_count,
+		       coalesce(c.group_id::text,'') AS group_id, coalesce(g.name,'') AS group_name
+		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
+		WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY lower(coalesce(g.name,'~')), c.party_name`, tenant, org.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"clients": rows})
 }
 
@@ -478,19 +487,33 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		ClientID            string `json:"client_id"`
-		PackageID           string `json:"package_id"` // optional until onboarding completes for the client
+		PackageID           string `json:"package_id"`   // optional until onboarding completes for the client
 		ContactName         string `json:"contact_name"` // client's contact for the dispute
 		DisputedAmountCents int64  `json:"disputed_amount_cents"`
 		Notes               string `json:"notes"`
 		OtherPartyName      string `json:"other_party_name"`  // the health plan the dispute is against
 		OtherPartyEmail     string `json:"other_party_email"` // where its notices go
 		OtherPartyNAIC      string `json:"other_party_naic"`
+		// The filer's own answers to two eligibility questions the
+		// documents often don't state: "" = not sure, left to the documents.
+		ProviderType string        `json:"provider_type"`
+		InNetwork    string        `json:"in_network"` // yes | no | ""
+		Packet       *filingPacket `json:"packet"`     // the filing packet form (filing_packet.go)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.ClientID == "" {
 		http.Error(w, `{"error":"client_id required"}`, http.StatusBadRequest)
 		return
 	}
-	rsp := respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC}
+	if packetRejected(w, in.Packet) {
+		return
+	}
+	answers, msg := s.filerEligibilityAnswers(r, tenant, in.ProviderType, in.InNetwork)
+	if msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+		return
+	}
+	// The packet form's plan name and notice email fill what the short form left blank.
+	rsp := in.Packet.otherParty(respondent{Side: "HEALTH_PLAN", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NAIC: in.OtherPartyNAIC})
 	if msg := rsp.check(); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
@@ -516,19 +539,12 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, "this dispute can't be filed yet: "+why), http.StatusConflict)
 		return
 	}
-	// Onboarding gate (tpa_onboarding): when the client has completed
-	// onboarding the filing must reference its READY package — six ACCEPTED
-	// slots + a verified payment rail. Clients that never started onboarding
-	// (no profile, no packages) keep the legacy ungated path so existing
-	// flows don't break mid-flight.
+	// Onboarding gate (tpa_onboarding): optional unless the tenant turns on
+	// onboarding_required, which makes every filing reference a READY package
+	// and a verified payment rail. A package named on a filing must be READY.
 	if s.featureEnabled(r, tenant, "tpa_onboarding") {
-		var onboarded int
-		_ = s.db.QueryRow(r.Context(), `
-			SELECT count(*) FROM public.tpa_clients
-			WHERE tenant=$1 AND id=$2 AND (npi IS NOT NULL OR
-			  EXISTS (SELECT 1 FROM public.tpa_packages p WHERE p.tenant=$1 AND p.client_id=$2))`,
-			tenant, in.ClientID).Scan(&onboarded)
-		if onboarded > 0 || s.featureEnabled(r, tenant, "onboarding_required") {
+		required := s.featureEnabled(r, tenant, "onboarding_required")
+		if required || in.PackageID != "" {
 			if in.PackageID == "" {
 				http.Error(w, `{"error":"filings must reference this client's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)
 				return
@@ -538,8 +554,8 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 				SELECT status FROM public.tpa_packages
 				WHERE tenant=$1 AND tpa_id=$2 AND client_id=$3 AND id=$4`,
 				tenant, org.ID, in.ClientID, in.PackageID).Scan(&pkgStatus)
-			if err != nil || pkgStatus != "READY" {
-				http.Error(w, `{"error":"package not found or not READY (all six documents must be ACCEPTED)"}`, http.StatusConflict)
+			if ok, _ := s.packageFileable(r.Context(), tenant, "tpa", in.PackageID); err != nil || !ok {
+				http.Error(w, `{"error":"these documents are still being read — file once they are (a minute or two), or file without them; none of them is required"}`, http.StatusConflict)
 				return
 			}
 			var verified int
@@ -547,7 +563,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 				SELECT count(*) FROM public.tpa_payment_methods
 				WHERE tenant=$1 AND client_id=$2 AND verified AND status='ACTIVE'`,
 				tenant, in.ClientID).Scan(&verified)
-			if verified == 0 {
+			if verified == 0 && required {
 				http.Error(w, `{"error":"no verified payment method for this client"}`, http.StatusConflict)
 				return
 			}
@@ -556,6 +572,8 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	caseID, caseNumber, st, err := s.fileTPADispute(r, tenant, org, in.ClientID, partyName, partyType, in.PackageID, in.ContactName, in.Notes, in.DisputedAmountCents)
 	if err == nil {
 		s.recordRespondent(r, tenant, caseID, rsp)
+		s.applyFilerEligibilityAnswers(r.Context(), tenant, caseID, answers)
+		s.fileWithPacket(r, tenant, caseID, in.Packet, "TPA "+org.Name)
 	}
 	if err != nil {
 		switch {
@@ -606,7 +624,7 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT o.case_id, o.initiating_party_name, o.initiating_party_type, o.filed_by_email,
 		       o.created_at::date::text AS filed,
-		       c.case_number, c.status, c.disputed_amount_cents,
+		       c.case_number, c.status, coalesce(c.agency_status,'') AS agency_status, c.disputed_amount_cents,
 		       cl.party_name AS client_name, cl.id AS client_id,
 		       coalesce(c.details->>'initiating_party_contact','') AS contact_name,
 		       coalesce(c.details->>'filing_notes','') AS notes,
@@ -626,13 +644,13 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 	s.attachFeeStates(r.Context(), tenant, rows)
 	// Roll up per initiating party.
 	type rollup struct {
-		ClientID   string `json:"client_id"`
-		Party      string `json:"initiating_party"`
-		PartyType  string `json:"party_type"`
-		Cases      int    `json:"cases"`
-		Open       int    `json:"open"`
-		Invoiced   int64  `json:"invoiced_cents"`
-		Paid       int64  `json:"paid_cents"`
+		ClientID  string `json:"client_id"`
+		Party     string `json:"initiating_party"`
+		PartyType string `json:"party_type"`
+		Cases     int    `json:"cases"`
+		Open      int    `json:"open"`
+		Invoiced  int64  `json:"invoiced_cents"`
+		Paid      int64  `json:"paid_cents"`
 	}
 	byClient := map[string]*rollup{}
 	order := []string{}

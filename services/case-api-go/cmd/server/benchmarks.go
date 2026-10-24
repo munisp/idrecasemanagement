@@ -85,11 +85,11 @@ func (s *server) caseBenchmarks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type bench struct {
-		Code      string `json:"code"`
-		N         int    `json:"n"`
-		P25Cents  int64  `json:"p25_cents"`
-		MedianCents int64 `json:"median_cents"`
-		P75Cents  int64 `json:"p75_cents"`
+		Code        string `json:"code"`
+		N           int    `json:"n"`
+		P25Cents    int64  `json:"p25_cents"`
+		MedianCents int64  `json:"median_cents"`
+		P75Cents    int64  `json:"p75_cents"`
 	}
 	out := []bench{}
 	for _, code := range codes {

@@ -162,7 +162,8 @@ func (s *server) ledgerBackfill(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
 		SELECT coalesce(p.case_id::text,''), p.payment_intent, coalesce(i.party,''),
 		       coalesce(i.amount_cents, p.amount_cents), p.status,
-		       CASE WHEN p.status='REFUNDED' THEN coalesce((p.raw->>'amount_refunded')::bigint, p.amount_cents) ELSE 0 END
+		       CASE WHEN p.status='REFUNDED' THEN coalesce((p.raw->>'amount_refunded')::bigint, p.amount_cents) ELSE 0 END,
+		       EXISTS(SELECT 1 FROM public.refunds rf WHERE rf.payment_id=p.id AND rf.kind='FEE')
 		FROM public.payments p
 		LEFT JOIN public.invoices i ON i.id::text = p.invoice_id::text AND i.tenant = p.tenant
 		WHERE p.tenant=$1 AND p.provider='stripe' AND p.status IN ('PAID','REFUNDED')
@@ -176,15 +177,36 @@ func (s *server) ledgerBackfill(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var caseID, pi, party, status string
 		var amount, refunded int64
-		if rows.Scan(&caseID, &pi, &party, &amount, &status, &refunded) != nil {
+		var tracked bool
+		if rows.Scan(&caseID, &pi, &party, &amount, &status, &refunded, &tracked) != nil {
 			continue
 		}
 		d, c, id := paymentLeg(pi, party, false)
 		add("stripe-payment", pi, caseID, amount, d, c, id, paymentLegKey(pi, false))
-		if status == "REFUNDED" {
+		if status == "REFUNDED" && !tracked { // a refund from before public.refunds; tracked ones are posted below
 			d, c, id = paymentLeg(pi, "", true)
 			add("stripe-refund", pi, caseID, refunded, d, c, id, paymentLegKey(pi, true))
 		}
+	}
+	rows.Close()
+
+	// Refunds (refunds.go): each reverses its payment's own leg, on that leg's escrow party.
+	rows, err = s.db.Query(r.Context(), `
+		SELECT case_id, ledger_key, coalesce(party,''), amount_cents FROM public.refunds
+		WHERE tenant=$1 AND kind='FEE' AND status='SUCCEEDED' AND coalesce(ledger_key,'') <> '' ORDER BY created_at`, tenant)
+	if err != nil {
+		slog.Error("ledger backfill: refunds query", "err", err)
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	for rows.Next() {
+		var caseID, key, party string
+		var amount int64
+		if rows.Scan(&caseID, &key, &party, &amount) != nil {
+			continue
+		}
+		d, c, id := paymentLeg(key, party, true)
+		add("refund", key, caseID, amount, d, c, id, paymentLegKey(key, true))
 	}
 	rows.Close()
 

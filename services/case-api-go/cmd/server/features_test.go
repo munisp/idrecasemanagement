@@ -49,3 +49,29 @@ func TestStoredFlagsOverlayTheProgramSettings(t *testing.T) {
 		t.Errorf("nothing stored: no flags")
 	}
 }
+
+// The tenant's step rules: with step order off any step not done can be taken; with step owners off anyone can.
+func TestStepRules(t *testing.T) {
+	next := wfStep{State: "next", OwnerRoles: []string{"FINANCE"}}
+	later := wfStep{State: "upcoming", OwnerRoles: []string{"FINANCE"}}
+	done := wfStep{State: "done", OwnerRoles: []string{"FINANCE"}}
+	reviewer := principal{Roles: []string{"CASE_MANAGER"}}
+	strict, loose := wfRules{order: true, owner: true}, wfRules{order: false, owner: false}
+	if !strict.open(next) || strict.open(later) || strict.open(done) {
+		t.Error("step order on: only the next step is open")
+	}
+	if !loose.open(next) || !loose.open(later) || loose.open(done) {
+		t.Error("step order off: every step not done is open")
+	}
+	if strict.mayAct(reviewer, next) {
+		t.Error("step owners on: a Reviewer may not take Finance's step")
+	}
+	if !loose.mayAct(reviewer, next) {
+		t.Error("step owners off: anyone may take it")
+	}
+	for _, k := range []string{"step_order", "step_owner", "payment_lock", "ineligible_lock"} {
+		if !registeredFeatures[k] {
+			t.Errorf("%s is not a registered feature", k)
+		}
+	}
+}

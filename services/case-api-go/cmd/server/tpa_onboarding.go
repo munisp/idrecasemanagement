@@ -4,14 +4,16 @@ package main
 // tpa_onboarding.go — full onboarding pipeline for TPA initiating parties
 // (feature flag: tpa_onboarding).
 //
-// Per client (initiating party) the TPA completes three gates before filing:
+// Per client (initiating party) the TPA completes two gates before filing:
 //   1. Profile  — NPI (Luhn/80840), TIN, address.
 //   2. Payment  — CARD (processor token ref) or ACH (ABA checksum + debit
 //                 authorization capture), verified per client.
-//   3. Package  — six required documents, either DISCRETE (six uploads) or
-//                 MERGED (one PDF, split by doc-intel page classification).
-//                 Every slot is validated by doc-intel; filing is refused
-//                 until all six are ACCEPTED.
+//
+// Each dispute brings its own documents: a package of six, either DISCRETE
+// (six uploads) or MERGED (one PDF, split by doc-intel page classification),
+// made for that dispute when it is filed (or per row in bulk filing). Every
+// slot is validated by doc-intel; a package named on a filing must have all
+// six ACCEPTED.
 //
 // Bulk paths: CSV roster import (row-level report) and ZIP package upload
 // (top-level folder = client party_name; merged.pdf = MERGED package).
@@ -22,13 +24,15 @@ package main
 
 import (
 	"archive/zip"
-	"context"
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -59,13 +63,83 @@ var tpaSlots = []string{
 	"OPEN_NEGOTIATION_NOTICE", "OFFER_SUBSTANTIATION", "IDRE_ATTESTATION",
 }
 
+// moreDocKinds: every other document a dispute can bring besides the six, as the Florida filing packet lists
+// them. Each one is kept in a slot of its own, MORE_<KIND>_<id>, as many as the filer adds. They are taken as filed
+// (scanned and stored like the six, but not held to a slot's expectation, and never what makes a set ready) and go
+// onto the dispute with the six when it is filed.
+var moreDocKinds = []string{"CLAIM_FORMS", "DENIALS_EOBS", "FLORIDA_LICENSE", "FINAL_DETERMINATION_LETTER", "CONTRACT",
+	"WAIVER_OF_PAYMENT", "NOTICE_OF_OVERPAYMENT", "OVERPAYMENT_RESPONSE", "MEDICAL_RECORDS", "CODING_RULES", "OTHER"}
+
+var moreSlotRe = regexp.MustCompile(`^MORE_([A-Z_]+)_([0-9A-F]{8})$`)
+
+func isMoreKind(k string) bool {
+	for _, x := range moreDocKinds {
+		if x == k {
+			return true
+		}
+	}
+	return false
+}
+
+// moreDocKind is the kind of an additional document's slot; "" for one of the six (or no valid slot).
+func moreDocKind(slot string) string {
+	if m := moreSlotRe.FindStringSubmatch(slot); m != nil && isMoreKind(m[1]) {
+		return m[1]
+	}
+	return ""
+}
+
+// newMoreSlot is a fresh slot for one more document of this kind.
+func newMoreSlot(kind string) string {
+	return "MORE_" + kind + "_" + strings.ToUpper(strings.ReplaceAll(newUUID(), "-", "")[:8])
+}
+
+// slotForUpload is the slot an upload goes into: one of the six, an additional document's own slot, or a new one
+// when the upload names only the kind (MORE_MEDICAL_RECORDS). "" when it is neither.
+func slotForUpload(slot string) string {
+	switch {
+	case tpaSlotValid(slot):
+		return slot
+	case strings.HasPrefix(slot, "MORE_") && isMoreKind(strings.TrimPrefix(slot, "MORE_")):
+		return newMoreSlot(strings.TrimPrefix(slot, "MORE_"))
+	}
+	return ""
+}
+
+// moreKindFromFilename: the kind an additional document's file name suggests (OTHER when it says nothing).
+func moreKindFromFilename(name string) string {
+	n := strings.ToLower(name)
+	for _, k := range []struct {
+		kind  string
+		words []string
+	}{
+		{"MEDICAL_RECORDS", []string{"medical", "record", "chart", "notes"}},
+		{"CLAIM_FORMS", []string{"claim", "cms1500", "cms-1500", "hcfa"}},
+		{"DENIALS_EOBS", []string{"denial", "denied"}},
+		{"FLORIDA_LICENSE", []string{"license", "licence"}},
+		{"FINAL_DETERMINATION_LETTER", []string{"determination", "appeal"}},
+		{"CONTRACT", []string{"contract", "agreement"}},
+		{"WAIVER_OF_PAYMENT", []string{"waiver"}},
+		{"OVERPAYMENT_RESPONSE", []string{"overpayment_response", "overpayment-response", "response"}},
+		{"NOTICE_OF_OVERPAYMENT", []string{"overpayment"}},
+		{"CODING_RULES", []string{"coding", "ncci", "policy"}},
+	} {
+		for _, w := range k.words {
+			if strings.Contains(n, w) {
+				return k.kind
+			}
+		}
+	}
+	return "OTHER"
+}
+
 func tpaSlotValid(slot string) bool {
 	for _, s := range tpaSlots {
 		if s == slot {
 			return true
 		}
 	}
-	return false
+	return moreDocKind(slot) != ""
 }
 
 // tpaSlotFromFilename maps a bulk-upload filename onto a slot.
@@ -113,18 +187,6 @@ func npiValid(npi string) bool {
 	return sum%10 == 0
 }
 
-func tinValid(tin string) bool {
-	if len(tin) != 9 {
-		return false
-	}
-	for _, c := range tin {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // routingValid: ABA routing transit number checksum (3-7-1 weights).
 func routingValid(rt string) bool {
 	if len(rt) != 9 {
@@ -145,7 +207,8 @@ func routingValid(rt string) bool {
 // --- onboarding status (derived) ------------------------------------------
 
 // recomputeClientStatus derives PROFILE_INCOMPLETE -> PAYMENT_PENDING ->
-// DOCS_PENDING -> READY from the three gates. Never trusts caller input.
+// READY from the two gates (an NPI or exclusion-list hold in between). Never
+// trusts caller input.
 func (s *server) recomputeClientStatus(r *http.Request, tenant, clientID string) string {
 	return s.recomputeClientStatusCtx(r.Context(), tenant, clientID)
 }
@@ -173,6 +236,12 @@ func (s *server) recomputeClientStatusCtx(ctx context.Context, tenant, clientID 
 			tenant, clientID, status)
 		return status
 	}
+	if hold := s.exclusionOnboardingStatus(ctx, "tpa", tenant, clientID); hold != "" {
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
+			tenant, clientID, hold)
+		return hold
+	}
 	status = "PAYMENT_PENDING"
 	var payments int
 	_ = s.db.QueryRow(ctx, `
@@ -185,15 +254,9 @@ func (s *server) recomputeClientStatusCtx(ctx context.Context, tenant, clientID 
 			tenant, clientID, status)
 		return status
 	}
-	status = "DOCS_PENDING"
-	var ready int
-	_ = s.db.QueryRow(ctx, `
-		SELECT count(*) FROM public.tpa_packages
-		WHERE tenant=$1 AND client_id::text=$2 AND status='READY'`,
-		tenant, clientID).Scan(&ready)
-	if ready > 0 {
-		status = "READY"
-	}
+	// Documents belong to each dispute (its own set, made when it is filed), not to the client: a client with its
+	// profile and a payment method is ready to file.
+	status = "READY"
 	_, _ = s.db.Exec(ctx, `
 		UPDATE public.tpa_clients SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 		tenant, clientID, status)
@@ -224,14 +287,15 @@ func (s *server) tpaUpdateClientProfile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	in.NPI = strings.TrimSpace(in.NPI)
-	in.TIN = strings.TrimSpace(in.TIN)
+	var tinMsg string
+	in.TIN, tinMsg = tinCheck(in.TIN)
 	in.Address = strings.TrimSpace(in.Address)
 	if !npiValid(in.NPI) {
 		http.Error(w, `{"error":"NPI failed the 10-digit Luhn check (80840 prefix)"}`, http.StatusBadRequest)
 		return
 	}
-	if !tinValid(in.TIN) {
-		http.Error(w, `{"error":"TIN must be exactly 9 digits"}`, http.StatusBadRequest)
+	if msg := tinMsg; msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
 		return
 	}
 	if in.Address == "" {
@@ -266,6 +330,7 @@ func (s *server) tpaUpdateClientProfile(w http.ResponseWriter, r *http.Request) 
 	if chk.Status != "" {
 		s.saveClientNPICheck(r.Context(), tenant, clientID, chk)
 	}
+	s.runVerifications(r.Context(), "tpa", tenant, clientID, in.NPI, partyName, in.TIN)
 	st := s.recomputeClientStatus(r, tenant, clientID)
 	var npiStatus, registry string
 	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(npi_status,''), coalesce(npi_registry_name,'') FROM public.tpa_clients WHERE tenant=$1 AND id::text=$2`,
@@ -336,13 +401,17 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 		}
 		name, ptype, email, npi, tin, addr := cell(0), strings.ToUpper(cell(1)), cell(2), cell(3), cell(4), cell(5)
 		res.PartyName = name
+		tinMsg := ""
+		if tin != "" {
+			tin, tinMsg = tinCheck(tin)
+		}
 		switch {
 		case ptype != "PROVIDER" && ptype != "HEALTH_PLAN":
 			res.Error = "party_type must be PROVIDER or HEALTH_PLAN"
 		case npi != "" && !npiValid(npi):
 			res.Error = "NPI failed Luhn check"
-		case tin != "" && !tinValid(tin):
-			res.Error = "TIN must be 9 digits"
+		case tinMsg != "":
+			res.Error = tinMsg
 		default:
 			var chk npiCheck
 			if npi != "" {
@@ -367,6 +436,7 @@ func (s *server) tpaImportClientsCSV(w http.ResponseWriter, r *http.Request) {
 				if chk.Status != "" {
 					s.saveClientNPICheck(r.Context(), tenant, id, chk)
 				}
+				s.runVerifications(r.Context(), "tpa", tenant, id, npi, name, tin)
 				s.recomputeClientStatus(r, tenant, id)
 				if s.featureEnabled(r, tenant, "entity360") {
 					s.ensureEntityQuiet(r.Context(), tenant, "tpa_clients", id, ptype, name, npi, tin, "", "")
@@ -477,7 +547,7 @@ func (s *server) tpaListPayments(w http.ResponseWriter, r *http.Request) {
 		SELECT id, method, coalesce(label,''), coalesce(brand,''), last4,
 		       coalesce(routing,''), auth_received, verified, status
 		FROM public.tpa_payment_methods
-		WHERE tenant=$1 AND tpa_id=$2 AND client_id=$3 ORDER BY created_at`,
+		WHERE tenant=$1 AND tpa_id=$2 AND client_id=$3 ORDER BY created_at DESC`,
 		tenant, org.ID, chi.URLParam(r, "clientId"))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -556,7 +626,7 @@ func (s *server) tpaCreatePackage(w http.ResponseWriter, r *http.Request) {
 // storePackageDoc seals + stores one package document and publishes the
 // validation event. Shared by discrete, merged, and ZIP bulk uploads.
 func (s *server) storePackageDoc(r *http.Request, tenant, tpaID, pkgID, slot, filename string, raw []byte) (string, error) {
-	if n, err := s.rds.incrExpire("idre:rl:tpadoc:"+tenant+":"+tpaID, 3600); err == nil && n > 400 {
+	if n, err := s.rds.incrExpire(s.cfg.RedisPrefix+":rl:tpadoc:"+tenant+":"+tpaID, 3600); err == nil && n > 400 {
 		return "", fmt.Errorf("upload rate limit exceeded (400/hour)")
 	}
 	if err := docPolicy(filename, raw); err != nil {
@@ -577,16 +647,33 @@ func (s *server) storePackageDoc(r *http.Request, tenant, tpaID, pkgID, slot, fi
 		}); err != nil {
 		return "", fmt.Errorf("store failed")
 	}
+	// What the slot held before, kept in its history (package_doc_history) rather than overwritten.
+	by := uploaderName(r)
+	prev, hadPrev := s.endPackageDoc(r, tenant, pkgID, slot, by, "REPLACED")
+	// One of the six waits for doc-intel's verdict; an additional document is taken as filed.
+	more := moreDocKind(slot) != ""
+	initial := map[bool]string{true: "ACCEPTED", false: "PENDING"}[more]
 	var rowID string
 	err = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.tpa_package_docs (tenant, package_id, slot, object_key, filename, status)
-		VALUES ($1,$2,$3,$4,$5,'PENDING')
+		INSERT INTO public.tpa_package_docs (tenant, package_id, slot, object_key, filename, status, uploaded_by, uploaded_at, analyzed_at)
+		VALUES ($1,$2,$3,$4,$5,$7,$6,now(), CASE WHEN $7='ACCEPTED' THEN now() END)
 		ON CONFLICT (package_id, slot) DO UPDATE SET
 		  object_key=excluded.object_key, filename=excluded.filename,
-		  status='PENDING', reasons='[]'::jsonb, analyzed_at=NULL
-		RETURNING id`, tenant, pkgID, slot, objectKey, filename).Scan(&rowID)
+		  status=excluded.status, reasons='[]'::jsonb, analyzed_at=excluded.analyzed_at,
+		  uploaded_by=excluded.uploaded_by, uploaded_at=now()
+		RETURNING id`, tenant, pkgID, slot, objectKey, filename, by, initial).Scan(&rowID)
 	if err != nil {
 		return "", fmt.Errorf("db")
+	}
+	action, payload := "PACKAGE_DOC_UPLOADED", s.packageDocAudit(r, tenant, tpaID, pkgID, slot)
+	payload["filename"] = filename
+	if hadPrev {
+		action = "PACKAGE_DOC_REPLACED"
+		payload["replaced_filename"], payload["replaced_status"] = prev.filename, prev.status
+	}
+	s.logAudit(r.Context(), tenant, "", action, payload)
+	if more {
+		return rowID, nil
 	}
 	s.packageDocReplaced(r, tenant, onboardingKinds["tpa"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
@@ -614,10 +701,11 @@ func (s *server) tpaAttachDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
-	// Until it is filed, a slot can be added or replaced: slots are checked
-	// one at a time, so the package is VALIDATING after the first upload.
-	if mode != "DISCRETE" || status == "FILED" {
-		http.Error(w, `{"error":"this package takes one merged PDF, or it has already been filed"}`, http.StatusConflict)
+	// Until it is filed, any slot can be added or replaced -- in a merged set too, once the PDF was split -- and
+	// the set is checked again. A filed set is the dispute's evidence and does not change.
+	_ = mode
+	if status == "FILED" {
+		http.Error(w, `{"error":"this document set has been filed with a dispute, so its documents can't be changed — send a corrected document through the dispute's document requests"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -625,9 +713,9 @@ func (s *server) tpaAttachDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
 		return
 	}
-	slot := strings.ToUpper(strings.TrimSpace(r.FormValue("slot")))
-	if !tpaSlotValid(slot) {
-		http.Error(w, `{"error":"slot must be one of: `+strings.Join(tpaSlots, ", ")+`"}`, http.StatusBadRequest)
+	slot := slotForUpload(strings.ToUpper(strings.TrimSpace(r.FormValue("slot"))))
+	if slot == "" {
+		http.Error(w, `{"error":"slot must be one of: `+strings.Join(tpaSlots, ", ")+`, or MORE_ and one of: `+strings.Join(moreDocKinds, ", ")+`"}`, http.StatusBadRequest)
 		return
 	}
 	f, hdr, err := r.FormFile("file")
@@ -644,6 +732,11 @@ func (s *server) tpaAttachDoc(w http.ResponseWriter, r *http.Request) {
 	rowID, err := s.storePackageDoc(r, tenant, org.ID, pkgID, slot, hdr.Filename, raw)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	if moreDocKind(slot) != "" {
+		writeJSON(w, http.StatusAccepted, map[string]any{"package_doc_id": rowID, "slot": slot, "status": "ACCEPTED",
+			"note": "added to the dispute's documents"})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -746,9 +839,11 @@ func (s *server) tpaPackageStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"package not found"}`, http.StatusNotFound)
 		return
 	}
+	history := s.packageDocHistory(r, tenant, pkgID)
 	rows, err := s.db.Query(r.Context(), `
 		SELECT id, slot, coalesce(filename,''), status, reasons::text,
-		       coalesce(page_start::text,''), coalesce(page_end::text,''), coalesce(analyzed_at::text,'')
+		       coalesce(page_start::text,''), coalesce(page_end::text,''), coalesce(analyzed_at::text,''),
+		       coalesce(uploaded_by,''), coalesce(coalesce(uploaded_at, created_at)::text,'')
 		FROM public.tpa_package_docs WHERE tenant=$1 AND package_id=$2 ORDER BY slot`, tenant, pkgID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -757,24 +852,59 @@ func (s *server) tpaPackageStatus(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	bySlot := map[string]map[string]any{}
 	for rows.Next() {
-		var id, slot, fn, st, reasons, ps, pe, at string
-		if rows.Scan(&id, &slot, &fn, &st, &reasons, &ps, &pe, &at) == nil {
+		var id, slot, fn, st, reasons, ps, pe, at, ub, ua string
+		if rows.Scan(&id, &slot, &fn, &st, &reasons, &ps, &pe, &at, &ub, &ua) == nil {
 			bySlot[slot] = map[string]any{
 				"id": id, "slot": slot, "filename": fn, "status": st,
-				"reasons": json.RawMessage(reasons), "page_start": ps, "page_end": pe, "analyzed_at": at}
+				"reasons": json.RawMessage(reasons), "page_start": ps, "page_end": pe, "analyzed_at": at,
+				"uploaded_by": ub, "uploaded_at": ua}
 		}
 	}
 	grid := make([]map[string]any, 0, len(tpaSlots))
 	for _, slot := range tpaSlots {
-		if d, ok := bySlot[slot]; ok {
-			grid = append(grid, d)
-		} else {
-			grid = append(grid, map[string]any{"slot": slot, "status": "MISSING"})
+		d, ok := bySlot[slot]
+		if !ok {
+			d = map[string]any{"slot": slot, "status": "MISSING"}
 		}
+		h := history[slot]
+		if h == nil {
+			h = []map[string]any{}
+		}
+		d["history"] = h
+		grid = append(grid, d)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"package_id": pkgID, "client_id": clientID, "mode": mode,
-		"status": status, "slots": grid})
+		"status": status, "slots": grid, "more": moreDocsOf(bySlot), "more_kinds": moreDocKinds})
+}
+
+// packageFileable: a set can be filed with its dispute once every document in it has been read -- any documents,
+// as many as the dispute relies on, the six or not. The check of each document against its slot is a flag for the
+// Reviewer (who confirms the filing packet is complete), never a gate. prefix: tpa | hp.
+func (s *server) packageFileable(ctx context.Context, tenant, prefix, pkgID string) (bool, string) {
+	var status string
+	var docs, reading int
+	if err := s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT pk.status,
+		       (SELECT count(*) FROM public.%[1]s_package_docs d WHERE d.package_id=pk.id),
+		       (SELECT count(*) FROM public.%[1]s_package_docs d WHERE d.package_id=pk.id AND d.status IN ('PENDING','ANALYZING'))
+		FROM public.%[1]s_packages pk WHERE pk.tenant=$1 AND pk.id::text=$2`, prefix), tenant, pkgID).Scan(&status, &docs, &reading); err != nil {
+		return false, ""
+	}
+	return status != "FILED" && docs > 0 && reading == 0, status
+}
+
+// moreDocsOf: a set's additional documents (each with its kind), oldest first.
+func moreDocsOf(bySlot map[string]map[string]any) []map[string]any {
+	out := []map[string]any{}
+	for slot, d := range bySlot {
+		if k := moreDocKind(slot); k != "" {
+			d["kind"] = k
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return fmt.Sprint(out[i]["uploaded_at"]) < fmt.Sprint(out[j]["uploaded_at"]) })
+	return out
 }
 
 // tpaOnboardingBoard: the TPA's whole roster with the three gates per client.
@@ -796,20 +926,23 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		       (SELECT count(*) FROM public.tpa_packages pk
 		         WHERE pk.tenant=c.tenant AND pk.client_id=c.id AND pk.status='READY'),
 		       (SELECT json_agg(json_build_object('id',pk.id,'mode',pk.mode,'status',pk.status))
-		        FROM public.tpa_packages pk WHERE pk.tenant=c.tenant AND pk.client_id=c.id AND pk.status<>'FILED')
-		FROM public.tpa_clients c WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY c.party_name`,
+		        FROM public.tpa_packages pk WHERE pk.tenant=c.tenant AND pk.client_id=c.id AND pk.status<>'FILED'),
+		       coalesce(g.name,'')
+		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
+		WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY c.party_name`,
 		tenant, org.ID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
+	checks := s.verificationsSummary(r.Context(), "tpa", tenant)
 	clients := []map[string]any{}
 	for rows.Next() {
-		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote string
+		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote, group string
 		var npay, nready int
 		var pkgs *string
-		if rows.Scan(&id, &name, &ptype, &ost, &cst, &npi, &tin, &npiSt, &npiReg, &npiNote, &npay, &nready, &pkgs) != nil {
+		if rows.Scan(&id, &name, &ptype, &ost, &cst, &npi, &tin, &npiSt, &npiReg, &npiNote, &npay, &nready, &pkgs, &group) != nil {
 			continue
 		}
 		var packages json.RawMessage
@@ -819,10 +952,10 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			packages = json.RawMessage("[]")
 		}
 		clients = append(clients, map[string]any{
-			"client_id": id, "party_name": name, "party_type": ptype,
+			"client_id": id, "party_name": name, "party_type": ptype, "provider_group": group,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": npi != "" && tin != "",
-			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote,
+			"npi":              npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})
@@ -833,8 +966,10 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 // --- bulk ZIP packages ---------------------------------------------------------
 
 // tpaUploadBulkZip: one ZIP, many clients. Layout:
-//   <party_name>/eob.pdf, itemized_bill.pdf, ...     -> DISCRETE package
-//   <party_name>/merged.pdf                          -> MERGED package
+//
+//	<party_name>/eob.pdf, itemized_bill.pdf, ...     -> DISCRETE package
+//	<party_name>/merged.pdf                          -> MERGED package
+//
 // Every client folder gets its own package and per-slot validation; the
 // response is a per-client report so one bad folder never blocks the rest.
 func (s *server) tpaUploadBulkZip(w http.ResponseWriter, r *http.Request) {
@@ -884,11 +1019,11 @@ func (s *server) tpaUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 		byClient[parts[0]] = append(byClient[parts[0]], entry{parts[1], zf})
 	}
 	type clientReport struct {
-		Client     string   `json:"client"`
-		PackageID  string   `json:"package_id,omitempty"`
-		Mode       string   `json:"mode,omitempty"`
-		Attached   []string `json:"attached,omitempty"`
-		Errors     []string `json:"errors,omitempty"`
+		Client    string   `json:"client"`
+		PackageID string   `json:"package_id,omitempty"`
+		Mode      string   `json:"mode,omitempty"`
+		Attached  []string `json:"attached,omitempty"`
+		Errors    []string `json:"errors,omitempty"`
 	}
 	reports := []clientReport{}
 	for clientName, entries := range byClient {

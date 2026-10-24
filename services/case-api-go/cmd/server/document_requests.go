@@ -38,6 +38,8 @@ var docRequestReasons = map[string]string{
 	"MISSING_DOCUMENT":    "Missing document",
 	"CLEARER_COPY":        "Clearer copy needed",
 	"RFI":                 "Request for information",
+	"PERMISSION":          "Permission to proceed",
+	"EXTENSION":           "More time requested",
 	"OTHER":               "Other",
 }
 
@@ -125,6 +127,10 @@ func (s *server) createDocRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"say which side is asked: PROVIDER or HEALTH_PLAN"}`, http.StatusBadRequest)
 		return
 	}
+	if in.Reason == "EXTENSION" {
+		http.Error(w, `{"error":"ask for more time from the deadline on the case's Timelines (it says which deadline and by how many days)"}`, http.StatusBadRequest)
+		return
+	}
 	if _, ok := docRequestReasons[in.Reason]; !ok {
 		http.Error(w, `{"error":"reason must be one of VERIFICATION, ELIGIBILITY_RECHECK, MISSING_DOCUMENT, CLEARER_COPY, RFI, OTHER"}`, http.StatusBadRequest)
 		return
@@ -182,11 +188,35 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 	label := docRequestReasons[reason]
 	if pc.org != "" {
 		kind, orgID, _ := strings.Cut(pc.org, ":")
-		s.notifyOrg(r.Context(), tenant, kind, orgID, caseID, "DOCUMENTS_REQUESTED",
-			fmt.Sprintf("Documents requested for %s (%s): %s — due %s. Upload them under Document requests.", caseNumber, strings.ToLower(label), truncate(what, 160), due),
-			"#/document-requests")
+		if reason == "EXTENSION" {
+			s.notifyOrg(r.Context(), tenant, kind, orgID, caseID, "EXTENSION_REQUESTED",
+				fmt.Sprintf("More time requested on %s: %s — answer by %s under Document requests.", caseNumber, truncate(what, 160), due),
+				"#/document-requests")
+		} else if reason == "PERMISSION" {
+			s.notifyOrg(r.Context(), tenant, kind, orgID, caseID, "PERMISSION_REQUESTED",
+				fmt.Sprintf("Permission to proceed needed for %s: %s — due %s. Answer under Document requests.", caseNumber, truncate(what, 160), due),
+				"#/document-requests")
+		} else {
+			s.notifyOrg(r.Context(), tenant, kind, orgID, caseID, "DOCUMENTS_REQUESTED",
+				fmt.Sprintf("Documents requested for %s (%s): %s — due %s. Upload them under Document requests.", caseNumber, strings.ToLower(label), truncate(what, 160), due),
+				"#/document-requests")
+		}
 	}
-	if pc.email != "" && source != "rfi_letter" { // an RFI's letter is the email
+	// An RFI's letter is the email, and so is a permission request's Cost Estimate email.
+	// A request for more time: the side agrees or declines in its portal; the email says so.
+	if pc.email != "" && reason == "EXTENSION" {
+		subject := fmt.Sprintf("More time requested — dispute %s", caseNumber)
+		body := fmt.Sprintf("The review team of dispute %s asks for more time:\n\n  • %s\n\nWhy: %s\n\n"+
+			"Please sign in to the portal by %s and agree or decline under Document requests:\n%s/app.html#/document-requests\n",
+			caseNumber, what, message, due, strings.TrimRight(s.cfg.PortalBaseURL, "/"))
+		err := s.sendMail([]string{pc.email}, nil, subject, body)
+		errs := []string{}
+		if err != nil {
+			errs = append(errs, err.Error())
+		}
+		s.logCorrespondence(r, tenant, caseID, "OUT", "extension_request", subject, body, []string{pc.email}, nil, displayName(r.Context().Value(ctxPrincipal{}).(principal)), errs...)
+	}
+	if pc.email != "" && source != "rfi_letter" && reason != "PERMISSION" && reason != "EXTENSION" {
 		subject := fmt.Sprintf("Documents requested — dispute %s", caseNumber)
 		var body strings.Builder
 		fmt.Fprintf(&body, "The review of dispute %s needs documents from you (%s).\n\n", caseNumber, strings.ToLower(label))
@@ -414,14 +444,31 @@ func (s *server) orgDocRequestSubmit(kind string) http.HandlerFunc {
 			return
 		}
 		var in struct {
-			Note string `json:"note"`
+			Note     string `json:"note"`
+			Decision string `json:"decision"` // a permission request: PROCEED | DECLINE
 		}
 		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in)
 		var files int
 		_ = s.db.QueryRow(r.Context(), `SELECT count(*) FROM public.document_request_files WHERE request_id::text=$1`, reqID).Scan(&files)
-		if files == 0 {
+		var asked string
+		_ = s.db.QueryRow(r.Context(), `SELECT reason FROM public.document_requests WHERE id::text=$1`, reqID).Scan(&asked)
+		decision := strings.ToUpper(strings.TrimSpace(in.Decision))
+		switch {
+		case asked == "PERMISSION" && decision != "PROCEED" && decision != "DECLINE":
+			http.Error(w, `{"error":"say whether you give permission to proceed with the full review"}`, http.StatusBadRequest)
+			return
+		case asked == "EXTENSION" && decision != "AGREE" && decision != "DECLINE":
+			http.Error(w, `{"error":"say whether you agree to the extra time"}`, http.StatusBadRequest)
+			return
+		case asked != "PERMISSION" && asked != "EXTENSION" && files == 0:
 			http.Error(w, `{"error":"upload the requested documents before submitting"}`, http.StatusBadRequest)
 			return
+		}
+		if asked == "PERMISSION" {
+			in.Note = strings.TrimSpace(map[string]string{"PROCEED": "Permission given to proceed.", "DECLINE": "Declined to proceed."}[decision] + " " + in.Note)
+		}
+		if asked == "EXTENSION" {
+			in.Note = strings.TrimSpace(map[string]string{"AGREE": "Agreed to the extra time.", "DECLINE": "Declined the extra time."}[decision] + " " + in.Note)
 		}
 		p := r.Context().Value(ctxPrincipal{}).(principal)
 		var reason, source, requestedBy, caseNumber string
@@ -434,6 +481,14 @@ func (s *server) orgDocRequestSubmit(kind string) http.HandlerFunc {
 		}
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
 		msg := fmt.Sprintf("%s sent the documents you requested for %s (%d file%s)", py.name, caseNumber, files, map[bool]string{true: "", false: "s"}[files == 1])
+		if reason == "PERMISSION" {
+			msg = fmt.Sprintf("%s %s for %s", py.name, map[string]string{"PROCEED": "gave permission to proceed with the full review",
+				"DECLINE": "declined to proceed with the full review"}[decision], caseNumber)
+		}
+		if reason == "EXTENSION" {
+			msg = fmt.Sprintf("%s %s for %s", py.name, map[string]string{"AGREE": "agreed to the extra time",
+				"DECLINE": "declined the extra time"}[decision], caseNumber)
+		}
 		if reason == "ELIGIBILITY_RECHECK" {
 			msg += " — ready for the eligibility re-check"
 		}
@@ -447,9 +502,29 @@ func (s *server) orgDocRequestSubmit(kind string) http.HandlerFunc {
 		if source == "rfi_letter" || reason == "RFI" {
 			// The RFI's 15-day clock stops: the response is in.
 			wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-			signalled = s.tc != nil && s.tc.SignalWorkflow(r.Context(), wfID, "", "RFI_RESPONSE_RECEIVED",
+			signalled = s.sigCase(r.Context(), tenant, caseID, wfID, "RFI_RESPONSE_RECEIVED",
 				map[string]any{"source": "portal document request", "by": py.name, "documents": files}) == nil
 			s.logActivity(r.Context(), tenant, caseID, "RFI_RESPONSE_RECEIVED", "RFI response received in the portal from "+py.name)
+			s.setProgramDateToday(r.Context(), tenant, caseID, "rfi_response_received_at")
+		}
+		// The provider's permission (step 4, within 15 calendar days): recorded on the case as the Reviewer's step
+		// would record it, so the workflow moves on -- the plan's notice, or the dismissal.
+		if reason == "PERMISSION" {
+			data := map[string]any{"granted": decision == "PROCEED", "date": time.Now().UTC().Format("2006-01-02"),
+				"source": "portal document request", "by": py.name}
+			wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+			signalled = s.sigCase(r.Context(), tenant, caseID, wfID, "ESTIMATE_PERMISSION", data) == nil
+			detail, _ := json.Marshal(data)
+			s.logActivity(r.Context(), tenant, caseID, "ESTIMATE_PERMISSION", fmt.Sprintf("Workflow signal ESTIMATE_PERMISSION delivered to %s — %s", wfID, detail))
+		}
+		// More time agreed: the deadline moves now, as if the PM had extended it.
+		if reason == "EXTENSION" {
+			sig, err := s.extensionAnswered(r, tenant, caseID, caseNumber, reqID, py.name, decision == "AGREE")
+			if err != nil {
+				s.logActivity(r.Context(), tenant, caseID, "EXTENSION_NOT_APPLIED",
+					fmt.Sprintf("%s agreed to the extra time, but the deadline could not be moved (%s) — extend it on the Timelines", py.name, err))
+			}
+			signalled = sig
 		}
 		s.logAudit(r.Context(), tenant, caseID, "DOCUMENTS_SUBMITTED", map[string]any{
 			"by": p.Subject, "request_id": reqID, "files": files, "org": py.org(), "workflow_signalled": signalled})
@@ -522,4 +597,42 @@ func (s *server) sideJoined(ctx context.Context, tenant, caseID, side string) bo
 	var joined bool
 	err := s.db.QueryRow(ctx, `SELECT `+eligibleForOtherSide+` FROM public.case_respondents rs WHERE rs.tenant=$1 AND rs.case_id=$2`, tenant, caseID).Scan(&joined)
 	return err != nil || joined // no respondent row (an older case): nothing to gate on
+}
+
+// permissionDocRequest: the Cost Estimate went out, so the filer is asked in its portal -- not only by the estimate
+// email -- for its permission to proceed (step 4, within 15 calendar days). Once per case; only a filer with a
+// portal account (a filer without one answers the email).
+func (s *server) permissionDocRequest(r *http.Request, tenant, caseID string) {
+	// The filer is asked: the provider, or a health plan that filed the dispute itself.
+	side := "PROVIDER"
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT CASE WHEN upper(coalesce(details->>'filing_party_type','')) = 'HEALTH_PLAN'
+		THEN 'HEALTH_PLAN' ELSE 'PROVIDER' END FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&side)
+	if s.sideContact(r.Context(), tenant, caseID, side).org == "" {
+		return
+	}
+	var exists bool
+	_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.document_requests WHERE tenant=$1 AND case_id=$2 AND reason='PERMISSION')`,
+		tenant, caseID).Scan(&exists)
+	if exists {
+		return
+	}
+	var cents int64
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce((details->'dispute_summary'->>'full_review_estimate_cents')::bigint, 0)
+		FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&cents)
+	item := "Your permission to proceed with the full review"
+	if cents > 0 {
+		item += " at the estimated cost of " + usd(cents)
+	}
+	by := ""
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok {
+		by = p.Subject
+	}
+	_, _, _ = s.openDocRequest(r, tenant, caseID, side, "PERMISSION", "estimate_cost", []string{item},
+		"Give your permission to proceed, or say you do not wish to proceed. Without permission within 15 calendar days the dispute is dismissed.", 15, by)
+}
+
+// closePermissionRequests: the permission was recorded another way (the Reviewer's step), or the case was dismissed.
+func (s *server) closePermissionRequests(ctx context.Context, tenant, caseID, status string) {
+	_, _ = s.db.Exec(ctx, `UPDATE public.document_requests SET status=$3, closed_at=now() WHERE tenant=$1 AND case_id=$2
+		AND reason='PERMISSION' AND status='OPEN'`, tenant, caseID, status)
 }

@@ -65,6 +65,10 @@ func (s *server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		q += ` AND type=$2`
 		args = append(args, typ)
 	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		q += searchClause(len(args), "legal_name", "npi", "phone", "website", "type", "address::text", "custom::text")
+	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int
 	if err := s.db.QueryRow(r.Context(),
@@ -276,6 +280,10 @@ func (s *server) listLeads(w http.ResponseWriter, r *http.Request) {
 	if statusArg != nil {
 		queryArgs = append(queryArgs, statusArg)
 	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		queryArgs = append(queryArgs, like)
+		statusClause += searchClause(len(queryArgs), "name", "organization", "phone", "email", "summary", "source", "status")
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
 		`SELECT count(*) FROM public.leads WHERE tenant=$1`+statusClause, queryArgs...).Scan(&total); err != nil {
@@ -385,6 +393,10 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 		args = append(args, status)
 		q += fmt.Sprintf(` AND status=$%d`, len(args))
 	}
+	if like := searchLike(r.URL.Query().Get("q")); like != "" {
+		args = append(args, like)
+		q += searchClause(len(args), "subject", "task_ref", "case_id", "status")
+	}
 	limit, offset := pageParams(r, 100, 500)
 	var total int
 	if err := s.db.QueryRow(r.Context(),
@@ -434,7 +446,7 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lock := s.caseLockedForRequest(r, tenant, in.CaseID); lock != "" {
-		writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+		writeLockRefusal(w, lock)
 		return
 	}
 	// Two statements, not one writable-CTE combo: confirmed live on this
@@ -520,6 +532,10 @@ func (s *server) addNote(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Body == "" {
 		http.Error(w, `{"error":"body required"}`, http.StatusBadRequest)
+		return
+	}
+	if strings.EqualFold(in.RecordType, "case") && !s.caseVisible(r.Context(), p, tenant, in.RecordID) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	// Notes streams (Field Criteria): default internal; validate against the
@@ -627,6 +643,21 @@ func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = visible
 	}
+	// Who wrote each note, by name (author is the Keycloak subject).
+	var authors []string
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if a := fmt.Sprint(row["author"]); a != "" && !seen[a] {
+			seen[a] = true
+			authors = append(authors, a)
+		}
+	}
+	if len(authors) > 0 {
+		names := s.resolveSubjectNames(r.Context(), authors)
+		for _, row := range rows {
+			row["author_name"] = names[fmt.Sprint(row["author"])]
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"notes": rows})
 }
 
@@ -659,7 +690,9 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 		{"case", fmt.Sprintf(`SELECT id, case_number, status, id::text FROM tenant_%s.cases
 			WHERE case_number ILIKE $1 OR provider_id ILIKE $1 OR payer_id ILIKE $1
 			   OR details->>'provider_name' ILIKE $1 OR details->>'payer_name' ILIKE $1
-			   OR details->>'patient_name' ILIKE $1 LIMIT 10`, sanitizeTenant(tenant))},
+			   OR details->>'patient_name' ILIKE $1
+			   OR details->>'requester_org' ILIKE $1 OR details->>'provider_org' ILIKE $1 OR details->>'health_plan' ILIKE $1
+			   OR details->>'requester_email' ILIKE $1 LIMIT 10`, sanitizeTenant(tenant))},
 		{"account", `SELECT id::text, legal_name, type, '' FROM public.accounts
 			WHERE tenant=$1 AND legal_name ILIKE $2 LIMIT 10`},
 		{"contact", `SELECT id::text, name, COALESCE(role_title,''), '' FROM public.contacts
@@ -710,16 +743,49 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 	// Document full-text hits from OpenSearch (idre-docs-{tenant}, written by
 	// doc-intel). Best-effort: cluster down/absent just means no doc hits —
 	// the SQL results above always stand on their own.
-	if docHits, ok := s.searchDocsOpenSearch(r.Context(), tenant, r.URL.Query().Get("q")); ok {
+	// Each hit is named as people know it -- its file and its case -- and one whose document is gone from the
+	// case (the index still had it) is left out.
+	if docHits, ok := s.searchDocsOpenSearch(r.Context(), tenant, r.URL.Query().Get("q")); ok && len(docHits) > 0 {
+		ids := make([]string, 0, len(docHits))
 		for _, d := range docHits {
-			label := "document"
-			if d.DocType != "" {
-				label = d.DocType
-			}
-			out = append(out, hit{
-				Kind: "document", ID: d.DocID, Label: label, Detail: d.Snippet, CaseID: d.CaseID,
-			})
+			ids = append(ids, d.DocID)
 		}
+		names := map[string][2]string{}
+		if rows, err := s.db.Query(r.Context(), fmt.Sprintf(`SELECT d.id::text, coalesce(d.filename,''), coalesce(c.case_number,'')
+			FROM tenant_%s.documents d LEFT JOIN tenant_%s.cases c ON c.id::text = d.case_id::text
+			WHERE d.id::text = ANY($1)`, sanitizeTenant(tenant), sanitizeTenant(tenant)), ids); err == nil {
+			for rows.Next() {
+				var id, file, num string
+				if rows.Scan(&id, &file, &num) == nil {
+					names[id] = [2]string{file, num}
+				}
+			}
+			rows.Close()
+		}
+		for _, d := range docHits {
+			n, found := names[d.DocID]
+			if !found {
+				continue
+			}
+			out = append(out, hit{Kind: "document", ID: d.DocID, Label: docHitLabel(n[0], n[1], d.DocType), Detail: d.Snippet, CaseID: d.CaseID})
+		}
+	}
+	// A Reviewer finds nothing of a case assigned to someone else: not the case, its documents, tasks or invoices.
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && reviewerScoped(p) {
+		var ids []string
+		for _, h := range out {
+			if h.CaseID != "" {
+				ids = append(ids, h.CaseID)
+			}
+		}
+		hidden := s.hiddenCaseIDs(r.Context(), p, tenant, ids)
+		kept := out[:0]
+		for _, h := range out {
+			if !hidden[h.CaseID] {
+				kept = append(kept, h)
+			}
+		}
+		out = kept
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -761,4 +827,19 @@ func (s *server) queryRows(r *http.Request, sql string, args ...any) ([]map[stri
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// docHitLabel names a document search hit: its file and case ("eob.pdf — FL26-021372"), else its type.
+func docHitLabel(file, caseNumber, docType string) string {
+	label := file
+	if label == "" {
+		label = strings.ReplaceAll(docType, "_", " ")
+	}
+	if label == "" {
+		label = "document"
+	}
+	if caseNumber != "" {
+		label += " — " + caseNumber
+	}
+	return label
 }

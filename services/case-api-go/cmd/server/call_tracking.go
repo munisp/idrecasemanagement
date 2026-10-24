@@ -17,7 +17,8 @@ import (
 var callTrackingRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 // logCall: POST /v1/tenants/{tenant}/calls (tenant-level, pre-case)
-//          POST /v1/tenants/{tenant}/cases/{caseId}/calls (case-scoped)
+//
+//	POST /v1/tenants/{tenant}/cases/{caseId}/calls (case-scoped)
 func (s *server) logCall(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, callTrackingRoles...) {
@@ -65,7 +66,8 @@ func (s *server) logCall(w http.ResponseWriter, r *http.Request) {
 }
 
 // listCalls: GET /v1/tenants/{tenant}/calls?case_id=|email=
-//            GET /v1/tenants/{tenant}/cases/{caseId}/calls
+//
+//	GET /v1/tenants/{tenant}/cases/{caseId}/calls
 func (s *server) listCalls(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")
@@ -96,7 +98,8 @@ func (s *server) listCalls(w http.ResponseWriter, r *http.Request) {
 }
 
 // logInquiry: POST /v1/tenants/{tenant}/inquiries
-//             POST /v1/tenants/{tenant}/cases/{caseId}/inquiries
+//
+//	POST /v1/tenants/{tenant}/cases/{caseId}/inquiries
 func (s *server) logInquiry(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, callTrackingRoles...) {
@@ -159,7 +162,8 @@ func (s *server) logCorrespondenceInquiry(r *http.Request, tenant, caseID, email
 }
 
 // listInquiries: GET /v1/tenants/{tenant}/inquiries?case_id=|email=
-//                GET /v1/tenants/{tenant}/cases/{caseId}/inquiries
+//
+//	GET /v1/tenants/{tenant}/cases/{caseId}/inquiries
 func (s *server) listInquiries(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	caseID := chi.URLParam(r, "caseId")

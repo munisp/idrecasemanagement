@@ -85,10 +85,10 @@ func TestParseMoneyToCents(t *testing.T) {
 
 func TestAutoMatch(t *testing.T) {
 	items := []reconItem{
-		{Date: "2026-10-03", AmountCents: 10000, Reference: "pi_123"},     // exact ref
-		{Date: "2026-10-04", AmountCents: 5005},                          // tolerance ($1 cap)
-		{Date: "2026-10-05", AmountCents: 7000},                          // ambiguous (two candidates)
-		{Date: "2026-10-06", AmountCents: 99999},                         // none
+		{Date: "2026-10-03", AmountCents: 10000, Reference: "pi_123"}, // exact ref
+		{Date: "2026-10-04", AmountCents: 5005},                       // tolerance ($1 cap)
+		{Date: "2026-10-05", AmountCents: 7000},                       // ambiguous (two candidates)
+		{Date: "2026-10-06", AmountCents: 99999},                      // none
 	}
 	events := []finEvent{
 		{ID: 1, AmountCents: 10000, Ref: "pi_123", Date: "2026-10-01"},

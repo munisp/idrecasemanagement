@@ -116,10 +116,10 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 		body = fmt.Sprintf(`
 			<h1>Secure document download</h1>
 			<p class="muted">Case <b>%s</b> · link expires %s · %d of %d use(s) remaining</p>
-			<p><a class="btn" href="/api/share/%s/download">Download document</a></p>
+			<p><a class="btn" href="/api/share/%s/download">Download</a></p>
 			<p class="fine">%s Downloads are logged to the case record.</p>`,
 			escHTML(caseNumber), g.ExpiresAt.Format("Jan 2, 2006 15:04 MST"), g.MaxUses-g.Uses, g.MaxUses, escHTML(token),
-			map[bool]string{true: "This link downloads the dispute's documents as one zip file.", false: "This link grants access to one specific document."}[g.ObjectKey == caseZipKey])
+			linkWhat(g.ObjectKey, s.bundleDocs(r.Context(), g.Tenant, g.CaseID, strings.TrimPrefix(g.ObjectKey, caseSetPrefix))))
 		body += shareChatSection(token)
 	}
 	// sharePage's <title> appends "— Secure Document Exchange" itself, so
@@ -280,24 +280,48 @@ func (s *server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		s.writeCaseZip(w, r, g.Tenant, g.CaseID, false)
 		return
 	}
+	// A set: the letter's documents (letterBundles), the latest of each, as one zip.
+	if strings.HasPrefix(objectKey, caseSetPrefix) {
+		set := strings.TrimPrefix(objectKey, caseSetPrefix)
+		docs := s.bundleDocs(r.Context(), g.Tenant, g.CaseID, set)
+		if len(docs) == 0 {
+			http.Error(w, `{"error":"the documents for this link are not filed yet — contact your case coordinator"}`, http.StatusNotFound)
+			return
+		}
+		if _, err := s.consumeShare(r, token, "download"); err != nil {
+			http.Error(w, `{"error":"link expired or invalid"}`, http.StatusGone)
+			return
+		}
+		zipName := s.bundleName(r.Context(), g.Tenant, g.CaseID, set)
+		s.logCorrespondence(r, g.Tenant, g.CaseID, "OUT", "sharebox_download",
+			fmt.Sprintf("%s (%d documents) downloaded via secure link", zipName, len(docs)), "", nil, nil, "sharebox:"+token[:8])
+		s.logActivity(r.Context(), g.Tenant, g.CaseID, "SHARE_DOWNLOAD",
+			fmt.Sprintf("%s (%d documents) downloaded via secure link (use %d/%d)", zipName, len(docs), g.Uses+1, g.MaxUses))
+		s.writeDocsZip(w, r, g.Tenant, zipName, docs)
+		return
+	}
 	if objectKey == "" {
 		// default: newest unsealed document on the case
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-			SELECT object_key FROM tenant_%s.documents
-			WHERE case_id=$1 AND sealed=false ORDER BY created_at DESC LIMIT 1`, sanitizeTenant(g.Tenant)),
+			SELECT d.object_key FROM tenant_%s.documents d
+			WHERE d.case_id=$1 AND NOT d.sealed AND NOT `+internalDocSQL+` ORDER BY d.created_at DESC LIMIT 1`, sanitizeTenant(g.Tenant)),
 			g.CaseID).Scan(&objectKey)
 	}
 	if objectKey == "" {
 		http.Error(w, `{"error":"no document attached to this link"}`, http.StatusNotFound)
 		return
 	}
-	// sealed documents never leave via sharebox
-	var sealed bool
+	// sealed documents never leave via sharebox, nor the office's internal ones (the eligibility checklist)
+	var sealed, internal bool
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT sealed FROM tenant_%s.documents WHERE object_key=$1`, sanitizeTenant(g.Tenant)),
-		objectKey).Scan(&sealed)
+		SELECT d.sealed, `+internalDocSQL+` FROM tenant_%s.documents d WHERE d.object_key=$1`, sanitizeTenant(g.Tenant)),
+		objectKey).Scan(&sealed, &internal)
 	if sealed {
 		http.Error(w, `{"error":"document is sealed"}`, http.StatusForbidden)
+		return
+	}
+	if internal {
+		http.Error(w, `{"error":"this document is not shared outside the review team"}`, http.StatusForbidden)
 		return
 	}
 	if _, err := s.consumeShare(r, token, "download"); err != nil {
@@ -515,4 +539,22 @@ go.onclick = async function(){
   } catch(e){ msg.textContent = e.message + " — click Upload to resume."; go.disabled = false; }
 };
 })();`
+}
+
+// linkWhat: what a download link's page says it carries.
+func linkWhat(objectKey string, set []bundleDoc) string {
+	switch {
+	case objectKey == caseZipKey:
+		return "This link downloads the dispute's documents as one zip file."
+	case strings.HasPrefix(objectKey, caseSetPrefix):
+		if len(set) == 0 {
+			return "The documents for this link are not filed yet."
+		}
+		names := make([]string, len(set))
+		for i, d := range set {
+			names[i] = d.name
+		}
+		return "This link downloads, as one zip file: " + strings.Join(names, "; ") + "."
+	}
+	return "This link grants access to one specific document."
 }

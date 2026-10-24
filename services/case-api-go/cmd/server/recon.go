@@ -35,9 +35,9 @@ import (
 // ---------- normalized external item ----------
 
 type reconItem struct {
-	Date       string `json:"date"`       // YYYY-MM-DD
-	AmountCents int64 `json:"amount_cents"` // signed: + received, - disbursed
-	Reference  string `json:"reference"`
+	Date        string `json:"date"`         // YYYY-MM-DD
+	AmountCents int64  `json:"amount_cents"` // signed: + received, - disbursed
+	Reference   string `json:"reference"`
 	Description string `json:"description"`
 }
 
@@ -58,7 +58,7 @@ var reconAdapters = map[string]reconAdapter{
 
 // ReconConfig is the tenant-tunable block on ProgramConfig.
 type ReconConfig struct {
-	ToleranceCents int64 `json:"tolerance_cents"` // default 100 ($1.00)
+	ToleranceCents int64 `json:"tolerance_cents"`  // default 100 ($1.00)
 	DateWindowDays int   `json:"date_window_days"` // default 5
 	// csv_mappings: mapping name -> {date, description, amount, reference}
 	// column headers. Built-ins exist for quickbooks/xero/sage/bank_generic;

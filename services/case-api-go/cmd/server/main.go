@@ -60,7 +60,12 @@ type Config struct {
 	// TopicPrefix namespaces every Kafka topic this deployment publishes
 	// ("<prefix>.<tenant>.<domain>"). Two deployments on one broker MUST
 	// use different prefixes or each consumes the other's events.
-	TopicPrefix     string
+	TopicPrefix string
+	// RedisPrefix starts every Redis key this deployment writes. Deployments
+	// sharing one Redis keep their rate limits, idempotency keys and mail
+	// pacing apart by setting it (REDIS_KEY_PREFIX); dev and idre-prod keep
+	// the default and so share mail pacing, as they share one mail account.
+	RedisPrefix     string
 	VaultURL        string // http://vault:8081 (mTLS via Dapr in k8s)
 	GraphIntelURL   string // http://graph-intel:8082 ("" = graph features disabled)
 	DeidURL         string // http://deid:8083 ("" = de-identification disabled)
@@ -119,6 +124,7 @@ func configFromEnv() Config {
 		TBClusterID:   get("TIGERBEETLE_CLUSTER_ID", ""),
 		DaprHTTP:      get("DAPR_HTTP_ENDPOINT", "http://localhost:3500"),
 		TopicPrefix:   get("TOPIC_PREFIX", "idre"),
+		RedisPrefix:   get("REDIS_KEY_PREFIX", "idre"),
 		VaultURL:      get("VAULT_URL", "http://localhost:8081"),
 		GraphIntelURL: get("GRAPH_INTEL_URL", "http://localhost:8082"),
 		DeidURL:       get("DEID_URL", ""),
@@ -173,6 +179,9 @@ type Case struct {
 	PayerID          string    `json:"payer_id"`
 	TriageLane       string    `json:"triage_lane"`        // AUTO_REVIEW | STANDARD | COMPLEX
 	SLADaysRemaining int       `json:"sla_days_remaining"` // 30 statutory business days, approximated
+	AssignedTo       *string   `json:"assigned_to"`        // Keycloak user id; null = unassigned
+	AssignedRole     *string   `json:"assigned_role,omitempty"`
+	AssignedName     string    `json:"assigned_name,omitempty"` // the assignee's name, for the list
 }
 
 type InitiateRequest struct {
@@ -497,14 +506,19 @@ func main() {
 	// JWKS via Redis: all replicas share one cache; Keycloak key rotation
 	// propagates within the TTL instead of hammering the certs endpoint.
 	var keys jwk.Set
-	if raw := rds.get("idre:jwks"); raw != "" {
+	// The cache is per signing-key URL: deployments on one Redis sign in on
+	// different realms, and a shared key handed a starting pod the other
+	// realm's keys (every login then failed until the cache expired).
+	sum := sha256.Sum256([]byte(cfg.KeycloakJWKS))
+	jwksKey := cfg.RedisPrefix + ":jwks:" + hex.EncodeToString(sum[:8])
+	if raw := rds.get(jwksKey); raw != "" {
 		keys, err = jwk.ParseString(raw)
 	}
 	if keys == nil {
 		keys, err = jwk.Fetch(ctx, cfg.KeycloakJWKS)
 		must(err)
 		if buf, merr := json.Marshal(keys); merr == nil {
-			rds.setex("idre:jwks", 300, string(buf))
+			rds.setex(jwksKey, 300, string(buf))
 		}
 	}
 	a := &authn{keys: keys, issuer: cfg.KeycloakIssuer, workerToken: cfg.WorkerToken}
@@ -531,7 +545,11 @@ func main() {
 		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
 		r.Get("/queues/summary", s.queuesSummary)   // dashboard rollup: queue counts + clocks in one call
 		r.Get("/cases", s.listCases)
+		r.Get("/cases/pipeline/counts", s.pipelineCounts) // per-stage totals for the Pipeline board (pages via /cases)
 		r.Get("/cases/{caseId}", s.getCase)
+		r.Get("/cases/{caseId}/summary", s.caseSummary)        // the dispute in words, from current data (casesummary.go)
+		r.Post("/fees/transfer", s.postFeeTransfer)            // escrow/admin/IDRE fee double-entry
+		r.Post("/cases/{caseId}/signal", s.signalCase)         // e.g. response filed, fees paid
 		r.Get("/cases/{caseId}/next-action", s.caseNextAction) // rule-based next best action
 		r.Post("/telemetry/events", s.telemetryIngest)         // portal interaction baseline
 		r.Get("/telemetry/metrics", s.telemetryMetrics)
@@ -539,8 +557,6 @@ func main() {
 		r.Get("/telemetry/action-stats", s.telemetryActionStats)   // per-action calibration: prior vs observed
 		r.Get("/telemetry/prefill-stats", s.telemetryPrefillStats) // per-field prefill accept rates
 		r.Get("/analytics/transitions", s.analyticsTransitions)
-		r.Post("/fees/transfer", s.postFeeTransfer)    // escrow/admin/IDRE fee double-entry
-		r.Post("/cases/{caseId}/signal", s.signalCase) // e.g. response filed, fees paid
 
 		// Documents: encrypted upload, authorized download, analysis status.
 		r.Post("/cases/{caseId}/documents", s.uploadDocument)
@@ -555,6 +571,7 @@ func main() {
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
+		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket) // the filing packet form (filing_packet.go)
 		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
 		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
 		r.Post("/deliverables/request", s.requestAdhocDeliverable)
@@ -607,6 +624,11 @@ func main() {
 		// Case management: assignment, escalation, relationships, checklists,
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
+		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
+		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
+		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Reviewers in turn: on/off, the rotation, who is next
+		r.Put("/assignment/auto", s.setAutoAssign)
+		r.Post("/assignment/auto/assign-open", s.assignOpenCases) // the unassigned backlog, in turn (autoassign.go)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
 		r.Get("/internal/ledger/balances", s.ledgerBalances)            // worker-token: reconciliation job
 		r.Post("/internal/ledger/backfill", s.ledgerBackfill)           // replay past payments into the ledger (?apply=true)
@@ -638,22 +660,26 @@ func main() {
 		r.Get("/tpa/documents.zip", s.orgDocumentsZip("tpa"))
 		r.Get("/hp/documents.zip", s.orgDocumentsZip("hp"))
 		r.Get("/notifications", s.listNotifications)
+		r.Get("/notifications/count", s.countNotifications) // the bell's unread total
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Post("/notifications/read-all", s.readAllNotifications)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
 		r.Get("/prefs", s.getPrefs) // server-side user preferences (source of truth)
 		r.Put("/prefs", s.putPref)
-		r.Get("/cases/clocks", s.casesClocks)         // batch statutory-clock projection (grids)
-		r.Get("/cases/{caseId}/clocks", s.caseClocks) // per-case projection (workspace header)
-		r.Post("/cases/bulk", s.bulkCases)            // bulk assign / status with per-item results
-		r.Post("/queues/grab-next", s.grabNext)       // atomic queue claim (triage fast lane)
+		r.Get("/cases/clocks", s.casesClocks)                                          // batch statutory-clock projection (grids)
+		r.Get("/cases/{caseId}/clocks", s.caseClocks)                                  // per-case projection (workspace header)
+		r.Post("/cases/{caseId}/clocks/{clock}/extend", s.extendDeadline)              // PM deadline extension (deadline_extensions.go)
+		r.Post("/cases/{caseId}/clocks/{clock}/extension-request", s.requestExtension) // ask the TPA / plan to agree to more time
+		r.Post("/cases/bulk", s.bulkCases)                                             // bulk assign / status with per-item results
+		r.Post("/queues/grab-next", s.grabNext)                                        // atomic queue claim (triage fast lane)
 
 		// Graph intelligence (proxied to graph-intel: FalkorDB + GraphSAGE + EPR-KGQA).
 		r.Post("/graph/ask", s.graphAsk)                  // EPR-KGQA natural-language query
 		r.Get("/graph/hints", s.graphHints)               // real names for the sample questions
 		r.Post("/graph/feedback", s.graphFeedback)        // thumbs up/down -> ART-ready log
-		r.Post("/graph/sync", s.graphSyncNow)             // Postgres -> FalkorDB -> lakehouse
+		r.Post("/graph/sync", s.graphSyncNow)             // Postgres -> FalkorDB -> lakehouse (runs in the background)
+		r.Get("/graph/sync", s.graphSyncStatus)           // running? how the last full sync ended
 		r.Post("/graph/to-lakehouse", s.graphToLakehouse) // FalkorDB -> gold-zone export
 		r.Post("/graph/train", s.graphTrain)              // GraphSAGE training round
 		r.Get("/cases/{caseId}/related", s.caseRelated)   // GNN link predictions
@@ -668,12 +694,15 @@ func main() {
 
 		// Program rules (per-state customization; federal NSA is the no-config default).
 		r.Get("/program", s.getProgram)
-		r.Put("/program/label", s.setTenantLabel)                // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
-		r.Put("/program/brand", s.setTenantBrand)                // program admins: the portal's brand name for this tenant
-		r.Get("/admin/tenant-labels", s.listTenantLabels)        // cross-tenant switcher label map
-		r.Post("/cases/{caseId}/program-date", s.setProgramDate) // record clock-basis events
-		r.Post("/cases/{caseId}/status", s.setDualStatus)        // dual internal/agency status (G5)
-		r.Post("/cases/{caseId}/time", s.addTimeEntry)           // per-role effort on the dispute
+		r.Get("/program/configuration", s.getConfiguration)           // the Configuration page (configuration.go)
+		r.Put("/program/configuration/{section}", s.putConfiguration) // fees | eligibility | clocks | billing
+		r.Put("/features", s.setOwnTenantFeatures)                    // a tenant admin's own toggles (features.go)
+		r.Put("/program/label", s.setTenantLabel)                     // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
+		r.Put("/program/brand", s.setTenantBrand)                     // program admins: the portal's brand name for this tenant
+		r.Get("/admin/tenant-labels", s.listTenantLabels)             // cross-tenant switcher label map
+		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
+		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
+		r.Post("/cases/{caseId}/time", s.addTimeEntry)                // per-role effort on the dispute
 		r.Get("/cases/{caseId}/time", s.listTimeEntries)
 		r.Get("/time/mine", s.myTimeEntries)           // personal timesheet (all disputes)
 		r.Get("/time/summary", s.myTimeSummary)        // today / this week / this month totals
@@ -729,30 +758,46 @@ func main() {
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
 		// multiple initiating parties (providers or health plans).
-		r.Post("/tpa/claim", s.claimTPA)            // burn a one-time claim code, bind user -> TPA
-		r.Post("/tpa/unlink", s.unlinkTPA)          // staff-only: undo "Act as this TPA"
-		r.Post("/tpa/invite-code", s.tpaInviteCode) // mint a fresh claim code to add a teammate
-		r.Get("/tpa/me", s.tpaMe)                   // my TPA org + clients
-		r.Post("/tpa/clients", s.tpaAddClient)      // add an initiating party I represent
+		r.Post("/tpa/claim", s.claimTPA)             // burn a one-time claim code, bind user -> TPA
+		r.Post("/tpa/unlink", s.unlinkTPA)           // staff-only: undo "Act as this TPA"
+		r.Post("/tpa/invite-code", s.tpaInviteCode)  // mint a fresh claim code to add a teammate
+		r.Get("/tpa/team", s.tpaTeamList)            // the TPA's employees (tpa_team.go)
+		r.Post("/tpa/team", s.tpaTeamAdd)            // add an employee: their own login, emailed to them
+		r.Patch("/tpa/team/{sub}", s.tpaTeamSetRole) // ADMIN | STAFF
+		r.Delete("/tpa/team/{sub}", s.tpaTeamRemove) // unlink + disable the login
+		r.Get("/tpa/groups", s.tpaGroupsList)        // provider groups: TPA -> groups -> providers
+		r.Post("/tpa/groups", s.tpaGroupAdd)
+		r.Patch("/tpa/groups/{groupId}", s.tpaGroupUpdate)
+		r.Put("/tpa/clients/{clientId}/group", s.tpaClientSetGroup)
+		r.Get("/tpa/me", s.tpaMe)              // my TPA org + clients
+		r.Post("/tpa/clients", s.tpaAddClient) // add an initiating party I represent
 		r.Get("/tpa/clients", s.tpaListClients)
 		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
-		r.Post("/tpa/intake", s.tpaIntake)                                     // file a dispute on behalf of a client
-		r.Get("/tpa/dashboard", s.tpaDashboard)                                // status of all my clients' disputes
-		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                    // correct my own filing while it awaits payment
-		r.Get("/admin/tpas", s.adminListTPAs)                                  // state oversight
-		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)              // suspend|reactivate
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)              // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)             // past reviews (G2)
-		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist) // printable Eligibility Checklist
-		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                      // the SOP steps: done, next, upcoming
-		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                     // Reviewer: outcome, claims reviewed, award, party billed
-		r.Post("/cases/{caseId}/fwa", s.fwaAction)                             // fraud/waste/abuse: report, assign reviewer, conclude
-		r.Put("/program/contract-dates", s.setContractDates)                   // admin: contract execution/effective/end dates
-		r.Get("/program/recipients", s.getCorrespondenceRecipients)            // agency contacts + PM copy addresses
-		r.Put("/program/recipients", s.setCorrespondenceRecipients)            // admin
-		r.Get("/program/templates", s.listTemplates)                           // the Templates screen
-		r.Post("/program/templates/preview", s.previewTemplate)                // placeholders filled from a real case
-		r.Put("/program/templates/usage", s.putTemplateUsage)                  // which template is used when (PM/admin)
+		r.Post("/tpa/intake", s.tpaIntake)                                           // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)                                      // status of all my clients' disputes
+		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                          // correct my own filing while it awaits payment
+		r.Get("/admin/tpas", s.adminListTPAs)                                        // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                    // suspend|reactivate
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                    // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)                   // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote) // notes on a review (Reviewer, PM, Attorney)
+		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist)       // printable Eligibility Checklist
+		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                            // the SOP steps: done, next, upcoming
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                           // Reviewer: outcome, claims reviewed, award, party billed
+		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                // the written decision: sections, amounts, claims tables
+		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
+		r.Post("/cases/{caseId}/decision-report/file", s.attachDecisionReport) // the finished report, uploaded
+		r.Get("/letter-settings", s.getLetterSettings)                         // letterhead, Agency addressee, invoice terms, remit-to
+		r.Put("/letter-settings", s.putLetterSettings)
+		r.Get("/template-variables", s.getTemplateVariables) // the office's values and its own {variables}
+		r.Put("/template-variables", s.putTemplateVariables)
+		r.Post("/cases/{caseId}/fwa", s.fwaAction)                  // fraud/waste/abuse: report, assign reviewer, conclude
+		r.Put("/program/contract-dates", s.setContractDates)        // admin: contract execution/effective/end dates
+		r.Get("/program/recipients", s.getCorrespondenceRecipients) // agency contacts + PM copy addresses
+		r.Put("/program/recipients", s.setCorrespondenceRecipients) // admin
+		r.Get("/program/templates", s.listTemplates)                // the Templates screen
+		r.Post("/program/templates/preview", s.previewTemplate)     // placeholders filled from a real case
+		r.Put("/program/templates/usage", s.putTemplateUsage)       // which template is used when (PM/admin)
 		r.Delete("/program/templates/usage/{id}", s.deleteTemplateUsage)
 		r.Get("/program/templates/{key}/history", s.templateHistory)
 		r.Put("/program/templates/{key}", s.putTemplate)       // add or change a template (PM/admin)
@@ -768,10 +813,12 @@ func main() {
 		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
 		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)
 		r.Post("/tpa/packages/{packageId}/docs", s.tpaAttachDoc)           // one slot
+		r.Delete("/tpa/packages/{packageId}/docs/{slot}", s.tpaRemoveDoc)  // take a file out of a set not yet filed
 		r.Post("/tpa/packages/{packageId}/merged", s.tpaUploadMerged)      // one giant PDF
 		r.Get("/tpa/packages/{packageId}", s.tpaPackageStatus)             // slot verdict grid
 		r.Post("/tpa/packages/bulk", s.tpaUploadBulkZip)                   // ZIP of client folders
 		r.Post("/tpa/disputes/bulk", s.tpaBulkDisputes)                    // many disputes, each with its own six documents (ZIP)
+		r.Get("/tpa/disputes/bulk/sample.zip", s.tpaBulkSample)            // a sample ZIP to copy (tpa_bulk_sample.go)
 		r.Get("/tpa/disputes/bulk", s.tpaBulkDisputeBatches)               // my bulk dispute batches
 		r.Get("/tpa/disputes/bulk/{batchId}", s.tpaBulkDisputeBatch)       // per-row report: documents, case number
 		r.Post("/tpa/disputes/bulk/{batchId}/checkout", s.tpaBulkCheckout) // one payment for the batch's filed, unpaid disputes
@@ -790,6 +837,11 @@ func main() {
 		r.Get("/tpa/audit", s.orgAuditLog("tpa")) // the TPA's own audit trail (orgaudit.go)
 		r.Get("/hp/audit", s.orgAuditLog("hp"))   // the plan's own audit trail
 		// Document requests (document_requests.go): asked on the case, answered in the portal.
+		r.Get("/tpa/sent-documents", s.orgSentDocs("tpa")) // what was sent to the TPA, by dispute (party_documents.go)
+		r.Get("/tpa/sent-documents/{docId}", s.orgSentDocDownload("tpa"))
+		r.Get("/hp/sent-documents", s.orgSentDocs("hp"))
+		r.Get("/hp/sent-documents/{docId}", s.orgSentDocDownload("hp"))
+		r.Post("/party-documents/backfill", s.backfillPartyDocs)
 		r.Get("/tpa/document-requests", s.orgDocRequests("tpa"))
 		r.Post("/tpa/document-requests/{reqId}/files", s.orgDocRequestUpload("tpa"))
 		r.Post("/tpa/document-requests/{reqId}/submit", s.orgDocRequestSubmit("tpa"))
@@ -803,6 +855,10 @@ func main() {
 		r.Post("/tpa/clients/{clientId}/fees/checkout", s.tpaClientCheckout)
 		r.Post("/tpa/disputes/{caseId}/pay", s.disputePay("tpa"))
 		r.Get("/tpa/disputes/{caseId}/fee", s.disputeFee("tpa"))
+		r.Get("/tpa/disputes/{caseId}/summary", s.orgDisputeSummary("tpa")) // the dispute as the TPA sees it (party_dispute_view.go)
+		r.Get("/tpa/prefill", s.orgPrefill("tpa"))                          // File a dispute filled in from its own documents (org_prefill.go)
+		r.Get("/hp/prefill", s.orgPrefill("hp"))
+		r.Get("/hp/disputes/{caseId}/summary", s.orgDisputeSummary("hp"))
 		r.Post("/tpa/fees/checkout/{groupId}/confirm", s.checkoutConfirm("tpa"))
 		r.Post("/tpa/fees/checkout/{groupId}/cancel", s.checkoutCancel("tpa"))
 		r.Get("/hp/fees", s.orgFees("hp"))
@@ -823,6 +879,8 @@ func main() {
 		r.Post("/hp/responding/{caseId}/documents", s.respondingUpload("plan"))
 		r.Post("/hp/responding/{caseId}/submit", s.respondingSubmit("plan"))
 		r.Post("/hp/responding/{caseId}/opt-out", s.respondingOptOut)
+		r.Get("/onboarding/verification-reviews", s.verificationReviews) // exclusion-list (HHS-OIG) matches
+		r.Post("/onboarding/verification-reviews/{reviewId}", s.verificationReviewDecide)
 		r.Get("/onboarding/npi-reviews", s.npiReviews) // client NPIs the registry holds under another name
 		r.Post("/onboarding/npi-reviews/{kind}/{id}", s.npiReviewDecide)
 		r.Get("/onboarding/reviews", s.onboardingReviews) // documents doc-intel left for a person (both rails)
@@ -861,7 +919,9 @@ func main() {
 		r.Get("/cases/{caseId}/copilot/actions", s.copilotListActionBatches)
 		r.Post("/cases/{caseId}/copilot/actions/{batchId}/decision", s.copilotDecideActions) // human gate -> Temporal signal
 		r.Post("/cases/{caseId}/correspondence", s.draftCorrespondence)                      // template draft / send (G3)
+		r.Post("/cases/{caseId}/correspondence/preview", s.previewCorrespondence)            // how it will read, before it is sent (mail_preview.go)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
+		r.Get("/cases/{caseId}/mail-tracker", s.caseMailTracker) // every email of the case, tracked (mail_tracker.go)
 		r.Get("/correspondence", s.listMailJournal)              // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
 
@@ -906,18 +966,22 @@ func main() {
 		r.Get("/payments", s.listPayments)                     // payment history (tenant)
 		r.Get("/cases/{caseId}/payments", s.listPayments)      // payment history (case)
 		r.Get("/reports/financial", s.financialReport)         // finance dashboard aggregate
-		r.Get("/reports/fl/weekly", s.flWeeklyReport)          // contract 2.4.2: 16-col A-P CSV
-		r.Get("/reports/fl/monthly", s.flMonthlyReport)        // contract 2.4.3: 33-field CSV
-		r.Get("/reports/fl/adhoc", s.flAdhocReport)            // contract 2.4.4: chosen columns, period, statuses
-		r.Get("/reports/fl/final", s.flFinalReport)            // contract 2.4.5: every case, monthly layout
-		r.Get("/reports/fl/columns", s.flReportColumns)        // what an ad hoc report can contain
-		r.Post("/cases/{caseId}/claims", s.importClaims)       // bulk claim lines (G10)
+		r.Get("/reports/unapplied", s.listUnapplied)           // money received that pays no fee (unapplied.go)
+		r.Post("/finance/unapplied/{id}/resolve", s.resolveUnapplied)
+		r.Get("/reports/refunds-due", s.refundsDue)      // refunds the workflow ordered, not yet made (refunds_due.go)
+		r.Get("/reports/fl/weekly", s.flWeeklyReport)    // contract 2.4.2: 16-col A-P CSV
+		r.Get("/reports/fl/monthly", s.flMonthlyReport)  // contract 2.4.3: 33-field CSV
+		r.Get("/reports/fl/adhoc", s.flAdhocReport)      // contract 2.4.4: chosen columns, period, statuses
+		r.Get("/reports/fl/final", s.flFinalReport)      // contract 2.4.5: every case, monthly layout
+		r.Get("/reports/fl/columns", s.flReportColumns)  // what an ad hoc report can contain
+		r.Post("/cases/{caseId}/claims", s.importClaims) // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
-		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake
-		r.Post("/intake", s.createIntake)                 // pre-case intake (G12)
-		r.Post("/intake/bulk", s.bulkIntake)              // third-party batch filing (idempotent by batch_ref)
-		r.Get("/intake/bulk", s.listIntakeBatches)        // filer status board (own batches; staff may filter)
-		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch) // batch receipt / reconciliation
+		r.Put("/cases/{caseId}/claims/eligibility", s.setClaimEligibility) // a partially accepted case's ineligible claims
+		r.Post("/intake/converse", s.intakeConverse)                       // conversational intake (step 5): extraction only — filing stays on /intake
+		r.Post("/intake", s.createIntake)                                  // pre-case intake (G12)
+		r.Post("/intake/bulk", s.bulkIntake)                               // third-party batch filing (idempotent by batch_ref)
+		r.Get("/intake/bulk", s.listIntakeBatches)                         // filer status board (own batches; staff may filter)
+		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch)                  // batch receipt / reconciliation
 		r.Get("/intake", s.listIntake)
 		r.Post("/intake/{intakeId}/advance", s.advanceIntake) // refund window enforced
 
@@ -956,6 +1020,7 @@ func main() {
 		r.Post("/tenant-staff", s.createTenantStaff)
 		r.Get("/tenant-staff", s.listTenantStaff)
 		r.Patch("/tenant-staff/{username}", s.updateTenantStaffStatus)
+		r.Put("/tenant-staff/{username}/roles", s.setTenantStaffRoles) // what a staff member does (staffroles.go)
 		r.Delete("/tenant-staff/{username}", s.deleteTenantStaff)
 	})
 
@@ -1031,10 +1096,30 @@ func main() {
 			if n := s.sweepPaymentReminders(); n > 0 {
 				slog.Info("payment reminders sweep", "drafted", n)
 			}
+			if n := s.sweepLateFees(); n > 0 {
+				slog.Info("late fee sweep", "charged", n)
+			}
+			s.sweepStepTasks()
 			select {
 			case <-sweepStop:
 				return
 			case <-t.C:
+			}
+		}
+	}()
+
+	// Mail the provider turned away for now (mailqueue.go) goes out again as soon as it may.
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+				if n := s.sweepMailQueue(); n > 0 {
+					slog.Info("mail queue sweep", "sent", n)
+				}
 			}
 		}
 	}()
@@ -1045,7 +1130,9 @@ func main() {
 	// Bulk TPA disputes (tpa_bulk_disputes.go): a row is filed once its own
 	// six documents are accepted.
 	go s.runBulkDisputeFiler(sweepStop)
+	go s.catchUpStepQueues(sweepStop) // cases already at a specialist's step get their queue item (helpers.go)
 	go s.backfillPackageAnalyses()
+	go s.backfillPartyDocsAll() // letters sent before the parties' record existed (party_documents.go)
 
 	go func() {
 		t := time.NewTicker(docSweepEvery)
@@ -1139,7 +1226,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	// Idempotency (Redis): mobile/PWA retries replay the same key and get the
 	// original case back instead of a duplicate dispute.
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		rkey := fmt.Sprintf("idre:%s:idem:%s", tenant, key)
+		rkey := fmt.Sprintf("%s:%s:idem:%s", s.cfg.RedisPrefix, tenant, key)
 		if existing := s.rds.get(rkey); existing != "" {
 			writeJSON(w, http.StatusOK, map[string]any{"case_id": existing, "idempotent_replay": true})
 			return
@@ -1242,6 +1329,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	}
 	// Case-management enrichment: stage checklists + duplicate detection + timeline.
 	s.ensureChecklist(r, tenant, caseID)
+	s.autoAssignNewCase(r, tenant, caseID, req.CaseNumber) // the next Reviewer in turn (autoassign.go)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
 		fmt.Sprintf("Dispute %s initiated (%s) — %s / %s, QPA $%d.%02d, workflow %s",
 			req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
@@ -1269,9 +1357,9 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 
 	dups := s.findDuplicates(r, tenant, req.ProviderID, req.PayerID, req.QPACents)
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		s.rds.setex(fmt.Sprintf("idre:%s:idem:%s", tenant, key), 86400, caseID)
+		s.rds.setex(fmt.Sprintf("%s:%s:idem:%s", s.cfg.RedisPrefix, tenant, key), 86400, caseID)
 	}
-	s.graphSync(tenant) // nudge FalkorDB + lakehouse silver (best-effort)
+	s.graphSync(tenant, caseID) // the new case in the graph (best-effort)
 	s.logAudit(r.Context(), tenant, caseID, "CASE_INITIATED", map[string]any{
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "case_number": req.CaseNumber,
 		"status": initialStatus, "workflow_id": wfID, "late_initiation": lateInitiation,
@@ -1294,6 +1382,25 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 //	?q=text       case_number ILIKE search
 //
 // Response: {"cases": [...], "next_cursor": "...", "total": N}
+// caseServiceSQL is a case's service line as people see it: the one set on the case, else the packet's type of
+// service, else its claim lines' (a dispute filed through the filing packet records the service there, and its
+// service_line column stays empty). c = the case row; tenant = $1.
+const caseServiceSQL = `coalesce(nullif(c.service_line,''), nullif(c.details->>'type_of_service',''),
+	(SELECT cl.type_of_service FROM public.case_claims cl WHERE cl.tenant=$1 AND cl.case_id=c.id::text AND coalesce(cl.type_of_service,'') <> ''
+	 GROUP BY 1 ORDER BY count(*) DESC, 1 LIMIT 1), '')`
+
+// caseSearchSQL is the ?q= filter on cases aliased c, the term (a LIKE pattern) being $n and the tenant $1. The
+// Disputes list and the Pipeline board's counts both use it, so a search finds the same cases in both.
+func caseSearchSQL(n int) string {
+	return fmt.Sprintf(` AND (c.case_number ILIKE $%[1]d OR `+caseServiceSQL+` ILIKE $%[1]d
+			OR coalesce(c.internal_status,'') ILIKE $%[1]d OR coalesce(c.agency_status,'') ILIKE $%[1]d
+			OR coalesce(c.payer_id,'') ILIKE $%[1]d OR coalesce(c.details::text,'') ILIKE $%[1]d
+			OR EXISTS (SELECT 1 FROM public.case_origin o WHERE o.tenant=$1 AND o.case_id=c.id::text
+			           AND (coalesce(o.initiating_party_name,'') ILIKE $%[1]d OR coalesce(o.filed_by_email,'') ILIKE $%[1]d))
+			OR EXISTS (SELECT 1 FROM public.case_respondents rp WHERE rp.tenant=$1 AND rp.case_id=c.id::text
+			           AND (coalesce(rp.name,'') ILIKE $%[1]d OR coalesce(rp.email,'') ILIKE $%[1]d OR coalesce(rp.npi,'') ILIKE $%[1]d)))`, n)
+}
+
 func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	// TPA deliberately excluded: this is the tenant's whole case list, no
@@ -1315,11 +1422,14 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	// sort switches to offset mode (keyset over arbitrary columns isn't stable).
 	// sort=sla is the deadline-driven order (Lever 4): closest to statutory
 	// breach first = oldest opened_at ASC.
-	sortCol, sortDir := "opened_at", "DESC"
+	sortCol, sortDir := "c.opened_at", "DESC"
 	if s := q.Get("sort"); s != "" {
-		whitelist := map[string]string{"opened_at": "opened_at", "case_number": "case_number",
-			"status": "status", "qpa_cents": "qpa_cents", "service_line": "service_line",
-			"disputed_amount_cents": "disputed_amount_cents", "sla": "opened_at"}
+		// Status sorts by what the list shows: a programmed case's Internal
+		// Status (its basic status stays PENDING_INTAKE), else the status.
+		whitelist := map[string]string{"opened_at": "c.opened_at", "case_number": "c.case_number",
+			"status": "coalesce(c.internal_status, c.status)", "qpa_cents": "c.qpa_cents", "service_line": caseServiceSQL,
+			"assigned":              "NULLIF(NULLIF(c.assigned_to,''),'unassigned-pool')",
+			"disputed_amount_cents": "c.disputed_amount_cents", "sla": "c.opened_at"}
 		col, dir := s, "ASC"
 		if strings.HasPrefix(s, "-") {
 			col, dir = strings.TrimPrefix(s, "-"), "DESC"
@@ -1331,7 +1441,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 			sortCol, sortDir = c, dir
 		}
 	}
-	offsetMode := sortCol != "opened_at" || sortDir != "DESC"
+	offsetMode := sortCol != "c.opened_at" || sortDir != "DESC"
 	offset := 0
 	if offsetMode {
 		if n, err := strconv.Atoi(q.Get("offset")); err == nil && n >= 0 {
@@ -1356,14 +1466,51 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	if st := q.Get("status"); st != "" {
 		add("c.status = $%d", st)
 	}
-	if qs := q.Get("q"); qs != "" {
-		add("c.case_number ILIKE '%%' || $%d || '%%'", qs)
+	// Pipeline columns (pipelineCounts): one stage of the board, paged like any other list.
+	if st := q.Get("internal_status"); st != "" {
+		add("c.internal_status = $%d", st)
+	}
+	switch q.Get("unset") { // the board's "Not yet reviewed" column
+	case "internal_status":
+		where += " AND coalesce(c.internal_status,'') = ''"
+	case "status":
+		where += " AND coalesce(c.status,'') = ''"
+	}
+	// Search (the Disputes page's search box): case number, service line, statuses, payer, anything in the case's
+	// details (provider org, requester, health plan, contacts, notes, CPT codes...), and the filing and responding
+	// parties by name, email or NPI. LIKE wildcards in the term are taken literally.
+	if qs := strings.TrimSpace(q.Get("q")); qs != "" {
+		if len(qs) > 100 {
+			qs = qs[:100]
+		}
+		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(qs) + "%"
+		args = append(args, like)
+		n := len(args)
+		where += caseSearchSQL(n)
 	}
 	// mine=true: same convention as listTasks (crm.go) -- assigned_to is the
 	// Keycloak sub assignCase/the auto-assign queue already writes, so this
 	// is a real, populated filter, not a new concept.
+	caller := r.Context().Value(ctxPrincipal{}).(principal)
 	if q.Get("mine") == "true" {
-		add("c.assigned_to = $%d", r.Context().Value(ctxPrincipal{}).(principal).Subject)
+		add("c.assigned_to = $%d", caller.Subject)
+	}
+	// A Reviewer sees only unassigned cases and their own (casescope.go).
+	if cond, ok := caseScopeSQL(caller, "c", len(args)+1); ok {
+		args = append(args, caller.Subject)
+		where += cond
+	}
+	// Assignment filters: assigned=mine|unassigned|assigned, and (for those who see every case) assignee=<user id>.
+	switch q.Get("assigned") {
+	case "mine":
+		add("c.assigned_to = $%d", caller.Subject)
+	case "unassigned":
+		where += " AND (c.assigned_to IS NULL OR c.assigned_to = 'unassigned-pool')"
+	case "assigned":
+		where += " AND c.assigned_to IS NOT NULL AND c.assigned_to <> 'unassigned-pool'"
+	}
+	if who := strings.TrimSpace(q.Get("assignee")); who != "" && !reviewerScoped(caller) {
+		add("c.assigned_to = $%d", who)
 	}
 	// Triage lane filter (Lever 2): whitelisted, never interpolated raw.
 	if lane := q.Get("lane"); lane == "AUTO_REVIEW" || lane == "STANDARD" || lane == "COMPLEX" {
@@ -1396,10 +1543,11 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := fmt.Sprintf(`SELECT c.id, c.case_number, c.status, c.internal_status, c.agency_status,
-		                    coalesce(c.service_line,''), coalesce(c.qpa_cents,0), coalesce(c.disputed_amount_cents,0), c.opened_at,
-		                    c.batch_id::text, coalesce(c.payer_id,''), %s AS triage_lane, %s AS sla_days_remaining
+		                    `+caseServiceSQL+`, coalesce(c.qpa_cents,0), coalesce(c.disputed_amount_cents,0), c.opened_at,
+		                    c.batch_id::text, coalesce(c.payer_id,''), %s AS triage_lane, %s AS sla_days_remaining,
+		                    NULLIF(NULLIF(c.assigned_to,''),'unassigned-pool'), c.assigned_role
 		             %s WHERE true%s
-		             ORDER BY c.%s %s, c.id DESC LIMIT %d`, triageLaneSQL, slaDaysSQL, fromClause, where, sortCol, sortDir, limit+1)
+		             ORDER BY %s %s NULLS LAST, c.id DESC LIMIT %d`, triageLaneSQL, slaDaysSQL, fromClause, where, sortCol, sortDir, limit+1)
 	if offsetMode {
 		query += fmt.Sprintf(" OFFSET %d", offset)
 	}
@@ -1413,7 +1561,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c Case
 		var batchID *string
-		if err := rows.Scan(&c.ID, &c.CaseNumber, &c.Status, &c.InternalStatus, &c.AgencyStatus, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &batchID, &c.PayerID, &c.TriageLane, &c.SLADaysRemaining); err != nil {
+		if err := rows.Scan(&c.ID, &c.CaseNumber, &c.Status, &c.InternalStatus, &c.AgencyStatus, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &batchID, &c.PayerID, &c.TriageLane, &c.SLADaysRemaining, &c.AssignedTo, &c.AssignedRole); err != nil {
 			slog.Error("listCases scan failed — row silently dropped from the list", "tenant", tenant, "err", err)
 			continue
 		}
@@ -1433,6 +1581,21 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 			next = last.OpenedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID
 		}
 	}
+	// The assignee's name on every row (one lookup per distinct person on the page).
+	var subs []string
+	for _, c := range out {
+		if c.AssignedTo != nil && !contains(subs, *c.AssignedTo) {
+			subs = append(subs, *c.AssignedTo)
+		}
+	}
+	if len(subs) > 0 {
+		names := s.resolveSubjectNames(r.Context(), subs)
+		for i := range out {
+			if out[i].AssignedTo != nil {
+				out[i].AssignedName = names[*out[i].AssignedTo]
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"cases": out, "next_cursor": next, "total": total})
 }
 
@@ -1444,7 +1607,9 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 	var details, programDates []byte
 	var internal, agency *string
 	err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT id, case_number, status, coalesce(service_line,''), coalesce(qpa_cents,0), coalesce(disputed_amount_cents,0), opened_at,
+		fmt.Sprintf(`SELECT id, case_number, status, coalesce(nullif(service_line,''), nullif(details->>'type_of_service',''),
+		                    (SELECT cl.type_of_service FROM public.case_claims cl WHERE cl.case_id=cases.id::text AND coalesce(cl.type_of_service,'') <> ''
+		                     GROUP BY 1 ORDER BY count(*) DESC, 1 LIMIT 1), ''), coalesce(qpa_cents,0), coalesce(disputed_amount_cents,0), opened_at,
 		                    internal_status, agency_status, details, COALESCE(program_dates,'{}'::jsonb)
 		             FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), id).
 		Scan(&c.ID, &c.CaseNumber, &c.Status, &c.ServiceLine, &c.QPA, &c.DisputedAmount, &c.OpenedAt, &internal, &agency, &details, &programDates)
@@ -1507,6 +1672,12 @@ var signalRoleFloors = map[string][]string{
 	"PROVIDER_WITHDRAW":        {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"OUTREACH_DONE":            {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"RFI_RESPONSE_RECEIVED":    {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	// A refund is a person's decision, never the clock's (the workflow only flags a potential refund).
+	"REFUND_APPROVED": {"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	// Capitol Bridge verifies a withdrawal request before the Withdrawal letter goes out.
+	"WITHDRAWAL_CONFIRMED": {"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	// Whether the filer asked for a cost estimate: the step after the case is deemed eligible.
+	"ESTIMATE_CONFIRMED": {"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 }
 
 func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
@@ -1540,6 +1711,7 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 // coder asking for clinical review opens a clinical one. It writes the error
 // response and returns false when it refuses.
 func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenant, id, signal string, data map[string]any, reviewNote string) bool {
+	defer s.settleStepTasks(r.Context(), tenant, id) // a recorded step may settle its task (step_tasks.go)
 	gate := signalRoleFloors[signal]
 	if gate == nil {
 		gate = caseStaffRoles
@@ -1565,9 +1737,38 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	// that was always empty. Reading a program row (not the much heavier
 	// loadProgram-dependent callers elsewhere) is enough to tell which
 	// workflow this case belongs to.
-	wfID := fmt.Sprintf("IDR-%s-%s", strings.ToUpper(tenant), caseNumber)
-	if s.loadProgram(r, tenant) != nil {
-		wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+	wfID := s.caseWorkflowID(r, tenant, caseNumber)
+	// The day the step actually happened (its dialog's date, today when none): checked here and passed on to the
+	// workflow as given. The readable record of the dialog's answers is kept on the case, not in the workflow.
+	stepDay, bad := stepDayOf(data, s.programToday(r.Context(), tenant))
+	if bad != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, bad), http.StatusBadRequest)
+		return false
+	}
+	record, _ := data["record"].(string)
+	delete(data, "record")
+	// AHCA's Final Order is its own document: it is uploaded with the step that records it, never made here.
+	if signal == "FINAL_ORDER_ISSUED" {
+		docID, _ := data["doc_id"].(string)
+		var fn string
+		if docID == "" || s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT filename FROM tenant_%s.documents WHERE id::text=$1 AND case_id::text=$2`,
+			sanitizeTenant(tenant)), docID, id).Scan(&fn) != nil {
+			http.Error(w, `{"error":"upload AHCA's Final Order (the PDF the Agency issued) to record it"}`, http.StatusBadRequest)
+			return false
+		}
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.documents SET folder='DETERMINATION',
+			filename = CASE WHEN filename ILIKE 'Final Order%%' THEN filename ELSE 'Final Order ' || $3 || ' — ' || filename END
+			WHERE id::text=$1 AND case_id::text=$2`, sanitizeTenant(tenant)), docID, id, caseNumber)
+	}
+	// Close and refund is for a paid filing whose packet never completed; once the packet is in, the case goes on.
+	if signal == "REFUND_APPROVED" {
+		var packetIn bool
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(program_dates->>'packet_complete_at','') <> '' FROM tenant_%s.cases WHERE id=$1`,
+			sanitizeTenant(tenant)), id).Scan(&packetIn)
+		if packetIn {
+			http.Error(w, `{"error":"the filing packet is complete, so this case goes on to its review — it can't be closed for a refund"}`, http.StatusConflict)
+			return false
+		}
 	}
 	// Statutory offer window (45 CFR 149.520(b)(2)): sealed offers are only
 	// accepted while the 10-business-day window is open — no late offers.
@@ -1577,7 +1778,14 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		http.Error(w, `{"error":"offer window is not open — late offers are not accepted"}`, http.StatusConflict)
 		return false
 	}
-	if err := s.tc.SignalWorkflow(r.Context(), wfID, "", signal, data); err != nil {
+	// An open case whose workflow has ended gets it back (or, once its stages are done, the step is recorded without
+	// it): workflow_alive.go. Only a closed case is refused.
+	if _, err := s.signalCaseWorkflow(r.Context(), tenant, id, wfID, signal, data); err != nil {
+		if workflowEnded(err) {
+			forgetWorkflowRunning(wfID)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": endedWorkflowMsg, "workflow_ended": true})
+			return false
+		}
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return false
 	}
@@ -1598,20 +1806,57 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 				sanitizeTenant(tenant)), id, n)
 		}
 	}
-	// The withdrawal letter is due one business day from the request.
+	if signal == "RFI_RESPONSE_RECEIVED" {
+		s.setProgramDateOn(r.Context(), tenant, id, "rfi_response_received_at", stepDay)
+	}
+	if signal == "ESTIMATE_PERMISSION" { // recorded by the Reviewer: the portal request is answered
+		s.closePermissionRequests(r.Context(), tenant, id, "COMPLETE")
+	}
+	// The answer is the case's too: the acceptance letter and email drop the estimate language without one.
+	if signal == "ESTIMATE_CONFIRMED" {
+		req, _ := data["requested"].(bool)
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) ||
+			jsonb_build_object('fee_estimate_requested', $2::boolean) WHERE id::text=$1`, sanitizeTenant(tenant)), id, req)
+	}
+	if signal == "WITHDRAWAL_CONFIRMED" {
+		s.markProgramDateOn(r.Context(), tenant, id, "withdrawal_confirmed_at", stepDay)
+	}
+	// The outreach to a filer whose packet didn't come starts the refund window.
+	if signal == "OUTREACH_DONE" {
+		s.markProgramDateOn(r.Context(), tenant, id, "outreach_at", stepDay)
+	}
+	// When the withdrawal was asked for, and by whom (the provider or the health plan).
 	if signal == "PROVIDER_WITHDRAW" {
-		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
-			`UPDATE tenant_%s.cases SET program_dates = coalesce(program_dates,'{}'::jsonb) || jsonb_build_object('withdrawal_requested_at', $2::text) WHERE id=$1`,
-			sanitizeTenant(tenant)), id, time.Now().UTC().Format("2006-01-02"))
+		s.setProgramDateOn(r.Context(), tenant, id, "withdrawal_requested_at", stepDay)
+		if by, _ := data["by"].(string); by == "provider" || by == "health_plan" {
+			s.setCaseDetail(r.Context(), tenant, id, "withdrawal_requested_by", by)
+		}
+	}
+	// AHCA's own number for its Final Order, when the order has one.
+	if signal == "FINAL_ORDER_ISSUED" {
+		if n, _ := data["order_number"].(string); strings.TrimSpace(n) != "" {
+			s.setCaseDetail(r.Context(), tenant, id, "final_order_number", truncate(strings.TrimSpace(n), 100))
+		}
 	}
 	detail, _ := json.Marshal(data)
 	s.logActivity(r.Context(), tenant, id, signal,
 		fmt.Sprintf("Workflow signal %s delivered to %s — %s", signal, wfID, truncate(string(detail), 500)))
-	s.graphSync(tenant) // graph reflects status transitions (best-effort)
+	s.graphSync(tenant, id) // graph reflects status transitions (best-effort)
 	s.logAudit(r.Context(), tenant, id, "CASE_SIGNALED", map[string]any{
 		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "signal": signal, "workflow_id": wfID,
 	})
+	// What the step's dialog recorded, kept on the case as a note; a review's findings go on its review record.
+	if record = strings.TrimSpace(record); record != "" && reviewDisciplineOf(signal) == "" {
+		s.addCaseNote(r.Context(), tenant, id, r.Context().Value(ctxPrincipal{}).(principal).Subject, truncate(record, 4000))
+	}
+	if reviewNote == "" {
+		n, _ := data["note"].(string)
+		reviewNote = truncate(strings.TrimSpace(n), 4000)
+	}
 	if disc := reviewDisciplineOf(signal); disc != "" {
+		// A review done without being claimed first started when it was done.
+		s.markProgramDate(r.Context(), tenant, id, reviewStartedKey[disc])
+		s.markProgramDate(r.Context(), tenant, id, reviewDoneKey[disc])
 		p := r.Context().Value(ctxPrincipal{}).(principal)
 		s.closeOpenReview(r, tenant, id, disc, displayName(p), reviewNote)
 		if disc == "CODING" && data["clinical_requested"] == true {
@@ -1619,6 +1864,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 				"Clinical review asked for by the coder ("+displayName(p)+")"+map[bool]string{true: ": " + truncate(reviewNote, 300), false: "."}[reviewNote != ""], displayName(p))
 		}
 	}
+	s.ensureStepHelper(r, tenant, id) // a specialist's step next: the next one in turn (helpers.go)
 	return true
 }
 

@@ -28,16 +28,18 @@ var graphHTTP = &http.Client{Timeout: 90 * time.Second}
 
 // graphSync is a best-effort, fire-and-forget nudge; failures never block the
 // transactional path (Postgres remains the source of truth; the next manual
-// or scheduled /graph/sync reconciles).
-func (s *server) graphSync(tenant string) {
-	if s.cfg.GraphIntelURL == "" {
+// /graph/sync reconciles). It brings the one case that changed up to date in
+// the graph -- a full rebuild on every change read the whole tenant into
+// graph-intel's memory each time, and a run of quick changes ran it out.
+func (s *server) graphSync(tenant, caseID string) {
+	if s.cfg.GraphIntelURL == "" || caseID == "" {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-			s.cfg.GraphIntelURL+"/sync/from-db?tenant="+url.QueryEscape(tenant), nil)
+			s.cfg.GraphIntelURL+"/sync/case?tenant="+url.QueryEscape(tenant)+"&case_id="+url.QueryEscape(caseID), nil)
 		resp, err := graphHTTP.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
@@ -195,6 +197,16 @@ func (s *server) graphSyncNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.proxyGraph(w, r, http.MethodPost, "/sync/from-db", nil)
+}
+
+// graphSyncStatus handles GET /graph/sync — a full sync runs in the background (minutes on a large tenant): whether
+// one is running, and how the last one ended.
+func (s *server) graphSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, graphAdminRoles...) {
+		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
+	s.proxyGraph(w, r, http.MethodGet, "/sync/status", nil)
 }
 
 // graphToLakehouse handles POST /graph/to-lakehouse — graph -> gold export.

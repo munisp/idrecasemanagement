@@ -1,0 +1,10 @@
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/version_check-69fbd31180836c1b.d: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/version.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/channel.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/date.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/libversion_check-69fbd31180836c1b.rlib: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/version.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/channel.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/date.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/libversion_check-69fbd31180836c1b.rmeta: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/version.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/channel.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/date.rs
+
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/lib.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/version.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/channel.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/version_check-0.9.5/src/date.rs:

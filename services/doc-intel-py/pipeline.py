@@ -87,7 +87,10 @@ def _model(key: tuple, factory) -> Any:
 TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
     "eob": {
         "strong": ["explanation of benefits", "remittance advice", "patient responsibility",
-                   "allowed amount", "adjustment amount", "claim adjustment reason"],
+                   "allowed amount", "adjustment amount", "claim adjustment reason",
+                   # an 835 remittance printout (Epic's "Claim Details" view): remit_docs.py
+                   "claim charge amount", "claim paid amount", "payer control number",
+                   "claim filing indicator", "service line summary"],
         "weak": ["claim number", "denial code", "coinsurance", "copay", "deductible",
                  "eob", "benefits", "covered", "not covered"],
     },
@@ -99,13 +102,32 @@ TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
                  "idre", "batched", "attest"],
     },
     "idr_claim": {
-        "strong": ["qualifying payment amount", "ub-04", "cms-1500", "hcpcs",
-                   "place of service", "taxonomy", "itemized bill"],
+        "strong": ["qualifying payment amount", "ub-04", "ub04", "cms-1500", "hcpcs",
+                   "place of service", "taxonomy", "itemized bill", "type of bill",
+                   "treatment authorization codes", "statement covers period"],
         "weak": ["cpt", "billed amount", "qpa", "service date", "npi", "diagnosis code",
                  "procedure code", "claim", "provider", "payer", "member id", "units",
                  "revenue code", "drg"],
     },
+    # The patient's clinical record (ER note, discharge summary, operative report...): evidence in nearly every
+    # dispute -- the program's packet lists it ("Medical records") -- though it carries no billing vocabulary.
+    "medical_records": {
+        "strong": ["discharge summary", "history of present illness", "chief complaint", "emergency department record",
+                   "emergency department note", "progress note", "operative report", "assessment and plan",
+                   "review of systems", "medication administration record", "nursing note", "admission note",
+                   "consultation note", "radiology report", "pathology report", "physical examination"],
+        "weak": ["diagnosis:", "treated with", "history of", "ct scan", "x-ray", "vital signs", "allergies",
+                 "admitted", "discharged", "medications", "medical record"],
+    },
 }
+# The office's own letters (decision report, cover letter, review invoice, IRO decision): letter_docs.py.
+import letter_docs as _letter_docs  # noqa: E402
+TYPE_SIGNALS.update(_letter_docs.TYPE_SIGNALS)
+# The program's filing packet (Capitol Bridge): packet_docs.py.
+import packet_docs as _packet_docs  # noqa: E402
+TYPE_SIGNALS.update(_packet_docs.TYPE_SIGNALS)
+# An 835 remittance printout, a payer's EOB and a UB-04, read for the claims table: remit_docs.py.
+import remit_docs as _remit_docs  # noqa: E402
 WEIGHT = {"strong": 3, "weak": 1}
 
 # Minimum score to accept a classification at all, and minimum lead over the
@@ -960,7 +982,9 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
             "The transcribed text below is the authoritative content of this document. "
             f"{image_caveat}"
             "FIRST decide whether this document is related to medical billing, health "
-            "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
+            "insurance claims, explanation-of-benefits, IDR arbitration, or the patient's clinical "
+            "record of the care in dispute (ER notes, discharge summaries, operative reports, "
+            "progress notes -- these ARE related) at all, and "
             'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, legal contract, '
             "photograph with no document content, or any other unrelated material is "
             "false. When false, set every other field null and stop. "
@@ -981,7 +1005,9 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
             "The transcribed text below is the authoritative content of this document. "
             f"{image_caveat}"
             "FIRST decide whether this document is related to medical billing, health "
-            "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
+            "insurance claims, explanation-of-benefits, IDR arbitration, or the patient's clinical "
+            "record of the care in dispute (ER notes, discharge summaries, operative reports, "
+            "progress notes -- these ARE related) at all, and "
             'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, legal contract, '
             "photograph with no document content, or any other unrelated material is "
             "false. When false, set every other field null and stop. "
@@ -1211,8 +1237,45 @@ def stage_fields(ctx: dict, cfg: dict) -> dict:
     import learning as _learning
     text = ctx.get("text", "") or ""
     ex = _fields.extract_fields(text, extra_labels=_learning.get_active_labels())
+    issues = _fields.cross_check(ex)
+    letter, letter_issues = _letter_docs.extract(ctx.get("doc_type") or "", text)
+    if letter:
+        ex["letter"] = letter
+        issues = issues + letter_issues
+    remit_key, remit, remit_issues = _remit_docs.extract(ctx.get("doc_type") or "", text, ctx.get("raw_bytes"))
+    if remit_key:
+        ex[remit_key] = remit
+        issues = issues + remit_issues
+        # The eligibility review's filing window and program-start checks read normalized service/determination
+        # dates (case-api deriveEligibilityInput); a remittance states both, so the model is not needed for them.
+        norm = ctx.setdefault("normalized", {})
+        claim = (remit.get("claims") or [{}])[0]
+        if not norm.get("service_date") and claim.get("date_of_service"):
+            norm["service_date"] = claim["date_of_service"]
+        if not norm.get("determination_date") and claim.get("date_of_denial"):
+            norm["determination_date"] = claim["date_of_denial"]
+    packet, packet_issues = _packet_docs.extract(ctx.get("doc_type") or "", text, ctx.get("raw_bytes"))
+    if packet:
+        ex["packet"] = packet
+        issues = issues + packet_issues
+    # A document a layout reader understood states its own claim number; the generic regex's guess (the first
+    # "claim/account/bill ..." word on the page) is replaced by it, or dropped when the reader found none. Its
+    # code lists are dropped too: on an 835 printout, a payer EOB, a UB-04 or the packet the regex reads zip
+    # codes, amounts and ICD-10 codes as CPT/HCPCS, and those would be lifted onto the case.
+    read_by_layout = [v for v in (ex.get("remit"), ex.get("ub04"), ex.get("packet")) if v]
+    if read_by_layout:
+        ids = ex.setdefault("identifiers", {})
+        number = next((c.get("claim_number") for v in read_by_layout for c in (v.get("claims") or []) if c.get("claim_number")), None)
+        if number:
+            ids["claim_number"] = number
+        else:
+            ids.pop("claim_number", None)
+        for key in ("cpt_codes", "hcpcs_codes", "diagnosis_codes"):
+            if ex.get(key):
+                ex.setdefault("codes_not_lifted", {})[key] = ex[key]
+                ex[key] = []
     ctx["extracted_fields"] = ex
-    ctx["field_check_issues"] = _fields.cross_check(ex)
+    ctx["field_check_issues"] = issues
     return ctx
 
 
@@ -1387,12 +1450,27 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
         if ex.get("claim_number") and case.get("case_number"):
             # claim vs CMS case number are different identifiers; record both
             ctx["extracted"]["cms_case_number"] = case["case_number"]
+        # One of the office's letters names its case: uploaded to another case, someone should look.
+        lcase = ((ctx.get("extracted_fields") or {}).get("letter") or {}).get("case_number")
+        if lcase and case.get("case_number"):
+            a, b = _letter_docs.case_seq(lcase), _letter_docs.case_seq(case["case_number"])
+            if a and b and a != b:
+                findings.append({"field": "case_number", "issue": f"This letter is for case {lcase}, but it was "
+                                 f"uploaded to case {case['case_number']} — check it belongs here"})
     # Out-of-domain guard: VLM verdict, zero-signal classification, or an
     # all-null extraction each independently mean a human should look before
     # this document is treated as case evidence.
     ex_fields = {k: v for k, v in ex.items() if v not in (None, "", [], {})}
     unreadable = bool(ctx.get("scan_quality_poor") or ctx.get("ocr_low_confidence"))
-    if unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
+    # A layout reader that recognised the page (an 835 printout, a payer EOB, a UB-04, the filing packet) is
+    # firmer evidence than the model's relevance vote, which sometimes calls a plain EOB "not medical billing":
+    # the document keeps its type instead of becoming "unrelated, possible mis-upload".
+    layout_read = any((ctx.get("extracted_fields") or {}).get(k) for k in ("remit", "ub04", "packet"))
+    # A clinical record named by its own headings is evidence too, though it holds no billing field to extract.
+    clinical = ctx.get("doc_type") == "medical_records" and ctx.get("classify_score", 0) >= WEIGHT["strong"]
+    if layout_read or clinical:
+        pass
+    elif unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
         # The model saw too little legible text to recognise the page. That is
         # a page nobody could read, not a page about something else -- and
         # "unrelated, possible mis-upload" sends a person looking for the

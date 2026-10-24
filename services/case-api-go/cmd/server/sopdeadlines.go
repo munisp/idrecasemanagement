@@ -349,6 +349,9 @@ func (s *server) sweepReportDeliverables() int {
 func (s *server) fwaAction(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if !s.featureGate(w, r, tenant, "fwa_review") { // turned off by a tenant admin (Feature toggles)
+		return
+	}
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
 		Action   string `json:"action"`
@@ -439,21 +442,26 @@ func (s *server) fwaAction(w http.ResponseWriter, r *http.Request) {
 // closureReasonFor maps how a case closed to the program's
 // "Withdrawal/Dismissed Reason" list. "" when there is nothing to set.
 func closureReasonFor(template, eligReason string) (reason, outcome string) {
+	// The outcome each closing letter means, by the program's outcome definitions.
 	switch template {
 	case "ineligible":
 		switch eligReason {
 		case "over_filing_window", "over_12_months":
-			return "Dismissed-Timeliness eligibility failed", "Dismissed"
+			return "Dismissed-Timeliness eligibility failed", "Ineligible - Closed"
 		case "plan_not_fl_regulated":
-			return "Member plan is not regulated by Florida", "Dismissed"
+			return "Member plan is not regulated by Florida", "Ineligible - Closed"
 		case "self_funded_plan":
-			return "Self-Funded Plan", "Dismissed"
+			return "Self-Funded Plan", "Ineligible - Closed"
 		}
-		return "Other", "Dismissed"
+		return "Other", "Ineligible - Closed"
 	case "dismissal":
 		return "Provider No Response", "Dismissed"
 	case "withdrawal":
 		return "Other", "Withdrawn"
+	case "plan_opt_out":
+		return "Plan Opt-Out", "Plan Opt-Out"
+	case "refund":
+		return "Refunded", "Refunded"
 	}
 	return "", ""
 }

@@ -39,7 +39,7 @@ jobs:
           # module scope; installing them here would make this job minutes
           # slower for no reason). httpx/pyyaml are pipeline.py's own
           # module-level imports -- needed just to collect test_pipeline.py.
-          pip install -q numpy opencv-python-headless pytesseract pillow httpx pyyaml
+          pip install -q numpy opencv-python-headless pytesseract pillow httpx pyyaml pypdf
           # main.py's own module-level clients -- small wheels, needed only so
           # the tests that import helpers from main.py can collect it.
           pip install -q "psycopg[binary]" confluent-kafka minio opensearch-py

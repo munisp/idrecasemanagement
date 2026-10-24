@@ -46,7 +46,7 @@ func (s *server) uploadApplicationDocument(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Same abuse ceiling as case-document uploads.
-	if n, err := s.rds.incrExpire("idre:rl:up:"+tenant+":"+p.Subject, 3600); err == nil && n > 120 {
+	if n, err := s.rds.incrExpire(s.cfg.RedisPrefix+":rl:up:"+tenant+":"+p.Subject, 3600); err == nil && n > 120 {
 		http.Error(w, `{"error":"upload rate limit exceeded (120/hour) — try again later"}`, http.StatusTooManyRequests)
 		return
 	}

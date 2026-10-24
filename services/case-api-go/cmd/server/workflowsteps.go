@@ -61,6 +61,8 @@ type wfFacts struct {
 	ReviewerSends    bool              // an approved draft goes back to its drafter to send
 	ReviewInvoice    bool              // an invoice other than the initial fee exists
 	OpenInvoices     int
+	ReportSaved      bool            // the decision report has been saved
+	Generated        map[string]bool // generated letter (lettergen template) -> a draft not rejected in QA
 }
 
 var wfOwnerLabels = map[string]string{
@@ -93,6 +95,11 @@ var wfStatusReached = map[string]string{
 func buildWorkflowSteps(f wfFacts) []wfStep {
 	var steps []wfStep
 	done := map[string]bool{}
+	// Steps whose evidence may come early: the decision report and its letters
+	// can be saved and generated at any point (the Attorney and the Coder
+	// write their parts during their own steps), so their being done says
+	// nothing about how far the case has got.
+	early := map[string]bool{}
 	add := func(key, label, role, action string, isDone bool, hint string) {
 		steps = append(steps, wfStep{Key: key, Label: label, Owner: wfOwnerLabels[role], OwnerRoles: []string{role},
 			Action: action, Hint: hint})
@@ -141,7 +148,7 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("eligibility", "Eligibility review", "CASE_MANAGER", "eligibility", f.HasElig, "Complete the Eligibility Checklist.")
 	}
 
-	estimate := flag("PACKET_COMPLETE", "estimate_requested")
+	estimate := wfEstimateRequested(f)
 	switch {
 	case withdrawn || closing:
 	case f.HasElig && f.EligResult == "INELIGIBLE":
@@ -156,6 +163,12 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		// only owed on a dispute that is going forward.
 		add("dispute_summary", "Complete the Dispute Summary", "CODER", "summary", f.HasSummary,
 			"Verify the plan type from the plan's letterhead.")
+		// Whether the filer asked for a cost estimate decides the path (with an estimate: estimate, permission,
+		// then the plan's notice; without: the acceptance and the plan's notice together, by day 13). A case whose
+		// acceptance letter was drafted before this step existed has been past it.
+		add("estimate_confirm", "Confirm if Cost Estimate requested", "CASE_MANAGER", "signal:ESTIMATE_CONFIRMED",
+			has("ESTIMATE_CONFIRMED") || f.Letter["acceptance"] != "", "The filing packet's “estimate requested” box.")
+		steps[len(steps)-1].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		letter("acceptance", "Acceptance letter", "CASE_MANAGER", "PM")
 		if estimate {
 			add("estimate", "Record the full review cost estimate", "CODER", "summary", f.HasEstimate,
@@ -169,11 +182,19 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			}
 		}
 	}
+	optedOut := wfOptedOut(f)
 	if !withdrawn && !closing {
 		letter("plan_notification", "Health Plan Notification", "CASE_MANAGER", "PM")
 		add("plan_response", "Record the health plan's response", "CASE_MANAGER", "signal:PLAN_RESPONSE_RECEIVED",
-			has("PLAN_RESPONSE_RECEIVED") || f.Dates["date_plan_responded"] != "" || f.Internal == "Plan - No Response",
+			has("PLAN_RESPONSE_RECEIVED") || f.Dates["date_plan_responded"] != "" || f.Internal == "Plan - No Response" || optedOut,
 			"15 calendar days from the notification. No response by day 15 becomes a default determination.")
+		if optedOut {
+			// The plan opted out with its supporting documentation: the Opt-Out Determination Letter closes the case.
+			letter("plan_opt_out", "Opt-Out Determination Letter", "CASE_MANAGER", "PM")
+			closing = true
+		}
+	}
+	if !withdrawn && !closing {
 		add("coding_review", "Coding review", "CODER", "signal:CODING_REVIEW_COMPLETE", has("CODING_REVIEW_COMPLETE"),
 			"Decide whether clinical review is needed.")
 		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") {
@@ -185,6 +206,21 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("attorney_review", "Final rationale and Final Order package", "ATTORNEY", "signal:ATTORNEY_REVIEW_COMPLETE",
 			has("ATTORNEY_REVIEW_COMPLETE"), "Enter the rationale; record the outcome.")
 		add("invoice", "Create the review invoice", "PM", "invoice", f.ReviewInvoice, "")
+		// The decision report, then the documents made from it, before the
+		// Final Order package that carries them.
+		add("report_save", "Save the decision report", "CASE_MANAGER", "report:save", f.ReportSaved,
+			"Enter the outcome and amounts, paste or upload the report, and save.")
+		add("report_generate", "Generate the decision report", "CASE_MANAGER", "report:final_order_rationale",
+			f.Generated["final_order_rationale"], "Generate the pasted report, or upload the finished one; it goes under Documents and to the QA gate.")
+		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
+			f.Generated["cover_letter_final_notice"], "")
+		add("report_plan_invoice", "Generate the health plan invoice", "CASE_MANAGER", "report:invoice_health_plan",
+			f.Generated["invoice_health_plan"], "")
+		// The Reviewer and the PM may both edit the whole report.
+		for i := len(steps) - 4; i < len(steps); i++ {
+			early[steps[i].Key] = true
+			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
+		}
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
 		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
 			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
@@ -196,16 +232,25 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			"The case closes when the invoices are paid.")
 	}
 	if withdrawn {
+		add("withdrawal_confirm", "Confirm the withdrawal request", "CASE_MANAGER", "signal:WITHDRAWAL_CONFIRMED",
+			has("WITHDRAWAL_CONFIRMED") || f.Letter["withdrawal"] != "", "Verify the request with the party who asked.")
+		steps[len(steps)-1].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		letter("withdrawal", "Withdrawal letter", "CASE_MANAGER", "PM")
 	}
 
-	// How far the case has got: the last step with evidence, or the step its
-	// Internal Status implies. Anything before that without evidence was
-	// done before steps were tracked.
+	// How far the case has got, for steps with no evidence of their own: the
+	// step its Internal Status implies. Anything before that was done before
+	// steps were tracked (a case migrated mid-way), so it reads skipped.
+	// Only the status says so -- not a later step done out of order. With
+	// "follow the steps in order" off, a specialist can finish a later step
+	// first; that must not mark the Acceptance letter, the Health Plan
+	// Notification or the plan's response as passed. (It did: a coding review
+	// done early skipped 8 steps, so a case could reach a decision without
+	// the plan ever being notified.)
 	reached := -1
+	mapped := wfStatusReached[f.Internal]
 	for i, st := range steps {
-		mapped := wfStatusReached[f.Internal]
-		if done[st.Key] || st.Key == mapped || (strings.HasPrefix(mapped, "qa:") && st.Key == "send:"+strings.TrimPrefix(mapped, "qa:")) {
+		if st.Key == mapped || (strings.HasPrefix(mapped, "qa:") && st.Key == "send:"+strings.TrimPrefix(mapped, "qa:")) {
 			reached = i
 		}
 	}
@@ -226,11 +271,30 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 	return steps
 }
 
+// wfFlag: `"field":true` in the data a signal recorded.
+func wfFlag(f wfFacts, typ, field string) bool {
+	return strings.Contains(strings.ReplaceAll(f.Act[typ].Body, " ", ""), `"`+field+`":true`)
+}
+
+// wfEstimateRequested: what the Reviewer confirmed (Confirm if Cost Estimate requested), or for a case from
+// before that step, the answer recorded with the filing packet.
+func wfEstimateRequested(f wfFacts) bool {
+	if _, ok := f.Act["ESTIMATE_CONFIRMED"]; ok {
+		return wfFlag(f, "ESTIMATE_CONFIRMED", "requested")
+	}
+	return wfFlag(f, "PACKET_COMPLETE", "estimate_requested")
+}
+
+// wfOptedOut: the plan exercised a valid opt-out (the opt-out was found eligible, or its letter is under way).
+func wfOptedOut(f wfFacts) bool {
+	return f.Internal == "Plan Opt-Out" || wfFlag(f, "PLAN_OPT_OUT", "eligible") || f.Letter["plan_opt_out"] != ""
+}
+
 // wfAnytime: actions that are never tied to a position in the list.
 func wfAnytime(action string) bool {
 	switch action {
 	case "signal:PROVIDER_WITHDRAW", "signal:OUTREACH_DONE", "signal:RFI_SENT", "signal:RFI_RESPONSE_RECEIVED",
-		"signal:PLAN_OPT_OUT", "signal:LETTER_SENT", "signal:ELIGIBILITY_RESULT":
+		"signal:PLAN_OPT_OUT", "signal:LETTER_SENT", "signal:ELIGIBILITY_RESULT", "signal:REFUND_APPROVED", "signal:WITHDRAWAL_CONFIRMED":
 		return true
 	}
 	return false
@@ -317,7 +381,8 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 		SELECT DISTINCT ON (type) type, coalesce(body,''), created_at FROM public.case_activities
 		WHERE tenant=$1 AND case_id=$2 AND type = ANY($3) ORDER BY type, created_at DESC`, tenant, caseID,
 		[]string{"PACKET_COMPLETE", "AOR_REVISED", "ESTIMATE_PERMISSION", "PLAN_RESPONSE_RECEIVED", "CODING_REVIEW_COMPLETE",
-			"CLINICAL_REVIEW_COMPLETE", "ATTORNEY_REVIEW_COMPLETE", "FINAL_ORDER_ISSUED", "PROVIDER_WITHDRAW"}); err == nil {
+			"CLINICAL_REVIEW_COMPLETE", "ATTORNEY_REVIEW_COMPLETE", "FINAL_ORDER_ISSUED", "PROVIDER_WITHDRAW",
+			"ESTIMATE_CONFIRMED", "WITHDRAWAL_CONFIRMED", "PLAN_OPT_OUT", "RFI_SENT"}); err == nil {
 		for rows.Next() {
 			var typ string
 			var a wfAct
@@ -336,6 +401,20 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 			var tpl, st string
 			if rows.Scan(&tpl, &st) == nil {
 				f.Letter[tpl] = st
+			}
+		}
+		rows.Close()
+	}
+	_ = s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.decision_reports WHERE tenant=$1 AND case_id=$2)`,
+		tenant, caseID).Scan(&f.ReportSaved)
+	f.Generated = map[string]bool{}
+	if rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT ON (artifact) artifact, status FROM public.qa_reviews
+		WHERE tenant=$1 AND case_id=$2 AND channel='letter' ORDER BY artifact, created_at DESC`, tenant, caseID); err == nil {
+		for rows.Next() {
+			var tpl, st string
+			if rows.Scan(&tpl, &st) == nil {
+				f.Generated[tpl] = st != "REJECTED"
 			}
 		}
 		rows.Close()
@@ -359,6 +438,27 @@ func wfMayAct(p principal, st wfStep) bool {
 	return wfIsAdmin(p) || hasAnyRole(p, st.OwnerRoles...)
 }
 
+// wfRules is the tenant's step rules (features.go): step_order -- only the next step can be acted on;
+// step_owner -- only its owner role (or an admin) can act on it. Both on unless a tenant admin turns them off.
+type wfRules struct{ order, owner bool }
+
+func (s *server) stepRules(r *http.Request, tenant string) wfRules {
+	return wfRules{order: s.featureEnabled(r, tenant, "step_order"), owner: s.featureEnabled(r, tenant, "step_owner")}
+}
+
+// open: the step can be acted on at all -- the next one, or with step order off any step not done yet.
+func (x wfRules) open(st wfStep) bool {
+	if x.order {
+		return st.State == "next"
+	}
+	return st.State != "done"
+}
+
+// mayAct: its owner or an admin; with step owners off, anyone who may work the case.
+func (x wfRules) mayAct(p principal, st wfStep) bool {
+	return !x.owner || wfMayAct(p, st)
+}
+
 // caseWorkflow: GET /cases/{caseId}/workflow — the steps, for the case page.
 func (s *server) caseWorkflow(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -377,12 +477,48 @@ func (s *server) caseWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
+	s.ensureStepHelper(r, tenant, caseID) // cases already at a specialist's step get one too (helpers.go)
 	steps := buildWorkflowSteps(f)
+	rules := s.stepRules(r, tenant)
 	for i := range steps {
-		steps[i].CanAct = steps[i].State == "next" && wfMayAct(p, steps[i])
+		steps[i].CanAct = rules.open(steps[i]) && rules.mayAct(p, steps[i])
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"steps": steps, "programmed": true,
-		"closed": wfClosedStatuses[f.Internal], "is_admin": wfIsAdmin(p)})
+	out := map[string]any{"steps": steps, "programmed": true, "closed": wfClosedStatuses[f.Internal], "is_admin": wfIsAdmin(p),
+		"step_order": rules.order, "step_owner": rules.owner}
+	// The document's numbered steps for this case's workflow, each with the countdown of the clock that times it.
+	doc := buildDocSteps(f, steps)
+	if cfg := s.loadProgram(r, tenant); cfg != nil {
+		views := map[string]ClockView{}
+		for _, v := range s.programClockViews(r, tenant, caseID, cfg) {
+			views[v.Clock] = v
+		}
+		var invDue *time.Time
+		_ = s.db.QueryRow(r.Context(), `SELECT min(due_date) FROM public.invoices WHERE tenant=$1 AND case_id=$2
+			AND kind NOT IN ('INITIAL_FEE','LATE_FEE') AND status='OPEN'`, tenant, caseID).Scan(&invDue)
+		for i := range doc.Steps {
+			if v, ok := views[doc.Steps[i].Clock]; ok {
+				doc.Steps[i].View = &v
+			}
+			if doc.Steps[i].Title == "Invoice cycle begins" && invDue != nil {
+				doc.Steps[i].Due = invDue.Format("2006-01-02")
+			}
+		}
+	}
+	out["doc"] = doc
+	// Whether the case's workflow can still take its steps (workflow_alive.go); left out when Temporal can't be asked.
+	var caseNumber string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+	if caseNumber != "" {
+		// An open case's steps stay open even while its workflow isn't running: taking one starts the workflow again
+		// (signalCaseWorkflow, workflow_alive.go). Only a closed case's steps are shut.
+		if running, known := s.workflowRunning(r.Context(), s.caseWorkflowID(r, tenant, caseNumber)); known && !running && wfClosedStatuses[f.Internal] {
+			out["workflow_running"] = false
+			for i := range steps {
+				steps[i].CanAct = false
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // stepGuard refuses an action that is not the case's next step, or that the
@@ -398,13 +534,16 @@ func (s *server) stepGuard(w http.ResponseWriter, r *http.Request, tenant, caseI
 		return true // let the handler answer 404
 	}
 	steps := buildWorkflowSteps(f)
+	rules := s.stepRules(r, tenant)
 	firstLetterSent := f.Letter["acceptance"] == "SENT" || f.Letter["ineligible"] == "SENT" || f.Letter["dismissal"] == "SENT"
-	if why := wfDecide(steps, action, firstLetterSent); why != "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": why})
-		return false
+	if rules.order {
+		if why := wfDecide(steps, action, firstLetterSent); why != "" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": why})
+			return false
+		}
 	}
 	for _, st := range steps {
-		if st.State == "next" && st.Action == action && !wfMayAct(p, st) {
+		if st.Action == action && rules.open(st) && !rules.mayAct(p, st) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": fmt.Sprintf("forbidden: %q is done by the %s", st.Label, st.Owner)})
 			return false

@@ -45,6 +45,8 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.HasElig, f.EligResult, f.EligAt = true, "ELIGIBLE", now
 	expect("dispute_summary", "Coder")
 	f.HasSummary = true
+	expect("estimate_confirm", "Reviewer")
+	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `Workflow signal ESTIMATE_CONFIRMED delivered — {"requested":false}`, At: now}
 	expect("letter:acceptance", "Reviewer")
 	f.Letter["acceptance"] = "PENDING"
 	expect("qa:acceptance", "PM")
@@ -63,6 +65,17 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Act["ATTORNEY_REVIEW_COMPLETE"] = wfAct{At: now}
 	expect("invoice", "PM")
 	f.ReviewInvoice, f.OpenInvoices = true, 1
+	expect("report_save", "Reviewer")
+	f.ReportSaved = true
+	f.Generated = map[string]bool{}
+	expect("report_generate", "Reviewer")
+	f.Generated["final_order_rationale"] = true
+	expect("report_cover_letter", "Reviewer")
+	f.Generated["cover_letter_final_notice"] = true
+	expect("report_plan_invoice", "Reviewer")
+	f.Generated["invoice_health_plan"] = false // rejected in QA: generate it again
+	expect("report_plan_invoice", "Reviewer")
+	f.Generated["invoice_health_plan"] = true
 	expect("letter:final_order", "Reviewer")
 	f.Letter["final_order"] = "SENT"
 	expect("final_order_issued", "Reviewer")
@@ -132,6 +145,10 @@ func TestWorkflowStepsBranches(t *testing.T) {
 	f = wfBase()
 	f.Act["PACKET_COMPLETE"], f.HasSummary = wfAct{At: now}, true
 	f.Act["PROVIDER_WITHDRAW"] = wfAct{At: now}
+	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "withdrawal_confirm" {
+		t.Fatalf("withdrawal: next should be confirming the request, got %+v", n)
+	}
+	f.Act["WITHDRAWAL_CONFIRMED"] = wfAct{At: now}
 	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "letter:withdrawal" {
 		t.Fatalf("withdrawal: next should be the Withdrawal letter, got %+v", n)
 	}
@@ -221,6 +238,7 @@ func TestWorkflowLetterHandBack(t *testing.T) {
 	f := wfBase()
 	f.ReviewerSends = true
 	f.Act["PACKET_COMPLETE"], f.HasSummary = wfAct{At: time.Now()}, true
+	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `{"requested":false}`, At: time.Now()}
 	f.HasElig, f.EligResult = true, "ELIGIBLE"
 	for st, want := range map[string][2]string{
 		"": {"letter:acceptance", "Reviewer"}, "PENDING": {"qa:acceptance", "PM"},
@@ -263,5 +281,64 @@ func TestClinicalStepOwners(t *testing.T) {
 	}
 	if wfMayAct(principal{Roles: []string{"CODER"}}, *st) {
 		t.Error("a Coder must not act on the clinical review step")
+	}
+}
+
+// The decision report can be saved and its letters generated early (the
+// Attorney and the Coder write their parts during their own steps): that
+// marks those steps done but does not skip the steps before them.
+func TestWorkflowDecisionReportEarly(t *testing.T) {
+	f := wfBase()
+	now := time.Now()
+	f.Act["PACKET_COMPLETE"] = wfAct{At: now}
+	f.HasElig, f.EligResult, f.EligAt, f.HasSummary = true, "ELIGIBLE", now, true
+	f.Letter["acceptance"], f.Letter["plan_notification"] = "SENT", "SENT"
+	f.Act["PLAN_RESPONSE_RECEIVED"] = wfAct{At: now}
+	f.ReportSaved = true
+	f.Generated = map[string]bool{"final_order_rationale": true}
+	steps := buildWorkflowSteps(f)
+	if n := wfNext(steps); n == nil || n.Key != "coding_review" {
+		t.Fatalf("next step: got %+v, want coding_review", n)
+	}
+	for _, st := range steps {
+		if st.Key == "report_save" && st.State != "done" {
+			t.Fatalf("the saved report shows as done, got %s", st.State)
+		}
+		if (st.Key == "attorney_review" || st.Key == "invoice") && st.State != "upcoming" {
+			t.Fatalf("%s must not be skipped by an early report, got %s", st.Key, st.State)
+		}
+	}
+	for _, st := range steps {
+		if strings.HasPrefix(st.Key, "report_") && strings.Join(st.OwnerRoles, ",") != "CASE_MANAGER,PM" {
+			t.Fatalf("%s is the Reviewer's or the PM's, got %v", st.Key, st.OwnerRoles)
+		}
+	}
+}
+
+// A later step done out of order (step order off: the Coder completed the coding review from the queue) leaves the
+// earlier steps open: the Acceptance letter and the Health Plan Notification are still owed, not "skipped".
+func TestOutOfOrderStepSkipsNothing(t *testing.T) {
+	now := time.Now()
+	f := wfBase()
+	f.Internal = "Initial Review Pending"
+	f.Act["PACKET_COMPLETE"] = wfAct{At: now}
+	f.HasElig, f.EligResult, f.EligAt = true, "ELIGIBLE", now
+	f.Act["CODING_REVIEW_COMPLETE"] = wfAct{Body: `{"clinical_requested":true}`, At: now}
+	f.Act["CLINICAL_REVIEW_COMPLETE"] = wfAct{At: now}
+	steps := buildWorkflowSteps(f)
+	if n := wfNext(steps); n == nil || n.Key != "dispute_summary" {
+		t.Fatalf("next should still be the Dispute Summary, got %+v", n)
+	}
+	for _, st := range steps {
+		switch st.Key {
+		case "letter:acceptance", "qa:acceptance", "letter:plan_notification", "qa:plan_notification", "plan_response":
+			if st.State == "skipped" || st.State == "done" {
+				t.Errorf("%s must still be owed, got %s", st.Key, st.State)
+			}
+		case "coding_review", "clinical_review":
+			if st.State != "done" {
+				t.Errorf("%s was done, got %s", st.Key, st.State)
+			}
+		}
 	}
 }

@@ -42,7 +42,7 @@ var orgActionLabels = map[string]string{
 	"POST /tpa/invite-code": "Generated a teammate invite code", "POST /tpa/clients": "Added a client",
 	"POST /tpa/clients/import": "Imported clients from CSV", "PUT /tpa/clients/{clientId}/profile": "Updated a client's profile",
 	"POST /tpa/clients/{clientId}/payments": "Added a client payment method", "POST /tpa/clients/{clientId}/status": "Changed a client's status",
-	"POST /tpa/clients/{clientId}/packages": "Started a document package", "POST /tpa/packages/{packageId}/docs": "Uploaded a package document",
+	"POST /tpa/clients/{clientId}/packages": "Started a document package", "POST /tpa/packages/{packageId}/docs": "Uploaded a package document", "DELETE /tpa/packages/{packageId}/docs/{slot}": "Removed a package document",
 	"POST /tpa/packages/{packageId}/merged": "Uploaded a merged package PDF", "POST /tpa/packages/bulk": "Uploaded packages in bulk",
 	"POST /tpa/intake": "Filed a dispute", "PATCH /tpa/disputes/{caseId}": "Corrected a dispute",
 	"POST /tpa/disputes/bulk": "Uploaded a bulk filing", "POST /tpa/disputes/bulk/{batchId}/checkout": "Started payment for a bulk filing",
@@ -90,6 +90,7 @@ var orgEventLabels = map[string]string{
 	"DOCUMENTS_REQUESTED": "Office requested documents", "DOCUMENT_REQUEST_CANCELLED": "Office withdrew a document request",
 	"DOCUMENT_REQUEST_COMPLETE": "Office marked a document request complete", "DOCUMENTS_SUBMITTED": "Requested documents sent",
 	"FEE_CHECKOUT": "Payment page opened", "FEE_CHECKOUT_CANCELLED": "Payment cancelled", "DUPLICATE_PAYMENT_REFUNDED": "Fee paid twice — refunded",
+	"PACKAGE_DOC_UPLOADED": "Document uploaded", "PACKAGE_DOC_REPLACED": "Document replaced", "PACKAGE_DOC_REMOVED": "Document removed",
 	"TPA_FEE_CHECKOUT": "Payment page opened", "BATCH_FILED": "Notice: bulk filing filed", "PACKAGE_STATUS": "Package checked",
 }
 
@@ -301,6 +302,15 @@ func (s *server) auditEntries(w http.ResponseWriter, r *http.Request, tenant, co
 				}
 				if st := str("status"); action == "PACKAGE_STATUS" && st != "" {
 					e.Detail = str("party") + ": " + strings.ToLower(st)
+				}
+				if strings.HasPrefix(action, "PACKAGE_DOC_") {
+					e.Detail = strings.TrimPrefix(str("client")+" · ", " · ") + str("slot") + ": " + str("filename")
+					if old := str("replaced_filename"); old != "" {
+						e.Detail += " (replacing " + old + ", " + strings.ToLower(str("replaced_status")) + ")"
+					}
+					if st := str("status_when_removed"); st != "" {
+						e.Detail += " (was " + strings.ToLower(st) + ")"
+					}
 				}
 				switch by := str("by"); {
 				case by == "" || strings.HasPrefix(by, "system") || strings.HasPrefix(by, "stripe"):

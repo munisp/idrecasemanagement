@@ -17,13 +17,14 @@ package main
 // QPA-substantiation expectation for plan-uploaded OFFER_SUBSTANTIATION.
 
 import (
-	"context"
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -116,9 +117,9 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"line_of_business is required: FULLY_INSURED|ASO|MEDICARE_ADVANTAGE|MEDICAID_MANAGED"}`, http.StatusBadRequest)
 		return
 	}
-	in.FEIN = strings.TrimSpace(in.FEIN)
-	if !tinValid(in.FEIN) {
-		http.Error(w, `{"error":"FEIN is required (9 digits)"}`, http.StatusBadRequest)
+	in.FEIN = normTIN(in.FEIN)
+	if msg := feinProblem(in.FEIN); msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
 		return
 	}
 	in.NAIC = strings.TrimSpace(in.NAIC)
@@ -202,7 +203,8 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	tempPassword, _ := result["temporary_password"].(string)
 	subject, body := hpWelcomeMail(in.Name, in.ContactName, username, tempPassword, s.cfg.PortalBaseURL)
-	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil {
+	// A queued email (the provider's limit was reached) still arrives: the registration stands.
+	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
 		s.logCorrespondence(r, tenant, "", "OUT", "hp_welcome", subject, tpaWelcomeLogNote, []string{in.ContactEmail}, nil, "system:hp-register", merr.Error())
 		dropPlan()
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
@@ -399,6 +401,8 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.NPI, in.TIN, in.Address = strings.TrimSpace(in.NPI), strings.TrimSpace(in.TIN), strings.TrimSpace(in.Address)
+	var tinMsg string
+	in.TIN, tinMsg = tinCheck(in.TIN)
 	var ptype, partyName, oldNPI, oldStatus string
 	if err := s.db.QueryRow(r.Context(), `
 		SELECT party_type, party_name, coalesce(npi,''), coalesce(npi_status,'') FROM public.hp_parties WHERE tenant=$1 AND plan_id=$2 AND id=$3`,
@@ -415,8 +419,8 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"NPI failed the 10-digit Luhn check"}`, http.StatusBadRequest)
 		return
 	}
-	if !tinValid(in.TIN) {
-		http.Error(w, `{"error":"TIN must be exactly 9 digits"}`, http.StatusBadRequest)
+	if msg := tinMsg; msg != "" {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), http.StatusBadRequest)
 		return
 	}
 	if in.Address == "" {
@@ -445,6 +449,7 @@ func (s *server) hpUpdatePartyProfile(w http.ResponseWriter, r *http.Request) {
 	case in.NPI == "": // an employer group without one: nothing to decide
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.hp_parties SET npi_status=NULL, npi_registry_name=NULL WHERE tenant=$1 AND id::text=$2`, tenant, partyID)
 	}
+	s.runVerifications(r.Context(), "hp", tenant, partyID, in.NPI, partyName, in.TIN)
 	st := s.recomputeHpPartyStatus(r, tenant, partyID)
 	var npiStatus, registry string
 	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(npi_status,''), coalesce(npi_registry_name,'') FROM public.hp_parties WHERE tenant=$1 AND id::text=$2`,
@@ -483,6 +488,12 @@ func (s *server) recomputeHpPartyStatusCtx(ctx context.Context, tenant, partyID 
 			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
 			tenant, partyID, status)
 		return status
+	}
+	if hold := s.exclusionOnboardingStatus(ctx, "hp", tenant, partyID); hold != "" {
+		_, _ = s.db.Exec(ctx, `
+			UPDATE public.hp_parties SET onboarding_status=$3 WHERE tenant=$1 AND id::text=$2`,
+			tenant, partyID, hold)
+		return hold
 	}
 	status = "PAYMENT_PENDING"
 	var payments int
@@ -569,6 +580,10 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 		}
 		name, ptype, email, npi, tin, addr := cell(0), strings.ToUpper(cell(1)), cell(2), cell(3), cell(4), cell(5)
 		res.PartyName = name
+		tinMsg := ""
+		if tin != "" {
+			tin, tinMsg = tinCheck(tin)
+		}
 		switch {
 		case !hpPartyTypes[ptype]:
 			res.Error = "party_type must be EMPLOYER_GROUP|DELEGATED_NETWORK|FACILITY"
@@ -576,8 +591,8 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 			res.Error = "NPI failed Luhn check"
 		case ptype != "EMPLOYER_GROUP" && npi == "":
 			res.Error = "NPI required for DELEGATED_NETWORK/FACILITY"
-		case tin != "" && !tinValid(tin):
-			res.Error = "TIN must be 9 digits"
+		case tinMsg != "":
+			res.Error = tinMsg
 		default:
 			var chk npiCheck
 			if npi != "" {
@@ -602,6 +617,7 @@ func (s *server) hpImportPartiesCSV(w http.ResponseWriter, r *http.Request) {
 				if chk.Status != "" {
 					s.saveNPICheck(r.Context(), "hp", tenant, id, chk)
 				}
+				s.runVerifications(r.Context(), "hp", tenant, id, npi, name, tin)
 				s.recomputeHpPartyStatus(r, tenant, id)
 				if s.featureEnabled(r, tenant, "entity360") {
 					s.ensureEntityQuiet(r.Context(), tenant, "hp_parties", id, ptype, name, npi, tin, "", "")
@@ -711,7 +727,7 @@ func (s *server) hpListPayments(w http.ResponseWriter, r *http.Request) {
 		SELECT id, method, coalesce(label,''), coalesce(brand,''), last4,
 		       coalesce(routing,''), auth_received, verified, status
 		FROM public.hp_payment_methods
-		WHERE tenant=$1 AND plan_id=$2 AND party_id=$3 ORDER BY created_at`,
+		WHERE tenant=$1 AND plan_id=$2 AND party_id=$3 ORDER BY created_at DESC`,
 		tenant, org.ID, chi.URLParam(r, "partyId"))
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -789,7 +805,7 @@ func (s *server) hpCreatePackage(w http.ResponseWriter, r *http.Request) {
 // event with actor=healthplan (doc-intel's QPA floor applies to payer-side
 // OFFER_SUBSTANTIATION).
 func (s *server) hpStorePackageDoc(r *http.Request, tenant, planID, pkgID, slot, filename string, raw []byte) (string, error) {
-	if n, err := s.rds.incrExpire("idre:rl:hpdoc:"+tenant+":"+planID, 3600); err == nil && n > 400 {
+	if n, err := s.rds.incrExpire(s.cfg.RedisPrefix+":rl:hpdoc:"+tenant+":"+planID, 3600); err == nil && n > 400 {
 		return "", fmt.Errorf("upload rate limit exceeded (400/hour)")
 	}
 	if err := docPolicy(filename, raw); err != nil {
@@ -810,16 +826,22 @@ func (s *server) hpStorePackageDoc(r *http.Request, tenant, planID, pkgID, slot,
 		}); err != nil {
 		return "", fmt.Errorf("store failed")
 	}
+	// One of the six waits for doc-intel's verdict; an additional document is taken as filed (tpa_onboarding.go).
+	more := moreDocKind(slot) != ""
+	initial := map[bool]string{true: "ACCEPTED", false: "PENDING"}[more]
 	var rowID string
 	err = s.db.QueryRow(r.Context(), `
-		INSERT INTO public.hp_package_docs (tenant, package_id, slot, object_key, filename, status)
-		VALUES ($1,$2,$3,$4,$5,'PENDING')
+		INSERT INTO public.hp_package_docs (tenant, package_id, slot, object_key, filename, status, analyzed_at)
+		VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $6='ACCEPTED' THEN now() END)
 		ON CONFLICT (package_id, slot) DO UPDATE SET
 		  object_key=excluded.object_key, filename=excluded.filename,
-		  status='PENDING', reasons='[]'::jsonb, analyzed_at=NULL
-		RETURNING id`, tenant, pkgID, slot, objectKey, filename).Scan(&rowID)
+		  status=excluded.status, reasons='[]'::jsonb, analyzed_at=excluded.analyzed_at
+		RETURNING id`, tenant, pkgID, slot, objectKey, filename, initial).Scan(&rowID)
 	if err != nil {
 		return "", fmt.Errorf("db")
+	}
+	if more {
+		return rowID, nil
 	}
 	s.packageDocReplaced(r, tenant, onboardingKinds["hp"], pkgID)
 	s.publish(r.Context(), tenant, "documents", map[string]any{
@@ -850,8 +872,8 @@ func (s *server) hpAttachDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	// Until it is filed, a slot can be added or replaced: slots are checked
 	// one at a time, so the package is VALIDATING after the first upload.
-	if mode != "DISCRETE" || status == "FILED" {
-		http.Error(w, `{"error":"this package takes one merged PDF, or it has already been filed"}`, http.StatusConflict)
+	if status == "FILED" {
+		http.Error(w, `{"error":"this package has already been filed"}`, http.StatusConflict)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
@@ -859,9 +881,14 @@ func (s *server) hpAttachDoc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
 		return
 	}
-	slot := strings.ToUpper(strings.TrimSpace(r.FormValue("slot")))
-	if !tpaSlotValid(slot) {
-		http.Error(w, `{"error":"slot must be one of: `+strings.Join(tpaSlots, ", ")+`"}`, http.StatusBadRequest)
+	slot := slotForUpload(strings.ToUpper(strings.TrimSpace(r.FormValue("slot"))))
+	if slot == "" {
+		http.Error(w, `{"error":"slot must be one of: `+strings.Join(tpaSlots, ", ")+`, or MORE_ and one of: `+strings.Join(moreDocKinds, ", ")+`"}`, http.StatusBadRequest)
+		return
+	}
+	// A merged set's six come from its one PDF; every additional document is added on its own.
+	if mode != "DISCRETE" && moreDocKind(slot) == "" {
+		http.Error(w, `{"error":"this package takes one merged PDF for its six documents"}`, http.StatusConflict)
 		return
 	}
 	f, hdr, err := r.FormFile("file")
@@ -1008,7 +1035,7 @@ func (s *server) hpPackageStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"package_id": pkgID, "party_id": partyID, "mode": mode,
-		"status": status, "slots": grid})
+		"status": status, "slots": grid, "more": moreDocsOf(bySlot), "more_kinds": moreDocKinds})
 }
 
 // hpOnboardingBoard: the plan's whole party roster with the three gates.
@@ -1038,6 +1065,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
+	checks := s.verificationsSummary(r.Context(), "hp", tenant)
 	parties := []map[string]any{}
 	for rows.Next() {
 		var id, name, ptype, ost, cst, npi, tin, npiSt, npiReg, npiNote string
@@ -1056,7 +1084,7 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 			"party_id": id, "party_name": name, "party_type": ptype,
 			"onboarding_status": ost, "status": cst,
 			"profile_complete": tin != "" && (ptype == "EMPLOYER_GROUP" || npi != ""),
-			"npi": npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote,
+			"npi":              npi, "npi_status": npiSt, "npi_registry_name": npiReg, "npi_review_note": npiNote, "checks": checks[id],
 			"verified_payments": npay, "ready_packages": nready,
 			"open_packages": packages,
 		})
@@ -1235,19 +1263,24 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		PartyID             string `json:"party_id"`
-		PackageID           string `json:"package_id"`
-		DisputedAmountCents int64  `json:"disputed_amount_cents"`
-		Notes               string `json:"notes"`
-		OtherPartyName      string `json:"other_party_name"`  // the provider the dispute is against
-		OtherPartyEmail     string `json:"other_party_email"` // where its notices go
-		OtherPartyNPI       string `json:"other_party_npi"`
+		PartyID             string        `json:"party_id"`
+		PackageID           string        `json:"package_id"`
+		DisputedAmountCents int64         `json:"disputed_amount_cents"`
+		Notes               string        `json:"notes"`
+		OtherPartyName      string        `json:"other_party_name"`  // the provider the dispute is against
+		OtherPartyEmail     string        `json:"other_party_email"` // where its notices go
+		OtherPartyNPI       string        `json:"other_party_npi"`
+		Packet              *filingPacket `json:"packet"` // the filing packet form (filing_packet.go)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PartyID == "" {
 		http.Error(w, `{"error":"party_id required"}`, http.StatusBadRequest)
 		return
 	}
-	rsp := respondent{Side: "PROVIDER", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NPI: in.OtherPartyNPI}
+	if packetRejected(w, in.Packet) {
+		return
+	}
+	// The packet form's provider name, email and NPI fill what the short form left blank.
+	rsp := in.Packet.otherParty(respondent{Side: "PROVIDER", Name: in.OtherPartyName, Email: in.OtherPartyEmail, NPI: in.OtherPartyNPI})
 	if msg := rsp.check(); msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
@@ -1277,15 +1310,10 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, "this dispute can't be filed yet: "+why), http.StatusConflict)
 		return
 	}
-	// Onboarding gate: once a party has started onboarding, filings must
-	// reference its READY package and a verified payment rail.
-	var onboarded int
-	_ = s.db.QueryRow(r.Context(), `
-		SELECT count(*) FROM public.hp_parties
-		WHERE tenant=$1 AND id=$2 AND (tin IS NOT NULL OR
-		  EXISTS (SELECT 1 FROM public.hp_packages p WHERE p.tenant=$1 AND p.party_id=$2))`,
-		tenant, in.PartyID).Scan(&onboarded)
-	if onboarded > 0 || s.featureEnabled(r, tenant, "onboarding_required") {
+	// Onboarding gate: optional unless the tenant turns on onboarding_required
+	// (READY package + verified payment rail). A package named must be READY.
+	required := s.featureEnabled(r, tenant, "onboarding_required")
+	if required || in.PackageID != "" {
 		if in.PackageID == "" {
 			http.Error(w, `{"error":"filings must reference this party's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)
 			return
@@ -1295,8 +1323,8 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 			SELECT status FROM public.hp_packages
 			WHERE tenant=$1 AND plan_id=$2 AND party_id=$3 AND id=$4`,
 			tenant, org.ID, in.PartyID, in.PackageID).Scan(&pkgStatus)
-		if err != nil || pkgStatus != "READY" {
-			http.Error(w, `{"error":"package not found or not READY (all six documents must be ACCEPTED)"}`, http.StatusConflict)
+		if ok, _ := s.packageFileable(r.Context(), tenant, "hp", in.PackageID); err != nil || !ok {
+			http.Error(w, `{"error":"these documents are still being read — file once they are (a minute or two), or file without them; none of them is required"}`, http.StatusConflict)
 			return
 		}
 		var verified int
@@ -1304,7 +1332,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 			SELECT count(*) FROM public.hp_payment_methods
 			WHERE tenant=$1 AND party_id=$2 AND verified AND status='ACTIVE'`,
 			tenant, in.PartyID).Scan(&verified)
-		if verified == 0 {
+		if verified == 0 && required {
 			http.Error(w, `{"error":"no verified payment method for this party"}`, http.StatusConflict)
 			return
 		}
@@ -1339,6 +1367,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		s.attachPackageDocsToCase(r, tenant, onboardingKinds["hp"], in.PackageID, caseID, "health-plan:"+org.Name)
 	}
 	s.recordRespondent(r, tenant, caseID, rsp)
+	s.fileWithPacket(r, tenant, caseID, in.Packet, "health plan "+org.Name)
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = details || jsonb_build_object('filed_by_plan', $2::text) WHERE id=$1`, sanitizeTenant(tenant)), caseID, org.Name)
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,
@@ -1354,7 +1383,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"case_id": caseID, "case_number": caseNumber, "status": st,
 		"payment_required": st == "AWAITING_PAYMENT",
-		"party": partyName, "filed_by": org.Name,
+		"party":            partyName, "filed_by": org.Name,
 		"note": "payment link and case instructions go to the health plan contact — you pay and upload on behalf of " + partyName,
 	})
 }

@@ -209,3 +209,13 @@ func TestAPartyCannotReachTheRestOfTheTenant(t *testing.T) {
 		}
 	}
 }
+
+func TestOutsideTelemetry(t *testing.T) {
+	tpa := principal{Subject: "t1", Roles: []string{"TPA"}}
+	if d, _, _ := accessDecision(tpa, http.MethodPost, "/telemetry/events"); d != "allow" {
+		t.Errorf("a TPA sends its own portal-use counts: %s", d)
+	}
+	if d, _, _ := accessDecision(tpa, http.MethodGet, "/telemetry/metrics"); d != "deny" {
+		t.Errorf("a TPA never reads the tenant's metrics: %s", d)
+	}
+}

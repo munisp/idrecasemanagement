@@ -151,7 +151,7 @@ func (s *server) caseNextAction(w http.ResponseWriter, r *http.Request) {
 		`SELECT count(*) FROM public.doc_analysis WHERE tenant=$1 AND case_id=$2 AND status='ANALYZED_WITH_FINDINGS'`,
 		tenant, caseID).Scan(&in.UnreadDocs)
 	_ = s.db.QueryRow(r.Context(),
-		`SELECT count(*) FROM public.checklist_items WHERE tenant=$1 AND case_id=$2 AND done=false`,
+		`SELECT count(*) FROM public.case_checklists WHERE tenant=$1 AND case_id=$2 AND done=false`,
 		tenant, caseID).Scan(&in.ChecklistDue)
 	_ = s.db.QueryRow(r.Context(), `
 		SELECT EXISTS(
@@ -433,7 +433,7 @@ func (s *server) computeAttention(ctx context.Context, tenant string, p principa
 		         WHERE q.tenant=$1 AND q.case_id=c.id::text AND q.status='PENDING'),
 		       (SELECT count(*) FROM public.doc_analysis a
 		         WHERE a.tenant=$1 AND a.case_id=c.id AND a.status='ANALYZED_WITH_FINDINGS'),
-		       (SELECT count(*) FROM public.checklist_items ci
+		       (SELECT count(*) FROM public.case_checklists ci
 		         WHERE ci.tenant=$1 AND ci.case_id::text=c.id::text AND ci.done=false),
 		       LEAST(c.offer_window_ends_at, c.open_negotiation_end::timestamptz)
 		FROM tenant_%s.cases c

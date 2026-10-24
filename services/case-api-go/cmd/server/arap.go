@@ -59,18 +59,18 @@ func asOfDate(r *http.Request) (time.Time, error) {
 }
 
 type arapRow struct {
-	Source     string `json:"source"` // case_fee_invoice | service_invoice | payable
-	ID         string `json:"id"`
-	Number     string `json:"number,omitempty"`
-	CaseID     string `json:"case_id,omitempty"`
-	Party      string `json:"party"` // counterparty: who owes (AR) / who is owed (AP)
-	Kind       string `json:"kind,omitempty"`
-	Amount     int64  `json:"amount_cents"`
-	Paid       int64  `json:"paid_cents"`
-	Due        int64  `json:"due_cents"`
-	BasisDate  string `json:"basis_date"` // due date or creation date
-	Days       int    `json:"days_outstanding"`
-	Bucket     string `json:"bucket"`
+	Source    string `json:"source"` // case_fee_invoice | service_invoice | payable
+	ID        string `json:"id"`
+	Number    string `json:"number,omitempty"`
+	CaseID    string `json:"case_id,omitempty"`
+	Party     string `json:"party"` // counterparty: who owes (AR) / who is owed (AP)
+	Kind      string `json:"kind,omitempty"`
+	Amount    int64  `json:"amount_cents"`
+	Paid      int64  `json:"paid_cents"`
+	Due       int64  `json:"due_cents"`
+	BasisDate string `json:"basis_date"` // due date or creation date
+	Days      int    `json:"days_outstanding"`
+	Bucket    string `json:"bucket"`
 }
 
 func withAging(rows []arapRow, asOf time.Time) []arapRow {
@@ -445,9 +445,9 @@ func (s *server) arapSummary(w http.ResponseWriter, r *http.Request) {
 		SELECT coalesce(sum(amount_cents),0) FROM public.payables WHERE tenant=$1 AND status='OPEN'`, tenant).Scan(&ap)
 	ar := arCase + arSvc
 	writeJSON(w, http.StatusOK, map[string]any{
-		"as_of": asOf.Format("2006-01-02"),
-		"ar": map[string]any{"case_fee_cents": arCase, "service_fee_cents": arSvc, "total_cents": ar},
-		"ap": map[string]any{"open_cents": ap},
+		"as_of":              asOf.Format("2006-01-02"),
+		"ar":                 map[string]any{"case_fee_cents": arCase, "service_fee_cents": arSvc, "total_cents": ar},
+		"ap":                 map[string]any{"open_cents": ap},
 		"net_position_cents": ar - ap})
 }
 
@@ -537,7 +537,7 @@ func (s *server) caseFinancials(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"case_id": caseID,
+		"case_id":      caseID,
 		"fee_invoices": feeInvoices, "fee_payments": feePayments,
 		"service_lines": svcLines, "service_payments": svcPayments,
 		"payables": payables, "events": events,

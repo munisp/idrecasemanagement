@@ -40,9 +40,9 @@ var onboardingKinds = map[string]onboardingKind{
 // Reviewer owns intake, the PM is the QA gate.
 var onboardingReviewRoles = []string{"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
-// refreshOnboardingPackage recomputes a package's status from its slots
-// (READY only when all six are ACCEPTED) and then its owner's onboarding
-// status. The same rule doc-intel applies after each verdict.
+// refreshOnboardingPackage recomputes a package's status from its documents
+// (READY once all of them are read) and then its owner's onboarding status.
+// The same rule doc-intel applies after each verdict.
 func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onboardingKind, pkgID string) string {
 	var owner, current string
 	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(
@@ -50,17 +50,16 @@ func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onbo
 		tenant, pkgID).Scan(&owner, &current); err != nil || current == "FILED" {
 		return current
 	}
-	var accepted, rejected int
+	// READY once every document has been read (packageFileable): a flagged one is the Reviewer's to look at, and
+	// never holds the set back.
+	var docs, reading int
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`
-		SELECT count(*) FILTER (WHERE status='ACCEPTED'), count(*) FILTER (WHERE status='REJECTED')
+		SELECT count(*), count(*) FILTER (WHERE status IN ('PENDING','ANALYZING'))
 		FROM public.%s_package_docs WHERE tenant=$1 AND package_id=$2`, k.prefix),
-		tenant, pkgID).Scan(&accepted, &rejected)
+		tenant, pkgID).Scan(&docs, &reading)
 	status := "VALIDATING"
-	switch {
-	case accepted >= len(tpaSlots):
+	if docs > 0 && reading == 0 {
 		status = "READY"
-	case rejected > 0:
-		status = "REJECTED"
 	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(
 		`UPDATE public.%s_packages SET status=$3, updated_at=now() WHERE tenant=$1 AND id=$2`, k.prefix),
@@ -77,9 +76,17 @@ func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onbo
 // not ready until doc-intel has read it (a READY package with an unread
 // document in it would otherwise still file).
 func (s *server) packageDocReplaced(r *http.Request, tenant string, k onboardingKind, pkgID string) {
+	// The set's status from what is left in it, by doc-intel's rule (tpa_docs._refresh_package): being read while
+	// a document is (or a merged PDF waits to be split into them), READY once every one has been, ASSEMBLING when it
+	// is empty. After a removal nothing is left to read, so a set set to VALIDATING here stayed "being read" until
+	// its next upload.
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
-		UPDATE public.%s_packages SET status='VALIDATING', updated_at=now()
-		WHERE tenant=$1 AND id=$2 AND status<>'FILED'`, k.prefix), tenant, pkgID)
+		UPDATE public.%[1]s_packages pk SET updated_at=now(), status = CASE
+		    WHEN NOT EXISTS (SELECT 1 FROM public.%[1]s_package_docs d WHERE d.package_id=pk.id)
+		      THEN CASE WHEN pk.mode='MERGED' AND coalesce(pk.source_object_key,'') <> '' THEN 'VALIDATING' ELSE 'ASSEMBLING' END
+		    WHEN EXISTS (SELECT 1 FROM public.%[1]s_package_docs d WHERE d.package_id=pk.id AND d.status IN ('PENDING','ANALYZING')) THEN 'VALIDATING'
+		    ELSE 'READY' END
+		WHERE pk.tenant=$1 AND pk.id=$2 AND pk.status<>'FILED'`, k.prefix), tenant, pkgID)
 	var owner string
 	if s.db.QueryRow(r.Context(), fmt.Sprintf(
 		`SELECT %s::text FROM public.%s_packages WHERE tenant=$1 AND id=$2`, k.ownerCol, k.prefix),
@@ -117,7 +124,8 @@ func (s *server) onboardingReviews(w http.ResponseWriter, r *http.Request) {
 		JOIN public.health_plans o ON o.id=pk.plan_id
 		JOIN public.hp_parties c ON c.id=pk.party_id
 		WHERE d.tenant=$1 AND d.status='NEEDS_REVIEW' AND pk.status<>'FILED'
-		ORDER BY 6`, tenant)
+		ORDER BY 6 DESC NULLS LAST -- the latest analyzed first
+		`, tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

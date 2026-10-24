@@ -146,10 +146,10 @@ func (s *server) submitOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		PartyID      string   `json:"party_id"` // INITIATING | RESPONDING
-		AmountCents  int64    `json:"amount_cents"`
-		Justification string  `json:"justification"`
-		Documents    []string `json:"documents"` // doc IDs already uploaded to the case docket
+		PartyID       string   `json:"party_id"` // INITIATING | RESPONDING
+		AmountCents   int64    `json:"amount_cents"`
+		Justification string   `json:"justification"`
+		Documents     []string `json:"documents"` // doc IDs already uploaded to the case docket
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil ||
 		!validOfferParty(in.PartyID) || in.AmountCents <= 0 {
@@ -279,7 +279,7 @@ func (s *server) revealOffers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type sealedOffer struct {
-		id, party string
+		id, party          string
 		nonce, ct, wrapped []byte
 	}
 	var pending []sealedOffer

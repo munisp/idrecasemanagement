@@ -23,7 +23,9 @@ import (
 
 type redisClient struct{ addr, password string }
 
-func newRedis(addr, password string) *redisClient { return &redisClient{addr: addr, password: password} }
+func newRedis(addr, password string) *redisClient {
+	return &redisClient{addr: addr, password: password}
+}
 
 // incrExpire increments key and, on first increment, sets its TTL — the
 // fixed-window counter primitive behind rate limiting. Returns the count.
