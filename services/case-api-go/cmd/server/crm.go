@@ -742,15 +742,31 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 	// Document full-text hits from OpenSearch (idre-docs-{tenant}, written by
 	// doc-intel). Best-effort: cluster down/absent just means no doc hits —
 	// the SQL results above always stand on their own.
-	if docHits, ok := s.searchDocsOpenSearch(r.Context(), tenant, r.URL.Query().Get("q")); ok {
+	// Each hit is named as people know it -- its file and its case -- and one whose document is gone from the
+	// case (the index still had it) is left out.
+	if docHits, ok := s.searchDocsOpenSearch(r.Context(), tenant, r.URL.Query().Get("q")); ok && len(docHits) > 0 {
+		ids := make([]string, 0, len(docHits))
 		for _, d := range docHits {
-			label := "document"
-			if d.DocType != "" {
-				label = d.DocType
+			ids = append(ids, d.DocID)
+		}
+		names := map[string][2]string{}
+		if rows, err := s.db.Query(r.Context(), fmt.Sprintf(`SELECT d.id::text, coalesce(d.filename,''), coalesce(c.case_number,'')
+			FROM tenant_%s.documents d LEFT JOIN tenant_%s.cases c ON c.id::text = d.case_id::text
+			WHERE d.id::text = ANY($1)`, sanitizeTenant(tenant), sanitizeTenant(tenant)), ids); err == nil {
+			for rows.Next() {
+				var id, file, num string
+				if rows.Scan(&id, &file, &num) == nil {
+					names[id] = [2]string{file, num}
+				}
 			}
-			out = append(out, hit{
-				Kind: "document", ID: d.DocID, Label: label, Detail: d.Snippet, CaseID: d.CaseID,
-			})
+			rows.Close()
+		}
+		for _, d := range docHits {
+			n, found := names[d.DocID]
+			if !found {
+				continue
+			}
+			out = append(out, hit{Kind: "document", ID: d.DocID, Label: docHitLabel(n[0], n[1], d.DocType), Detail: d.Snippet, CaseID: d.CaseID})
 		}
 	}
 	// A Reviewer finds nothing of a case assigned to someone else: not the case, its documents, tasks or invoices.
@@ -810,4 +826,19 @@ func (s *server) queryRows(r *http.Request, sql string, args ...any) ([]map[stri
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// docHitLabel names a document search hit: its file and case ("eob.pdf — FL26-021372"), else its type.
+func docHitLabel(file, caseNumber, docType string) string {
+	label := file
+	if label == "" {
+		label = strings.ReplaceAll(docType, "_", " ")
+	}
+	if label == "" {
+		label = "document"
+	}
+	if caseNumber != "" {
+		label += " — " + caseNumber
+	}
+	return label
 }
