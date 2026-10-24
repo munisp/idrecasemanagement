@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // docrequeue.go — no uploaded document is left unread.
 //
 // An upload is stored first and then announced on the message bus for the

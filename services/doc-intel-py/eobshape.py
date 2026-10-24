@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """eobshape.py -- reading a billing document's fields whatever shape they
 arrive in.
 

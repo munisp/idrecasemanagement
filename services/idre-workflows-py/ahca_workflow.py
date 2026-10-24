@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """AhcaDisputeWorkflow — the Florida AHCA Claims Dispute Resolution
 lifecycle. One long-running workflow per case, started the moment a
 Filing Party's shell case is created (status PENDING_INTAKE), same timing

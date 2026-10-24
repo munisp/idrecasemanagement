@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // sopdeadlines.go — the contract's deadlines, measured by the system instead
 // of by hand.
 //

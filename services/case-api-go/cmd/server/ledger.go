@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // ledger.go — opening ledger accounts on first use, and keeping one
 // deployment's ledger ids apart from another's.
 //

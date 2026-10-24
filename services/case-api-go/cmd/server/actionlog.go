@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // actionlog.go — every action anyone takes, for monitoring through the OTel

@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // qagate.go — what a letter held for QA, and a letter actually sent, do to
 // the case around them.
 //

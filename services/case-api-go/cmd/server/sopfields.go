@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // sopfields.go — the case fields the SOP assigns to one role each.
 //
 //   - Review notes: five fields, each written by the role that owns it

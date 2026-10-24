@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // emailcheck.go — whether an address can receive the platform's email, beyond

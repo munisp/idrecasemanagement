@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """Activities for AhcaDisputeWorkflow — side effects only, workflow stays
 deterministic. Mirrors activities.py's direct-DB-plus-HTTP pattern rather
 than inventing a new one."""

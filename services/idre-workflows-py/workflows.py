@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """Temporal workflows — the statutory lifecycle of a federal IDR dispute.
 
 One long-running workflow per case. Signals = business events, timers =

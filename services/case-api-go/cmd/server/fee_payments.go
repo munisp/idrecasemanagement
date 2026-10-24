@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // fee_payments.go — outside filers pay their disputes' initial fees by card.

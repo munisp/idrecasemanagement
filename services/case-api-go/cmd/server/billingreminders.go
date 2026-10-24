@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // billingreminders.go — collection reminders, the case outcome, and time
 // prompts.
 //

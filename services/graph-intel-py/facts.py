@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """facts.py -- the program's figures, for questions that are not about one
 case or one party.
 

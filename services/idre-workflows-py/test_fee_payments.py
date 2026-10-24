@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """FeePaymentWorkflow against Temporal's time-skipping test server, with the
 case-api activities replaced: a card paid at once, a declined card, a bank
 debit cleared by the webhook's signal, and a bank debit that never clears

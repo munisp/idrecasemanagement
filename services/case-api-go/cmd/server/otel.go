@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // otel.go — OpenTelemetry tracing for case-api.
 //
 // Spans are exported over OTLP/HTTP to the endpoint in

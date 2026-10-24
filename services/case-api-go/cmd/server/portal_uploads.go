@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // portal_uploads.go — big files can be stopped and resumed (portal uploads).

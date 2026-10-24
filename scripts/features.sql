@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- Per-tenant feature flags (features.go). Kept in their own table, not in
 -- program_rules.config: whether a tenant has a program_rules row at all is
 -- what marks it as running its own program (loadProgram, the deadline sweep,

@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // document_requests.go — a reviewer asks one side of a dispute for documents,

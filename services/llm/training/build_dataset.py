@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Author: Patrick Munis at newwave
 """Build the NSA/IDRE instruction dataset (JSONL) for QLoRA fine-tuning.
 
 Sources, in priority order:

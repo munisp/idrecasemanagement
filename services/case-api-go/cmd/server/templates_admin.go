@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // templates_admin.go — email templates managed from the dashboard, and the
 // rules for which one is used when.
 //

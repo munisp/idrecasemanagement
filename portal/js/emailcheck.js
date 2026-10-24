@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // emailcheck.js — checks an email field when the person leaves it: is the
 // address well formed, does its domain take mail, is the domain a typo of a
 // big provider (with a one-click fix). Any <input type="email" data-email-check>

@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 //! OpenTelemetry tracing for the vault: one server span per request,
 //! continuing the caller's trace when it sends a `traceparent` header.
 //!

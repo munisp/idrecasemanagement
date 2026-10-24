@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // tpa_bulk_disputes.go — a TPA files many disputes at once, each with its

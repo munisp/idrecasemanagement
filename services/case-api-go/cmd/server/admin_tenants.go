@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // admin_tenants.go — platform-level tenant provisioning (Keycloak group +

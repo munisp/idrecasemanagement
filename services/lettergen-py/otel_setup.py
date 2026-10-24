@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """OpenTelemetry tracing shared by the Python services.
 
 Spans go over OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT. With that variable
