@@ -926,3 +926,33 @@ def test_filing_fields_never_guess():
     # An unlabelled amount and a personal address are not read as the plan's.
     got = f("We spoke on the phone about $500.00 and wrote to jane.doe@gmail.com.")
     assert "billed_cents" not in got and "payer_email" not in got and "payer_name" not in got
+
+
+ER_NOTE = ("Emergency department record. Diagnosis: acute appendicitis with peritonitis. CT scan of the abdomen "
+           "performed, laparoscopic appendectomy, treated with piperacillin-tazobactam. History of asthma.")
+
+
+def test_classify_a_clinical_record_as_medical_records():
+    dtype, score, _ = pl.classify_text("upload.pdf", ER_NOTE)
+    assert dtype == "medical_records" and score >= 3
+
+
+def test_an_eob_stays_an_eob_beside_the_clinical_signals():
+    eob = "EXPLANATION OF BENEFITS. Remittance advice. Allowed amount $600. Patient responsibility $50. Diagnosis: sepsis."
+    assert pl.classify_text("eob.pdf", eob)[0] == "eob"
+
+
+def test_validate_keeps_a_clinical_record_the_model_called_off_topic():
+    # The model's relevance vote judged by billing vocabulary: a plain ER note has none, and was flagged
+    # "not related to medical billing — possible mis-upload".
+    ctx = {"extracted": {"claim_number": None, "qpa_usd": None}, "normalized": {}, "in_domain": False,
+           "doc_type": "medical_records", "classify_score": 7}
+    out = pl.stage_validate(ctx, {}, None)
+    assert out["doc_type"] == "medical_records"
+    assert not any("mis-upload" in f["issue"] or "no usable field values" in f["issue"] for f in out["findings"])
+
+
+def test_validate_still_flags_a_weakly_clinical_page_the_model_rejected():
+    ctx = {"extracted": {}, "normalized": {}, "in_domain": False, "doc_type": "medical_records", "classify_score": 2}
+    out = pl.stage_validate(ctx, {}, None)
+    assert out["doc_type"] == "unrelated"

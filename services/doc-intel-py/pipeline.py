@@ -108,6 +108,16 @@ TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
                  "procedure code", "claim", "provider", "payer", "member id", "units",
                  "revenue code", "drg"],
     },
+    # The patient's clinical record (ER note, discharge summary, operative report...): evidence in nearly every
+    # dispute -- the program's packet lists it ("Medical records") -- though it carries no billing vocabulary.
+    "medical_records": {
+        "strong": ["discharge summary", "history of present illness", "chief complaint", "emergency department record",
+                   "emergency department note", "progress note", "operative report", "assessment and plan",
+                   "review of systems", "medication administration record", "nursing note", "admission note",
+                   "consultation note", "radiology report", "pathology report", "physical examination"],
+        "weak": ["diagnosis:", "treated with", "history of", "ct scan", "x-ray", "vital signs", "allergies",
+                 "admitted", "discharged", "medications", "medical record"],
+    },
 }
 # The office's own letters (decision report, cover letter, review invoice, IRO decision): letter_docs.py.
 import letter_docs as _letter_docs  # noqa: E402
@@ -971,7 +981,9 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
             "The transcribed text below is the authoritative content of this document. "
             f"{image_caveat}"
             "FIRST decide whether this document is related to medical billing, health "
-            "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
+            "insurance claims, explanation-of-benefits, IDR arbitration, or the patient's clinical "
+            "record of the care in dispute (ER notes, discharge summaries, operative reports, "
+            "progress notes -- these ARE related) at all, and "
             'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, legal contract, '
             "photograph with no document content, or any other unrelated material is "
             "false. When false, set every other field null and stop. "
@@ -992,7 +1004,9 @@ def stage_vlm_extract(ctx: dict, cfg: dict, schemas: dict) -> dict:
             "The transcribed text below is the authoritative content of this document. "
             f"{image_caveat}"
             "FIRST decide whether this document is related to medical billing, health "
-            "insurance claims, explanation-of-benefits, or IDR arbitration at all, and "
+            "insurance claims, explanation-of-benefits, IDR arbitration, or the patient's clinical "
+            "record of the care in dispute (ER notes, discharge summaries, operative reports, "
+            "progress notes -- these ARE related) at all, and "
             'set "_in_domain" true or false based on the TEXT. A resume, menu, tax form, legal contract, '
             "photograph with no document content, or any other unrelated material is "
             "false. When false, set every other field null and stop. "
@@ -1451,7 +1465,9 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     # firmer evidence than the model's relevance vote, which sometimes calls a plain EOB "not medical billing":
     # the document keeps its type instead of becoming "unrelated, possible mis-upload".
     layout_read = any((ctx.get("extracted_fields") or {}).get(k) for k in ("remit", "ub04", "packet"))
-    if layout_read:
+    # A clinical record named by its own headings is evidence too, though it holds no billing field to extract.
+    clinical = ctx.get("doc_type") == "medical_records" and ctx.get("classify_score", 0) >= WEIGHT["strong"]
+    if layout_read or clinical:
         pass
     elif unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
         # The model saw too little legible text to recognise the page. That is
