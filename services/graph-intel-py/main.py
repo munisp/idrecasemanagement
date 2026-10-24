@@ -17,7 +17,9 @@ Run: uvicorn main:app --host 0.0.0.0 --port 8082
 
 from __future__ import annotations
 
+import json
 import os
+import socket
 import threading
 import time
 
@@ -44,50 +46,78 @@ CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 
+# deid-py takes at most 500,000 characters a request; batches stay well under.
+DEID_BATCH_CHARS = int(os.environ.get("DEID_BATCH_CHARS", "200000"))
+
+
+def _deid_batches(values: list[str], limit: int) -> list[list[str]]:
+    """Split values (one per line) into batches whose joined text stays under limit."""
+    batches, cur, size = [], [], 0
+    for v in values:
+        if cur and size + len(v) + 1 > limit:
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append(v)
+        size += len(v) + 1
+    if cur:
+        batches.append(cur)
+    return batches
+
+
 def _deid_rows(tenant: str, rows: list[dict]) -> list[dict]:
-    """Scrub free-text fields through deid-py; report the decision."""
+    """Scrub free-text fields through deid-py; report the decision.
+
+    Each distinct value is scrubbed once (a tenant's 20,000 cases name a few
+    hundred organizations), in batches under deid-py's request limit. A value
+    is sent on a line of its own, so its newlines are flattened first; a batch
+    that comes back with a different number of lines fails the sync rather
+    than pair a scrubbed value with the wrong field."""
     if not DEID_URL:
         return rows
     import hashlib
     import httpx
     fields = ["provider_name", "payer_name", "provider_org", "health_plan",
               "requester_org", "service_line"]
-    findings_total, detectors, policy = 0, [], "safe-harbor-18/v1"
-    out = []
-    joined = []
-    for d in rows:
-        d = dict(d)
-        for f in fields:
-            v = d.get(f)
-            if v:
-                joined.append(v)
-        out.append(d)
-    blob = "\n".join(joined)
-    if blob.strip():
-        resp = httpx.post(f"{DEID_URL}/v1/deidentify", timeout=60, json={
-            "tenant": tenant, "artifact": "lakehouse", "text": blob})
+    flat = lambda v: " ".join(str(v).splitlines())  # noqa: E731
+    out = [dict(d) for d in rows]
+    unique = sorted({flat(d[f]) for d in out for f in fields if d.get(f) and flat(d[f]).strip()})
+    if not unique:
+        return out
+    scrubbed: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    detectors: list[str] = []
+    policy = "safe-harbor-18/v1"
+    audit: dict = {}
+    for batch in _deid_batches(unique, DEID_BATCH_CHARS):
+        resp = httpx.post(f"{DEID_URL}/v1/deidentify", timeout=120, json={
+            "tenant": tenant, "artifact": "lakehouse", "text": "\n".join(batch)})
         resp.raise_for_status()
         body = resp.json()
         redacted = body["text"].split("\n")
+        if len(redacted) != len(batch):
+            raise RuntimeError(f"deid returned {len(redacted)} lines for {len(batch)} values")
+        scrubbed.update(zip(batch, redacted))
         audit = body["audit"]
-        findings_total = sum(audit.get("counts", {}).values())
-        detectors = audit.get("detectors", [])
+        for k, n in audit.get("counts", {}).items():
+            counts[k] = counts.get(k, 0) + n
+        detectors = sorted(set(detectors) | set(audit.get("detectors", [])))
         policy = audit.get("policy", policy)
-        it = iter(redacted)
-        for d in out:
-            for f in fields:
-                if d.get(f):
-                    d[f] = next(it, d[f])
-        # One report per sync run: input hash covers the joined blob.
-        try:
-            httpx.post(
-                f"{CASE_API}/v1/tenants/{tenant}/internal/deid/reports",
-                headers={"Authorization": f"Bearer {WORKER_TOKEN}"}, timeout=10,
-                json={"artifact": "lakehouse",
-                      "ref_id": hashlib.sha256(blob.encode()).hexdigest()[:16],
-                      "action": "DEIDENTIFY", "audit": audit})
-        except httpx.HTTPError:
-            pass  # report persistence is best-effort; the scrub itself is not
+    for d in out:
+        for f in fields:
+            if d.get(f):
+                d[f] = scrubbed.get(flat(d[f]), d[f])
+    findings_total = sum(counts.values())
+    # One report per sync run: the input hash covers every value scrubbed.
+    report = dict(audit, counts=counts, detectors=detectors, policy=policy)
+    try:
+        httpx.post(
+            f"{CASE_API}/v1/tenants/{tenant}/internal/deid/reports",
+            headers={"Authorization": f"Bearer {WORKER_TOKEN}"}, timeout=10,
+            json={"artifact": "lakehouse",
+                  "ref_id": hashlib.sha256("\n".join(unique).encode()).hexdigest()[:16],
+                  "action": "DEIDENTIFY", "audit": report})
+    except httpx.HTTPError:
+        pass  # report persistence is best-effort; the scrub itself is not
     if findings_total:
         print(f"lakehouse deid: {findings_total} identifier(s) scrubbed "
               f"for {tenant} ({', '.join(detectors)}, {policy})", flush=True)
@@ -170,9 +200,19 @@ def sync_case(tenant: str = Query(...), case_id: str = Query(...)):
 # tenant at a time: asking again while one runs queues exactly one more (the
 # changes made meanwhile are then picked up), instead of starting copies side
 # by side -- several at once ran the service out of memory (OOMKilled at 1 GiB
-# on a tenant of 20,000 cases).
-_sync_lock = threading.Lock()
-_sync_state: dict[str, str] = {}  # tenant -> "running" | "again"
+# on a tenant of 20,000 cases). graph-intel runs more than one replica, so the
+# lock, the "once more" flag and the last result are kept in FalkorDB's Redis
+# (shared by them all), not in one process's memory: an ask that lands on the
+# other replica sees the sync that is running, and its status.
+SYNC_LOCK_TTL = int(os.environ.get("SYNC_LOCK_TTL", "3600"))  # a replica killed mid-sync frees the lock
+
+
+def _sync_key(tenant: str, what: str) -> str:
+    return f"idre:graph-sync:{tenant}:{what}"
+
+
+def _redis():
+    return graphdb._client().connection
 
 
 def _full_sync(tenant: str) -> dict:
@@ -189,25 +229,56 @@ def _full_sync(tenant: str) -> dict:
     return {"tenant": tenant, "cases": len(cases), "bronze": bronze, "silver": silver}
 
 
-@app.post("/sync/from-db")
-def sync_from_db(tenant: str = Query(...)):
-    """Source-of-truth sync: Postgres tenant schema -> FalkorDB + bronze/silver."""
-    with _sync_lock:
-        if tenant in _sync_state:
-            _sync_state[tenant] = "again"
-            return {"tenant": tenant, "queued": True,
-                    "note": "a full sync of this tenant is running; one more runs when it ends"}
-        _sync_state[tenant] = "running"
+def _sync_last(tenant: str):
+    raw = _redis().get(_sync_key(tenant, "last"))
+    return json.loads(raw) if raw else None
+
+
+def _run_full_sync(tenant: str) -> None:
+    r = _redis()
     try:
         while True:
-            out = _full_sync(tenant)
-            with _sync_lock:
-                if _sync_state.get(tenant) != "again":
-                    return out
-                _sync_state[tenant] = "running"
+            r.delete(_sync_key(tenant, "again"))
+            started = time.time()
+            try:
+                out = _full_sync(tenant)
+                out.update(ok=True, seconds=round(time.time() - started, 1))
+            except Exception as e:  # recorded for /sync/status; the next ask tries again
+                out = {"tenant": tenant, "ok": False, "error": str(e)[:500]}
+                print(f"full sync of {tenant} failed: {e}", flush=True)
+            out["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            r.set(_sync_key(tenant, "last"), json.dumps(out))
+            if not r.get(_sync_key(tenant, "again")):
+                return
+            r.expire(_sync_key(tenant, "running"), SYNC_LOCK_TTL)
     finally:
-        with _sync_lock:
-            _sync_state.pop(tenant, None)
+        r.delete(_sync_key(tenant, "running"))
+
+
+@app.post("/sync/from-db")
+def sync_from_db(tenant: str = Query(...), wait: bool = False):
+    """Source-of-truth sync: Postgres tenant schema -> FalkorDB + bronze/silver.
+
+    A tenant of 20,000 cases takes minutes, longer than a caller waits, so it
+    runs in the background: the answer says it started (or was queued behind
+    the one running), and /sync/status tells how it ended. wait=true runs it
+    in the request (scripts, tests)."""
+    r = _redis()
+    if not r.set(_sync_key(tenant, "running"), socket.gethostname(), nx=True, ex=SYNC_LOCK_TTL):
+        r.set(_sync_key(tenant, "again"), "1", ex=SYNC_LOCK_TTL)
+        return {"tenant": tenant, "queued": True,
+                "note": "a full sync of this tenant is running; one more runs when it ends"}
+    if wait:
+        _run_full_sync(tenant)
+        return _sync_last(tenant) or {"tenant": tenant}
+    threading.Thread(target=_run_full_sync, args=(tenant,), daemon=True).start()
+    return {"tenant": tenant, "started": True, "last": _sync_last(tenant)}
+
+
+@app.get("/sync/status")
+def sync_status(tenant: str = Query(...)):
+    """Whether a full sync of the tenant is running (on any replica), and how the last one ended."""
+    return {"tenant": tenant, "running": bool(_redis().exists(_sync_key(tenant, "running"))), "last": _sync_last(tenant)}
 
 
 @app.post("/sync/from-lakehouse")

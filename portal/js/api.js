@@ -439,6 +439,7 @@ const Api = (() => {
       related: (caseId) => req("GET", `${t()}/cases/${caseId}/related`),
       neighbors: (caseId) => req("GET", `${t()}/cases/${caseId}/graph-neighbors`),
       sync: () => req("POST", `${t()}/graph/sync`),
+      syncStatus: () => req("GET", `${t()}/graph/sync`),
       train: (epochs) => req("POST", `${t()}/graph/train`, epochs ? { epochs } : {}),
     },
     prefs: {

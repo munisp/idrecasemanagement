@@ -198,6 +198,16 @@ func (s *server) graphSyncNow(w http.ResponseWriter, r *http.Request) {
 	s.proxyGraph(w, r, http.MethodPost, "/sync/from-db", nil)
 }
 
+// graphSyncStatus handles GET /graph/sync — a full sync runs in the background (minutes on a large tenant): whether
+// one is running, and how the last one ended.
+func (s *server) graphSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, graphAdminRoles...) {
+		http.Error(w, `{"error":"forbidden: requires FEDERAL_ADMIN or PLATFORM_ADMIN"}`, http.StatusForbidden)
+		return
+	}
+	s.proxyGraph(w, r, http.MethodGet, "/sync/status", nil)
+}
+
 // graphToLakehouse handles POST /graph/to-lakehouse — graph -> gold export.
 func (s *server) graphToLakehouse(w http.ResponseWriter, r *http.Request) {
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, graphAdminRoles...) {

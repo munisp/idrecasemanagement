@@ -31,8 +31,21 @@ const Palette = (() => {
       .map((a) => (a.run ? a : { ...a, run: () => go(a.page) }));
   };
   async function graphSync() {
-    try { const r = await Api.graph.sync(); UI.toast(`Graph synced — ${r.cases} cases mirrored to FalkorDB + lakehouse`); }
-    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    // A full sync runs in the background (minutes on a large tenant): say it started, then how it ended.
+    try {
+      const r = await Api.graph.sync();
+      if (r.cases != null) { UI.toast(`Graph synced — ${r.cases} cases mirrored to FalkorDB + lakehouse`); return; }
+      UI.toast(r.queued ? "A graph sync is already running — one more runs when it ends" : "Graph sync started — you'll be told when it ends");
+      for (let i = 0; i < 120; i++) {
+        await new Promise((ok) => setTimeout(ok, 5000));
+        const st = await Api.graph.syncStatus();
+        if (st.running) continue;
+        const l = st.last || {};
+        if (l.ok) UI.toast(`Graph synced — ${l.cases} cases mirrored to FalkorDB + lakehouse (${Math.round(l.seconds)}s)`, { kind: "ok" });
+        else UI.toast(`Graph sync failed: ${l.error || "unknown error"}`, { kind: "warn" });
+        return;
+      }
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
   async function graphTrain() {
     try { const r = await Api.graph.train(); UI.toast(r.trained ? `GNN trained: loss ${r.final_loss} over ${r.cases} cases, ${r.positive_edges} edges` : `Not trained: ${r.reason}`, { kind: r.trained ? "ok" : "warn" }); }

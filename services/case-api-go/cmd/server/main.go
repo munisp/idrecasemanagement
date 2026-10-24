@@ -677,7 +677,8 @@ func main() {
 		r.Post("/graph/ask", s.graphAsk)                  // EPR-KGQA natural-language query
 		r.Get("/graph/hints", s.graphHints)               // real names for the sample questions
 		r.Post("/graph/feedback", s.graphFeedback)        // thumbs up/down -> ART-ready log
-		r.Post("/graph/sync", s.graphSyncNow)             // Postgres -> FalkorDB -> lakehouse
+		r.Post("/graph/sync", s.graphSyncNow)             // Postgres -> FalkorDB -> lakehouse (runs in the background)
+		r.Get("/graph/sync", s.graphSyncStatus)           // running? how the last full sync ended
 		r.Post("/graph/to-lakehouse", s.graphToLakehouse) // FalkorDB -> gold-zone export
 		r.Post("/graph/train", s.graphTrain)              // GraphSAGE training round
 		r.Get("/cases/{caseId}/related", s.caseRelated)   // GNN link predictions
