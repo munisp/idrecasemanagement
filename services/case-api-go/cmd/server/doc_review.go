@@ -51,7 +51,7 @@ func (s *server) docReviewQueue(w http.ResponseWriter, r *http.Request) {
 		FROM public.doc_analysis a
 		JOIN tenant_%s.cases c ON c.id = a.case_id
 		WHERE a.tenant=$1 AND a.status='ANALYZED_WITH_FINDINGS'
-		ORDER BY a.analyzed_at DESC
+		ORDER BY a.analyzed_at DESC NULLS LAST
 		LIMIT 200`, sanitizeTenant(tenant)), tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
