@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- ============================================================
 -- Everyone's own audit trail (orgaudit.go myAuditLog: My activity)
 --

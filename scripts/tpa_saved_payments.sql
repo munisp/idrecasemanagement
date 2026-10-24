@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- tpa_saved_payments.sql — cards and US bank accounts (ACH) saved with Stripe,
 -- for a TPA's clients and for the TPA itself, and fee payments charged to them
 -- by the FeePaymentWorkflow (Temporal). Idempotent.

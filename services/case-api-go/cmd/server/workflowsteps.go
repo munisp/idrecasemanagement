@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // workflowsteps.go — the SOP as an ordered list of steps on a case.
 //
 // A programmed case moves through the stages of the program's SOP one step

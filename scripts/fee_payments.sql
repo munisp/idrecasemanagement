@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- ============================================================
 -- Fee payments for outside filers (fee_payments.go)
 --

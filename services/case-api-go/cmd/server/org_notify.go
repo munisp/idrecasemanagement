@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // org_notify.go — in-app notices for the organizations outside the office:
 // a TPA and a health plan.
 //

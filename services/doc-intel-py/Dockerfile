@@ -1,4 +1,5 @@
 FROM python:3.12-slim
+LABEL org.opencontainers.image.authors="Patrick Munis at newwave"
 WORKDIR /app
 # Paddle system deps + tesseract-ocr (pytesseract is just a wrapper around
 # this binary -- installing the pip package alone imports fine but every

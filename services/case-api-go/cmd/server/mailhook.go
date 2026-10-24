@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // mailhook.go — delivery reports from the mail provider, and the helpers
 // that keep one mail-log row per email across its whole life.
 //

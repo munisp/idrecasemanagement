@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- ============================================================
 -- Resumable uploads from the portal (portal_uploads.go)
 --

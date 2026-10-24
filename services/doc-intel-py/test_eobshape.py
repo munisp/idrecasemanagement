@@ -1,3 +1,4 @@
+# Author: Patrick Munis at newwave
 """An EOB is read the same whatever its layout and whatever shape the model
 answers in. Each test is one shape that either broke the reader or could."""
 import pytest

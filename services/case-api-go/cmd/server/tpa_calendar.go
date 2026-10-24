@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // tpa_calendar.go — a TPA's calendar: the deadlines on the disputes it filed,

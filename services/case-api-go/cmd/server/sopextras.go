@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // sopextras.go — smaller pieces of the FL AHCA workflow document.
 //
 //   - The Eligibility Checklist is filed on the case as a document each time

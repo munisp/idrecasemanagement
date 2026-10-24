@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // org_documents_zip.go — a TPA (or a health plan) downloads the documents of

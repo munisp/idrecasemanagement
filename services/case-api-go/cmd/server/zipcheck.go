@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // zipcheck.go — what every uploaded ZIP (bulk filings, document packages)

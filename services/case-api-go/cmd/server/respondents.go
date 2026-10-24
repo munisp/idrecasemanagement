@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // respondents.go — the other side of a dispute.

@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- npi_registry.sql — a TPA client's and a health plan party's NPI are checked
 -- against the national registry (NPPES), and the answer kept. See case-api npi_registry.go.
 -- Safe to re-run.

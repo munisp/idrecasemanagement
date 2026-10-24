@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // tpa_bulk_payments.go — one payment for a bulk batch.

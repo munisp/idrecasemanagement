@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- ============================================================
 -- The portal's brand name, per tenant (program.go setTenantBrand)
 --

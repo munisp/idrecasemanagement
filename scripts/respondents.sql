@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- ============================================================
 -- The responding party of a dispute (respondents.go)
 --

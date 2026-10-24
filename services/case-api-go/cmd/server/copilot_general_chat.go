@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // General (non-case-scoped) copilot chat — the floating Assistant widget's

@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // tpa_saved_payments.go — a TPA pays its disputes' fees with a saved card or

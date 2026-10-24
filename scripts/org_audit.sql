@@ -1,3 +1,4 @@
+-- Author: Patrick Munis at newwave
 -- ============================================================
 -- The audit trail of outside organizations (orgaudit.go)
 --

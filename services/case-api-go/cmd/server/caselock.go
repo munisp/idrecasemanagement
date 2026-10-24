@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // caselock.go — cases that are frozen except for correspondence.
 //
 // Two states freeze a case (each one a tenant rule that is on unless a tenant admin turns it off):

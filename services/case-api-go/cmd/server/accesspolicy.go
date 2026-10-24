@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // accesspolicy.go — who may reach which part of a tenant's API, decided in
 // one place and before any handler runs.
 //

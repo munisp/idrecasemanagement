@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 package main
 
 // npi_registry.go — an NPI is checked against the national registry (NPPES,

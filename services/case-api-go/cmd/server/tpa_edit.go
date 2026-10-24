@@ -1,3 +1,4 @@
+// Author: Patrick Munis at newwave
 // tpa_edit.go — a TPA correcting a dispute it filed, before the fee is paid.
 //
 // A case that is awaiting payment is frozen (caselock.go): staff may only
