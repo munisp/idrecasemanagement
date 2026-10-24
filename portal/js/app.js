@@ -299,9 +299,9 @@
   // (and so what each account may open) is the same list of links.
   const NAV_GROUPS = [
     ["", ["dashboard"]],
-    ["Disputes", ["cases", "new", "pipeline", "intake", "qa", "deliverables", "queues/CODING", "queues/CLINICAL", "queues/LEGAL", "queues/pm", "party", "calendar"]],
+    ["Disputes", ["cases", "new", "pipeline", "intake", "qa", "doc-review", "deliverables", "queues/CODING", "queues/CLINICAL", "queues/LEGAL", "queues/pm", "party", "calendar"]],
     ["Organizations", ["tpa", "healthplan", "onboarding", "crm/accounts", "crm/leads", "crm/tasks", "crm/360"]],
-    ["Money & reports", ["finance", "payments", "billing", "arap", "recon", "reports", "ops", "insights", "time"]],
+    ["Money & reports", ["finance", "payments", "billing", "arap", "recon", "reports", "productivity", "ops", "insights", "time"]],
     ["Tools", ["assistant", "ask", "voice", "mail", "templates", "timesheet", "document-requests"]],
     ["Admin", ["configuration", "team", "rules", "features", "audit", "org-audit", "my-activity"]],
   ];
