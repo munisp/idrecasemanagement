@@ -1071,9 +1071,12 @@ func (s *server) logCorrespondence(r *http.Request, tenant, caseID, direction, t
 // including pre-case mail (intake links, payment demands, time reports) and
 // inbound mail that matched no case — the "can we refer to it?" view.
 // Staff-only: bodies carry party PII.
+// mailJournalRoles may read the tenant-wide mail log (and what came attached to its inbound mail).
+var mailJournalRoles = []string{"CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"}
+
 func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR") {
+	if !hasAnyRole(p, mailJournalRoles...) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
@@ -1081,7 +1084,7 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT c.id, c.case_id, COALESCE(k.case_number,'') AS case_number, c.direction, c.template,
 	             c.subject, c.body, c.recipients, c.sent_by, c.created_at,
 	             c.delivery_status, coalesce(c.delivery_error,'') AS delivery_error,
-	             c.status_updated_at, count(*) OVER() AS total_count
+	             c.status_updated_at, coalesce(c.match_reason,'') AS match_reason, count(*) OVER() AS total_count
 	      FROM public.correspondence_log c
 	      LEFT JOIN tenant_` + sanitizeTenant(tenant) + `.cases k ON k.id::text = c.case_id
 	      WHERE c.tenant=$1`
@@ -1089,6 +1092,10 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	if d := r.URL.Query().Get("direction"); d == "IN" || d == "OUT" {
 		q += ` AND c.direction=$2`
 		args = append(args, d)
+	}
+	// The general inbound section: received mail that names no dispute, waiting to be filed by hand (mailfiling.go).
+	if r.URL.Query().Get("unmatched") == "1" {
+		q += ` AND c.direction='IN' AND c.case_id=''`
 	}
 	if term := strings.TrimSpace(r.URL.Query().Get("q")); term != "" {
 		q += fmt.Sprintf(` AND (c.subject ILIKE $%d OR c.body ILIKE $%d OR k.case_number ILIKE $%d)`, len(args)+1, len(args)+1, len(args)+1)

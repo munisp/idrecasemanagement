@@ -123,6 +123,7 @@ type mailEvent struct {
 	Type string `json:"type"`
 	Data struct {
 		EmailID   string   `json:"email_id"`
+		From      string   `json:"from"`
 		To        []string `json:"to"`
 		Subject   string   `json:"subject"`
 		CreatedAt string   `json:"created_at"`
@@ -131,6 +132,9 @@ type mailEvent struct {
 			Type    string `json:"type"`
 			SubType string `json:"subType"`
 		} `json:"bounce"`
+		Failed struct {
+			Reason string `json:"reason"` // e.g. reached_daily_quota
+		} `json:"failed"`
 	} `json:"data"`
 }
 
@@ -164,18 +168,38 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
+	// Mail received on a staff member's own address (mailboxes.go). A failure answers 502 so Resend retries; a retry
+	// files nothing twice.
+	if ev.Type == "email.received" {
+		n, err := s.handleReceivedEmail(r.Context(), body)
+		if err != nil {
+			slog.Warn("received email not filed", "err", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "not filed yet: " + err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "filed", "filed": n})
+		return
+	}
 	status := mailEventStatus(ev.Type)
 	if status == "" || len(ev.Data.To) == 0 {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "type": ev.Type})
 		return
 	}
 	detail := ""
+	if status == "FAILED" && ev.Data.Failed.Reason != "" {
+		detail = "the mail service refused it: " + strings.ReplaceAll(ev.Data.Failed.Reason, "_", " ")
+	}
 	if status == "BOUNCED" {
 		detail = strings.TrimSpace(fmt.Sprintf("%s %s: %s", ev.Data.Bounce.Type, ev.Data.Bounce.SubType, ev.Data.Bounce.Message))
 		detail = strings.Trim(detail, " :")
 		if detail == "" {
 			detail = "returned by the recipient's mail server"
 		}
+	}
+	// A message a staff member sent from their own address: its own history, not the case mail log.
+	if s.applyMailboxDelivery(r.Context(), ev.Data.EmailID, ev.Type, detail, ev.Data.From, ev.Data.To, ev.Data.Subject) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "type": ev.Type})
+		return
 	}
 	updated := 0
 	for _, addr := range ev.Data.To {

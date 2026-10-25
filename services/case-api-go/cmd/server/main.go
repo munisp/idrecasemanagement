@@ -79,19 +79,29 @@ type Config struct {
 	// MailWebhookSecret (whsec_…) signs the mail provider's delivery reports
 	// (bounced/delivered/complained). Empty = the endpoint is closed.
 	MailWebhookSecret string
-	MojaloopAdapter   string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
-	MojaloopSecret    string // HMAC secret shared with the scheme adapter
-	PortalBaseURL     string // https://portal.example.gov — Stripe success/cancel return
-	ClamdAddr         string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
-	SMTPHost          string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
-	SMTPPort          int
-	SMTPUser          string
-	SMTPPass          string
-	SMTPFrom          string // e.g. flcdr@example.org
-	WorkerToken       string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
-	KeycloakURL       string // http://keycloak:8080 (base, no /realms/... suffix) -- admin API calls
-	KCAdmin           string // Keycloak master-realm admin username, for tenant provisioning
-	KCAdminPassword   string
+	// Personal mailboxes (mailboxes.go): the inbound domain each staff address is on, the Resend API key used to send
+	// from it and to fetch received mail (defaults to SMTP_PASS, a Resend key when SMTP_HOST is smtp.resend.com), and
+	// the Microsoft app that connects Outlook. Each feature is off while its settings are empty.
+	MailboxDomain       string
+	EmailInboundToken   string
+	ResendAPIKey        string
+	OutlookClientID     string
+	OutlookClientSecret string
+	OutlookTenant       string
+	OutlookRedirectURL  string
+	MojaloopAdapter     string // SDK scheme-adapter base URL ("" = mojaloop provider disabled)
+	MojaloopSecret      string // HMAC secret shared with the scheme adapter
+	PortalBaseURL       string // https://portal.example.gov — Stripe success/cancel return
+	ClamdAddr           string // clamd:3310 — ClamAV INSTREAM target (uploads fail-closed if down)
+	SMTPHost            string // outbound mail relay (state SMTP / SES / Mailgun); empty = delivery skipped
+	SMTPPort            int
+	SMTPUser            string
+	SMTPPass            string
+	SMTPFrom            string // e.g. flcdr@example.org
+	WorkerToken         string // shared secret the Temporal worker (idre-workflows) authenticates service-to-service calls with
+	KeycloakURL         string // http://keycloak:8080 (base, no /realms/... suffix) -- admin API calls
+	KCAdmin             string // Keycloak master-realm admin username, for tenant provisioning
+	KCAdminPassword     string
 }
 
 func configFromEnv() Config {
@@ -131,23 +141,30 @@ func configFromEnv() Config {
 		// The copilot shares the in-cluster ollama already serving doc-intel
 		// extraction and graph-intel KGQA — a shared LOCAL instance with a
 		// known OOM history, so briefs are single bounded calls, never loops.
-		CopilotEndpoint:   get("COPILOT_ENDPOINT", get("VLM_ENDPOINT", "http://ollama.ollama.svc.cluster.local:11434/v1")),
-		OpenSearchURL:     get("OPENSEARCH_URL", ""),
-		OpenSearchUser:    get("OPENSEARCH_USER", ""),
-		OpenSearchPass:    get("OPENSEARCH_PASSWORD", ""),
-		CopilotModel:      get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
-		StripeSecret:      get("STRIPE_SECRET_KEY", ""),
-		StripeWebhook:     get("STRIPE_WEBHOOK_SECRET", ""),
-		MailWebhookSecret: get("MAIL_WEBHOOK_SECRET", ""),
-		MojaloopAdapter:   get("MOJALOOP_ADAPTER_URL", ""),
-		MojaloopSecret:    get("MOJALOOP_WEBHOOK_SECRET", ""),
-		PortalBaseURL:     get("PORTAL_BASE_URL", "http://localhost:8080"),
-		ClamdAddr:         get("CLAMD_ADDR", "localhost:3310"),
-		SMTPHost:          get("SMTP_HOST", ""),
-		SMTPPort:          getInt("SMTP_PORT", 587),
-		SMTPUser:          get("SMTP_USER", ""),
-		SMTPPass:          get("SMTP_PASS", ""),
-		SMTPFrom:          get("SMTP_FROM", "idre@localhost"),
+		CopilotEndpoint:     get("COPILOT_ENDPOINT", get("VLM_ENDPOINT", "http://ollama.ollama.svc.cluster.local:11434/v1")),
+		OpenSearchURL:       get("OPENSEARCH_URL", ""),
+		OpenSearchUser:      get("OPENSEARCH_USER", ""),
+		OpenSearchPass:      get("OPENSEARCH_PASSWORD", ""),
+		CopilotModel:        get("COPILOT_MODEL", get("VLM_MODEL", "qwen2.5:7b-instruct")),
+		StripeSecret:        get("STRIPE_SECRET_KEY", ""),
+		StripeWebhook:       get("STRIPE_WEBHOOK_SECRET", ""),
+		MailWebhookSecret:   get("MAIL_WEBHOOK_SECRET", ""),
+		MailboxDomain:       strings.ToLower(get("MAILBOX_DOMAIN", "")),
+		EmailInboundToken:   get("EMAIL_INBOUND_TOKEN", ""),
+		ResendAPIKey:        get("RESEND_API_KEY", ""),
+		OutlookClientID:     get("OUTLOOK_CLIENT_ID", ""),
+		OutlookClientSecret: get("OUTLOOK_CLIENT_SECRET", ""),
+		OutlookTenant:       get("OUTLOOK_TENANT", "common"),
+		OutlookRedirectURL:  get("OUTLOOK_REDIRECT_URL", ""),
+		MojaloopAdapter:     get("MOJALOOP_ADAPTER_URL", ""),
+		MojaloopSecret:      get("MOJALOOP_WEBHOOK_SECRET", ""),
+		PortalBaseURL:       get("PORTAL_BASE_URL", "http://localhost:8080"),
+		ClamdAddr:           get("CLAMD_ADDR", "localhost:3310"),
+		SMTPHost:            get("SMTP_HOST", ""),
+		SMTPPort:            getInt("SMTP_PORT", 587),
+		SMTPUser:            get("SMTP_USER", ""),
+		SMTPPass:            get("SMTP_PASS", ""),
+		SMTPFrom:            get("SMTP_FROM", "idre@localhost"),
 		// No default: an empty WorkerToken disables the service-auth path
 		// entirely rather than accepting a guessable default as a credential.
 		WorkerToken: get("WORKER_TOKEN", ""),
@@ -655,6 +672,15 @@ func main() {
 		r.Get("/tpa/documents.zip", s.orgDocumentsZip("tpa"))
 		r.Get("/hp/documents.zip", s.orgDocumentsZip("hp"))
 		r.Get("/notifications", s.listNotifications)
+		// The signed-in staff member's own email (mailboxes.go, outlook.go): only ever their own.
+		r.Get("/me/mailbox", s.getMyMailbox)
+		r.Get("/me/mail", s.listMyMail)
+		r.Post("/me/mail/send", s.sendMyMail)
+		r.Get("/me/mail/{id}", s.getMyMail)
+		r.Get("/me/mail/{id}/attachments/{aid}", s.getMyMailAttachment)
+		r.Get("/me/outlook/connect", s.outlookConnect)
+		r.Post("/me/outlook/sync", s.outlookSyncNow)
+		r.Delete("/me/outlook", s.outlookDisconnect)
 		r.Get("/notifications/count", s.countNotifications) // the bell's unread total
 		r.Post("/notifications/{notifId}/read", s.readNotification)
 		r.Post("/notifications/read-all", s.readAllNotifications)
@@ -917,7 +943,14 @@ func main() {
 		r.Post("/cases/{caseId}/correspondence/preview", s.previewCorrespondence)            // how it will read, before it is sent (mail_preview.go)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Get("/cases/{caseId}/mail-tracker", s.caseMailTracker) // every email of the case, tracked (mail_tracker.go)
-		r.Get("/correspondence", s.listMailJournal)              // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
+		r.Post("/correspondence/{id}/file", s.fileMailToCase)    // file an unmatched inbound mail under a dispute (mailfiling.go)
+		r.Get("/correspondence", s.listMailJournal)
+		r.Get("/correspondence/{id}/attachments", s.mailLogAttachments)
+		r.Get("/correspondence/{id}/attachments/{aid}", s.mailLogAttachment)
+		r.Get("/company-outlook", s.companyOutlookStatus) // the program's company mailbox (company_outlook.go)
+		r.Get("/company-outlook/connect", s.companyOutlookConnect)
+		r.Post("/company-outlook/sync", s.companyOutlookSync)
+		r.Delete("/company-outlook", s.companyOutlookDisconnect) // tenant-wide mail journal (IN+OUT, incl. pre-case and unmatched)
 		r.Post("/cases/{caseId}/share-links", s.createShareLink) // tokenized upload/download (G9)
 
 		// Double-blind offers (45 CFR 149.520(b)) + specialty review queues +
@@ -1008,6 +1041,7 @@ func main() {
 		r.Use(a.middleware, noteActor)
 		r.Post("/tenants", s.createTenant)
 		r.Put("/tenants/{tenant}/features", s.setTenantFeatures)
+		r.Get("/mail-setup", s.mailSetup) // is mail set up: Resend domain, DNS, webhook, Outlook app (mailsetup.go)
 		r.Post("/federal-admins", s.createFederalAdmin)
 		r.Get("/federal-admins", s.listFederalAdmins)
 		r.Patch("/federal-admins/{username}", s.updateFederalAdminStatus)
@@ -1055,7 +1089,8 @@ func main() {
 
 	// Stripe webhook (no OIDC; HMAC-SHA256 signature against STRIPE_WEBHOOK_SECRET is the auth).
 	r.Post("/api/webhooks/stripe", s.stripeWebhook)
-	r.Post("/api/webhooks/mail", s.mailWebhook)                // provider delivery reports -> mail log status
+	r.Post("/api/webhooks/mail", s.mailWebhook)
+	r.Get("/api/oauth/outlook/callback", s.outlookCallback)    // Microsoft's sign-in returns here (outlook.go)                // provider delivery reports -> mail log status
 	r.Post("/api/webhooks/lockbox/{tenant}", s.lockboxWebhook) // bank deposit confirmation (HMAC)
 	r.Post("/api/webhooks/mojaloop", s.mojaloopWebhook)
 
@@ -1098,6 +1133,22 @@ func main() {
 			case <-sweepStop:
 				return
 			case <-t.C:
+			}
+		}
+	}()
+
+	// Connected Outlook accounts are synchronised every few minutes (outlook.go).
+	go func() {
+		t := time.NewTicker(outlookSyncInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepStop:
+				return
+			case <-t.C:
+				if n := s.sweepOutlook(context.Background()); n > 0 {
+					slog.Info("outlook sync", "filed", n)
+				}
 			}
 		}
 	}()

@@ -250,6 +250,7 @@ const Api = (() => {
       // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createTenant: (payload) => req("POST", "/v1/admin/tenants", payload),
       setFeatures: (tenant, features) => req("PUT", `/v1/admin/tenants/${tenant}/features`, { features }),
+      mailSetup: () => req("GET", "/v1/admin/mail-setup"),
       // Cross-tenant: creates a FEDERAL_ADMIN/PLATFORM_ADMIN account.
       // FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createFederalAdmin: (payload) => req("POST", "/v1/admin/federal-admins", payload),
@@ -336,6 +337,24 @@ const Api = (() => {
       activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },
     // Personal timesheet: daily entry screen with day/week/month totals.
+    // The program's company mailbox (e.g. where replies to case letters arrive), connected by a tenant admin.
+    companyOutlook: {
+      status: () => req("GET", `${t()}/company-outlook`),
+      connect: (mailbox) => req("GET", `${t()}/company-outlook/connect` + qs({ mailbox })),
+      sync: () => req("POST", `${t()}/company-outlook/sync`),
+      disconnect: () => req("DELETE", `${t()}/company-outlook`),
+    },
+    // The person's own email: their platform address and, when connected, their Outlook account.
+    myMail: {
+      mailbox: () => req("GET", `${t()}/me/mailbox`),
+      list: (opts) => req("GET", `${t()}/me/mail` + qs(opts || {})),
+      get: (id) => req("GET", `${t()}/me/mail/${id}`),
+      attachment: (id, aid) => fetchBlob(`${t()}/me/mail/${id}/attachments/${aid}`),
+      send: (body) => req("POST", `${t()}/me/mail/send`, body),
+      outlookConnect: () => req("GET", `${t()}/me/outlook/connect`),
+      outlookSync: () => req("POST", `${t()}/me/outlook/sync`),
+      outlookDisconnect: () => req("DELETE", `${t()}/me/outlook`),
+    },
     time: {
       mine: (from, to) => req("GET", `${t()}/time/mine${from||to ? `?from=${from||""}&to=${to||""}` : ""}`),
       summary: () => req("GET", `${t()}/time/summary`),
@@ -710,6 +729,9 @@ const Api = (() => {
       qaTemplateHealth: (days = 90) => req("GET", `${t()}/qa/template-health?days=${days}`),
       qaDecision: (id, decision, note, editedBody, to, cc) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined, to, cc }),
       mailJournal: (opts) => req("GET", `${t()}/correspondence${qs(opts || {})}`),
+      fileMail: (id, caseNumber) => req("POST", `${t()}/correspondence/${id}/file`, { case_number: caseNumber }),
+      mailAttachments: (id) => req("GET", `${t()}/correspondence/${id}/attachments`),
+      mailAttachment: (id, aid) => fetchBlob(`${t()}/correspondence/${id}/attachments/${aid}`),
       // Payment rails (moov-io): vault-sealed accounts, ACH/wire/ICL/Metro2 files, OFAC screening
       railAccounts: () => req("GET", `${t()}/payments/accounts`),
       allInvoices: () => req("GET", `${t()}/invoices?limit=500`),

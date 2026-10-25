@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net/mail"
 	"net/smtp"
 	"strings"
@@ -101,7 +102,18 @@ func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject 
 // queues around it).
 func (s *server) smtpDeliver(from string, to, cc []string, msg []byte) error {
 	cfg := s.cfg
-	all := append(append([]string{}, to...), cc...)
+	// Test addresses (EMAIL_TEST_DOMAINS: dev's .test suites) can never take mail: they are left off the envelope
+	// rather than spent from the provider's quota. Mail only to test addresses is not sent at all.
+	all := []string{}
+	for _, a := range append(append([]string{}, to...), cc...) {
+		if !emailTestDomain(strings.ToLower(a[strings.LastIndex(a, "@")+1:])) {
+			all = append(all, a)
+		}
+	}
+	if len(all) == 0 {
+		slog.Info("mail to test addresses only, not sent", "to", to, "cc", cc)
+		return nil
+	}
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
 	if cfg.SMTPPort == 465 { // implicit TLS
 		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.SMTPHost})

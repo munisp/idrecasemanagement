@@ -526,6 +526,15 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, result)
 		return
 	}
+	// Every new staff member gets their own email address (mailboxes.go). An account is never refused over it: the
+	// address is also provisioned on the person's first visit to their inbox.
+	if uid, _ := result["user_id"].(string); uid != "" && s.mailboxesOn() {
+		if mb, err := s.provisionMailbox(r.Context(), in.Tenant, uid, in.Username, displayName(p)); err == nil {
+			result["mailbox"] = mb.Address
+		} else {
+			slog.Warn("mailbox not provisioned", "user", in.Username, "err", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, result)
 }
 
@@ -772,6 +781,7 @@ func (s *server) updateTenantStaffStatus(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak status update failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, in.Enabled, p.Subject)
 	action := "TENANT_STAFF_SUSPENDED"
 	if in.Enabled {
 		action = "TENANT_STAFF_REACTIVATED"
@@ -817,6 +827,7 @@ func (s *server) deleteTenantStaff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak delete failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, false, p.Subject) // their mail history is kept; the address takes no more
 	s.logAudit(r.Context(), tenant, "", "TENANT_STAFF_DELETED", map[string]any{
 		"by": p.Subject, "username": username,
 	})
@@ -848,6 +859,7 @@ func (s *server) updateFederalAdminStatus(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak status update failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, in.Enabled, p.Subject)
 	action := "FEDERAL_ADMIN_SUSPENDED"
 	if in.Enabled {
 		action = "FEDERAL_ADMIN_REACTIVATED"
@@ -875,6 +887,7 @@ func (s *server) deleteFederalAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak delete failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, false, p.Subject)
 	s.logAudit(r.Context(), "", "", "FEDERAL_ADMIN_DELETED", map[string]any{
 		"by": p.Subject, "username": username,
 	})

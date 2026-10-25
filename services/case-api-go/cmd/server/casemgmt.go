@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -813,47 +815,37 @@ func (s *server) generateLetter(w http.ResponseWriter, r *http.Request) {
 
 // ---- Email channel: inbound email -> lead/activity (email-to-case) ------------------------
 
-// emailInbound receives provider webhooks (Mailgun/SES-style), token-authenticated.
+// emailInbound receives provider webhooks (Mailgun/SES-style), authenticated by the shared EMAIL_INBOUND_TOKEN.
+// Unset, the endpoint is closed. The mail is filed like every other inbound mail (mailfiling.go): under its dispute
+// when it names one, otherwise in the mail log's inbound section, and as a lead.
 func (s *server) emailInbound(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Email-Token") == "" {
+	if s.cfg.EmailInboundToken == "" {
+		http.Error(w, `{"error":"inbound email is not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Email-Token")), []byte(s.cfg.EmailInboundToken)) != 1 {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	var in struct {
-		Tenant  string `json:"tenant"`
-		From    string `json:"from"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-		CaseRef string `json:"case_number"` // optional: "Re: CMS-TX-2026-00001"
+		Tenant    string `json:"tenant"`
+		From      string `json:"from"`
+		Subject   string `json:"subject"`
+		Body      string `json:"body"`
+		CaseRef   string `json:"case_number"` // optional: "Re: CMS-TX-2026-00001"
+		MessageID string `json:"message_id"`
+		InReplyTo string `json:"in_reply_to"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&in)
 	tenant := strings.ToLower(in.Tenant)
 	if len(tenant) != 2 {
 		http.Error(w, `{"error":"tenant required"}`, http.StatusBadRequest)
 		return
 	}
-	// The mail journal is written FIRST and unconditionally: every inbound
-	// mail is referable from correspondence_log whether or not it matches a
-	// case, with the full subject and body (truncated at 20k, not 400 — the
-	// journal is the record, the timeline is the summary).
-	caseID := ""
-	if in.CaseRef != "" {
-		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-			`SELECT id FROM tenant_%s.cases WHERE case_number=$1`, sanitizeTenant(tenant)),
-			in.CaseRef).Scan(&caseID)
-	}
-	rcpts, _ := json.Marshal(map[string]any{"from": in.From})
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.correspondence_log (tenant, case_id, direction, template, subject, body, recipients, sent_by)
-		VALUES ($1,$2,'IN','inbound',$3,$4,$5,$6)`,
-		tenant, caseID, truncate(in.Subject, 500), truncate(in.Body, 20000), rcpts, in.From)
-	if caseID != "" {
-		// email-to-case: append to the case timeline
-		_, _ = s.db.Exec(r.Context(), `
-			INSERT INTO public.case_activities (tenant, case_id, type, body)
-			VALUES ($1,$2,'EMAIL',$3)`, tenant, caseID,
-			fmt.Sprintf("From %s — %s\n%s", in.From, in.Subject, truncate(in.Body, 400)))
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "attached", "case_id": caseID})
+	m := s.fileInbound(r.Context(), inboundMail{Tenant: tenant, From: in.From, Subject: in.Subject, Body: in.Body, MessageID: in.MessageID,
+		Refs: messageIDsIn(in.InReplyTo), CaseHint: in.CaseRef, By: "email-inbound"}, true)
+	if m.CaseID != "" {
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "attached", "case_id": m.CaseID, "case_number": m.CaseNumber, "reason": m.Reason})
 		return
 	}
 	// otherwise: lead capture (email-to-lead)
@@ -861,7 +853,7 @@ func (s *server) emailInbound(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO public.leads (tenant, source, name, email, summary)
 		VALUES ($1,'EMAIL',$2,$3,$4)`, tenant, in.From, in.From,
 		fmt.Sprintf("%s\n%s", in.Subject, truncate(in.Body, 400)))
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "lead_created"})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "lead_created", "reason": m.Reason})
 }
 
 func truncate(s string, n int) string {

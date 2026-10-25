@@ -235,6 +235,7 @@
   if (has("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/productivity", "⌁", "Productivity"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
+  if (!outside) links.push(["#/inbox", "✉", "My email"]);
   if (!outside) links.push(["#/timesheet", "⏱", "My timesheet"]);
   if (!outside || has("TPA")) links.push(["#/calendar", "▨", "Calendar"]);
   if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/voice", "☎", "Voice console"]);
@@ -250,11 +251,12 @@
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "FINANCE")) links.push(["#/configuration", "⚒", "Configuration"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/rules", "§", "Rules"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/mail-setup", "✉", "Mail setup"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
   if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/team", "⚉", "Team"]);
-  if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
+  if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   // Payment rails and OFAC screening: money screens, so the money roles (the page itself checks too).
   // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
@@ -277,8 +279,8 @@
     ["Disputes", ["cases", "new", "pipeline", "intake", "qa", "doc-review", "deliverables", "queues/CODING", "queues/CLINICAL", "queues/LEGAL", "queues/pm", "party", "calendar"]],
     ["Organizations", ["tpa", "healthplan", "crm/accounts", "crm/leads", "crm/tasks", "crm/360"]],
     ["Money & reports", ["finance", "payments", "billing", "arap", "recon", "reports", "productivity", "ops", "insights", "time"]],
-    ["Tools", ["assistant", "ask", "voice", "mail", "templates", "timesheet", "document-requests"]],
-    ["Admin", ["configuration", "team", "rules", "features", "audit", "org-audit", "my-activity"]],
+    ["Tools", ["assistant", "ask", "voice", "inbox", "mail", "templates", "timesheet", "document-requests"]],
+    ["Admin", ["configuration", "team", "rules", "features", "mail-setup", "audit", "org-audit", "my-activity"]],
   ];
   const linkHtml = ([h, i, l]) => `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`;
   function paintNav() {
@@ -486,6 +488,7 @@
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/cases\/([\w-]+)\/offers$/, (m) => Views.caseOffers(m[1])],
     [/^#\/features$/, Views.featuresAdmin],
+    [/^#\/mail-setup$/, Views.mailSetup],
     [/^#\/configuration$/, ConfigViews.page],
     [/^#\/queues\/pm$/, Views.pmQueueView],
     [/^#\/queues\/(CODING|CLINICAL|LEGAL)(\?.*)?$/, (m) => Views.queueView(m[1])],
@@ -514,6 +517,7 @@
     [/^#\/calendar$/, CrmViews.calendar],
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
+    [/^#\/inbox$/, Views.inbox],
     [/^#\/timesheet$/, Views.myTimesheet],
     [/^#\/time$/, Views.timeReport],
     [/^#\/templates$/, Views.templatesPage],

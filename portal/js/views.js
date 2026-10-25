@@ -6125,6 +6125,242 @@ const Views = (() => {
         <div id="ts-list"><p class="muted">Loading…</p></div></div>`;
   }
 
+  // ---- My email: the person's own platform address, and their Outlook account when connected ----------------------
+
+  let inboxState = { folder: "inbox", source: "", q: "", open: "" };
+
+  async function inbox() {
+    outlookReturnToast("#/inbox");
+    let mb;
+    try { mb = await Api.myMail.mailbox(); } catch (e) { return err(e); }
+    afterRender(() => inboxList());
+    return `<div class="view-head"><h1>My email</h1>
+        <span class="muted">your address <b>${esc(mb.mailbox.address)}</b> — mail sent to it lands here; only you can read it</span></div>
+      <div id="inbox-outlook">${inboxOutlookPanel(mb)}</div>
+      <div class="panel">
+        <div class="tabs" id="inbox-tabs">${[["inbox", `Inbox${mb.unread ? ` (${mb.unread})` : ""}`], ["sent", "Sent"]].map(([f, l]) =>
+          `<a href="javascript:void 0" class="tab ${inboxState.folder === f ? "active" : ""}" onclick="Views.inboxFolder('${f}')">${l}</a>`).join("")}</div>
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.inboxFilter(this)">
+          <input name="q" placeholder="search subject, sender, text" value="${esc(inboxState.q)}" style="min-width:16em" />
+          <select name="source"><option value="">all accounts</option>
+            <option value="RESEND" ${inboxState.source === "RESEND" ? "selected" : ""}>${esc(mb.mailbox.address)}</option>
+            <option value="OUTLOOK" ${inboxState.source === "OUTLOOK" ? "selected" : ""}>Outlook</option></select>
+          <button class="mini">Search</button>
+          <button class="mini" type="button" onclick="Views.inboxCompose()" ${mb.can_send || mb.outlook?.connected ? "" : "disabled title=\"sending isn't set up yet\""}>New message</button></form>
+        <div id="inbox-compose"></div>
+        <div id="inbox-list"><p class="muted">Loading…</p></div>
+      </div>
+      <div id="inbox-read"></div>`;
+  }
+
+  // Back from Microsoft's sign-in (…?outlook=connected): say how it went, then drop the flag from the address.
+  let outlookNeedsAdmin = false; // Microsoft asked for an admin's approval: the help that explains it opens
+  function outlookReturnToast(page) {
+    const flag = new URLSearchParams(location.hash.split("?")[1] || "").get("outlook");
+    if (!flag) return;
+    outlookNeedsAdmin = flag === "needs-admin";
+    const say = { connected: ["Outlook connected — mail is being brought in now", "ok"], declined: ["Outlook wasn't connected: the sign-in was cancelled. If Microsoft asked for admin approval, see “Need admin approval?” below", "info"],
+      expired: ["The Outlook sign-in took too long — try Connect again", "warn"], failed: ["Outlook couldn't be connected — try again, or ask an admin", "warn"],
+      "no-access": ["That account can't open the mailbox you named — check its permissions in Microsoft 365, or sign in as an account that can", "warn"],
+      "needs-admin": ["Your organization's IT admin has to approve the app first — see “Need admin approval?” below", "warn"],
+      "admin-approved": ["Approved for your organization — everyone in it can now connect their Outlook", "ok"],
+      "admin-declined": ["The app wasn't approved for your organization", "warn"],
+      "not-configured": ["Outlook isn't set up for this platform yet", "warn"] }[flag];
+    if (say) UI.toast(say[0], { kind: say[1], duration: 9000 });
+    history.replaceState(null, "", page);
+  }
+
+  // What a person (or their IT admin) needs to know to connect Outlook, shown next to Connect.
+  function outlookApprovalHelp(url, open) {
+    if (!url) return "";
+    return `<details class="prog-sec" ${open ? "open" : ""}><summary>Microsoft says “Need admin approval”?</summary>
+      <p>Your organization lets only its IT admin approve new apps. Send your admin this link. They open it, sign in with their admin account
+        and click <b>Accept</b> — once, for everyone in your organization. Then click Connect again.</p>
+      <p class="inline-form"><input readonly value="${esc(url)}" style="flex:1;min-width:16em" onclick="this.select()" />
+        <button class="mini" type="button" onclick="Views.copyText(this.previousElementSibling.value, 'Approval link copied')">Copy link</button></p>
+      <p class="muted" style="font-size:.9em">For the admin, the same thing in Microsoft's admin pages: Microsoft Entra admin center → Enterprise applications →
+        IDRE Mail → Permissions → Grant admin consent. Personal Microsoft accounts (outlook.com, hotmail) never need this.</p></details>`;
+  }
+  function outlookHowItWorks() {
+    return `<details class="prog-sec"><summary>How connecting works</summary><ol>
+      <li>Click <b>Connect Outlook</b> and sign in at Microsoft with the account you use — a work account or a personal outlook.com / hotmail one.
+        Your password goes to Microsoft only, never to this platform.</li>
+      <li>Microsoft lists what the platform may do — read your mail and send mail as you. Click <b>Accept</b>.</li>
+      <li>You come back here. The last 30 days of your mail arrive within a few minutes, then new mail every 5 minutes.
+        Mail that names a dispute is also filed under that dispute; the rest stays private to you.</li></ol>
+      <p class="muted" style="font-size:.9em">Disconnect any time and the platform stops reading at once. You can also remove its access from Microsoft:
+        myapps.microsoft.com for a work account, account.microsoft.com → Privacy → Apps and services for a personal one.</p></details>`;
+  }
+
+  function inboxOutlookPanel(mb) {
+    const o = mb.outlook || {};
+    if (!mb.outlook_available) {
+      return `<div class="panel"><h2>Outlook</h2><p class="muted">You'll be able to connect your Outlook account here once an administrator
+        finishes setting it up for the platform.</p></div>`;
+    }
+    if (!o.connected) {
+      return `<div class="panel"><h2>Outlook</h2><p class="muted">Connect your Outlook account to see and send your Outlook mail here too.
+        Your password never reaches this platform — you sign in at Microsoft.</p>
+        <button class="mini" onclick="Views.inboxOutlookConnect()">Connect Outlook</button>
+        ${outlookHowItWorks()}${outlookApprovalHelp(mb.outlook_admin_consent_url, outlookNeedsAdmin)}</div>`;
+    }
+    const bad = o.status === "ERROR";
+    return `<div class="panel"><h2>Outlook</h2>
+      <p>${badge(bad ? "NEEDS ATTENTION" : "CONNECTED")} <b>${esc(o.email || "")}</b> ${o.display_name ? `<span class="muted">(${esc(o.display_name)})</span>` : ""}
+        <span class="muted">· last synced ${o.last_sync_at ? fmtDate(o.last_sync_at) : "not yet"}</span></p>
+      ${bad ? `<p class="err-box">${esc(o.last_error || "the last sync failed")} — reconnect if it keeps failing.</p>` : ""}
+      <button class="mini" onclick="Views.inboxOutlookSync(this)">Sync now</button>
+      ${bad ? `<button class="mini" onclick="Views.inboxOutlookConnect()">Reconnect</button>` : ""}
+      <button class="mini ghost" onclick="Views.inboxOutlookDisconnect()">Disconnect</button></div>`;
+  }
+
+  let inboxRows = [];
+
+  async function inboxList(more) {
+    const box = document.getElementById("inbox-list");
+    if (!box) return;
+    const before = more && inboxRows.length ? inboxRows[inboxRows.length - 1].at : "";
+    try {
+      const r = await Api.myMail.list({ folder: inboxState.folder, source: inboxState.source, q: inboxState.q, before, limit: 50 });
+      const ms = r.messages || [];
+      inboxRows = more ? inboxRows.concat(ms) : ms;
+      const sent = inboxState.folder === "sent";
+      box.innerHTML = inboxRows.length
+        ? `<table class="tbl"><thead><tr><th>${sent ? "To" : "From"}</th><th>Subject</th><th>Account</th><th>Status</th><th>When</th></tr></thead><tbody>
+          ${inboxRows.map((m) => `<tr style="cursor:pointer;${m.is_read || sent ? "" : "font-weight:600"}" onclick="Views.inboxOpen('${m.id}')">
+            <td>${esc(sent ? (m.to || []).join(", ") : (m.from_name || m.from))}</td>
+            <td>${esc(m.subject || "(no subject)")}${m.has_attachments ? " 📎" : ""}<div class="muted" style="font-weight:400">${esc(m.preview || "")}</div></td>
+            <td class="muted">${m.source === "OUTLOOK" ? "Outlook" : "Platform"}</td>
+            <td>${badge(m.status)}</td>
+            <td class="muted">${fmtDate(m.at)}</td></tr>`).join("")}</tbody></table>
+          ${ms.length === 50 ? `<button class="mini ghost" onclick="Views.inboxMore()">Load older</button>` : ""}`
+        : `<p class="muted">${inboxState.q || inboxState.source ? "Nothing matches this search." : sent ? "Nothing sent yet." : "No mail yet."}</p>`;
+    } catch (e) { box.innerHTML = err(e); }
+  }
+
+  async function inboxOpen(id) {
+    const box = document.getElementById("inbox-read");
+    if (!box) return;
+    inboxState.open = id;
+    box.innerHTML = `<div class="panel"><p class="muted">Opening…</p></div>`;
+    try {
+      const { message: m, attachments, events } = await Api.myMail.get(id);
+      const auth = m.auth_results && typeof m.auth_results === "object" ? m.auth_results : {};
+      const authLine = ["spf", "dkim", "dmarc"].filter((k) => auth[k]).map((k) => `${k.toUpperCase()} ${esc(String(auth[k].result || auth[k]))}`).join(" · ");
+      box.innerHTML = `<div class="panel"><h2>${esc(m.subject || "(no subject)")}</h2>
+        <p><b>From</b> ${esc(m.from_name ? `${m.from_name} <${m.from}>` : m.from)}<br><b>To</b> ${esc((m.to || []).join(", "))}
+          ${(m.cc || []).length ? `<br><b>Cc</b> ${esc(m.cc.join(", "))}` : ""}<br>
+          <span class="muted">${fmtDate(m.at)} · ${m.source === "OUTLOOK" ? "Outlook" : "Platform address"}</span> ${badge(m.status)}
+          ${m.case_id ? `<br>Filed under dispute <a href="#/cases/${m.case_id}">${esc(m.case_number || "case")}</a>` : ""}
+          ${m.status_detail ? `<span class="muted">${esc(m.status_detail)}</span>` : ""}
+          ${authLine ? `<br><span class="muted">Sender checks: ${authLine}</span>` : ""}</p>
+        <div id="inbox-body"></div>
+        ${attachments.length ? `<h3>Attachments</h3><ul>${attachments.map((a) => `<li>${a.status === "STORED"
+          ? `<a href="javascript:void 0" onclick="Views.inboxAttachment('${m.id}','${a.id}')">${esc(a.filename)}</a>`
+          : `${esc(a.filename)} <span class="muted">(${a.status === "TOO_LARGE" ? "too large to keep" : "not saved"})</span>`}
+          <span class="muted">${Math.max(1, Math.round(a.size / 1024))} KB</span></li>`).join("")}</ul>` : ""}
+        <p>${m.direction === "IN" ? `<button class="mini" onclick="Views.inboxCompose('${m.id}')">Reply</button>` : ""}
+          <button class="mini ghost" onclick="document.getElementById('inbox-read').innerHTML=''">Close</button></p>
+        <details><summary class="muted">History (${events.length})</summary><table class="tbl"><tbody>
+          ${events.map((e) => `<tr><td>${badge(e.event)}</td><td>${esc(e.detail)}</td><td class="muted">${esc(e.actor)}</td><td class="muted">${fmtDate(e.at)}</td></tr>`).join("")}
+        </tbody></table></details></div>`;
+      const body = document.getElementById("inbox-body");
+      if (m.body_html) {
+        // The sender's HTML runs in a sandbox with no scripts and no access to this page.
+        const f = document.createElement("iframe");
+        f.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+        f.setAttribute("referrerpolicy", "no-referrer");
+        f.style.cssText = "width:100%;min-height:22em;border:1px solid var(--border-subtle);border-radius:6px;background:#fff";
+        f.srcdoc = `<base target="_blank">` + m.body_html;
+        body.appendChild(f);
+      } else {
+        body.innerHTML = `<pre style="white-space:pre-wrap">${esc(m.body_text || "")}</pre>`;
+      }
+      box.scrollIntoView({ behavior: "smooth", block: "start" });
+      const row = inboxRows.find((x) => x.id === id);
+      if (row && !row.is_read) { row.is_read = true; inboxList(); }
+    } catch (e) { box.innerHTML = err(e); }
+  }
+
+  // Save a fetched file ({blob, name} from Api.fetchBlob) to the viewer's downloads.
+  function saveBlob({ blob, name }) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name || "attachment";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
+  async function inboxAttachment(id, aid) {
+    try { saveBlob(await Api.myMail.attachment(id, aid)); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  async function inboxCompose(replyTo) {
+    const box = document.getElementById("inbox-compose");
+    if (!box) return;
+    let mb, orig = null;
+    try {
+      mb = await Api.myMail.mailbox();
+      if (replyTo) orig = (await Api.myMail.get(replyTo)).message;
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
+    const vias = [];
+    if (mb.can_send) vias.push(["platform", mb.mailbox.address]);
+    if (mb.outlook?.connected) vias.push(["outlook", `Outlook (${mb.outlook.email})`]);
+    const defVia = orig?.source === "OUTLOOK" && mb.outlook?.connected ? "outlook" : vias[0]?.[0];
+    const subj = orig ? (/^re:/i.test(orig.subject) ? orig.subject : `Re: ${orig.subject}`) : "";
+    const quote = orig ? `\n\n— On ${fmtDate(orig.at)}, ${orig.from_name || orig.from} wrote:\n${(orig.body_text || "").split("\n").map((l) => "> " + l).join("\n")}` : "";
+    box.innerHTML = `<div class="panel"><h2>${orig ? "Reply" : "New message"}</h2>
+      <form onsubmit="event.preventDefault(); Views.inboxSend(this)" style="display:grid;gap:8px">
+        <input type="hidden" name="in_reply_to" value="${esc(replyTo || "")}" />
+        <label>From <select name="via">${vias.map(([v, l]) => `<option value="${v}" ${v === defVia ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+        <input name="to" placeholder="To — addresses separated by commas" value="${esc(orig ? orig.from : "")}" required />
+        <input name="cc" placeholder="Cc (optional)" />
+        <input name="subject" placeholder="Subject" value="${esc(subj)}" required />
+        <textarea name="text" rows="10" required>${esc(quote)}</textarea>
+        <p><button>Send</button> <button type="button" class="mini ghost" onclick="document.getElementById('inbox-compose').innerHTML=''">Discard</button></p>
+      </form></div>`;
+    box.querySelector(orig ? "textarea" : "input[name=to]").focus();
+    if (orig) box.querySelector("textarea").setSelectionRange(0, 0);
+  }
+
+  async function inboxSend(f) {
+    const list = (s) => s.split(/[,;]/).map((x) => x.trim()).filter(Boolean);
+    const btn = f.querySelector("button");
+    btn.disabled = true;
+    try {
+      const r = await Api.myMail.send({ via: f.via.value, to: list(f.to.value), cc: list(f.cc.value), subject: f.subject.value, text: f.text.value, in_reply_to: f.in_reply_to.value });
+      if (r.status === "QUEUED") UI.toast("Queued — the mail service is busy; it goes out automatically shortly", { kind: "info", duration: 8000 });
+      else UI.toast("Sent");
+      document.getElementById("inbox-compose").innerHTML = "";
+      if (inboxState.folder === "sent") inboxList();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); btn.disabled = false; }
+  }
+
+  async function inboxOutlookConnect() {
+    try { const r = await Api.myMail.outlookConnect(); location.href = r.url; }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+
+  async function inboxOutlookSync(btn) {
+    btn.disabled = true;
+    try {
+      const r = await Api.myMail.outlookSync();
+      UI.toast(r.filed ? `${r.filed} new message${r.filed === 1 ? "" : "s"} from Outlook` : "Outlook is up to date");
+      App.rerender();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); btn.disabled = false; }
+  }
+
+  async function inboxOutlookDisconnect() {
+    const ok = await UI.modal({ title: "Disconnect Outlook?", body: "New Outlook mail stops coming in, and you can't send from Outlook here. Mail already brought in stays in your history.", submitLabel: "Disconnect", danger: true });
+    if (!ok) return;
+    try { await Api.myMail.outlookDisconnect(); UI.toast("Outlook disconnected"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  const inboxFolder = (f) => { inboxState = { ...inboxState, folder: f }; document.querySelectorAll("#inbox-tabs .tab").forEach((t, i) => t.classList.toggle("active", (i === 0) === (f === "inbox"))); inboxList(); };
+  const inboxFilter = (f) => { inboxState = { ...inboxState, q: f.q.value.trim(), source: f.source.value }; inboxList(); };
+  const inboxMore = () => inboxList(true);
+
   let tsFrom = "", tsTo = "";
 
   async function myTimesheetBoxes() {
@@ -6757,17 +6993,101 @@ const Views = (() => {
     URL.revokeObjectURL(a.href);
   }
 
+  // ---- Mail setup: each piece of the platform's mail, checked live, with the steps to set it up --------------------
+  async function mailSetup() {
+    let m;
+    try { m = await Api.admin.mailSetup(); } catch (e) { return err(e); }
+    const ok = (good, warn) => good ? `<span class="badge s-paid">Set up</span>` : `<span class="badge ${warn ? "warn" : "s-denied"}">${warn ? "Check" : "Not set up"}</span>`;
+    const code = (v) => `<code style="user-select:all;word-break:break-all">${esc(v)}</code>`;
+    const copy = (v, what) => `<button class="mini ghost" type="button" onclick="Views.copyText(${esc(JSON.stringify(v))}, '${what} copied')">Copy</button>`;
+    const d = m.domain || {}, mx = m.mx || {}, h = m.webhook || {}, o = m.outlook || {};
+    const domainOk = d.found && d.status === "verified" && d.receiving === "enabled" && d.sending === "enabled";
+    const dnsOk = (d.records || []).length > 0 && (d.records || []).every((r) => r.status === "verified") && mx.points_to_resend;
+    const hookOk = h.found && h.status === "enabled" && !(h.missing_events || []).length && m.webhook_secret;
+    const section = (title, good, warn, body) => `<details class="prog-sec" ${good ? "" : "open"}><summary>${title} ${ok(good, warn)}</summary>${body}</details>`;
+
+    const s1 = section("1. The mail domain at Resend", domainOk, d.found, `
+      <p>Every staff member gets an address on <b>${esc(m.mailbox_domain || "(no domain set)")}</b>. Resend sends and receives mail for it.</p>
+      <p>Now: ${d.found ? `${esc(d.status)} · sending ${esc(d.sending)} · receiving ${esc(d.receiving)}` : (d.error ? esc(d.error) : m.resend_key ? "not added to Resend yet" : "no Resend API key on the server")}</p>
+      <ol>
+        <li>Sign in at <b>resend.com</b> → <b>Domains</b> → <b>Add domain</b>, and enter ${code(m.mailbox_domain || "mail.yourdomain.com")}.
+          Use a sub-domain (like <i>mail.</i>…) so your company's own email is untouched.</li>
+        <li>Turn on <b>Receiving</b> for the domain (sending is on by default).</li>
+        <li>Add the DNS records it lists (step 2), then click <b>Verify</b>.</li>
+        <li>The server needs a Resend API key with <b>full access</b> (it reads received mail, not only sends): Resend → <b>API keys</b> →
+          <b>Create</b> → Full access. Give it to your platform operator for the server's <code>RESEND_API_KEY</code> setting.</li>
+      </ol>`);
+
+    const recRows = (d.records || []).map((r) => `<tr><td>${esc(r.record)}</td><td>${esc(r.type)}</td><td>${code(r.name)} ${copy(r.name, "Name")}</td>
+      <td style="max-width:28em">${code(r.value)} ${copy(r.value, "Value")}</td><td>${r.priority || ""}</td>
+      <td>${r.status === "verified" ? `<span class="badge s-paid">verified</span>` : `<span class="badge warn">${esc(r.status)}</span>`}</td></tr>`).join("");
+    const s2 = section("2. DNS records", dnsOk, (d.records || []).length > 0, `
+      <p>DNS tells the rest of the internet that Resend handles mail for this domain. Add these in the DNS provider for
+        <b>${esc(d.dns_zone || "your domain")}</b> (for upi.dev: DigitalOcean → Networking → Domains). Names are relative to ${esc(d.dns_zone || "the domain")}.</p>
+      ${recRows ? `<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>For</th><th>Type</th><th>Name</th><th>Value</th><th>Priority</th><th>At Resend</th></tr></thead><tbody>${recRows}</tbody></table></div>`
+        : `<p class="muted">The records appear here once the domain is added to Resend (step 1).</p>`}
+      <p>What the internet sees as the domain's mail server (MX) now: ${(mx.records || []).length ? mx.records.map(code).join(", ") : `<span class="muted">${esc(mx.error || "none")}</span>`}
+        ${mx.points_to_resend ? "— Resend ✓" : (mx.records || []).length ? "— <b>not Resend</b>: mail won't arrive" : ""}</p>
+      <p class="muted" style="font-size:.9em">New records can take from a few minutes to an hour to be seen everywhere. Reload this page to check again.</p>`);
+
+    const s3 = section("3. The webhook (Resend tells the platform)", hookOk, h.found, `
+      <p>When mail arrives, or a sent mail is delivered or bounces, Resend calls the platform at this address. Without it, received mail never reaches anyone's inbox
+        and the mail log can't show delivery.</p>
+      <p>Now: ${h.found ? `${esc(h.status)}${(h.missing_events || []).length ? ` · <b>missing events:</b> ${h.missing_events.map(esc).join(", ")}` : " · all needed events"}` : (h.error ? esc(h.error) : "no webhook calls this platform")}
+        · signing secret on the server: ${m.webhook_secret ? "yes" : "<b>no</b>"}</p>
+      <ol>
+        <li>Resend → <b>Webhooks</b> → <b>Add endpoint</b>.</li>
+        <li>Endpoint URL: ${code(m.webhook_url)} ${copy(m.webhook_url, "URL")}</li>
+        <li>Events — tick at least: ${(h.needed_events || []).map(code).join(" ")}</li>
+        <li>Save, then open the webhook and copy its <b>signing secret</b> (starts <code>whsec_</code>). Give it to your platform operator for the
+          server's <code>MAIL_WEBHOOK_SECRET</code> setting — it proves each call really comes from Resend.</li>
+        <li>Check: the webhook's <b>Events</b> list should show calls answered <i>200 OK</i>.</li>
+      </ol>`);
+
+    const s4 = section("4. The Microsoft app (connecting Outlook)", o.on, o.client_id, `
+      <p>Lets staff connect their own Outlook (any Microsoft account), and a tenant admin connect the company mailbox. Without it the Connect Outlook buttons stay hidden.</p>
+      <p>Now: app (client) ID ${o.client_id ? code(o.client_id) : "<b>not set</b>"} · client secret ${o.secret_set ? "set" : "<b>not set</b>"} · sign-in: ${esc(o.tenant)}</p>
+      <ol>
+        <li>Go to <b>entra.microsoft.com</b> and sign in with your organization's Microsoft 365 account → <b>Entra ID</b> → <b>App registrations</b> → <b>+ New registration</b>.</li>
+        <li>Name: ${code("IDRE Mail")}. Supported account types: <b>Any Entra ID Tenant + Personal Microsoft accounts</b>
+          (so any Outlook can connect — work or personal).</li>
+        <li>Redirect URI: platform <b>Web</b>, address ${code(o.redirect_url || m.webhook_url.replace("/api/webhooks/mail", "/api/oauth/outlook/callback"))}
+          ${copy(o.redirect_url || m.webhook_url.replace("/api/webhooks/mail", "/api/oauth/outlook/callback"), "Redirect URI")} → <b>Register</b>.</li>
+        <li>On the app's page: <b>API permissions</b> → <b>Add a permission</b> → <b>Microsoft Graph</b> → <b>Delegated permissions</b>, tick
+          ${["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send", "Mail.ReadWrite.Shared", "Mail.Send.Shared"].map(code).join(" ")} → <b>Add permissions</b>.</li>
+        <li><b>Certificates &amp; secrets</b> → <b>New client secret</b> (24 months) → copy its <b>Value</b> at once (it is shown only once).</li>
+        <li>Give your platform operator the <b>Application (client) ID</b> from the app's Overview and the secret value, for the server's
+          <code>OUTLOOK_CLIENT_ID</code> and <code>OUTLOOK_CLIENT_SECRET</code> settings.</li>
+        <li>Your Microsoft 365 admin approves it for your organization once, so staff aren't asked to: ${o.admin_consent_url
+          ? `send them this link — ${copy(o.admin_consent_url, "Approval link")}` : "the approval link appears here once the app is set up."}
+          Optional, for other organizations' staff: <b>Branding &amp; properties</b> → <b>Publisher verification</b> removes the “unverified” label.</li>
+      </ol>`);
+
+    const s5 = section("5. Sending limits", true, false, `
+      <p>Resend's free plan allows <b>100 emails a day</b> — and received mail counts too. Past it, mail waits in the platform's queue and goes out after
+        midnight UTC; received mail isn't delivered until then. For real use, choose a paid plan: Resend → <b>Settings</b> → <b>Billing</b>.</p>
+      <p class="muted" style="font-size:.9em">Sending from ${code(m.sending?.from || "")} through ${code(m.sending?.smtp_host || "(not set)")}.</p>`);
+
+    return `<div class="view-head"><h1>Mail setup</h1>
+        <span class="muted">each part of the platform's email, checked now — open one to see what it does and how to set it up</span>
+        <button class="mini ghost" onclick="App.rerender()">Check again</button></div>
+      <div class="panel">${s1}${s2}${s3}${s4}${s5}</div>`;
+  }
+
   // ---- Mail log: every inbound + outbound mail, referable ---------------
   function mailLog() {
-    if (!can("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"))
+    if (!can("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"))
       return `<div class="view-head"><h1>Mail log</h1></div><p class="muted">Requires a staff role.</p>`;
+    outlookReturnToast("#/mail");
     afterRender(mailLogBox);
     afterRender(mailRecipientsBox);
+    afterRender(companyOutlookBox);
     return `<div class="view-head"><h1>Mail log</h1>
       <span class="muted">every inbound and outbound mail across the platform, with its delivery status — pending approval, sent, delivered, bounced or failed</span></div>
       <div id="mail-recipients"></div>
+      <div id="company-outlook"></div>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
-        <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="OUT">Outbound</option></select>
+        <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="UNMATCHED">Inbound — not matched to a case</option><option value="OUT">Outbound</option></select>
         <select name="status" title="delivery status"><option value="">Any delivery status</option>
           ${["PENDING", "SENT", "DELIVERED", "BOUNCED", "FAILED", "COMPLAINED", "REJECTED"].map((x) => `<option>${x}</option>`).join("")}</select>
         <input name="q" placeholder="search subject / body / case number" style="min-width:18em" />
@@ -6817,6 +7137,14 @@ const Views = (() => {
           <input name="pm" placeholder="pm@yourcompany.com" value="${esc((r.pm || []).join(", "))}" /></label>
         <button class="mini">Save recipients</button></form></details>`;
   }
+  // File an inbound mail that named no dispute under the right one (it then shows on that dispute's timeline).
+  async function mailFileToCase(id) {
+    const v = await UI.modal({ title: "File this mail under a dispute", submitLabel: "File",
+      fields: [{ name: "case_number", label: "Dispute number", placeholder: "FL26-019334", required: true }] });
+    if (!v) return;
+    try { const r = await Api.program.fileMail(id, v.case_number.trim()); UI.toast(`Filed under ${r.case_number}`); mailLogBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
   async function saveMailRecipients(form) {
     const split = (v) => v.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
     try { await Api.program.setRecipients({ agency: split(form.agency.value), pm: split(form.pm.value) }); UI.toast("Recipients saved"); mailRecipientsBox(); }
@@ -6824,7 +7152,8 @@ const Views = (() => {
   }
 
   function mailLogFilter(form) {
-    mailLogFilterState = { direction: form.direction.value || "", status: form.status.value || "", q: form.q.value.trim() || "",
+    const unmatched = form.direction.value === "UNMATCHED";
+    mailLogFilterState = { direction: unmatched ? "IN" : (form.direction.value || ""), unmatched: unmatched ? "1" : "", status: form.status.value || "", q: form.q.value.trim() || "",
       from: form.from.value || "", to: form.to.value || "" };
     mailLogBox();
   }
@@ -6840,13 +7169,16 @@ const Views = (() => {
         const who = m.direction === "IN" ? (rc.from || m.sent_by || "") : (rc.to || []).join(", ");
         return `<tr>
           <td>${badge(m.direction)}</td>
-          <td>${m.case_id ? `<a href="#/cases/${m.case_id}">${esc(m.case_number || "case")}</a>` : `<span class="muted" title="pre-case or unmatched mail">—</span>`}</td>
+          <td>${m.case_id ? `<a href="#/cases/${m.case_id}">${esc(m.case_number || "case")}</a>` : m.direction === "IN" && can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")
+            ? `<button class="mini ghost" onclick="Views.mailFileToCase(${m.id})">File to case</button>` : `<span class="muted" title="pre-case or unmatched mail">—</span>`}
+            ${m.direction === "IN" && m.match_reason ? `<div class="muted" style="font-size:.85em;max-width:16em">${esc(m.match_reason)}</div>` : ""}</td>
           <td>${esc(m.subject || "")}${m.template && m.template !== "inbound" ? ` <span class="muted">(${esc(m.template)})</span>` : ""}</td>
           <td class="muted">${esc(who)}</td>
           <td>${mailStatusBadge(m)}</td>
           <td class="muted">${fmtDate(m.created_at)}</td>
           <td><button class="mini ghost" onclick="Views.mailLogBody(${m.id})">View</button></td></tr>
-          <tr id="mail-body-${m.id}" class="row-detail" style="display:none"><td colspan="7"><pre style="white-space:pre-wrap;max-height:16em;overflow:auto">${esc(m.body || "")}</pre></td></tr>`;
+          <tr id="mail-body-${m.id}" class="row-detail" style="display:none"><td colspan="7"><pre style="white-space:pre-wrap;max-height:16em;overflow:auto">${esc(m.body || "")}</pre>
+            ${m.direction === "IN" ? `<div id="mail-atts-${m.id}" data-dir="IN"></div>` : ""}</td></tr>`;
       }).join("");
       box.innerHTML = ms.length
         ? `<table id="mail-tb" data-serverpaged><thead><tr><th>Dir</th><th>Case</th><th>Subject</th><th>From / To</th><th>Delivery</th><th>When</th><th></th></tr></thead><tbody>${rowsHtml(ms)}</tbody></table><div id="mail-pg"></div>`
@@ -6863,6 +7195,81 @@ const Views = (() => {
   function mailLogBody(id) {
     const row = document.getElementById(`mail-body-${id}`);
     if (row) row.style.display = row.style.display === "none" ? "" : "none";
+    const box = document.getElementById(`mail-atts-${id}`);
+    if (box && !box.dataset.loaded) {
+      box.dataset.loaded = "1";
+      Api.program.mailAttachments(id).then((r) => {
+        const as = r.attachments || [];
+        box.innerHTML = as.length ? `<p><b>Attachments</b> ${as.map((a) => a.status === "STORED"
+          ? `<a href="javascript:void 0" onclick="Views.mailLogAttachment(${id},'${a.id}')">${esc(a.filename)}</a>`
+          : `${esc(a.filename)} <span class="muted">(${a.status === "TOO_LARGE" ? "too large to keep" : "not saved"})</span>`).join(" · ")}</p>` : "";
+      }).catch(() => { box.innerHTML = ""; });
+    }
+  }
+
+  async function mailLogAttachment(id, aid) {
+    try { saveBlob(await Api.program.mailAttachment(id, aid)); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // The program's company mailbox: a tenant admin connects it; everything it receives is filed like inbound mail.
+  async function companyOutlookBox() {
+    const box = document.getElementById("company-outlook");
+    if (!box || !can("TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return;
+    let r;
+    try { r = await Api.companyOutlook.status(); } catch (e) { box.innerHTML = ""; return; }
+    const o = r.outlook || {};
+    if (!r.outlook_available) {
+      box.innerHTML = `<details class="prog-sec"><summary>Company Outlook mailbox</summary><p class="muted">Connecting Outlook isn't set up for this platform yet — the Microsoft app registration (OUTLOOK_CLIENT_ID) is needed first.</p></details>`;
+      return;
+    }
+    if (!o.connected) {
+      box.innerHTML = `<details class="prog-sec" open><summary>Company Outlook mailbox — not connected</summary>
+        <p class="muted">Connect the mailbox where replies to case letters arrive (for example idre@upi.dev). Every mail it receives is filed here:
+          under its dispute when it names one, otherwise in “Inbound — not matched to a case”. You sign in at Microsoft; the platform never sees a password.</p>
+        <p><b>Setting it up</b></p>
+        <ol>
+          <li><b>Approve the app for your organization.</b> Your Microsoft 365 admin opens the approval link below, signs in and clicks Accept.
+            (Skip this if Microsoft didn't ask for approval.)</li>
+          <li><b>If it is a shared mailbox</b> (one nobody signs in to, like idre@upi.dev): in the Exchange admin center → Recipients → Mailboxes →
+            the mailbox → Delegation → <i>Read and manage (Full Access)</i>, add the account that will connect it. It can take up to an hour to apply.</li>
+          <li><b>Connect it:</b> enter the mailbox below, click Connect, and sign in at Microsoft with that account.</li>
+        </ol>
+        ${r.outlook_admin_consent_url ? `<p class="inline-form"><input readonly value="${esc(r.outlook_admin_consent_url)}" style="flex:1;min-width:16em" onclick="this.select()" />
+          <button class="mini" type="button" onclick="Views.copyText(this.previousElementSibling.value, 'Approval link copied')">Copy approval link</button></p>` : ""}
+        <form class="inline-form" onsubmit="event.preventDefault(); Views.companyOutlookConnect(this)">
+          <label>Shared mailbox <input name="mailbox" type="email" placeholder="idre@upi.dev" style="min-width:14em" /></label>
+          <button class="mini">Connect company Outlook</button></form>
+        <p class="muted" style="font-size:.9em">Leave the mailbox empty to connect the account you sign in with. Name a shared mailbox to read it through your own access.</p></details>`;
+      return;
+    }
+    const bad = o.status === "ERROR";
+    box.innerHTML = `<details class="prog-sec" open><summary>Company Outlook mailbox</summary>
+      <p>${badge(bad ? "NEEDS ATTENTION" : "CONNECTED")} <b>${esc(o.mailbox || o.email)}</b>
+        ${o.mailbox ? `<span class="muted">(through ${esc(o.email)})</span>` : ""}
+        <span class="muted">· last synced ${o.last_sync_at ? fmtDate(o.last_sync_at) : "not yet"}</span></p>
+      ${bad ? `<p class="err-box">${esc(o.last_error || "the last sync failed")} — reconnect if it keeps failing.</p>` : ""}
+      <button class="mini" onclick="Views.companyOutlookSync(this)">Sync now</button>
+      ${bad ? `<button class="mini" onclick="Views.companyOutlookConnect()">Reconnect</button>` : ""}
+      <button class="mini ghost" onclick="Views.companyOutlookDisconnect()">Disconnect</button></details>`;
+  }
+  async function copyText(text, done) {
+    try { await navigator.clipboard.writeText(text); UI.toast(done || "Copied"); }
+    catch { UI.toast("Select the text and copy it with Cmd/Ctrl+C", { kind: "info" }); }
+  }
+  async function companyOutlookConnect(f) {
+    try { const r = await Api.companyOutlook.connect(f ? f.mailbox.value.trim() : ""); location.href = r.url; }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+  async function companyOutlookSync(btn) {
+    btn.disabled = true;
+    try { const r = await Api.companyOutlook.sync(); UI.toast(r.filed ? `${r.filed} new message${r.filed === 1 ? "" : "s"} filed` : "The company mailbox is up to date"); companyOutlookBox(); mailLogBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); btn.disabled = false; }
+  }
+  async function companyOutlookDisconnect() {
+    const ok = await UI.modal({ title: "Disconnect the company mailbox?", body: "Its new mail stops coming into the mail log. Mail already filed stays filed.", submitLabel: "Disconnect", danger: true });
+    if (!ok) return;
+    try { await Api.companyOutlook.disconnect(); UI.toast("Company mailbox disconnected"); companyOutlookBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   async function uploadCheck(file, btn) {
@@ -11318,5 +11725,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();
