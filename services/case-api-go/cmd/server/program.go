@@ -609,6 +609,11 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, id, "CASE_STATUS_CHANGED", map[string]any{
 		"by": p.Subject, "internal_status": in.Internal, "agency_status": in.Agency,
 	})
+	// AHCA's Final Order is recorded: review costs already paid close the case now (after the status write, so
+	// its "Closed" isn't overwritten).
+	if in.Internal == "Final Order Issued" {
+		s.maybeMarkDecidedInvoicePaid(r, tenant, id)
+	}
 	// The workflow moves a case by setting its status (here), not through the step signals: a case it has brought
 	// to a specialist's step goes in that queue now, not the next time someone happens to open the case.
 	s.ensureStepHelper(r, tenant, id)

@@ -57,6 +57,19 @@ func (s *server) requestLetterGen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A review invoice's letter needs that party's invoice: refuse here, so the person asking sees why, rather than
+	// a "Generating" toast and a failure only the case's activity shows.
+	if party := map[string]string{"invoice_health_plan": "HEALTH_PLAN", "invoice_provider": "PROVIDER"}[key]; party != "" {
+		var billed bool
+		_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$1 AND case_id=$2 AND party=$3
+			AND kind <> 'INITIAL_FEE' AND status <> 'VOID')`, tenant, caseID, party).Scan(&billed)
+		if !billed {
+			who := map[string]string{"HEALTH_PLAN": "health plan", "PROVIDER": "provider"}[party]
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "there is no review invoice to the " + who +
+				" on this case — the PM issues it first (Billing on the case); if the other party was billed, generate theirs"})
+			return
+		}
+	}
 	// displayName(p): this flows straight into qa_reviews.drafted_by via lettergen-py, so a reviewer opening the
 	// QA queue sees who requested the letter, not a raw Keycloak UUID.
 	if err := s.enqueueLetter(r, tenant, caseID, caseNumber, key, displayName(p)); err != nil {

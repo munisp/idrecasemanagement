@@ -1062,10 +1062,14 @@ const intakeStatusList = "DOCS_RECEIVED, PACKET_COMPLETE, PAID, CONVERTED, INELI
 // paid" may rest a case at Decided - Invoice Paid. Without this guard an
 // early fee invoice closing mid-review would prematurely mark the case
 // complete.
+//
+// Only once AHCA's Final Order is issued (SOP: the invoice cycle begins with the Final Order). It used to accept any
+// status naming a "Determination", and "QA Final Determination" -- the PM's QA, before anything has gone to AHCA --
+// is one: paying the review invoice then closed a case mid-way. Costs paid before the Final Order close the case when
+// it is recorded (setDualStatus).
 func decidedEnoughForInvoiceRest(internal string) bool {
-	switch {
-	case strings.Contains(internal, "Final Order"), strings.Contains(internal, "Determination"),
-		strings.Contains(internal, "Decided"), strings.Contains(internal, "Invoice"):
+	switch internal {
+	case "Final Order Issued":
 		return true
 	}
 	return false

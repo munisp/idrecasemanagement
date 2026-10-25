@@ -51,6 +51,7 @@ type wfFacts struct {
 	Dates            map[string]string
 	HasSummary       bool
 	HasEstimate      bool
+	BilledParties    map[string]bool // parties with a review invoice (not the initial fee or a late fee)
 	HasElig          bool
 	EligResult       string
 	EligAt           time.Time
@@ -126,6 +127,23 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("qa:"+tpl, "QA and send the "+label, qaRole, "qa:"+tpl, sent, "Approve it in the QA gate; approval sends it.")
 		return sent
 	}
+	// The review invoice's letter, for each party it bills: the health plan, the provider, or both when the cost is
+	// split. The step used to ask for the health plan's always, so a case billing the provider could never pass it
+	// (its letter can't be generated without an invoice to the plan). Before any invoice, the health plan's.
+	invoiceLetters := func() {
+		billed := f.BilledParties
+		if len(billed) == 0 {
+			billed = map[string]bool{"HEALTH_PLAN": true}
+		}
+		if billed["HEALTH_PLAN"] {
+			add("report_plan_invoice", "Generate the health plan invoice", "CASE_MANAGER", "report:invoice_health_plan",
+				f.Generated["invoice_health_plan"], "")
+		}
+		if billed["PROVIDER"] {
+			add("report_provider_invoice", "Generate the provider invoice", "CASE_MANAGER", "report:invoice_provider",
+				f.Generated["invoice_provider"], "")
+		}
+	}
 
 	add("fee", "Initial fee paid", "FINANCE", "settle", f.Status != "AWAITING_PAYMENT",
 		"The filer pays by card, or Finance records a check/ACH against the invoice.")
@@ -200,13 +218,13 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 	// its cover letter and the default invoice, as the Final Order package.
 	if !withdrawn && !closing && wfDefaulted(f) {
 		add("invoice", "Create the default invoice", "PM", "invoice", f.ReviewInvoice, "The health plan is billed: a default.")
+		reportFrom := len(steps)
 		add("report_default", "Generate the Default Determination", "CASE_MANAGER", "report:default_determination",
 			f.Generated["default_determination"], "The plan did not respond within its 15 days: a default determination for the provider.")
 		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
 			f.Generated["cover_letter_final_notice"], "")
-		add("report_plan_invoice", "Generate the health plan invoice", "CASE_MANAGER", "report:invoice_health_plan",
-			f.Generated["invoice_health_plan"], "")
-		for i := len(steps) - 3; i < len(steps); i++ {
+		invoiceLetters()
+		for i := reportFrom; i < len(steps); i++ {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
@@ -235,16 +253,16 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("invoice", "Create the review invoice", "PM", "invoice", f.ReviewInvoice, "")
 		// The decision report, then the documents made from it, before the
 		// Final Order package that carries them.
+		reportFrom := len(steps)
 		add("report_save", "Save the decision report", "CASE_MANAGER", "report:save", f.ReportSaved,
 			"Enter the outcome and amounts, paste or upload the report, and save.")
 		add("report_generate", "Generate the decision report", "CASE_MANAGER", "report:final_order_rationale",
 			f.Generated["final_order_rationale"], "Generate the pasted report, or upload the finished one; it goes under Documents and to the QA gate.")
 		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
 			f.Generated["cover_letter_final_notice"], "")
-		add("report_plan_invoice", "Generate the health plan invoice", "CASE_MANAGER", "report:invoice_health_plan",
-			f.Generated["invoice_health_plan"], "")
+		invoiceLetters()
 		// The Reviewer and the PM may both edit the whole report.
-		for i := len(steps) - 4; i < len(steps); i++ {
+		for i := reportFrom; i < len(steps); i++ {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
@@ -463,6 +481,17 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 	_ = s.db.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE kind <> 'INITIAL_FEE') > 0, count(*) FILTER (WHERE status='OPEN')
 		FROM public.invoices WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&f.ReviewInvoice, &f.OpenInvoices)
+	f.BilledParties = map[string]bool{}
+	if rows, err := s.db.Query(ctx, `SELECT DISTINCT party FROM public.invoices WHERE tenant=$1 AND case_id=$2
+		AND kind NOT IN ('INITIAL_FEE','LATE_FEE') AND status <> 'VOID'`, tenant, caseID); err == nil {
+		for rows.Next() {
+			var p string
+			if rows.Scan(&p) == nil {
+				f.BilledParties[p] = true
+			}
+		}
+		rows.Close()
+	}
 	return f, nil
 }
 

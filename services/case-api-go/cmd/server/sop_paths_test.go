@@ -178,3 +178,33 @@ func TestFinalOrderFollowsTheDetermination(t *testing.T) {
 		t.Error("only the workflows' events are case events")
 	}
 }
+
+// The invoice letter step follows the party billed (FL26-001285 billed the provider and was stuck on the plan's).
+func TestInvoiceLetterFollowsThePartyBilled(t *testing.T) {
+	base := func(billed map[string]bool) wfFacts {
+		return wfFacts{Internal: "QA Final Determination", Dates: map[string]string{"packet_complete_at": "2026-10-01"},
+			HasElig: true, EligResult: "ELIGIBLE", HasSummary: true, ReviewInvoice: len(billed) > 0, BilledParties: billed,
+			Act: map[string]wfAct{"PACKET_COMPLETE": {}, "ESTIMATE_CONFIRMED": {Body: `{"requested":false}`}, "PLAN_RESPONSE_RECEIVED": {},
+				"CODING_REVIEW_COMPLETE": {}, "ATTORNEY_REVIEW_COMPLETE": {}},
+			Letter: map[string]string{"acceptance": "SENT", "plan_notification": "SENT"}, Generated: map[string]bool{"invoice_provider": true}}
+	}
+	keys := func(f wfFacts) map[string]bool {
+		k := map[string]bool{}
+		for _, st := range buildWorkflowSteps(f) {
+			k[st.Key] = true
+		}
+		return k
+	}
+	if k := keys(base(map[string]bool{"PROVIDER": true})); k["report_plan_invoice"] || !k["report_provider_invoice"] {
+		t.Errorf("billing the provider asks for the provider's invoice letter, not the plan's: %v", k)
+	}
+	if k := keys(base(map[string]bool{"PROVIDER": true, "HEALTH_PLAN": true})); !k["report_plan_invoice"] || !k["report_provider_invoice"] {
+		t.Error("a split bill asks for both letters")
+	}
+	if k := keys(base(nil)); !k["report_plan_invoice"] {
+		t.Error("before any invoice, the health plan's")
+	}
+	if decidedEnoughForInvoiceRest("QA Final Determination") || decidedEnoughForInvoiceRest("Determination Sent to FL") || !decidedEnoughForInvoiceRest("Final Order Issued") {
+		t.Error("paid costs close a case only once AHCA's Final Order is issued")
+	}
+}
