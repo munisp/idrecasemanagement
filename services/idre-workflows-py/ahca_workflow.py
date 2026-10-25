@@ -46,6 +46,7 @@ class AhcaDisputeWorkflow:
         self.estimate_permission: bool | None = None  # True = proceed, False = declined
         self.provider_withdrawn = False
         self.withdrawal_confirmed = False  # Capitol Bridge verified the withdrawal request (WITHDRAWAL_CONFIRMED)
+        self.case_over = False  # the stages have finished: the case closed or reached its Final Order
         # A person decided the fee is to be refunded (REFUND_APPROVED): the refund is never decided by the clock.
         self.refund_approved = False
         self.plan_response_received = False
@@ -315,17 +316,23 @@ class AhcaDisputeWorkflow:
         # A resumed case that was already finished ends here without having
         # waited; the watchers must not stay in catch-up for ever.
         self._catching_up = False
+        # The case is over (closed, or the Final Order recorded): the watchers end with it. They used to outlive a case
+        # that closed early -- ineligible, opted out, dismissed, refunded: its workflow never finished, an RFI sent on
+        # it afterwards relabelled it Dismissed 15 days later, and a dismissed or refunded case was flagged for the
+        # 60-day AHCA breach. Runs from before this keep their watchers.
+        if workflow.patched("watchers-end-with-the-case"):
+            self.case_over = True
         return result
 
     async def _watch_rfi(self, tenant: str, case_id: str) -> None:
         # RFI_RESPONSE: 15cd, day-15 follow-up (timeframe_lapsed_email_and_call),
         # breach -> "Case closed" per program-rules.sql. Loops so more than one
         # RFI can go out sequentially across stages 3-5.
-        while not (self.determination_sent or self.provider_withdrawn or self.rfi_lapsed):
+        while not (self.determination_sent or self.provider_withdrawn or self.rfi_lapsed or self.case_over):
             await workflow.wait_condition(
-                lambda: self.rfi_pending or self.determination_sent or self.provider_withdrawn,
+                lambda: self.rfi_pending or self.determination_sent or self.provider_withdrawn or self.case_over,
             )
-            if not self.rfi_pending:
+            if not self.rfi_pending or self.case_over:
                 return
             # The "RFI Pending ..." Internal Statuses are marked for removal in
             # the program's status mapping: an RFI no longer moves the case's
@@ -340,7 +347,9 @@ class AhcaDisputeWorkflow:
                 )
             self._rfi_round += 1
             responded = await self._deadline(
-                lambda: self.rfi_response_received, 15, f"rfi-{self._rfi_round}", "RFI_RESPONSE", stage=False)
+                lambda: self.rfi_response_received or self.case_over, 15, f"rfi-{self._rfi_round}", "RFI_RESPONSE", stage=False)
+            if self.case_over:
+                return  # the case closed while the RFI was out: nothing to dismiss
             if responded:
                 self.rfi_pending = False
                 self.rfi_response_received = False
@@ -380,7 +389,7 @@ class AhcaDisputeWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
             )
             done = lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
-                            or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE")
+                            or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE" or self.case_over)
             met = done()
             # recommendation_days_left already counts the extensions granted so far; only later ones remain.
             self._ext_used["AGENCY_RECOMMENDATION"] = self.deadline_ext.get("AGENCY_RECOMMENDATION", 0)
@@ -408,7 +417,7 @@ class AhcaDisputeWorkflow:
         # flag today and are a known remaining gap, not fixed here.
         met = await self._deadline(
             lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
-                     or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
+                     or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE" or self.case_over),
             60, "agency-recommendation", "AGENCY_RECOMMENDATION", stage=False)
         # The timer above started when the request to file came in, but the 60
         # days run from Date Received -- the day the fee was paid, which can
@@ -424,7 +433,7 @@ class AhcaDisputeWorkflow:
                     break
                 met = await self._wait(
                     lambda: (self.determination_sent or self.provider_withdrawn or self.closed_early
-                             or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE"),
+                             or self.rfi_lapsed or self.eligibility_result == "INELIGIBLE" or self.case_over),
                     timedelta(days=left), f"agency-recommendation-extra-{extra}", stage=False)
                 if met:
                     break
