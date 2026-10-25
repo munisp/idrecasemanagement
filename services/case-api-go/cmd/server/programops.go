@@ -503,8 +503,16 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 		OtherPartyName  string `json:"other_party_name"`
 		OtherPartyEmail string `json:"other_party_email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Email == "" {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": decodeProblem(err)})
+		return
+	}
+	if in.Email == "" {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := disputedAmountProblem(in.DisputedAmountCents, false); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
 	fpt := strings.ToUpper(strings.TrimSpace(in.FilingPartyType))

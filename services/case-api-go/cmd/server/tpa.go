@@ -500,8 +500,16 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		InNetwork    string        `json:"in_network"` // yes | no | ""
 		Packet       *filingPacket `json:"packet"`     // the filing packet form (filing_packet.go)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.ClientID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": decodeProblem(err)})
+		return
+	}
+	if in.ClientID == "" {
 		http.Error(w, `{"error":"client_id required"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := disputedAmountProblem(in.DisputedAmountCents, true); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
 	if packetRejected(w, in.Packet) {
@@ -582,6 +590,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		case isUniqueViolation(err):
 			http.Error(w, `{"error":"case_number already exists — retry"}`, http.StatusConflict)
 		default:
+			slog.Error("TPA filing: case creation failed", "tenant", tenant, "client", in.ClientID, "err", err)
 			http.Error(w, `{"error":"case creation failed"}`, http.StatusBadGateway)
 		}
 		return

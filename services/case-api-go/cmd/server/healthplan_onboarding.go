@@ -1272,8 +1272,16 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		OtherPartyNPI       string        `json:"other_party_npi"`
 		Packet              *filingPacket `json:"packet"` // the filing packet form (filing_packet.go)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PartyID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": decodeProblem(err)})
+		return
+	}
+	if in.PartyID == "" {
 		http.Error(w, `{"error":"party_id required"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := disputedAmountProblem(in.DisputedAmountCents, true); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
 	if packetRejected(w, in.Packet) {

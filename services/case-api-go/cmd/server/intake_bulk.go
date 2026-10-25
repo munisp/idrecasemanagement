@@ -73,6 +73,9 @@ func validateBulkIntakeItem(it bulkIntakeItem) string {
 	if it.DisputedAmountCents < 0 || it.QPACents < 0 {
 		return "amounts must be non-negative"
 	}
+	if msg := disputedAmountProblem(it.DisputedAmountCents, false); msg != "" {
+		return msg
+	}
 	return ""
 }
 
