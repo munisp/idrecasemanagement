@@ -586,6 +586,12 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 		matched += res.RowsAffected()
 		if res.RowsAffected() > 0 {
 			s.recordTransition(r.Context(), tenant, id, axisProgram, oldInternal, in.Internal, p.Subject, "status_update")
+			// SOP outcomes: a case closed without review takes the outcome its closure means; a plan that never
+			// responded makes this a default case, for good (the status moves on, the path doesn't).
+			s.recordClosureOutcome(r.Context(), tenant, id, in.Internal)
+			if in.Internal == "Plan - No Response" {
+				s.setProgramDateToday(r.Context(), tenant, id, "plan_no_response_at")
+			}
 		}
 	}
 	if in.Agency != "" {
@@ -1001,7 +1007,7 @@ func (c *ProgramConfig) outcomeGroupOf(outcome string) string {
 
 // closedWithoutReviewStatuses: the internal statuses a case closes with before any review (no invoice follows).
 var closedWithoutReviewStatuses = map[string]bool{"Provider Closure Letter Issued": true, "Dismissed": true, "Plan Opt-Out": true,
-	"Provider - Withdrawal": true, "Closed-Refunded": true}
+	"Provider - Withdrawal": true, "Closed-Refunded": true, "Ineligible": true, "Withdrawn": true}
 
 // setProgramDateToday records a program date as today, replacing any earlier one (a step that can recur, like an
 // RFI response, is met by its latest occurrence).

@@ -1457,6 +1457,14 @@ func (s *server) estimateDeclined(r *http.Request, tenant, caseID string) bool {
 	return v == "false" || v == "no"
 }
 
+// estimateRequested: the filer asked for a cost estimate (the packet's box, or the Reviewer's confirmation).
+func (s *server) estimateRequested(r *http.Request, tenant, caseID string) bool {
+	var v string
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT lower(coalesce(details->>'fee_estimate_requested','')) FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&v)
+	return v == "true" || v == "yes"
+}
+
 // dropEstimateParagraphs removes the paragraphs of a message that speak of a cost estimate.
 func dropEstimateParagraphs(body string) string {
 	paras := strings.Split(body, "\n\n")

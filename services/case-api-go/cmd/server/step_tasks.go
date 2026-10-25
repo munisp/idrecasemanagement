@@ -68,6 +68,7 @@ var clockSettled = map[string]struct {
 	"FINAL_ORDER":            {func(f wfFacts) bool { return f.Dates["date_final_order_sent"] != "" || wfHas(f, "FINAL_ORDER_ISSUED") }, "AHCA's Final Order was recorded"},
 	"OPT_OUT_LETTER":         {func(f wfFacts) bool { return wfSent(f, "plan_opt_out") }, "the opt-out letter was sent"},
 	"ACCEPTANCE_PLAN_NOTICE": {func(f wfFacts) bool { return wfSent(f, "plan_notification") }, "the Health Plan Notification was sent"},
+	"ACCEPTANCE_ESTIMATE":    {func(f wfFacts) bool { return wfSent(f, "estimate_cost") }, "the Cost Estimate was sent"},
 }
 
 var escalationRe = regexp.MustCompile(`^Escalation: ([A-Z_]+) breach`)

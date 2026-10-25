@@ -11,9 +11,10 @@ import (
 	"strings"
 )
 
-// maxDisputedCents: $100 million. A single FL claim dispute is far below it; an amount above is a typo (an extra
-// zero, cents typed as dollars), and the database and fee arithmetic shouldn't be the ones to find out.
-const maxDisputedCents = int64(100_000_000_00)
+// maxDisputedCents: the same ceiling a TPA's own edit of a filing has (tpa_edit.go, $1 billion). A single FL claim
+// dispute is far below it; an amount above is a typo (extra zeros, cents typed as dollars), and the database and the
+// fee arithmetic shouldn't be the ones to find out.
+const maxDisputedCents = int64(maxDisputedAmountCents)
 
 // disputedAmountProblem: what is wrong with a disputed amount, or "". required: the filing must state one (a TPA's
 // or a health plan's filing); the public intake may leave it for the filing packet.

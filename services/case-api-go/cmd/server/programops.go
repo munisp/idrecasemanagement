@@ -52,8 +52,8 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 		var internal, outcome string
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(internal_status,''), coalesce(details->>'case_outcome','') FROM tenant_%s.cases WHERE id=$1`,
 			sanitizeTenant(tenant)), caseID).Scan(&internal, &outcome)
-		if closedWithoutReviewStatuses[internal] || s.loadProgram(r, tenant).outcomeGroupOf(outcome) == "Closed Without Review" {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "no invoice is generated for a case closed without review (" + orWord(outcome, internal) + ")"})
+		if why := s.closingWithoutReview(r.Context(), tenant, caseID, internal); why != "" || s.loadProgram(r, tenant).outcomeGroupOf(outcome) == "Closed Without Review" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "no invoice is generated for a case closed without review (" + orWord(outcome, why) + ")"})
 			return
 		}
 	}
@@ -67,17 +67,36 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 			in.DueDays = *cfg.Fees.InvoiceDueDays
 		}
 	}
-	var caseNumber string
+	var caseNumber, finalOrder, noResponse string
 	if err := s.db.QueryRow(r.Context(),
-		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
-		Scan(&caseNumber); err != nil {
+		fmt.Sprintf(`SELECT case_number, coalesce(program_dates->>'date_final_order_sent',''), coalesce(program_dates->>'plan_no_response_at','') FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).
+		Scan(&caseNumber, &finalOrder, &noResponse); err != nil {
 		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)
 		return
+	}
+	// The review invoice follows the path: a default (the plan never responded) is billed with the default invoice,
+	// a full review with the full review one.
+	if msg := reviewInvoiceKindProblem(in.Kind, noResponse != ""); msg != "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msg})
+		return
+	}
+	// The invoice cycle begins with AHCA's Final Order: a review invoice issued after it is due when the payment
+	// window from the order ends (fees.late_fee.after_days, 35 days), as the ones issued before it now are.
+	dueFrom := "now()::date"
+	if finalOrder != "" && in.Kind != "INITIAL_FEE" {
+		in.DueDays = 35
+		if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Fees.LateFee != nil && cfg.Fees.LateFee.AfterDays > 0 {
+			in.DueDays = cfg.Fees.LateFee.AfterDays
+		}
+		dueFrom = "'" + finalOrder + "'::date"
+		if _, err := time.Parse("2006-01-02", finalOrder); err != nil {
+			dueFrom = "now()::date"
+		}
 	}
 	var invID string
 	err := s.db.QueryRow(r.Context(), `
 		INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
-		VALUES ($1,$2,$3,$4,$5,$6, (now() + make_interval(days => $7))::date)
+		VALUES ($1,$2,$3,$4,$5,$6, (`+dueFrom+` + make_interval(days => $7))::date)
 		ON CONFLICT (tenant, case_id, party, kind) DO UPDATE SET amount_cents=EXCLUDED.amount_cents, status='OPEN'
 		RETURNING id`, tenant, caseID, caseNumber, in.Party, in.Kind, in.AmountCents, in.DueDays).Scan(&invID)
 	if err != nil {
@@ -1006,15 +1025,8 @@ func (s *server) recordOptOut(w http.ResponseWriter, r *http.Request) {
 	_, optOutErr := s.db.Exec(r.Context(), `
 		INSERT INTO public.opt_out_decisions (tenant, case_id, eligible, rationale, decided_by)
 		VALUES ($1,$2,$3,$4,$5)`, tenant, caseID, in.Eligible, in.Rationale, p.Subject)
-	if in.Eligible {
-		// "Plan Opt-Out" is the exact string seeded in program_rules'
-		// statuses.internal -- this direct write bypasses setDualStatus's
-		// validation entirely, so the mismatched "Opted Out" literal here
-		// had never been caught; a case opting out would show a status the
-		// portal's own dropdown doesn't recognize.
-		_, _ = s.db.Exec(r.Context(),
-			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Plan Opt-Out', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
-	}
+	// The case closes as "Plan Opt-Out" when the Opt-Out Determination Letter has been sent (SOP 4), which the
+	// workflow sets. Closing it here, on the decision, skipped the letter: a closed case has no next step.
 	// Auto-signal the case's program workflow -- recordOptOut IS the
 	// Attorney's opt-out decision the workflow is waiting on, same
 	// dedicated-endpoint correspondence as checkEligibility's auto-signal.

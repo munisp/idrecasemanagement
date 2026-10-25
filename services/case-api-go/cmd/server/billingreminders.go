@@ -152,6 +152,7 @@ func (s *server) recordOutcome(w http.ResponseWriter, r *http.Request) {
 		PartyBilled string `json:"party_billed"`
 		AwardCents  *int64 `json:"final_amount_awarded_cents"`
 		Claims      *int   `json:"num_claims_reviewed"`
+		Explanation string `json:"outcome_explanation"` // required for "Other" (the SOP: "requires explanation")
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
@@ -169,6 +170,33 @@ func (s *server) recordOutcome(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// The SOP's outcomes follow the path: a case that closed without review has its outcome from how it closed; a
+	// default (the plan never responded) is a Default Award; a full review is a Full, Partial or No Award -- or, on
+	// either decided path, Other (with its explanation) or a pre-settlement resolution.
+	var internal, noResponse string
+	var defaultDoc bool
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(internal_status,''), coalesce(program_dates->>'plan_no_response_at','') FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&internal, &noResponse)
+	_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.qa_reviews WHERE tenant=$1 AND case_id::text=$2 AND artifact='default_determination' AND status <> 'REJECTED')`,
+		tenant, caseID).Scan(&defaultDoc)
+	if why := s.closingWithoutReview(r.Context(), tenant, caseID, internal); why != "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this case closed without review (" + why + "): its outcome is set by how it closed"})
+		return
+	}
+	isDefault := noResponse != "" || internal == "Plan - No Response" || defaultDoc
+	if !outcomeAllowed(in.CaseOutcome, isDefault) {
+		path := "a full review"
+		if isDefault {
+			path = "a default (the health plan did not respond)"
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("%q isn't an outcome of %s — choose one of: %s",
+			in.CaseOutcome, path, strings.Join(pathOutcomes(isDefault), ", "))})
+		return
+	}
+	if strings.EqualFold(in.CaseOutcome, "Other") && strings.TrimSpace(in.Explanation) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "explain the outcome: \"Other\" requires an explanation"})
+		return
+	}
 	if (in.AwardCents != nil && (*in.AwardCents < 0 || *in.AwardCents > maxDisputedAmountCents)) || (in.Claims != nil && *in.Claims < 0) {
 		http.Error(w, `{"error":"amount or claim count out of range"}`, http.StatusBadRequest)
 		return
@@ -180,6 +208,9 @@ func (s *server) recordOutcome(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Claims != nil {
 		fields["num_claims_reviewed"] = *in.Claims
+	}
+	if strings.TrimSpace(in.Explanation) != "" {
+		fields["outcome_explanation"] = strings.TrimSpace(in.Explanation)
 	}
 	merge, _ := json.Marshal(fields)
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(

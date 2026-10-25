@@ -42,11 +42,13 @@ var letterBundles = map[string]struct {
 	"final_order": {"Full Review determination documents %s", []bundlePart{
 		{"cover_letter_final_notice", "Cover Letter %s"},
 		{"final_order_rationale", "Review Rationale and Letter %s"},
+		{"default_determination", ""}, // a default: the Default Determination in place of the review rationale
 		{"invoice_health_plan", ""},
 		{"invoice_provider", ""},
 	}},
 	"final_order_rationale_copy": {"Final Order Rationale %s", []bundlePart{
 		{"final_order_rationale", "Review Rationale and Letter %s"},
+		{"default_determination", ""},
 		{"", "Final Order %s"}, // AHCA's own order, uploaded with the step that records it
 	}},
 }

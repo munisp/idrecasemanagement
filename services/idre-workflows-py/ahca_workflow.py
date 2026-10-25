@@ -741,10 +741,16 @@ class AhcaDisputeWorkflow:
                 (14, "call_and_email", "Day 14 — response due tomorrow (day 15); call and email the plan"),
                 (15, "call_again", "Day 15 — final attempt to reach the plan before default determination"),
             ]
+        # A withdrawal is allowed until the determination has gone to AHCA (SOP 5): from here on every wait -- the
+        # plan's 15 days, the reviews, the Final Order package -- also ends on one. They didn't: a withdrawal after
+        # the plan's notice sat until day 13, then ran on to the plan's chasers or a default. Runs from before this
+        # keep their waits.
+        wd = workflow.patched("withdraw-until-determination")
+        withdrawn = lambda: wd and self.provider_withdrawn
         prev_day = 0
         for day, action, detail in plan_followups:
             reached = await self._deadline(
-                lambda: self.plan_response_received or self.plan_opted_out is not None or self.rfi_lapsed,
+                lambda: self.plan_response_received or self.plan_opted_out is not None or self.rfi_lapsed or withdrawn(),
                 day - prev_day, f"plan-day{day}", "PLAN_RESPONSE")
             prev_day = day
             if reached:
@@ -756,6 +762,8 @@ class AhcaDisputeWorkflow:
         else:
             reached = False
 
+        if withdrawn():
+            return await self._withdraw(tenant, case_id)
         if self.rfi_lapsed:
             return "RFI_LAPSED"
 
@@ -791,8 +799,10 @@ class AhcaDisputeWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 elapsed = (workflow.now().date() - date.fromisoformat(plan_notified_day)).days
-                await self._deadline(lambda: self.plan_response_received or self.rfi_lapsed,
+                await self._deadline(lambda: self.plan_response_received or self.rfi_lapsed or withdrawn(),
                                      max(1, 15 - elapsed), "plan-after-opt-out-refused", "PLAN_RESPONSE")
+                if withdrawn():
+                    return await self._withdraw(tenant, case_id)
                 if self.rfi_lapsed:
                     return "RFI_LAPSED"
             else:
@@ -849,10 +859,18 @@ class AhcaDisputeWorkflow:
         # Review" already cover all of stage 5 in the seeded vocabulary,
         # and inventing an unseeded status would 400 on setDualStatus
         # (confirmed live earlier this session with "Closed-Refunded").
-        await self._until(lambda: self.coding_done)
-        if self.clinical_requested:
-            await self._until(lambda: self.clinical_done)
-        await self._until(lambda: self.attorney_done)
+        # A default (SOP 7: no response from the plan by day 15) is decided without the Coder, Nurse or Attorney
+        # reviews: the Reviewer generates the Default Determination and the PM QAs the Final Order package. A full
+        # review (the plan responded) goes through them. Runs from before this keep waiting for the reviews.
+        defaulted = not self.plan_response_received and workflow.patched("default-skips-full-review")
+        if not defaulted:
+            await self._until(lambda: self.coding_done or withdrawn())
+            if self.clinical_requested and not withdrawn():
+                await self._until(lambda: self.clinical_done or withdrawn())
+            if not withdrawn():
+                await self._until(lambda: self.attorney_done or withdrawn())
+            if withdrawn():
+                return await self._withdraw(tenant, case_id)
 
         await self._activity(
             # FL AHCA Status is "Decided" for the whole determination stage
@@ -882,7 +900,9 @@ class AhcaDisputeWorkflow:
                           "Review complete — PM to QA the Final Order package and create the invoice; then send it to AHCA. The case is marked Determination Sent to FL when it has been sent."],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
-            await self._until(lambda: "final_order" in self.letters_sent)
+            await self._until(lambda: "final_order" in self.letters_sent or withdrawn())
+            if withdrawn():
+                return await self._withdraw(tenant, case_id)
         determination_day = workflow.now().date().isoformat()
         await self._activity(
             set_program_date, args=[tenant, case_id, "date_recommendation_sent_to_agency", determination_day],

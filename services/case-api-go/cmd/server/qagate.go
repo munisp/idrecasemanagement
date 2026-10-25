@@ -135,6 +135,15 @@ func (s *server) afterLetterSent(r *http.Request, tenant, caseID, template, rfiT
 			WHERE id::text=$1 AND coalesce(program_dates->>'packet_complete_at','') <> '' AND NOT (program_dates ? 'no_estimate_window_from')`,
 			sanitizeTenant(tenant)), caseID)
 	}
+	// Cost estimate requested: the Cost Estimate is due with the acceptance, on or before day 13 (SOP 1.4) -- its
+	// clock (ACCEPTANCE_ESTIMATE) runs from the same start as the review, on these cases only, and stops when the
+	// Full Review Estimated Cost email goes (estimate_sent_at).
+	if template == "acceptance" && s.estimateRequested(r, tenant, caseID) {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+			UPDATE tenant_%s.cases SET program_dates = program_dates || jsonb_build_object('estimate_window_from', program_dates->>'packet_complete_at')
+			WHERE id::text=$1 AND coalesce(program_dates->>'packet_complete_at','') <> '' AND NOT (program_dates ? 'estimate_window_from')`,
+			sanitizeTenant(tenant)), caseID)
+	}
 	s.recordCaseDeliverables(r, tenant, caseID, template)
 	// The Cost Estimate asks the filer for its permission: in its portal too. A dismissal ends the wait.
 	switch template {

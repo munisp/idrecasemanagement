@@ -437,6 +437,9 @@ const Views = (() => {
     const ended = r.workflow_running === false && !!next;
     const inOrder = r.step_order !== false; // a tenant admin can let steps be taken out of order (Feature toggles)
     window._wf = { id, cfg, steps, next, isAdmin: !!r.is_admin, ended, inOrder };
+    // A default (the plan never responded) is billed with the default invoice: the Billing form starts there.
+    const invKind = document.querySelector("#p-inv select[name=kind]");
+    if (invKind && steps.some((x) => x.key === "report_default")) invKind.value = "DEFAULT";
     // The office's "Streamline Workflows, Timelines, and Outcomes": the case's workflow, its numbered steps in the
     // document's words, each with the countdown of the clock that times it, and the tasks that carry it out.
     const doc = r.doc || { workflow: "", steps: [] };
@@ -567,6 +570,12 @@ const Views = (() => {
     }
   }
   const WF_YESNO = [["", "choose…"], ["yes", "Yes"], ["no", "No"]];
+  // pathOutcome: whether an outcome is one this case's path (from its steps) can be recorded with by hand.
+  function pathOutcome(o, steps) {
+    const isDefault = (steps || []).some((x) => x.key === "report_default");
+    const admin = ["Other", "Costs Resolved Prior to Final Determination (Pre-Settlement)"];
+    return (isDefault ? ["Default Award"] : ["Full Award", "Partial Award", "No Award"]).concat(admin).includes(o);
+  }
   async function wfAct(key) {
     const { id, cfg, steps } = window._wf || {};
     const st = (steps || []).find((x) => x.key === key);
@@ -606,12 +615,19 @@ const Views = (() => {
       const v = await UI.modal({ title: "Record the outcome", submitLabel: "Record", wide: true,
         body: `These go on the reports to Florida. Each party's review cost comes from its invoice.
           ${defList ? `<details class="outcome-defs"><summary>What each outcome means</summary><dl>${defList}</dl></details>` : ""}`,
-        fields: [{ name: "case_outcome", label: "Case outcome", required: true, options: opts(fs.case_outcome) },
+        // The outcomes this case's path can end in (the SOP): a default (the plan never responded) is a Default
+        // Award; a full review a Full, Partial or No Award; either may be Other (explained) or settled beforehand.
+        fields: [{ name: "case_outcome", label: "Case outcome", required: true, options: opts((fs.case_outcome || []).filter((o) => pathOutcome(o, steps))) },
           { name: "party_billed", label: "Party billed", required: true, options: opts(fs.party_billed) },
+          { name: "outcome_explanation", label: "Explanation", type: "textarea", hint: "Required when the outcome is Other." },
           { name: "amount", label: "Final amount awarded (USD)", type: "number", step: "0.01" },
           { name: "num_claims", label: "Number of claims reviewed", type: "number", hint: "May differ from the number submitted." }] });
       if (!v) return;
+      if (v.case_outcome === "Other" && !String(v.outcome_explanation || "").trim()) {
+        UI.toast("Explain the outcome: Other requires an explanation.", { kind: "warn", duration: 7000 }); return;
+      }
       const body = { case_outcome: v.case_outcome, party_billed: v.party_billed };
+      if (String(v.outcome_explanation || "").trim()) body.outcome_explanation = v.outcome_explanation.trim();
       if (v.amount) body.final_amount_awarded_cents = Math.round(parseFloat(v.amount) * 100);
       if (v.num_claims) body.num_claims_reviewed = parseInt(v.num_claims, 10);
       try { await Api.program.recordOutcome(id, body); UI.toast("Outcome recorded"); setTimeout(() => App.rerender(), 800); }

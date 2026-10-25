@@ -1734,6 +1734,15 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	if !s.stepGuard(w, r, tenant, id, "signal:"+signal) {
 		return false
 	}
+	// SOP: a dispute is withdrawn after acceptance and before the final determination.
+	if signal == "PROVIDER_WITHDRAW" {
+		if f, err := s.workflowFacts(r.Context(), tenant, id); err == nil {
+			if msg := withdrawalRefusal(f.Letter["acceptance"], f.Letter["final_order"]); msg != "" {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": msg})
+				return false
+			}
+		}
+	}
 	// Workflow IDs are never persisted to the cases table (confirmed: no
 	// INSERT or UPDATE anywhere writes it) -- initiateCase/the AHCA intake
 	// endpoint both already compute it deterministically from tenant+case
@@ -1828,6 +1837,19 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	// The outreach to a filer whose packet didn't come starts the refund window.
 	if signal == "OUTREACH_DONE" {
 		s.markProgramDateOn(r.Context(), tenant, id, "outreach_at", stepDay)
+	}
+	// The invoice cycle begins with AHCA's Final Order: the review invoices are due when the program's payment window
+	// (fees.late_fee.after_days, 35 days) ends -- the same day the late fee starts counting.
+	if signal == "FINAL_ORDER_ISSUED" {
+		days := 35
+		if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Fees.LateFee != nil && cfg.Fees.LateFee.AfterDays > 0 {
+			days = cfg.Fees.LateFee.AfterDays
+		}
+		if tag, err := s.db.Exec(r.Context(), `UPDATE public.invoices SET due_date = $3::date + $4::int
+			WHERE tenant=$1 AND case_id=$2 AND status='OPEN' AND kind NOT IN ('INITIAL_FEE','LATE_FEE')`, tenant, id, stepDay, days); err == nil && tag.RowsAffected() > 0 {
+			s.logActivity(r.Context(), tenant, id, "INVOICE_DUE_SET",
+				fmt.Sprintf("AHCA's Final Order of %s starts the invoice cycle: the review invoices are due in %d days", stepDay, days))
+		}
 	}
 	// When the withdrawal was asked for, and by whom (the provider or the health plan).
 	if signal == "PROVIDER_WITHDRAW" {

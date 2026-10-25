@@ -167,3 +167,84 @@ async def test_confirming_the_cost_estimate_decides_the_path():
             await h.signal("LETTER_SENT", {"template": "acceptance"})
             await _settle(h)
     assert ("notify_roles", "ESTIMATE_DUE") in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_default_goes_to_the_determination_without_the_reviews():
+    """SOP 7: no response from the plan by day 15 is a default determination -- no Coder, Nurse or Attorney review;
+    the Final Order package to AHCA is next."""
+    rec.calls.clear()
+    env = await WorkflowEnvironment.start_time_skipping()
+    async with env:
+        queue = f"q-{uuid.uuid4()}"
+        async with Worker(env.client, task_queue=queue, workflows=[AhcaDisputeWorkflow], activities=rec.ACTIVITIES):
+            h = await _accepted(env, queue, estimate=False)
+            await h.signal("LETTER_SENT", {"template": "plan_notification"})
+            await _settle(h)
+            await env.sleep(timedelta(days=16))
+            await _settle(h)
+            # No CODING/ATTORNEY_REVIEW_COMPLETE signals: the case still reaches the determination stage.
+    assert ("set_dual_status", "Plan - No Response") in rec.calls
+    assert ("set_dual_status", "QA Final Determination") in rec.calls
+    assert "send_final_order_package" in _followups()
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_responds_still_gets_the_full_review():
+    rec.calls.clear()
+    env = await WorkflowEnvironment.start_time_skipping()
+    async with env:
+        queue = f"q-{uuid.uuid4()}"
+        async with Worker(env.client, task_queue=queue, workflows=[AhcaDisputeWorkflow], activities=rec.ACTIVITIES):
+            h = await _accepted(env, queue, estimate=False)
+            await h.signal("LETTER_SENT", {"template": "plan_notification"})
+            await _settle(h)
+            await h.signal("PLAN_RESPONSE_RECEIVED", {})
+            await _settle(h)
+            await env.sleep(timedelta(days=20))
+            await _settle(h)
+            assert ("set_dual_status", "QA Final Determination") not in rec.calls  # waits for the reviews
+            await h.signal("CODING_REVIEW_COMPLETE", {})
+            await h.signal("ATTORNEY_REVIEW_COMPLETE", {})
+            await _settle(h)
+    assert ("set_dual_status", "QA Final Determination") in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_in_the_plans_window_closes_the_case():
+    # SOP 5: the plan has been notified; the provider asks to withdraw. Capitol Bridge confirms, the Withdrawal letter
+    # goes, and the case closes then -- not on day 13, and never as a default.
+    rec.calls.clear()
+    env = await WorkflowEnvironment.start_time_skipping()
+    async with env:
+        queue = f"q-{uuid.uuid4()}"
+        async with Worker(env.client, task_queue=queue, workflows=[AhcaDisputeWorkflow], activities=rec.ACTIVITIES):
+            h = await _accepted(env, queue, estimate=False)
+            await h.signal("LETTER_SENT", {"template": "plan_notification"})
+            await _settle(h)
+            await h.signal("PROVIDER_WITHDRAW", {"by": "provider"})
+            await h.signal("WITHDRAWAL_CONFIRMED", {})
+            await h.signal("LETTER_SENT", {"template": "withdrawal"})
+            assert await h.result() == "WITHDRAWN"
+    assert ("set_dual_status", "Provider - Withdrawal") in rec.calls
+    assert ("set_dual_status", "Plan - No Response") not in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_during_the_reviews_closes_the_case():
+    rec.calls.clear()
+    env = await WorkflowEnvironment.start_time_skipping()
+    async with env:
+        queue = f"q-{uuid.uuid4()}"
+        async with Worker(env.client, task_queue=queue, workflows=[AhcaDisputeWorkflow], activities=rec.ACTIVITIES):
+            h = await _accepted(env, queue, estimate=False)
+            await h.signal("LETTER_SENT", {"template": "plan_notification"})
+            await _settle(h)
+            await h.signal("PLAN_RESPONSE_RECEIVED", {})
+            await h.signal("CODING_REVIEW_COMPLETE", {})
+            await _settle(h)
+            await h.signal("PROVIDER_WITHDRAW", {"by": "plan"})
+            await h.signal("WITHDRAWAL_CONFIRMED", {})
+            await h.signal("LETTER_SENT", {"template": "withdrawal"})
+            assert await h.result() == "WITHDRAWN"
+    assert ("set_dual_status", "QA Final Determination") not in rec.calls

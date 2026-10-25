@@ -186,13 +186,40 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 	if !withdrawn && !closing {
 		letter("plan_notification", "Health Plan Notification", "CASE_MANAGER", "PM")
 		add("plan_response", "Record the health plan's response", "CASE_MANAGER", "signal:PLAN_RESPONSE_RECEIVED",
-			has("PLAN_RESPONSE_RECEIVED") || f.Dates["date_plan_responded"] != "" || f.Internal == "Plan - No Response" || optedOut,
+			has("PLAN_RESPONSE_RECEIVED") || f.Dates["date_plan_responded"] != "" || f.Internal == "Plan - No Response" ||
+				f.Dates["plan_no_response_at"] != "" || optedOut,
 			"15 calendar days from the notification. No response by day 15 becomes a default determination.")
 		if optedOut {
 			// The plan opted out with its supporting documentation: the Opt-Out Determination Letter closes the case.
 			letter("plan_opt_out", "Opt-Out Determination Letter", "CASE_MANAGER", "PM")
 			closing = true
 		}
+	}
+	// Default (SOP 7): the plan's 15 days ran out with no response. The determination is a default for the provider --
+	// no Coder, Nurse or Attorney review -- and goes to AHCA like any determination: the Default Determination,
+	// its cover letter and the default invoice, as the Final Order package.
+	if !withdrawn && !closing && wfDefaulted(f) {
+		add("invoice", "Create the default invoice", "PM", "invoice", f.ReviewInvoice, "The health plan is billed: a default.")
+		add("report_default", "Generate the Default Determination", "CASE_MANAGER", "report:default_determination",
+			f.Generated["default_determination"], "The plan did not respond within its 15 days: a default determination for the provider.")
+		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
+			f.Generated["cover_letter_final_notice"], "")
+		add("report_plan_invoice", "Generate the health plan invoice", "CASE_MANAGER", "report:invoice_health_plan",
+			f.Generated["invoice_health_plan"], "")
+		for i := len(steps) - 3; i < len(steps); i++ {
+			early[steps[i].Key] = true
+			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
+		}
+		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
+		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
+			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
+		letter("final_order_rationale_copy", "Final Order copy to the parties", "CASE_MANAGER", "PM")
+		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
+			"Default Award, the health plan billed.")
+		add("payment", "Review costs paid", "FINANCE", "settle",
+			f.Internal == "Invoice Paid" || f.Internal == "Decided - Invoice Paid" || (f.ReviewInvoice && f.OpenInvoices == 0),
+			"The case closes when the invoices are paid.")
+		closing = true
 	}
 	if !withdrawn && !closing {
 		add("coding_review", "Coding review", "CODER", "signal:CODING_REVIEW_COMPLETE", has("CODING_REVIEW_COMPLETE"),
@@ -285,9 +312,20 @@ func wfEstimateRequested(f wfFacts) bool {
 	return wfFlag(f, "PACKET_COMPLETE", "estimate_requested")
 }
 
-// wfOptedOut: the plan exercised a valid opt-out (the opt-out was found eligible, or its letter is under way).
+// wfDefaulted: the plan never responded within its 15 days (the workflow set "Plan - No Response", which case-api
+// keeps as plan_no_response_at). A response logged after the 15 days doesn't undo it (SOP 7: no response by then is
+// a default); an opt-out within them means it was never a default.
+func wfDefaulted(f wfFacts) bool {
+	if wfOptedOut(f) {
+		return false
+	}
+	return f.Dates["plan_no_response_at"] != "" || f.Internal == "Plan - No Response" || f.Generated["default_determination"]
+}
+
+// wfOptedOut: the plan exercised a valid opt-out (the Attorney found it eligible, or its letter is under way).
 func wfOptedOut(f wfFacts) bool {
-	return f.Internal == "Plan Opt-Out" || wfFlag(f, "PLAN_OPT_OUT", "eligible") || f.Letter["plan_opt_out"] != ""
+	return f.Internal == "Plan Opt-Out" || wfFlag(f, "PLAN_OPT_OUT", "eligible") || f.Letter["plan_opt_out"] != "" ||
+		strings.HasPrefix(f.Act["OPT_OUT_DECISION"].Body, "Opt-out eligibility: true")
 }
 
 // wfAnytime: actions that are never tied to a position in the list.
@@ -382,7 +420,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 		WHERE tenant=$1 AND case_id=$2 AND type = ANY($3) ORDER BY type, created_at DESC`, tenant, caseID,
 		[]string{"PACKET_COMPLETE", "AOR_REVISED", "ESTIMATE_PERMISSION", "PLAN_RESPONSE_RECEIVED", "CODING_REVIEW_COMPLETE",
 			"CLINICAL_REVIEW_COMPLETE", "ATTORNEY_REVIEW_COMPLETE", "FINAL_ORDER_ISSUED", "PROVIDER_WITHDRAW",
-			"ESTIMATE_CONFIRMED", "WITHDRAWAL_CONFIRMED", "PLAN_OPT_OUT", "RFI_SENT"}); err == nil {
+			"ESTIMATE_CONFIRMED", "WITHDRAWAL_CONFIRMED", "PLAN_OPT_OUT", "OPT_OUT_DECISION", "RFI_SENT"}); err == nil {
 		for rows.Next() {
 			var typ string
 			var a wfAct
