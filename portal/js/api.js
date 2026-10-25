@@ -343,11 +343,6 @@ const Api = (() => {
       update: (id, p) => req("PUT", `${t()}/time/${id}`, p),
       remove: (id) => req("DELETE", `${t()}/time/${id}`),
     },
-    onboarding: {
-      submit: (payload) => req("POST", `${t()}/onboarding/applications`, payload),
-      list: (params) => req("GET", `${t()}/onboarding/applications${qs(params || {})}`),
-      decide: (id, decision, reason) => req("POST", `${t()}/onboarding/applications/${id}/decision`, { decision, reason }),
-    },
     voice: {
       intake: () => req("GET", `${t()}/voice/intake`),
       logs: () => req("GET", `${t()}/voice/logs`),

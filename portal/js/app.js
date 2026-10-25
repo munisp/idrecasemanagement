@@ -237,11 +237,6 @@
   // staff-productivity feature, not part of a TPA's own workflow.
   if (!outside) links.push(["#/timesheet", "⏱", "My timesheet"]);
   if (!outside || has("TPA")) links.push(["#/calendar", "▨", "Calendar"]);
-  // TPA excluded -- Onboarding is for registering NEW provider/payer/IDRE
-  // entity/auditor organizations and reviewing those applications; a TPA
-  // registers through its own dedicated flow (dispute.html) and has no
-  // use for this screen.
-  if (!outside) links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
@@ -280,7 +275,7 @@
   const NAV_GROUPS = [
     ["", ["dashboard"]],
     ["Disputes", ["cases", "new", "pipeline", "intake", "qa", "doc-review", "deliverables", "queues/CODING", "queues/CLINICAL", "queues/LEGAL", "queues/pm", "party", "calendar"]],
-    ["Organizations", ["tpa", "healthplan", "onboarding", "crm/accounts", "crm/leads", "crm/tasks", "crm/360"]],
+    ["Organizations", ["tpa", "healthplan", "crm/accounts", "crm/leads", "crm/tasks", "crm/360"]],
     ["Money & reports", ["finance", "payments", "billing", "arap", "recon", "reports", "productivity", "ops", "insights", "time"]],
     ["Tools", ["assistant", "ask", "voice", "mail", "templates", "timesheet", "document-requests"]],
     ["Admin", ["configuration", "team", "rules", "features", "audit", "org-audit", "my-activity"]],
@@ -517,8 +512,6 @@
     [/^#\/ops$/, Views.opsDashboard],
     [/^#\/productivity$/, Views.productivity],
     [/^#\/calendar$/, CrmViews.calendar],
-    [/^#\/onboarding$/, Views.onboarding],
-    [/^#\/onboarding\/new$/, Views.onboardingNew],
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
     [/^#\/timesheet$/, Views.myTimesheet],

@@ -154,9 +154,7 @@ func (s *server) opsDashboard(w http.ResponseWriter, r *http.Request) {
 				  (SELECT count(*) FROM public.checks WHERE tenant=$1 AND status='MATCHED') AS checks_awaiting_clear,
 				  (SELECT count(*) FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING') AS qa_pending,
 				  (SELECT count(*) FROM public.intake_requests WHERE tenant=$1
-				     AND status NOT IN ('CONVERTED','CLOSED_REFUNDED','INELIGIBLE')) AS intake_open,
-				  (SELECT count(*) FROM public.stakeholder_applications WHERE tenant=$1
-				     AND status IN ('SUBMITTED','PENDING_DOCS')) AS onboarding_pending`, tenant)
+				     AND status NOT IN ('CONVERTED','CLOSED_REFUNDED','INELIGIBLE')) AS intake_open`, tenant)
 		},
 		// Escalations trail (latest 10) — what supervisors needed to see.
 		"escalations": func() (any, error) {

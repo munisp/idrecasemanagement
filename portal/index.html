@@ -15,8 +15,8 @@
       <nav class="nav-links">
         <a href="#how">How it works</a>
         <a href="#states">State programs</a>
-        <a href="#stakeholders">Who applies</a>
-        <a class="btn ghost" href="/apply.html">Apply as an organization</a>
+        <a href="#stakeholders">Who uses it</a>
+        <a class="btn ghost" href="/dispute.html#register-tpa">Register as a TPA</a>
         <a class="btn solid" href="/dispute.html">File a dispute</a>
         <a class="btn ghost" href="/app.html">Log in</a>
       </nav>
@@ -33,7 +33,7 @@
         isolated tenant; every program's rules are configurable.</p>
       <div class="hero-cta">
         <a class="btn solid lg" href="/dispute.html">File a dispute</a>
-        <a class="btn ghost lg" href="/apply.html">Apply as an organization</a>
+        <a class="btn ghost lg" href="/dispute.html#register-tpa">Register as a TPA</a>
         <a class="btn ghost lg" href="/app.html">Sign in to the portal</a>
       </div>
       <dl class="hero-stats">
@@ -87,7 +87,7 @@
   <section id="states" class="band">
     <div class="wrap">
       <h2>State programs</h2>
-      <p class="muted">Select your state when you apply. Programs without a custom rule
+      <p class="muted">Select your state when you file or register. Programs without a custom rule
         set operate under the federal NSA default; states with their own programs
         (FL, TX, NY…) run on their own configured rules within their isolated tenant.</p>
       <div id="state-grid" class="state-grid"></div>
@@ -98,17 +98,18 @@
     <div class="wrap">
       <h2>Ready to participate?</h2>
       <p>Have a claim to dispute right now? File it directly — no account needed.
-        Want to join the platform as an organization? Submit an onboarding
-        application and the state's review team is notified immediately.</p>
+        Filing for several providers or health plans? Register as a third-party
+        administrator: your sign-in is emailed to you straight away, and you file,
+        pay and track disputes for all your clients from the portal.</p>
       <a class="btn solid lg" href="/dispute.html">File a dispute</a>
-      <a class="btn ghost lg" href="/apply.html">Apply as an organization</a>
+      <a class="btn ghost lg" href="/dispute.html#register-tpa">Register as a TPA</a>
     </div>
   </section>
 
   <footer class="site-foot">
     <div class="wrap">
       <span><span class="brand-name">Capitol Bridge</span> · 45 CFR Part 149 compliance infrastructure</span>
-      <span><a href="/dispute.html">File a dispute</a> · <a href="/apply.html">Apply</a> · <a href="/app.html">Portal login</a></span>
+      <span><a href="/dispute.html">File a dispute</a> · <a href="/dispute.html#register-tpa">Register as a TPA</a> · <a href="/app.html">Portal login</a></span>
     </div>
   </footer>
 
@@ -118,7 +119,7 @@
     const NAMES = {AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
     const CUSTOM = {FL:"FL AHCA CDR"};
     document.getElementById("state-grid").innerHTML = STATES.map(st =>
-      `<a class="state-chip" href="/apply.html?state=${st}"><strong>${st}</strong> ${NAMES[st]}${CUSTOM[st] ? `<em>${CUSTOM[st]}</em>` : ""}</a>`
+      `<a class="state-chip" href="/dispute.html?state=${st.toLowerCase()}#register-tpa"><strong>${st}</strong> ${NAMES[st]}${CUSTOM[st] ? `<em>${CUSTOM[st]}</em>` : ""}</a>`
     ).join("");
   </script>
   <script>
