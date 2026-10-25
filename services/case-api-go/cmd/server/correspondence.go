@@ -10,6 +10,7 @@ package main
 // program_rules config with explicit to/cc policy — one source of truth).
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -322,6 +323,10 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	// The stage letters (acceptance, plan notification, Final Order...) are
 	// steps: each can be drafted only when it is the case's next step.
 	if !s.stepGuard(w, r, tenant, caseID, "letter:"+tpl.Key) {
+		return
+	}
+	if msg := bundleRefusal(s.bundleWaiting(r.Context(), tenant, caseID, tpl.Key)); msg != "" {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": msg})
 		return
 	}
 	// Resolve the template's role-keyed to/cc policy to real addresses when
@@ -738,6 +743,17 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
+	// One decision at a time per draft, across replicas: two people approving the same draft at the same moment
+	// both read it as PENDING and both recorded a decision (and an approval that sends could have sent twice).
+	if conn, err := s.db.Acquire(r.Context()); err == nil {
+		defer conn.Release()
+		var mine bool
+		if conn.QueryRow(r.Context(), `SELECT pg_try_advisory_lock(hashtext('qa-decision:' || $1))`, qid).Scan(&mine) == nil && !mine {
+			http.Error(w, `{"error":"someone else is deciding this draft right now — refresh to see their decision"}`, http.StatusConflict)
+			return
+		}
+		defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('qa-decision:' || $1))`, qid) //nolint:errcheck
+	}
 	var caseID, subject, body, status, artifact, channel, draftedBy, requestedBySub, rfiTo string
 	var toJ, ccJ []byte
 	err := s.db.QueryRow(r.Context(),
@@ -758,7 +774,10 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not pending"}`, http.StatusConflict)
 		return
 	}
-	if isRetry && s.reviewerSends(r, tenant) {
+	// A draft the system made (the invoice email once its letter passes QA) has no person to hand it back to:
+	// the approval sends it, as "Approve & send" says.
+	systemDrafted := systemDraft(draftedBy)
+	if isRetry && s.reviewerSends(r, tenant) && !systemDrafted {
 		// Approving again what has already passed (a second click, or a stale page) changes nothing: say where the
 		// draft is instead of refusing -- the decision the person wanted is already on record.
 		writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "unchanged": true, "next": "with the Reviewer to send"})
@@ -890,9 +909,14 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	// displayName(p), not p.Subject -- drafted_by (same table) already uses
 	// it; reviewed_by was the one field here still showing a bare UUID.
-	_, _ = s.db.Exec(r.Context(), `
+	// Only from the status read above: a decision taken meanwhile (another replica without the lock, a retry)
+	// is not overwritten, and this one is refused instead of recorded twice.
+	if tag, err := s.db.Exec(r.Context(), `
 		UPDATE public.qa_reviews SET status=$3, reviewed_by=$4, reviewed_at=now(), review_note=$5
-		WHERE tenant=$1 AND id=$2`, tenant, qid, newStatus, displayName(p), in.Note)
+		WHERE tenant=$1 AND id=$2 AND status=$6`, tenant, qid, newStatus, displayName(p), in.Note, status); err != nil || tag.RowsAffected() == 0 {
+		http.Error(w, `{"error":"this draft was decided by someone else just now — refresh to see their decision"}`, http.StatusConflict)
+		return
+	}
 	// Phase 3-lite: every decision is a draft-quality observation (decision +
 	// token edit distance when the reviewer rewrote the body). Synchronous on
 	// purpose: losing observations to a queue outage would silently bias the
@@ -980,7 +1004,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		// Hand-back (SOP stage 0): where the program has the drafter send,
 		// approval does not deliver. The draft is APPROVED and goes back to
 		// the Reviewer, who enters the addresses and sends it (qaSend).
-		if s.reviewerSends(r, tenant) && !isRetry {
+		if s.reviewerSends(r, tenant) && !isRetry && !systemDrafted {
 			who := requestedBySub
 			if who == "" {
 				who = "role:CASE_MANAGER"
@@ -993,6 +1017,11 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 				"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "sent": false,
 			})
 			writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "next": "with the Reviewer to send"})
+			return
+		}
+		if msg := bundleRefusal(s.bundleWaiting(r.Context(), tenant, caseID, artifact)); msg != "" {
+			// Approved, but it goes only once the documents it carries have passed QA too.
+			writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "email_delivery_error": msg})
 			return
 		}
 		deliveryError = s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub, to, cc)
@@ -1336,6 +1365,10 @@ func (s *server) qaSend(w http.ResponseWriter, r *http.Request) {
 			_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET cc_recipients=$3 WHERE tenant=$1 AND id=$2`, tenant, qid, j)
 		}
 	}
+	if msg := bundleRefusal(s.bundleWaiting(r.Context(), tenant, caseID, artifact)); msg != "" {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": msg})
+		return
+	}
 	deliveryError := s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, "", to, cc)
 	s.logAudit(r.Context(), tenant, caseID, "QA_SENT", map[string]any{
 		"by": p.Subject, "qa_id": qid, "subject": subject, "to": to, "cc": cc, "email_delivery_error": deliveryError,
@@ -1435,4 +1468,9 @@ func dropEstimateParagraphs(body string) string {
 		kept = append(kept, p)
 	}
 	return strings.Join(kept, "\n\n")
+}
+
+// systemDraft: a QA draft the system made itself ("system: invoice email for letter …"), not a person.
+func systemDraft(draftedBy string) bool {
+	return strings.HasPrefix(draftedBy, "system:") || draftedBy == "system"
 }

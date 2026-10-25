@@ -74,17 +74,58 @@ func (s *server) bundleDocs(ctx context.Context, tenant, caseID, set string) []b
 			prefix = fmt.Sprintf(p.prefix, caseNumber)
 		}
 		var d bundleDoc
+		// An office letter goes only once it has passed QA: its newest QA item approved or sent, or none (a
+		// template the program doesn't gate). One waiting or sent back stays out -- bundleWaiting says so first.
 		if s.db.QueryRow(ctx, fmt.Sprintf(`
 			SELECT id::text, object_key, coalesce(filename, id::text), coalesce(parts::text,''), coalesce(size_bytes,0)
 			FROM tenant_%s.documents
 			WHERE case_id::text=$1 AND scan_status='CLEAN' AND NOT sealed AND NOT (content_type = 'text/html' AND left(coalesce(filename,''), 22) = 'Eligibility Checklist ')
 			  AND (($2 <> '' AND object_key LIKE '%%/' || $2 || '-%%') OR ($3 <> '' AND filename ILIKE $3 || '%%'))
-			ORDER BY created_at DESC LIMIT 1`, t), caseID, p.tpl, prefix).Scan(&d.id, &d.key, &d.name, &d.parts, &d.size) == nil && !seen[d.id] {
+			  AND ($2 = '' OR coalesce((SELECT q.status FROM public.qa_reviews q WHERE q.tenant=$4 AND q.case_id::text=$1
+			        AND q.channel='letter' AND q.artifact=$2 ORDER BY q.created_at DESC LIMIT 1), 'APPROVED') IN ('APPROVED','SENT'))
+			ORDER BY created_at DESC LIMIT 1`, t), caseID, p.tpl, prefix, tenant).Scan(&d.id, &d.key, &d.name, &d.parts, &d.size) == nil && !seen[d.id] {
 			seen[d.id] = true
 			out = append(out, d)
 		}
 	}
 	return out
+}
+
+// letterReleased: whether an office letter whose newest QA item has this status may leave the office ("" = the
+// program doesn't gate the template).
+func letterReleased(status string) bool {
+	return status == "" || status == "APPROVED" || status == "SENT"
+}
+
+// bundleWaiting: the letters of a set that are on the case but haven't passed QA -- still waiting, or sent back
+// -- by subject. While any is, the set's letter is not drafted or sent: the package would go without them.
+func (s *server) bundleWaiting(ctx context.Context, tenant, caseID, set string) []string {
+	var out []string
+	for _, p := range letterBundles[set].parts {
+		if p.tpl == "" {
+			continue
+		}
+		var status, subject string
+		if s.db.QueryRow(ctx, `SELECT status, coalesce(subject,'') FROM public.qa_reviews
+			WHERE tenant=$1 AND case_id::text=$2 AND channel='letter' AND artifact=$3 ORDER BY created_at DESC LIMIT 1`,
+			tenant, caseID, p.tpl).Scan(&status, &subject) == nil && !letterReleased(status) {
+			what := "waiting for QA"
+			if status == "REJECTED" {
+				what = "sent back in QA"
+			}
+			out = append(out, fmt.Sprintf("%s (%s)", subject, what))
+		}
+	}
+	return out
+}
+
+// bundleRefusal: the error a set's letter gets while some of its letters haven't passed QA; "" when none.
+func bundleRefusal(waiting []string) string {
+	if len(waiting) == 0 {
+		return ""
+	}
+	return "This letter carries documents that haven't passed QA yet: " + strings.Join(waiting, "; ") +
+		". Approve them in the QA gate first, so the package goes complete."
 }
 
 // bundleName: the set's zip, by what the letter calls it.

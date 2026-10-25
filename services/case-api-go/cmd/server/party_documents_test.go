@@ -63,3 +63,30 @@ func TestUnfilled(t *testing.T) {
 		t.Fatal("no fill-ins")
 	}
 }
+
+func TestLetterReleased(t *testing.T) {
+	for st, want := range map[string]bool{"": true, "APPROVED": true, "SENT": true, "PENDING": false, "REJECTED": false} {
+		if got := letterReleased(st); got != want {
+			t.Errorf("letterReleased(%q) = %v, want %v", st, got, want)
+		}
+	}
+}
+
+func TestBundleRefusal(t *testing.T) {
+	if bundleRefusal(nil) != "" {
+		t.Fatal("nothing waiting: no refusal")
+	}
+	msg := bundleRefusal([]string{"Invoice FL26-021380H - Health Plan (waiting for QA)"})
+	if !strings.Contains(msg, "Invoice FL26-021380H - Health Plan (waiting for QA)") || !strings.Contains(msg, "QA gate") {
+		t.Fatalf("the refusal names the letter and where to approve it: %q", msg)
+	}
+}
+
+func TestSystemDraft(t *testing.T) {
+	for in, want := range map[string]bool{"system: invoice email for letter 1f2": true, "system": true,
+		"manual.pm": false, "": false, "systematic.reviewer": false} {
+		if got := systemDraft(in); got != want {
+			t.Errorf("systemDraft(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
