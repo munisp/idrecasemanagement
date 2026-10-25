@@ -530,6 +530,10 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail("disputed_amount must be a positive dollar amount")
 			continue
 		}
+		if msg := disputedAmountProblem(amount, true); msg != "" {
+			fail("disputed_amount: " + msg)
+			continue
+		}
 		other := respondent{Side: "HEALTH_PLAN", Name: get(rec, "other_party_name"), Email: get(rec, "other_party_email"), NAIC: get(rec, "other_party_naic")}
 		if msg := other.check(); msg != "" {
 			fail(msg)

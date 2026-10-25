@@ -160,7 +160,7 @@ const CaseLayout = (() => {
     const box = document.getElementById("case-next");
     if (!box) return;
     const total = steps.length, done = steps.filter((x) => x.state === "done" || x.state === "skipped").length;
-    const bar = `<div class="case-progress" aria-label="${done} of ${total} steps done"><span style="width:${total ? Math.round(100 * done / total) : 0}%"></span></div>`;
+    const bar = `<div class="case-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}" aria-label="${done} of ${total} steps done"><span style="width:${total ? Math.round(100 * done / total) : 0}%"></span></div>`;
     if (!next) {
       box.innerHTML = `<div class="case-next-body"><div><span class="case-next-label">All steps done</span>
         <span class="muted">Nothing further is due on this case.</span></div></div>${bar}`;

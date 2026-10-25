@@ -11,7 +11,7 @@
   --brand-300:#2E6B52; --brand-500:#123B2F; --brand-700:#0C2A21; --brand-900:#071A14;
   --brass-500:#B08D3E; --brass-700:#8A6B2B;
   --n0:#FFFFFF; --n50:#F7F5EF; --n100:#EDEAE0; --n200:#D9D4C6; --n300:#BDB7A7;
-  --n500:#6E6A5E; --n700:#3B3931; --n900:#191813;
+  --n500:#69655A; --n700:#3B3931; --n900:#191813;
   --green-50:#E9F2EC; --green-700:#1E5B3C;
   --amber-50:#FBF3DF; --amber-700:#8A5E10;
   --red-50:#FAECEA;   --red-700:#9C2B1F;
@@ -822,15 +822,15 @@ button.linkish{background:none;border:0;padding:0;min-height:0;color:var(--accen
 .audit-tbl td.mono { white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* TPA disputes grouped by provider, with payment state */
-details.prov { border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--surface-raised); margin: 0 0 10px; }
-details.prov > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 12px 14px; cursor: pointer; list-style: none; }
-details.prov > summary::-webkit-details-marker { display: none; }
-details.prov > summary::before { content: "▸"; color: var(--text-tertiary); width: 1em; }
-details.prov[open] > summary::before { content: "▾"; }
-details.prov > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-details.prov .prov-name { font-weight: 600; color: var(--text-primary); }
-details.prov .prov-pay { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-details.prov > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 0 6px 6px; }
+.prov { border: 1px solid var(--border-subtle); border-radius: var(--radius-card); background: var(--surface-raised); margin: 0 0 10px; }
+.prov-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 14px; }
+.prov-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; flex: 1 1 260px; min-width: 0; padding: 4px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.prov-toggle::before { content: "▸"; color: var(--text-tertiary); width: 1em; }
+.prov.open .prov-toggle::before { content: "▾"; }
+.prov-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+.prov .prov-name { font-weight: 600; color: var(--text-primary); }
+.prov .prov-pay { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.prov-body > .tbl-wrap { border-top: 1px solid var(--border-subtle); padding: 0 6px 6px; }
 .fee-note { font-size: 12px; margin-top: 2px; max-width: 28ch; }
 .row-actions { white-space: nowrap; }
 .row-actions .mini + .mini { margin-left: 6px; }
@@ -1608,3 +1608,4 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .prefill-note{margin:10px 0;padding:10px 12px;border:1px solid var(--border-subtle);border-left:4px solid var(--info-fg, #2B5BD4);border-radius:8px;background:var(--surface-raised);font-size:13px}
 .prefill-note ul{margin:6px 0 0;padding-left:18px}
 .pkg-optional td{color:var(--text-secondary)}
+

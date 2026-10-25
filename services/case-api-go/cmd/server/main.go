@@ -533,7 +533,7 @@ func main() {
 	s.graphBackends = buildGraphBackends(pool, s)
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer)
+	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer, rejectMalformed)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
@@ -1241,7 +1241,11 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 
 	var req InitiateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": decodeProblem(err)})
+		return
+	}
+	if msg := disputedAmountProblem(req.DisputedAmountCents, false); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
 

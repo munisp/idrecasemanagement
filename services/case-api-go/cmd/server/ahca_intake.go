@@ -59,9 +59,16 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		OtherPartyName  string `json:"other_party_name"`
 		OtherPartyEmail string `json:"other_party_email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil ||
-		in.Tenant == "" || in.Email == "" || !strings.Contains(in.Email, "@") {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": decodeProblem(err)})
+		return
+	}
+	if in.Tenant == "" || in.Email == "" || !strings.Contains(in.Email, "@") {
 		http.Error(w, `{"error":"tenant and a valid email are required"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := disputedAmountProblem(in.DisputedAmountCents, false); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
 	if packetRejected(w, in.Packet) {

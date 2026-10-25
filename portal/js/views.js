@@ -2521,6 +2521,31 @@ const Views = (() => {
           <td data-label="Sent back">${pct(x.rejected, x.drafts)}</td><td data-label="Edited">${x.avg_edit_ratio != null ? Math.round(x.avg_edit_ratio * 100) + "% of the text" : "—"}</td><td data-label="Reviewers">${x.reviewers}</td></tr>`).join("")}</tbody></table></div>`
       : `<p class="muted">No QA decisions recorded yet in the last ${r.days || 90} days. Each approval or send-back from now on is counted here.</p>`;
   }
+  // Screens as people know them: telemetry records each by a key (telemetry.js workflowOf), the TPA and health plan
+  // portals by their tab ("tpa_file" is the TPA's File a dispute tab).
+  const SCREEN_NAMES = { case_initiate: "New dispute", qa_queue: "QA gate", intake: "Intake", doc_review: "Doc review",
+    case_detail: "Case", crm: "Accounts and leads", dashboard: "Home", document_requests: "Document requests", calendar: "Calendar",
+    reports: "Reports", other: "Other screens" };
+  const ORG_TAB_NAMES = { home: "Home", disputes: "Disputes", clients: "Clients", groups: "Provider groups", file: "File a dispute",
+    bulk: "Bulk filing", team: "Team", paymethods: "Payment methods", requests: "Document requests", audit: "Audit log",
+    oversight: "All TPAs", reviews: "Documents to review", parties: "Parties" };
+  function screenName(key) {
+    const k = String(key || ""), m = /^(tpa|hp)_(.+)$/.exec(k);
+    if (m) return `${m[1] === "tpa" ? "TPA" : "Health plan"} · ${ORG_TAB_NAMES[m[2]] || m[2].replace(/_/g, " ")}`;
+    return SCREEN_NAMES[k] || k.replace(/_/g, " ");
+  }
+  const TASK_NAMES = { file_dispute: "File a dispute", bulk_filing: "Bulk filing", qa_decision: "QA decision", send_letter: "Send a letter",
+    answer_document_request: "Answer a document request" };
+  // Each job from its first touch to done (telemetry tasks): the table both productivity views show.
+  function taskTableHtml(tasks) {
+    const secs = (v) => (v == null ? "—" : v < 90 ? `${Math.round(v)} s` : `${(v / 60).toFixed(1)} min`);
+    return tasks.length ? `<h3>Tasks</h3><p class="muted">Each job from its first touch to done: how many, how often refused, and what a typical one takes.</p>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Task</th><th>Where</th><th>Done</th><th>Refused</th><th>Typical time</th><th>Clicks</th><th>Keystrokes</th><th>With prefill</th></tr></thead><tbody>
+      ${tasks.map((t) => `<tr><td><b>${esc(TASK_NAMES[t.task] || t.task.replace(/_/g, " "))}</b></td><td class="muted">${esc(screenName(t.workflow))}</td>
+        <td>${t.done}</td><td>${t.errors ? `<span class="badge s-ck-review">${t.errors}</span>` : 0}</td><td>${secs(t.median_seconds)}</td>
+        <td>${t.avg_clicks == null ? "—" : Number(t.avg_clicks).toFixed(1)}</td><td>${t.avg_keys == null ? "—" : Math.round(t.avg_keys)}</td><td>${t.with_prefill || 0}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted">No tasks recorded yet. Filing a dispute, a QA decision or sending a letter is timed from its first touch to done.</p>`;
+  }
   // Portal productivity (telemetry.go): how much work each screen takes, and how often the suggestions are taken.
   async function productivityBox() {
     const box = document.getElementById("rpt-productivity");
@@ -2529,17 +2554,10 @@ const Views = (() => {
     try { r = await Api.cases.telemetryMetrics(30); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
     const ws = r.workflows || [], tasks = r.tasks || [];
     const rate = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
-    const TASK = { file_dispute: "File a dispute", bulk_filing: "Bulk filing", qa_decision: "QA decision", send_letter: "Send a letter",
-      answer_document_request: "Answer a document request" };
-    const secs = (v) => (v == null ? "—" : v < 90 ? `${Math.round(v)} s` : `${(v / 60).toFixed(1)} min`);
-    const taskHtml = tasks.length ? `<h3>Tasks</h3><p class="muted">Each job from its first touch to done: how many, how often refused, and what a typical one takes.</p>
-      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Task</th><th>Where</th><th>Done</th><th>Refused</th><th>Typical time</th><th>Clicks</th><th>Keystrokes</th><th>With prefill</th></tr></thead><tbody>
-      ${tasks.map((t) => `<tr><td><b>${esc(TASK[t.task] || t.task.replace(/_/g, " "))}</b></td><td class="muted">${esc(String(t.workflow).replace(/_/g, " "))}</td>
-        <td>${t.done}</td><td>${t.errors ? `<span class="badge s-ck-review">${t.errors}</span>` : 0}</td><td>${secs(t.median_seconds)}</td>
-        <td>${t.avg_clicks == null ? "—" : Number(t.avg_clicks).toFixed(1)}</td><td>${t.avg_keys == null ? "—" : Math.round(t.avg_keys)}</td><td>${t.with_prefill || 0}</td></tr>`).join("")}</tbody></table></div>` : "";
+    const taskHtml = taskTableHtml(tasks);
     const n1 = (v) => (v == null ? "—" : Number(v).toFixed(1));
-    box.innerHTML = taskHtml + (ws.length ? `<h3>Screens</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Screen</th><th>Sessions</th><th>Clicks per session</th><th>Keystrokes per session</th><th>Submits</th><th>Prefill kept</th><th>Suggestion taken</th></tr></thead><tbody>
-        ${ws.map((x) => `<tr><td>${esc(String(x.workflow || "").replace(/_/g, " "))}</td><td>${x.sessions}</td><td>${n1(x.clicks_per_session)}</td><td>${n1(x.keystrokes_per_session)}</td><td>${x.submits}</td>
+    box.innerHTML = taskHtml + `<p class="muted"><a href="#/productivity">The Productivity page</a> has the whole picture: each screen's funnel, the suggestions taken, and prefill accuracy by field.</p>` + (ws.length ? `<h3>Screens</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Screen</th><th>Sessions</th><th>Clicks per session</th><th>Keystrokes per session</th><th>Submits</th><th>Prefill kept</th><th>Suggestion taken</th></tr></thead><tbody>
+        ${ws.map((x) => `<tr><td>${esc(screenName(x.workflow))}</td><td>${x.sessions}</td><td>${n1(x.clicks_per_session)}</td><td>${n1(x.keystrokes_per_session)}</td><td>${x.submits}</td>
           <td>${rate(x.prefill_accept_rate)}</td><td>${rate(x.next_action_accept_rate)}</td></tr>`).join("")}</tbody></table></div>`
       : `<p class="muted">Nothing recorded yet in the last ${r.days || 30} days. The portal records clicks, typing and submits per screen (never what is typed).</p>`);
   }
@@ -4027,7 +4045,7 @@ const Views = (() => {
           `</tbody></table></section>` : "";
       const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
           <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
-          <span class="qa-item-meta">${qaCase(i)}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span>${qaDue(i) ? `<span class="badge" title="The statutory date on this case">due ${esc(qaDue(i))}</span>` : ""}</span>
+          <span class="qa-item-meta">${i.case_id ? `<span class="mono">${esc(i.case_number || i.case_id.slice(0, 8) + "…")}</span>` : ""}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span>${qaDue(i) ? `<span class="badge" title="The statutory date on this case">due ${esc(qaDue(i))}</span>` : ""}</span>
           <span class="qa-item-by">drafted by ${esc(i.drafted_by || "—")}${r.own_only ? " · waiting for QA" : ""}</span></button>`).join("")
         : `<p class="kc-empty">Queue empty — no drafts awaiting review.</p>`;
       const detailEmpty = q.length
@@ -4712,7 +4730,7 @@ const Views = (() => {
       html += `<section class="fin-sec" id="fin-checks"><h2>Checks</h2>
         <p class="fin-sec-sub">Scan or photograph a check: its amounts are read and matched to a fee, and a person clears it before the money counts.</p>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.uploadCheck(event.target.check.files[0], event.target.querySelector('button'))">
-          <input type="file" name="check" accept="image/jpeg,image/png,image/tiff,image/webp" required />
+          <input type="file" name="check" aria-label="Check image (JPEG, PNG, TIFF or WebP)" accept="image/jpeg,image/png,image/tiff,image/webp" required />
           <button class="mini">📷 scan / upload check</button>
           </form>
         <p class="fin-ck-filter">${["", "RECEIVED", "PROCESSED", "MATCHED", "REVIEW", "CLEARED", "REJECTED"].map((st) =>
@@ -9445,12 +9463,15 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       const unpaid = g.rows.filter(feePayable), due = unpaid.reduce((n, x) => n + Number(x.fee_cents || 0), 0);
       const paid = g.rows.filter((x) => x.fee_state === "PAID").length, pending = g.rows.filter((x) => x.fee_state === "PENDING").length;
       const open = window._tpaProvOpen[g.id] ?? (unpaid.length > 0 || groups.size === 1);
-      return `<details class="prov" ${open ? "open" : ""} ontoggle="Views.tpaProvToggle('${g.id}', this.open)">
-        <summary><span class="prov-name">${esc(g.name || "—")}</span>
-          <span class="muted">${g.rows.length} dispute${g.rows.length === 1 ? "" : "s"} · ${paid} paid${pending ? ` · ${pending} pending` : ""}</span>
+      // The client's name and counts toggle its disputes; the actions sit beside the toggle, not inside it (a
+      // control inside <summary> is a control inside a control, which screen readers and keyboards trip on).
+      return `<section class="prov${open ? " open" : ""}">
+        <div class="prov-head"><button type="button" class="prov-toggle" aria-expanded="${open ? "true" : "false"}" onclick="Views.tpaProvClick(this, '${g.id}')"><span class="prov-name">${esc(g.name || "—")}</span>
+          <span class="muted">${g.rows.length} dispute${g.rows.length === 1 ? "" : "s"} · ${paid} paid${pending ? ` · ${pending} pending` : ""}</span></button>
           <span class="prov-pay">${unpaid.length
-            ? `<span class="badge s-needs-review">${unpaid.length} unpaid · ${usdC(due)}</span>${canPay ? ` <button class="mini" onclick="event.preventDefault(); event.stopPropagation(); Views.payClientFn('${g.id}', this)">Pay all — ${usdC(due)}</button>` : ""}`
-            : '<span class="badge s-filed">Nothing owed</span>'}${canPay && g.id ? ` <button class="mini secondary" onclick="event.preventDefault(); event.stopPropagation(); Views.orgDocsDownload('tpa', {client_id: '${g.id}'}, this)">Download documents</button>` : ""}</span></summary>
+            ? `<span class="badge s-needs-review">${unpaid.length} unpaid · ${usdC(due)}</span>${canPay ? ` <button class="mini" onclick="Views.payClientFn('${g.id}', this)">Pay all — ${usdC(due)}</button>` : ""}`
+            : '<span class="badge s-filed">Nothing owed</span>'}${canPay && g.id ? ` <button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {client_id: '${g.id}'}, this)">Download documents</button>` : ""}</span></div>
+        <div class="prov-body"${open ? "" : " hidden"}>
         <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
         ${g.rows.map((x) => `<tr>
           <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
@@ -9459,10 +9480,19 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <td class="row-actions">${(window._tpaSent || {})[x.case_id] ? `<button class="mini ghost" onclick="Views.sentRecordOpen('tpa', '${x.case_id}', '${esc(x.case_number || "")}')" title="The letters sent to you on this dispute, with their documents">Letters (${window._tpaSent[x.case_id]})</button>` : ""}
             ${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
             ${x.status === "AWAITING_PAYMENT" && canPay ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}
-        </tbody></table></div></details>`;
+        </tbody></table></div></div></section>`;
     }).join("");
   }
   function tpaProvToggle(id, open) { window._tpaProvOpen[id] = open; }
+  function tpaProvClick(btn, id) {
+    const sec = btn.closest(".prov"), body = sec && sec.querySelector(".prov-body");
+    if (!body) return;
+    const open = body.hidden;
+    body.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    sec.classList.toggle("open", open);
+    tpaProvToggle(id, open);
+  }
   // A TPA may correct its own filing until the fee is paid; after that the
   // server refuses (409) and the row loses its Edit button on the next load.
   async function tpaEditDisputeFn(caseId) {
@@ -11199,7 +11229,7 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       const cards = (m.workflows || []).map((w) => {
         const pw = pathsByWf[w.workflow] || {};
         return `<tr>
-          <td><a href="#/productivity" onclick="Views.productivityDetail('${esc(w.workflow)}');return false">${esc(w.workflow)}</a></td>
+          <td><a href="#/productivity" onclick="Views.productivityDetail('${esc(w.workflow)}');return false">${esc(screenName(w.workflow))}</a></td>
           <td>${w.sessions}</td>
           <td>${pct(pw.completion_rate)}</td>
           <td>${dur(pw.median_time_to_submit_secs)}</td>
@@ -11210,8 +11240,9 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
       }).join("");
       const html = `<div class="view-head"><h1>Productivity</h1>
         <span class="muted">measured interaction baseline, last ${m.days} days — keystroke counts, never content</span></div>
-        <h2>Workflow funnel</h2>
-        <table><thead><tr><th>Workflow</th><th>Sessions</th><th>Completed</th><th>Median → submit</th><th>Clicks/session</th>
+        ${taskTableHtml(m.tasks || [])}
+        <h2>Screens</h2>
+        <table><thead><tr><th>Screen</th><th>Sessions</th><th>Completed</th><th>Median → submit</th><th>Clicks/session</th>
           <th>Keystrokes/session</th><th>Prefill accept</th><th>Next-action accept</th></tr></thead>
         <tbody>${cards || `<tr><td colspan="8" class="muted">No telemetry yet — events appear as people use the portal.</td></tr>`}</tbody></table>
         <div id="action-stats"></div>
@@ -11360,5 +11391,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, onboarding, onboardingFilter, onboardingNew, decide, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

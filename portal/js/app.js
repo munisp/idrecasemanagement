@@ -4,34 +4,13 @@
   const view = document.getElementById("view");
   const nav = document.getElementById("nav");
 
-  // Service worker (PWA). The default fire-and-forget registration leaves
-  // an already-open tab on its OLD service worker (and its OLD cached
-  // shell) until the browser gets around to its own update check on some
-  // later navigation -- during active deploys that reads as "still the
-  // old UI" no matter how many times the server is confirmed fresh.
-  // reg.update() forces the check now instead of waiting on the browser's
-  // schedule, and a new worker installing while one is already active
-  // means a newer build landed -- reload once to pick it up.
+  // No service worker for now (2026-10-24): the portal is served fresh from the network. A browser that installed
+  // the old one drops it here, with its caches; sw.js itself also unregisters wherever it still runs.
   if ("serviceWorker" in navigator) {
-    // Reload once the new worker has taken over (controllerchange), not when
-    // it has merely installed: a reload at "installed" was still answered by
-    // the old worker from the old cache, so the new build stayed hidden.
-    const hadController = !!navigator.serviceWorker.controller;
-    let reloaded = false;
-    navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (hadController && !reloaded) { reloaded = true; location.reload(); }
-    });
-    navigator.serviceWorker.register("/sw.js").then((reg) => {
-      reg.update();
-      // The check above only ran once, on this page load. A tab left open
-      // across several deploys (exactly how this app gets tested -- SPA
-      // hash routing, no real reload in between) never re-checked, so a
-      // fix already live on the server stayed invisible indefinitely in
-      // that tab. Re-check on every route change instead -- cheap (no-op
-      // network request if nothing changed) and turns "still broken after
-      // you said you fixed it" into "self-heals within one navigation."
-      addEventListener("hashchange", () => reg.update());
-    });
+    navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {});
+  }
+  if (window.caches) {
+    caches.keys().then((keys) => keys.filter((k) => k.startsWith("idre-")).forEach((k) => caches.delete(k))).catch(() => {});
   }
 
   // OIDC callback -- handleCallback() already restores the pre-login route
@@ -419,7 +398,7 @@
   // on mobile at all.
   const initials = (me.name || "?").split(/[\s._-]+/).map((s) => s[0]).join("").slice(0, 2).toUpperCase();
   document.getElementById("whoami").innerHTML =
-    `<span class="avatar" id="avatar-lo" title="Sign out" role="button" tabindex="0">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo">sign out</a></span>`;
+    `<span class="avatar" id="avatar-lo" title="Sign out" role="button" tabindex="0">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo" style="text-decoration:underline">sign out</a></span>`;
   document.getElementById("avatar-lo").addEventListener("click", Auth.logout);
   document.getElementById("rail-foot").innerHTML =
     `<a href="javascript:void(0)" id="rail-lo" title="Sign out"><span class="ri">⏻</span><span class="rl">Sign out — ${me.name}</span></a>`;
