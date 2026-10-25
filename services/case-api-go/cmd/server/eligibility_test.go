@@ -295,3 +295,29 @@ func TestFilingWindowUsesFilingDate(t *testing.T) {
 		t.Errorf("evidence should carry the determination date, deadline and filing date: %v", ev)
 	}
 }
+
+// Black-box findings (2026-10-25): dates that can't be true are refused rather than measured.
+func TestEligibilityDatesThatCantBeTrue(t *testing.T) {
+	tomorrow := time.Now().UTC().AddDate(0, 0, 2).Format("2006-01-02")
+	for name, in := range map[string]eligibilityInput{
+		"a service in the future":             {ServiceDate: tomorrow},
+		"a final determination in the future": {FinalDeterminationAt: tomorrow},
+		"the plan decided before the service": {ServiceDate: "2026-05-01", FinalDeterminationAt: "2026-04-01"},
+	} {
+		if invalidEligibilityInput(in) == "" {
+			t.Errorf("%s is refused", name)
+		}
+	}
+	if msg := invalidEligibilityInput(eligibilityInput{ServiceDate: "2026-04-01", FinalDeterminationAt: "2026-04-01"}); msg != "" {
+		t.Errorf("a same-day determination is fine: %s", msg)
+	}
+}
+
+// Every reason evalEligibility returns is one GET /program publishes.
+func TestComputedReasonsArePublished(t *testing.T) {
+	for _, r := range []string{"below_threshold", "over_filing_window", "service_before_program_start", "not_an_eligible_dispute_type", "unrecognized_provider_type"} {
+		if !contains(computedIneligibilityReasons, r) {
+			t.Errorf("%s isn't published", r)
+		}
+	}
+}

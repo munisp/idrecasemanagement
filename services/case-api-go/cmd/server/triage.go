@@ -53,20 +53,36 @@ type eligibilityInput struct {
 	DeterminationFrom string `json:"determination_from,omitempty"`
 }
 
+// computedIneligibilityReasons: the reasons evalEligibility itself can give (beside the program's own
+// eligibility.ineligibility_reasons, which a Reviewer ticks). GET /program publishes them, so every reason a review
+// can carry is one the program lists.
+var computedIneligibilityReasons = []string{"below_threshold", "over_filing_window", "service_before_program_start",
+	"not_an_eligible_dispute_type", "unrecognized_provider_type", "aor_invalid_pending_attorney"}
+
 // noOverrideReasons are computed INELIGIBLE results a reviewer may not set
 // aside: the filing window is statutory and not extendable.
 var noOverrideReasons = map[string]bool{"over_filing_window": true, "over_12_months": true}
 
-// invalidEligibilityInput returns a message when a supplied date is not a
-// YYYY-MM-DD calendar date, "" otherwise.
+// invalidEligibilityInput returns a message when a supplied date is not a YYYY-MM-DD calendar date, is in the
+// future, or has the plan deciding the claim before the service was rendered; "" otherwise. Each is a date entered
+// (or read) wrong, and each would have been measured as if it were true -- a determination dated next month is
+// always inside the filing window.
 func invalidEligibilityInput(in eligibilityInput) string {
-	for name, v := range map[string]string{"final_determination_at": in.FinalDeterminationAt, "service_date": in.ServiceDate} {
-		if v == "" {
+	today := time.Now().UTC().Format("2006-01-02") // UTC is a few hours ahead of the program's day: never too strict
+	for _, d := range []struct{ name, v string }{{"final_determination_at", in.FinalDeterminationAt}, {"service_date", in.ServiceDate}} {
+		if d.v == "" {
 			continue
 		}
-		if _, err := time.Parse("2006-01-02", v); err != nil {
-			return name + " must be a date in YYYY-MM-DD form"
+		if _, err := time.Parse("2006-01-02", d.v); err != nil {
+			return d.name + " must be a date in YYYY-MM-DD form"
 		}
+		if d.v > today {
+			return d.name + " is in the future (" + d.v + ")"
+		}
+	}
+	if in.ServiceDate != "" && in.FinalDeterminationAt != "" && in.FinalDeterminationAt < in.ServiceDate {
+		return "final_determination_at (" + in.FinalDeterminationAt + ") is before the service_date (" + in.ServiceDate +
+			"): the plan decides a claim after the service"
 	}
 	return ""
 }

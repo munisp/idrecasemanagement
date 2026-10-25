@@ -160,3 +160,21 @@ func TestAwardsCantOutliveAClosure(t *testing.T) {
 		}
 	}
 }
+
+func TestFinalOrderFollowsTheDetermination(t *testing.T) {
+	if determinationSent(wfFacts{Letter: map[string]string{}, Dates: map[string]string{}, Internal: "Provider Acceptance Letter Issued"}) {
+		t.Error("an accepted dispute hasn't had its determination sent")
+	}
+	for _, f := range []wfFacts{
+		{Letter: map[string]string{"final_order": "SENT"}, Dates: map[string]string{}},
+		{Letter: map[string]string{}, Dates: map[string]string{"date_recommendation_sent_to_agency": "2026-09-01"}},
+		{Letter: map[string]string{}, Dates: map[string]string{}, Internal: "Determination Sent to FL"},
+	} {
+		if !determinationSent(f) {
+			t.Errorf("sent: %+v", f)
+		}
+	}
+	if knownCaseSignals["QA_APPROVED"] || knownCaseSignals["INVOICE_PAID"] || !knownCaseSignals["FINAL_ORDER_ISSUED"] {
+		t.Error("only the workflows' events are case events")
+	}
+}

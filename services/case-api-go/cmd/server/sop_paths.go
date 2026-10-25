@@ -145,3 +145,10 @@ func (s *server) closingWithoutReview(ctx context.Context, tenant, caseID, inter
 	}
 	return ""
 }
+
+// determinationSent: the determination has gone to AHCA -- the Final Order package was sent, or (a case from before
+// letters were tracked) its status or date says so.
+func determinationSent(f wfFacts) bool {
+	return f.Letter["final_order"] == "SENT" || f.Dates["date_recommendation_sent_to_agency"] != "" ||
+		f.Internal == "Determination Sent to FL" || f.Internal == "Final Order Issued"
+}

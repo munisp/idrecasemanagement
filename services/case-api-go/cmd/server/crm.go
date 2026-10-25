@@ -665,7 +665,13 @@ func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
-	term := "%" + r.URL.Query().Get("q") + "%"
+	// searchLike escapes % and _: they are characters the user typed, not wildcards (a search for "%" listed
+	// everything).
+	term := searchLike(r.URL.Query().Get("q"))
+	if term == "" {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
 	// JSON tags matter: the portal reads lowercase h.kind/h.id/h.label/
 	// h.detail, and without tags encoding/json emits Go's capitalized field
 	// names -- every hit rendered as an empty row, which is exactly why the

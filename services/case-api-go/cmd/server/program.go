@@ -269,7 +269,8 @@ func (s *server) getProgram(w http.ResponseWriter, r *http.Request) {
 	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isExternalOnly(p) {
 		cfg = publicProgram(cfg)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label, "brand_name": brand, "features": s.tenantFeatures(r, tenant)})
+	writeJSON(w, http.StatusOK, map[string]any{"program": "custom", "config": cfg, "tenant_label": label, "brand_name": brand, "features": s.tenantFeatures(r, tenant),
+		"computed_ineligibility_reasons": computedIneligibilityReasons})
 }
 
 // publicProgram is what an outside filer may know about the program: how
@@ -696,6 +697,15 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error":          fmt.Sprintf("unknown provider_type %q: must be one of %s", in.ProviderType, strings.Join(types, ", ")),
 			"provider_types": types,
+		})
+		return
+	}
+	// The same for the type of claim dispute: one the program doesn't take is a typo to correct, not a dispute to
+	// close (it used to be recorded as INELIGIBLE).
+	if dt := cfg.Eligibility.DisputeTypes; len(dt) > 0 && in.DisputeType != "" && !contains(dt, in.DisputeType) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":         fmt.Sprintf("unknown dispute_type %q: must be one of %s", in.DisputeType, strings.Join(dt, ", ")),
+			"dispute_types": dt,
 		})
 		return
 	}

@@ -575,11 +575,6 @@ func main() {
 		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
 		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
 		r.Post("/deliverables/request", s.requestAdhocDeliverable)
-		r.Post("/onboarding/applications", s.submitApplication)
-		r.Get("/onboarding/applications", s.listApplications)
-		r.Post("/onboarding/applications/{appId}/decision", s.decideApplication)
-		r.Post("/onboarding/applications/{appId}/documents", s.uploadApplicationDocument)
-		r.Post("/onboarding/applications/{appId}/signal", s.signalApplication) // doc-intel -> StakeholderOnboardingWorkflow, SERVICE_WORKER only
 
 		// Voice console + compliance reports (JWT-authenticated reads).
 		r.Get("/voice/intake", s.listVoiceIntake)
@@ -1065,7 +1060,6 @@ func main() {
 	r.Post("/api/webhooks/mojaloop", s.mojaloopWebhook)
 
 	// Public stakeholder application (no OIDC; per-IP throttled, tenant + type validated).
-	r.Post("/api/public/apply", s.publicApply)
 
 	// Public pre-case intake for programmed tenants (no OIDC; per-IP throttled).
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
@@ -1684,6 +1678,17 @@ var signalRoleFloors = map[string][]string{
 	"ESTIMATE_CONFIRMED": {"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 }
 
+// knownCaseSignals: the signals the case workflows define (idre-workflows-py), and so the only events a case takes.
+var knownCaseSignals = map[string]bool{
+	"AOR_REVISED": true, "ATTORNEY_REVIEW_COMPLETE": true, "CLINICAL_REVIEW_COMPLETE": true, "CODING_REVIEW_COMPLETE": true,
+	"DEADLINE_EXTENDED": true, "DECISION": true, "DETERMINATION_ISSUED": true, "DOCS_VERIFIED": true, "ELIGIBILITY_RESULT": true,
+	"ESTIMATE_CONFIRMED": true, "ESTIMATE_PERMISSION": true, "FEES_PAID": true, "FINAL_ORDER_ISSUED": true, "LETTER_SENT": true,
+	"OFFER_SUBMITTED": true, "OUTREACH_DONE": true, "PACKET_COMPLETE": true, "PAYMENT_RECORDED": true, "PLAN_OPT_OUT": true,
+	"PLAN_RESPONSE_RECEIVED": true, "PROVIDER_WITHDRAW": true, "REFUND_APPROVED": true, "RESPONSE_FILED": true,
+	"RFI_RESPONSE_RECEIVED": true, "RFI_SENT": true, "SELECTION_FINALIZED": true, "SETTLED_OR_WITHDRAWN": true,
+	"WITHDRAWAL_CONFIRMED": true,
+}
+
 func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	id := chi.URLParam(r, "caseId")
@@ -1715,6 +1720,12 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 // coder asking for clinical review opens a clinical one. It writes the error
 // response and returns false when it refuses.
 func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenant, id, signal string, data map[string]any, reviewNote string) bool {
+	// Only the events the case workflows know. Any other name used to be accepted and written to the case's
+	// timeline under that name -- a Reviewer could post a "QA_APPROVED" or "INVOICE_PAID" entry.
+	if !knownCaseSignals[signal] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown case event %q", signal)})
+		return false
+	}
 	defer s.settleStepTasks(r.Context(), tenant, id) // a recorded step may settle its task (step_tasks.go)
 	gate := signalRoleFloors[signal]
 	if gate == nil {
@@ -1733,6 +1744,15 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	// Only the case's next step may be signalled, and only by its owner.
 	if !s.stepGuard(w, r, tenant, id, "signal:"+signal) {
 		return false
+	}
+	// AHCA issues its Final Order on the determination sent to it: there is none to record before the Final Order
+	// package has gone (with "follow the steps in order" off, it could be recorded on a dispute never reviewed --
+	// and it starts the invoices' payment terms).
+	if signal == "FINAL_ORDER_ISSUED" {
+		if f, err := s.workflowFacts(r.Context(), tenant, id); err == nil && !determinationSent(f) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "AHCA's Final Order comes after the determination: send the Final Order package to AHCA first"})
+			return false
+		}
 	}
 	// SOP: a dispute is withdrawn after acceptance and before the final determination.
 	if signal == "PROVIDER_WITHDRAW" {
