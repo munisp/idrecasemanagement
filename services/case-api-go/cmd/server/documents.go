@@ -433,10 +433,20 @@ func (s *server) listDocuments(w http.ResponseWriter, r *http.Request) {
 
 // documentAnalysis: full structured result from the PaddleOCR+VLM pipeline.
 func (s *server) documentAnalysis(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
 	var payload, docType, status string
-	err := s.db.QueryRow(r.Context(), `
-		SELECT status, doc_type, COALESCE(result::text,'{}') FROM public.doc_analysis
-		WHERE doc_id=$1`, chi.URLParam(r, "docId")).Scan(&status, &docType, &payload)
+	// The analysis row is keyed by doc_id alone (public.doc_analysis), so it
+	// MUST be bound to the document's own case and tenant here -- otherwise a
+	// caller authorized on one case could read any document's analysis by id,
+	// across cases and across tenants. Bind through tenant_<t>.documents (the
+	// authoritative owner of case_id, and never null for a case document),
+	// exactly as downloadDocument does; a doc of another case is "not found".
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT a.status, a.doc_type, COALESCE(a.result::text,'{}')
+		FROM public.doc_analysis a
+		JOIN tenant_%s.documents d ON d.id = a.doc_id
+		WHERE a.doc_id=$1 AND d.case_id::text=$2`, sanitizeTenant(tenant)),
+		chi.URLParam(r, "docId"), chi.URLParam(r, "caseId")).Scan(&status, &docType, &payload)
 	if err != nil {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return

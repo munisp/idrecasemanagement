@@ -61,7 +61,9 @@ func (s *server) caseVisible(ctx context.Context, p principal, tenant, caseID st
 	var to *string
 	if err := s.db.QueryRow(ctx, fmt.Sprintf(`SELECT assigned_to FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)),
 		caseID).Scan(&to); err != nil {
-		return true
+		// Fail closed, like hiddenCaseIDs: if the assignee cannot be read (a
+		// transient error, or no such case), a scoped Reviewer does not see it.
+		return false
 	}
 	return caseVisibleTo(p, deref(to))
 }
