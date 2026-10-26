@@ -122,14 +122,14 @@ func mailStatusMayReplace(current, next string) bool {
 type mailEvent struct {
 	Type string `json:"type"`
 	Data struct {
-		EmailID   string   `json:"email_id"`
-		From      string   `json:"from"`
-		To        []string `json:"to"`
+		EmailID string   `json:"email_id"`
+		From    string   `json:"from"`
+		To      []string `json:"to"`
 		// The Message-ID the mail finally carried: the provider replaces ours with its own (Amazon SES's), so replies
 		// quote this one. Kept on the row (provider_internet_id) so a reply is filed under its case.
 		MessageID string `json:"message_id"`
-		Subject   string   `json:"subject"`
-		CreatedAt string   `json:"created_at"`
+		Subject   string `json:"subject"`
+		CreatedAt string `json:"created_at"`
 		Bounce    struct {
 			Message string `json:"message"`
 			Type    string `json:"type"`

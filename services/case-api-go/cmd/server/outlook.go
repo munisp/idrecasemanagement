@@ -409,7 +409,11 @@ type graphMessage struct {
 	ConversationID    string           `json:"conversationId"`
 	IsRead            bool             `json:"isRead"`
 	HasAttachments    bool             `json:"hasAttachments"`
-	Body              struct {
+	Headers           []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"internetMessageHeaders"`
+	Body struct {
 		ContentType string `json:"contentType"`
 		Content     string `json:"content"`
 	} `json:"body"`
@@ -436,7 +440,7 @@ func outlookFolderURL(base, folder string, since time.Time) string {
 		"$filter":  {fmt.Sprintf("%s gt %s", field, since.UTC().Format("2006-01-02T15:04:05Z"))},
 		"$orderby": {field + " asc"},
 		"$top":     {"50"},
-		"$select":  {"id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,internetMessageId,conversationId,isRead,hasAttachments,body"},
+		"$select":  {"id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,internetMessageId,conversationId,isRead,hasAttachments,body,internetMessageHeaders"},
 	}
 	return base + "/mailFolders/" + folder + "/messages?" + q.Encode()
 }
@@ -536,6 +540,18 @@ func (s *server) fileOutlookMessage(ctx context.Context, tenant, sub, mbID, toke
 	toJ, _ := json.Marshal(graphAddrs(gm.ToRecipients))
 	ccJ, _ := json.Marshal(graphAddrs(gm.CcRecipients))
 	status := "SYNCED"
+	// The receiving server's sender checks, so an answer in this mail can be trusted (mail_decisions.go).
+	auth := map[string]string{}
+	for _, h := range gm.Headers {
+		if strings.EqualFold(h.Name, "Authentication-Results") {
+			for k, v := range authFromHeader(h.Value) {
+				if _, seen := auth[k]; !seen {
+					auth[k] = v
+				}
+			}
+		}
+	}
+	authJ, _ := json.Marshal(auth)
 	var mb any
 	if mbID != "" {
 		mb = mbID
@@ -543,11 +559,11 @@ func (s *server) fileOutlookMessage(ctx context.Context, tenant, sub, mbID, toke
 	var id string
 	err := s.db.QueryRow(ctx, `INSERT INTO public.mail_messages
 		(tenant, user_sub, mailbox_id, source, direction, folder, provider_message_id, internet_message_id, conversation_id,
-		 from_addr, from_name, to_addrs, cc_addrs, subject, body_text, body_html, has_attachments, status, is_read, occurred_at)
-		VALUES ($1,$2,$3,'OUTLOOK',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		 from_addr, from_name, to_addrs, cc_addrs, subject, body_text, body_html, has_attachments, status, is_read, occurred_at, auth_results)
+		VALUES ($1,$2,$3,'OUTLOOK',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		ON CONFLICT (user_sub, source, provider_message_id) WHERE provider_message_id <> '' DO NOTHING RETURNING id`,
 		tenant, sub, mb, dir, folder, gm.ID, gm.InternetMessageID, gm.ConversationID, fromAddr, fromName, toJ, ccJ,
-		gm.Subject, text, html, gm.HasAttachments, status, gm.IsRead || dir == "OUT", at).Scan(&id)
+		gm.Subject, text, html, gm.HasAttachments, status, gm.IsRead || dir == "OUT", at, authJ).Scan(&id)
 	if err != nil {
 		return 0, err // already filed (or the insert failed): nothing new
 	}

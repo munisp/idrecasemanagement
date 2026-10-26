@@ -75,28 +75,38 @@ func (s *server) sendMailWithAttachment(tenant string, to, cc []string, subject,
 	if s.cfg.SMTPHost == "" {
 		return fmt.Errorf("smtp not configured")
 	}
-	if _, sent := s.viaCompanyOutlook(tenant, to, cc, subject, body, &outAttachment{Name: filename, ContentType: "text/csv", Content: content}); sent {
+	if _, sent := s.viaCompanyOutlook(tenant, to, cc, subject, body, []outAttachment{{Name: filename, ContentType: "text/csv", Content: content}}); sent {
 		return nil
 	}
 	header, from := s.systemFrom(tenant)
-	boundary := "idre-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	var b strings.Builder
 	writeMailHeaders(&b, header, to, cc, subject, messageID(from))
-	fmt.Fprintf(&b, "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
-	fmt.Fprintf(&b, "--%s\r\n", boundary)
-	writeAlternative(&b, body)
-	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/csv; name=%q\r\nContent-Disposition: attachment; filename=%q\r\nContent-Transfer-Encoding: base64\r\n\r\n",
-		boundary, filename, filename)
-	enc := base64.StdEncoding.EncodeToString(content)
-	for i := 0; i < len(enc); i += 76 { // RFC 2045 line length
-		end := i + 76
-		if end > len(enc) {
-			end = len(enc)
-		}
-		b.WriteString(enc[i:end] + "\r\n")
-	}
-	fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	b.WriteString("MIME-Version: 1.0\r\n")
+	writeMixed(&b, body, []outAttachment{{Name: filename, ContentType: "text/csv", Content: content}})
 	return s.deliver(from, to, cc, []byte(b.String()))
+}
+
+// writeMixed writes a multipart/mixed body: the text (plain + HTML, writeAlternative), then each file in base64
+// (RFC 2045 lines of 76).
+func writeMixed(b *strings.Builder, body string, atts []outAttachment) {
+	boundary := "idre-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	fmt.Fprintf(b, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
+	fmt.Fprintf(b, "--%s\r\n", boundary)
+	writeAlternative(b, body)
+	for _, a := range atts {
+		name := strings.NewReplacer(`"`, "", "\r", "", "\n", "").Replace(a.Name)
+		fmt.Fprintf(b, "--%s\r\nContent-Type: %s; name=%q\r\nContent-Disposition: attachment; filename=%q\r\nContent-Transfer-Encoding: base64\r\n\r\n",
+			boundary, orWord(a.ContentType, "application/octet-stream"), headerText(name), headerText(name))
+		enc := base64.StdEncoding.EncodeToString(a.Content)
+		for i := 0; i < len(enc); i += 76 {
+			end := i + 76
+			if end > len(enc) {
+				end = len(enc)
+			}
+			b.WriteString(enc[i:end] + "\r\n")
+		}
+	}
+	fmt.Fprintf(b, "--%s--\r\n", boundary)
 }
 
 func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject, msgID string) {

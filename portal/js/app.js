@@ -336,7 +336,8 @@
     MAIL_BOUNCED: "Email bounced", MAIL_FAILED: "Email not delivered", MAIL_COMPLAINED: "Email marked as spam",
     EMAIL_BOUNCED: "Email bounced", EMAIL_COMPLAINED: "Email marked as spam", OUTLOOK_NEW_MAIL: "Outlook",
     OUTLOOK_ERROR: "Outlook needs attention", COMPANY_OUTLOOK_ERROR: "Company Outlook needs attention",
-    COMPANY_OUTLOOK_SEND_FAILED: "Company Outlook couldn't send",
+    COMPANY_OUTLOOK_SEND_FAILED: "Company Outlook couldn't send", MAIL_DECISION_TO_CHECK: "Email answer to check",
+    WITHDRAWAL_REQUESTED: "Withdrawal requested", DOCUMENTS_RECEIVED: "Answer received",
   };
   const notifLabel = (t) => NOTIF_LABELS[t] || String(t || "").toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
   const notifEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

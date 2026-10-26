@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,12 +210,13 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 		body := fmt.Sprintf("The review team of dispute %s asks for more time:\n\n  • %s\n\nWhy: %s\n\n"+
 			"Please sign in to the portal by %s and agree or decline under Document requests:\n%s/app.html#/document-requests\n",
 			caseNumber, what, message, due, strings.TrimRight(s.cfg.PortalBaseURL, "/"))
-		err := s.sendMail(tenant, []string{pc.email}, nil, subject, body)
+		msgID, err := s.sendMailID(tenant, []string{pc.email}, nil, subject, body)
 		errs := []string{}
 		if err != nil {
 			errs = append(errs, err.Error())
 		}
 		s.logCorrespondence(r, tenant, caseID, "OUT", "extension_request", subject, body, []string{pc.email}, nil, displayName(r.Context().Value(ctxPrincipal{}).(principal)), errs...)
+		s.noteMailMessageID(r.Context(), tenant, caseID, subject, msgID) // a reply is filed under the dispute by thread too
 	}
 	if pc.email != "" && source != "rfi_letter" && reason != "PERMISSION" && reason != "EXTENSION" {
 		subject := fmt.Sprintf("Documents requested — dispute %s", caseNumber)
@@ -233,12 +235,13 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 		} else {
 			fmt.Fprintf(&body, "Upload them through this secure link:\n%s", s.autoShareLink(r, tenant, caseID, "upload", ""))
 		}
-		err := s.sendMail(tenant, []string{pc.email}, nil, subject, body.String())
+		msgID, err := s.sendMailID(tenant, []string{pc.email}, nil, subject, body.String())
 		errs := []string{}
 		if err != nil {
 			errs = append(errs, err.Error())
 		}
 		s.logCorrespondence(r, tenant, caseID, "OUT", "document_request", subject, body.String(), []string{pc.email}, nil, displayName(r.Context().Value(ctxPrincipal{}).(principal)), errs...)
+		s.noteMailMessageID(r.Context(), tenant, caseID, subject, msgID) // a reply is filed under the dispute by thread too
 	}
 	s.logActivity(r.Context(), tenant, caseID, "DOCUMENTS_REQUESTED", fmt.Sprintf("%s requested from the %s side: %s (due %s)%s",
 		label, map[string]string{"PROVIDER": "provider", "HEALTH_PLAN": "health plan"}[side], truncate(what, 300), due,
@@ -471,63 +474,11 @@ func (s *server) orgDocRequestSubmit(kind string) http.HandlerFunc {
 			in.Note = strings.TrimSpace(map[string]string{"AGREE": "Agreed to the extra time.", "DECLINE": "Declined the extra time."}[decision] + " " + in.Note)
 		}
 		p := r.Context().Value(ctxPrincipal{}).(principal)
-		var reason, source, requestedBy, caseNumber string
-		if s.db.QueryRow(r.Context(), `
-			UPDATE public.document_requests SET status='SUBMITTED', submitted_at=now(), submitted_by=$3, response_note=NULLIF($4,'')
-			WHERE tenant=$1 AND id::text=$2 AND status='OPEN' RETURNING reason, source, coalesce(requested_by,'')`,
-			tenant, reqID, p.Subject, strings.TrimSpace(in.Note)).Scan(&reason, &source, &requestedBy) != nil {
+		signalled, err := s.answerDocRequest(r, tenant, caseID, reqID, p.Subject, py.name, py.org(), decision, in.Note, files, "portal document request")
+		if err != nil {
 			http.Error(w, `{"error":"this request was already answered"}`, http.StatusConflict)
 			return
 		}
-		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
-		msg := fmt.Sprintf("%s sent the documents you requested for %s (%d file%s)", py.name, caseNumber, files, map[bool]string{true: "", false: "s"}[files == 1])
-		if reason == "PERMISSION" {
-			msg = fmt.Sprintf("%s %s for %s", py.name, map[string]string{"PROCEED": "gave permission to proceed with the full review",
-				"DECLINE": "declined to proceed with the full review"}[decision], caseNumber)
-		}
-		if reason == "EXTENSION" {
-			msg = fmt.Sprintf("%s %s for %s", py.name, map[string]string{"AGREE": "agreed to the extra time",
-				"DECLINE": "declined the extra time"}[decision], caseNumber)
-		}
-		if reason == "ELIGIBILITY_RECHECK" {
-			msg += " — ready for the eligibility re-check"
-		}
-		if requestedBy != "" {
-			s.notify(r, tenant, requestedBy, "DOCUMENTS_RECEIVED", msg, "#/cases/"+caseID)
-		} else {
-			s.notify(r, tenant, "role:CASE_MANAGER", "DOCUMENTS_RECEIVED", msg, "#/cases/"+caseID)
-		}
-		s.logActivity(r.Context(), tenant, caseID, "DOCUMENTS_RECEIVED", msg+orDash(" — note: "+strings.TrimSpace(in.Note)))
-		signalled := false
-		if source == "rfi_letter" || reason == "RFI" {
-			// The RFI's 15-day clock stops: the response is in.
-			wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-			signalled = s.sigCase(r.Context(), tenant, caseID, wfID, "RFI_RESPONSE_RECEIVED",
-				map[string]any{"source": "portal document request", "by": py.name, "documents": files}) == nil
-			s.logActivity(r.Context(), tenant, caseID, "RFI_RESPONSE_RECEIVED", "RFI response received in the portal from "+py.name)
-			s.setProgramDateToday(r.Context(), tenant, caseID, "rfi_response_received_at")
-		}
-		// The provider's permission (step 4, within 15 calendar days): recorded on the case as the Reviewer's step
-		// would record it, so the workflow moves on -- the plan's notice, or the dismissal.
-		if reason == "PERMISSION" {
-			data := map[string]any{"granted": decision == "PROCEED", "date": time.Now().UTC().Format("2006-01-02"),
-				"source": "portal document request", "by": py.name}
-			wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-			signalled = s.sigCase(r.Context(), tenant, caseID, wfID, "ESTIMATE_PERMISSION", data) == nil
-			detail, _ := json.Marshal(data)
-			s.logActivity(r.Context(), tenant, caseID, "ESTIMATE_PERMISSION", fmt.Sprintf("Workflow signal ESTIMATE_PERMISSION delivered to %s — %s", wfID, detail))
-		}
-		// More time agreed: the deadline moves now, as if the PM had extended it.
-		if reason == "EXTENSION" {
-			sig, err := s.extensionAnswered(r, tenant, caseID, caseNumber, reqID, py.name, decision == "AGREE")
-			if err != nil {
-				s.logActivity(r.Context(), tenant, caseID, "EXTENSION_NOT_APPLIED",
-					fmt.Sprintf("%s agreed to the extra time, but the deadline could not be moved (%s) — extend it on the Timelines", py.name, err))
-			}
-			signalled = sig
-		}
-		s.logAudit(r.Context(), tenant, caseID, "DOCUMENTS_SUBMITTED", map[string]any{
-			"by": p.Subject, "request_id": reqID, "files": files, "org": py.org(), "workflow_signalled": signalled})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "SUBMITTED", "workflow_signalled": signalled})
 	}
 }
@@ -554,36 +505,47 @@ func (s *server) storeCaseUpload(w http.ResponseWriter, r *http.Request, tenant,
 	if err != nil {
 		return "", "", http.StatusBadRequest, "read failed"
 	}
-	if err := docPolicy(hdr.Filename, raw); err != nil {
-		return "", "", http.StatusUnsupportedMediaType, err.Error()
+	filename = namePrefix + hdr.Filename
+	docID, code, msg = s.storeCaseFile(r.Context(), tenant, caseID, uploadedBy, hdr.Filename, filename, hdr.Header.Get("Content-Type"), raw, "PARTY_UPLOADS")
+	return docID, filename, code, msg
+}
+
+// storeCaseFile files bytes as a document of the case, the way every party upload is filed: the file-type and
+// content checks, the malware scan (fail-closed), sealed by the vault, recorded in the case's documents, and
+// announced so doc-intel reads it. An upload and an email's attachment (mail_decisions.go) both come through here.
+func (s *server) storeCaseFile(ctx context.Context, tenant, caseID, uploadedBy, origName, filename, ctype string, raw []byte, folder string) (docID string, code int, msg string) {
+	if err := docPolicy(origName, raw); err != nil {
+		return "", http.StatusUnsupportedMediaType, err.Error()
 	}
-	if sig, ok := s.scanOrRefuse(discardWriter{}, bytes.NewReader(raw), "file"); !ok {
-		return "", "", http.StatusUnsupportedMediaType, "malware scan rejected: " + sig
+	sig, err := s.clamScan(bytes.NewReader(raw))
+	if err != nil {
+		return "", http.StatusServiceUnavailable, "malware scanner unavailable — not stored (fail-closed)"
+	}
+	if sig != "" {
+		return "", http.StatusUnsupportedMediaType, "malware scan rejected: " + sig
 	}
 	docID = newUUID()
 	objectKey := fmt.Sprintf("%s/cases/%s/%s.enc", tenant, caseID, docID)
-	ct, err := s.vaultSealDoc(r, tenant, objectKey, raw)
+	ct, err := s.vaultSealDoc((&http.Request{}).WithContext(ctx), tenant, objectKey, raw)
 	if err != nil {
-		return "", "", http.StatusBadGateway, "seal failed"
+		return "", http.StatusBadGateway, "seal failed"
 	}
-	if _, err := s.docs.mc.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
+	if _, err := s.docs.mc.PutObject(ctx, docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
 		minio.PutObjectOptions{UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
-		return "", "", http.StatusBadGateway, "store failed"
+		return "", http.StatusBadGateway, "store failed"
 	}
-	ctype := hdr.Header.Get("Content-Type")
-	filename = namePrefix + hdr.Filename
-	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`
+	if _, err := s.db.Exec(ctx, fmt.Sprintf(`
 		INSERT INTO tenant_%s.documents
 		  (id, case_id, object_key, size_bytes, content_type, sealed, uploaded_by, version, scan_status, filename, folder)
-		VALUES ($1,$2::uuid,$3,$4,$5,false,$6,1,'CLEAN',$7,'PARTY_UPLOADS')`, sanitizeTenant(tenant)),
-		docID, caseID, objectKey, len(raw), ctype, uploadedBy, filename); err != nil {
-		return "", "", http.StatusInternalServerError, "db"
+		VALUES ($1,$2::uuid,$3,$4,$5,false,$6,1,'CLEAN',$7,$8)`, sanitizeTenant(tenant)),
+		docID, caseID, objectKey, len(raw), ctype, uploadedBy, filename, folder); err != nil {
+		return "", http.StatusInternalServerError, "db"
 	}
-	s.publish(r.Context(), tenant, "documents", map[string]any{
+	s.publish(ctx, tenant, "documents", map[string]any{
 		"type": "doc.uploaded", "tenant": tenant, "case_id": caseID, "doc_id": docID,
 		"object_key": objectKey, "content_type": ctype, "sealed": false, "at": time.Now().UTC(),
 	})
-	return docID, filename, 0, ""
+	return docID, 0, ""
 }
 
 // sideJoined: the filing side always is; the other side once it has joined
@@ -635,4 +597,70 @@ func (s *server) permissionDocRequest(r *http.Request, tenant, caseID string) {
 func (s *server) closePermissionRequests(ctx context.Context, tenant, caseID, status string) {
 	_, _ = s.db.Exec(ctx, `UPDATE public.document_requests SET status=$3, closed_at=now() WHERE tenant=$1 AND case_id=$2
 		AND reason='PERMISSION' AND status='OPEN'`, tenant, caseID, status)
+}
+
+var errRequestAnswered = errors.New("this request was already answered")
+
+// answerDocRequest records an organization's answer to one open request -- a permission to proceed, more time, or the
+// documents asked for -- whichever way it came (the portal, or an email, mail_decisions.go): the request is closed, the
+// requester is told, the timeline says so, and the workflow is signalled as the step would signal it. org is the
+// organization's key (tpa:<id> / plan:<id>), for the audit.
+func (s *server) answerDocRequest(r *http.Request, tenant, caseID, reqID, actorSub, orgName, org, decision, note string, files int, via string) (bool, error) {
+	var reason, source, requestedBy, caseNumber string
+	if s.db.QueryRow(r.Context(), `
+		UPDATE public.document_requests SET status='SUBMITTED', submitted_at=now(), submitted_by=$3, response_note=NULLIF($4,'')
+		WHERE tenant=$1 AND id::text=$2 AND status='OPEN' RETURNING reason, source, coalesce(requested_by,'')`,
+		tenant, reqID, actorSub, strings.TrimSpace(note)).Scan(&reason, &source, &requestedBy) != nil {
+		return false, errRequestAnswered
+	}
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+	msg := fmt.Sprintf("%s sent the documents you requested for %s (%d file%s)", orgName, caseNumber, files, map[bool]string{true: "", false: "s"}[files == 1])
+	if reason == "PERMISSION" {
+		msg = fmt.Sprintf("%s %s for %s", orgName, map[string]string{"PROCEED": "gave permission to proceed with the full review",
+			"DECLINE": "declined to proceed with the full review"}[decision], caseNumber)
+	}
+	if reason == "EXTENSION" {
+		msg = fmt.Sprintf("%s %s for %s", orgName, map[string]string{"AGREE": "agreed to the extra time",
+			"DECLINE": "declined the extra time"}[decision], caseNumber)
+	}
+	if reason == "ELIGIBILITY_RECHECK" {
+		msg += " — ready for the eligibility re-check"
+	}
+	if requestedBy != "" {
+		s.notify(r, tenant, requestedBy, "DOCUMENTS_RECEIVED", msg, "#/cases/"+caseID)
+	} else {
+		s.notify(r, tenant, "role:CASE_MANAGER", "DOCUMENTS_RECEIVED", msg, "#/cases/"+caseID)
+	}
+	s.logActivity(r.Context(), tenant, caseID, "DOCUMENTS_RECEIVED", msg+orDash(" — note: "+strings.TrimSpace(note)))
+	signalled := false
+	if source == "rfi_letter" || reason == "RFI" {
+		// The RFI's 15-day clock stops: the response is in.
+		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+		signalled = s.sigCase(r.Context(), tenant, caseID, wfID, "RFI_RESPONSE_RECEIVED",
+			map[string]any{"source": via, "by": orgName, "documents": files}) == nil
+		s.logActivity(r.Context(), tenant, caseID, "RFI_RESPONSE_RECEIVED", "RFI response received ("+via+") from "+orgName)
+		s.setProgramDateToday(r.Context(), tenant, caseID, "rfi_response_received_at")
+	}
+	// The provider's permission (step 4, within 15 calendar days): recorded on the case as the Reviewer's step
+	// would record it, so the workflow moves on -- the plan's notice, or the dismissal.
+	if reason == "PERMISSION" {
+		data := map[string]any{"granted": decision == "PROCEED", "date": time.Now().UTC().Format("2006-01-02"),
+			"source": via, "by": orgName}
+		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
+		signalled = s.sigCase(r.Context(), tenant, caseID, wfID, "ESTIMATE_PERMISSION", data) == nil
+		detail, _ := json.Marshal(data)
+		s.logActivity(r.Context(), tenant, caseID, "ESTIMATE_PERMISSION", fmt.Sprintf("Workflow signal ESTIMATE_PERMISSION delivered to %s — %s", wfID, detail))
+	}
+	// More time agreed: the deadline moves now, as if the PM had extended it.
+	if reason == "EXTENSION" {
+		sig, err := s.extensionAnswered(r, tenant, caseID, caseNumber, reqID, orgName, decision == "AGREE")
+		if err != nil {
+			s.logActivity(r.Context(), tenant, caseID, "EXTENSION_NOT_APPLIED",
+				fmt.Sprintf("%s agreed to the extra time, but the deadline could not be moved (%s) — extend it on the Timelines", orgName, err))
+		}
+		signalled = sig
+	}
+	s.logAudit(r.Context(), tenant, caseID, "DOCUMENTS_SUBMITTED", map[string]any{
+		"by": actorSub, "request_id": reqID, "files": files, "org": org, "workflow_signalled": signalled, "via": via})
+	return signalled, nil
 }

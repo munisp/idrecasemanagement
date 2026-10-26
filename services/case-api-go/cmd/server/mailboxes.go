@@ -16,6 +16,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/mail"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -370,7 +372,19 @@ type sendMailRequest struct {
 	Subject   string   `json:"subject"`
 	Text      string   `json:"text"`
 	InReplyTo string   `json:"in_reply_to"` // a message id from this person's history, when replying
+	// Files to attach, as the browser read them: name, type, and the bytes in base64.
+	Attachments []struct {
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type"`
+		Data        string `json:"data"`
+	} `json:"attachments"`
 }
+
+const (
+	maxSendFiles        = 10
+	maxSendBytes        = 10 << 20 // all files of one message
+	maxOutlookFileBytes = 3 << 20  // Graph takes attachments this size inline (larger needs an upload session)
+)
 
 // sendMyMail: POST /me/mail/send -- from the person's own address (Resend) or their connected Outlook.
 func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +394,7 @@ func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in sendMailRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&in); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&in); err != nil { // up to 10 MB of attachments, in base64
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
@@ -394,6 +408,36 @@ func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
 	if in.Subject == "" || strings.TrimSpace(in.Text) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a subject and a message are required"})
 		return
+	}
+	// The attachments: decoded, within the limits, and scanned -- the platform never sends malware on someone's behalf.
+	atts := []outAttachment{}
+	total := 0
+	if len(in.Attachments) > maxSendFiles {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("attach up to %d files", maxSendFiles)})
+		return
+	}
+	for _, a := range in.Attachments {
+		data, err := base64.StdEncoding.DecodeString(a.Data)
+		name := strings.TrimSpace(filepath.Base(a.Filename))
+		if err != nil || name == "" || name == "." || len(data) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "an attachment could not be read: " + orWord(a.Filename, "(no name)")})
+			return
+		}
+		total += len(data)
+		if total > maxSendBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "attachments may total up to 10 MB"})
+			return
+		}
+		sig, err := s.clamScan(bytes.NewReader(data))
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the malware scanner is unavailable — try again shortly"})
+			return
+		}
+		if sig != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": name + " was refused by the malware scan (" + sig + ")"})
+			return
+		}
+		atts = append(atts, outAttachment{Name: name, ContentType: orWord(a.ContentType, "application/octet-stream"), Content: data})
 	}
 	var inReplyTo, conv string
 	if in.InReplyTo != "" {
@@ -412,6 +456,12 @@ func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "connect your Outlook account first"})
 			return
 		}
+		for _, a := range atts {
+			if len(a.Content) > maxOutlookFileBytes {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": a.Name + " is over 3 MB: send it from your platform address, or share it as a link"})
+				return
+			}
+		}
 	}
 	toJ, _ := json.Marshal(to)
 	ccJ, _ := json.Marshal(cc)
@@ -422,13 +472,26 @@ func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	s.mailEvent(r.Context(), id, "SENDING", "via "+strings.ToLower(source), p.Username)
+	// What was attached is kept with the message (sealed), as received mail's attachments are.
+	for i, a := range atts {
+		key, kerr := s.sealMailAttachment(r.Context(), m.Tenant, p.Subject, id, fmt.Sprintf("sent-%d", i+1), a.Content)
+		st := "STORED"
+		if kerr != nil {
+			st, key = "FAILED", ""
+		}
+		_, _ = s.db.Exec(r.Context(), `INSERT INTO public.mail_attachments (message_id, filename, content_type, size_bytes, object_key, status) VALUES ($1,$2,$3,$4,$5,$6)`,
+			id, a.Name, a.ContentType, len(a.Content), key, st)
+	}
+	if len(atts) > 0 {
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET has_attachments=true WHERE id=$1`, id)
+	}
+	s.mailEvent(r.Context(), id, "SENDING", "via "+strings.ToLower(source)+attachNote(atts), p.Username)
 	var msgID string
 	if source == "RESEND" {
-		msgID, err = s.sendFromMailbox(p.Username, m.Address, to, cc, in.Subject, in.Text, inReplyTo)
+		msgID, err = s.sendFromMailbox(p.Username, m.Address, to, cc, in.Subject, in.Text, inReplyTo, atts)
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET internet_message_id=$2 WHERE id=$1`, id, msgID)
 	} else {
-		msgID, err = s.outlookSendFrom(r.Context(), m.Tenant, p.Subject, to, cc, in.Subject, in.Text, nil)
+		msgID, err = s.outlookSendFrom(r.Context(), m.Tenant, p.Subject, to, cc, in.Subject, in.Text, atts)
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET internet_message_id=$2 WHERE id=$1`, id, msgID)
 	}
 	if errors.Is(err, errMailQueued) {
@@ -455,7 +518,7 @@ func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
 // sendFromMailbox sends from a person's own address through the platform's mail relay -- paced, and queued when the
 // provider turns it away for now, like every other platform mail (mailqueue.go). Returns the Message-ID it carries,
 // so a reply can be threaded back to it.
-func (s *server) sendFromMailbox(name, addr string, to, cc []string, subject, text, inReplyTo string) (string, error) {
+func (s *server) sendFromMailbox(name, addr string, to, cc []string, subject, text, inReplyTo string, atts []outAttachment) (string, error) {
 	if s.cfg.SMTPHost == "" {
 		return "", errors.New("sending is not configured (SMTP_HOST)")
 	}
@@ -474,7 +537,11 @@ func (s *server) sendFromMailbox(name, addr string, to, cc []string, subject, te
 		fmt.Fprintf(&b, "In-Reply-To: %s\r\nReferences: %s\r\n", inReplyTo, inReplyTo)
 	}
 	b.WriteString("MIME-Version: 1.0\r\n")
-	writeAlternative(&b, text)
+	if len(atts) == 0 {
+		writeAlternative(&b, text)
+	} else {
+		writeMixed(&b, text, atts)
+	}
 	return msgID, s.deliver(addr, to, cc, []byte(b.String()))
 }
 
@@ -810,4 +877,11 @@ func authSummary(raw json.RawMessage) string {
 		return ""
 	}
 	return fmt.Sprintf(" (spf %s, dkim %s, dmarc %s)", orWord(a["spf"], "-"), orWord(a["dkim"], "-"), orWord(a["dmarc"], "-"))
+}
+
+func attachNote(atts []outAttachment) string {
+	if len(atts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d attachment%s", len(atts), plural(len(atts)))
 }

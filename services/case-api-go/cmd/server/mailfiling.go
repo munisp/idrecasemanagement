@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -113,20 +114,20 @@ func (s *server) matchCase(ctx context.Context, tenant, hint, subject, body stri
 
 // inboundMail is one received mail, however it arrived.
 type inboundMail struct {
-	Tenant     string
-	From       string
-	To         []string
-	Subject    string
-	Body       string
-	MessageID  string   // its own Message-ID
-	Refs       []string // In-Reply-To and References
-	CaseHint   string   // a dispute number the sender gave explicitly (the email-to-case endpoint)
-	Owners     []string // whose inboxes it reached (they were told already)
+	Tenant    string
+	From      string
+	To        []string
+	Subject   string
+	Body      string
+	MessageID string   // its own Message-ID
+	Refs      []string // In-Reply-To and References
+	CaseHint  string   // a dispute number the sender gave explicitly (the email-to-case endpoint)
+	Owners    []string // whose inboxes it reached (they were told already)
 	// Business mail -- to the program's own address, its company Outlook, email-to-case: when it matches no dispute
 	// the PMs are told it waits to be filed. A staff member's personal mail is not announced to anyone else.
 	NotifyUnmatched bool
-	MailboxIDs []string // the mail_messages rows (one per staff member it reached), when it came to a personal address
-	By         string   // what carried it: resend, outlook, email-inbound
+	MailboxIDs      []string // the mail_messages rows (one per staff member it reached), when it came to a personal address
+	By              string   // what carried it: resend, outlook, email-inbound
 }
 
 // fileInbound records an inbound mail in the mail log -- under its dispute when one is found -- and adds it to that
@@ -153,6 +154,15 @@ func (s *server) fileInbound(ctx context.Context, in inboundMail, general bool) 
 		}
 		if m.CaseID != "" {
 			s.addInboundToTimeline(ctx, in.Tenant, m.CaseID, in.From, in.Subject, in.Body, m.Reason)
+			// Its attachments become the dispute's documents, and an answer the dispute waits on is recorded
+			// (mail_decisions.go) -- as the same answer given in the portal would be.
+			row := ""
+			if len(in.MailboxIDs) > 0 {
+				row = in.MailboxIDs[0]
+			}
+			if d := s.actOnFiledMail(ctx, in, m, row); d.Action != "" || d.Why != "" {
+				slog.Info("filed mail acted on", "case", m.CaseNumber, "action", d.Action, "answer", d.Answer, "why", d.Why)
+			}
 		}
 		s.announceInbound(ctx, in, m)
 	}

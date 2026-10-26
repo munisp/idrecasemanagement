@@ -139,7 +139,7 @@ type outAttachment struct {
 
 // outlookSendFrom sends one message from a connected Outlook account (a person's, or the company mailbox) and returns
 // its Message-ID: the message is created as a draft first, which gives the id, then sent; Outlook keeps it in Sent Items.
-func (s *server) outlookSendFrom(ctx context.Context, tenant, sub string, to, cc []string, subject, text string, att *outAttachment) (string, error) {
+func (s *server) outlookSendFrom(ctx context.Context, tenant, sub string, to, cc []string, subject, text string, atts []outAttachment) (string, error) {
 	token, err := s.outlookAccess(ctx, tenant, sub)
 	if err != nil {
 		return "", err
@@ -155,9 +155,13 @@ func (s *server) outlookSendFrom(ctx context.Context, tenant, sub string, to, cc
 	if len(cc) > 0 {
 		msg["ccRecipients"] = rcpt(cc)
 	}
-	if att != nil {
-		msg["attachments"] = []map[string]any{{"@odata.type": "#microsoft.graph.fileAttachment", "name": att.Name,
-			"contentType": att.ContentType, "contentBytes": base64.StdEncoding.EncodeToString(att.Content)}}
+	if len(atts) > 0 {
+		list := []map[string]any{}
+		for _, a := range atts {
+			list = append(list, map[string]any{"@odata.type": "#microsoft.graph.fileAttachment", "name": a.Name,
+				"contentType": a.ContentType, "contentBytes": base64.StdEncoding.EncodeToString(a.Content)})
+		}
+		msg["attachments"] = list
 	}
 	base := s.outlookBase(ctx, tenant, sub)
 	var draft struct {
@@ -178,13 +182,13 @@ var outlookFallbackNoticed sync.Map // tenant -> time the admins were last told 
 // viaCompanyOutlook sends the program's mail from its company Outlook when the tenant chose that (program_mail_settings).
 // sent=false means the caller sends it through the platform: Outlook isn't chosen, or it failed -- then the mail still
 // goes out, and the tenant admins are told (at most hourly) that Outlook needs attention.
-func (s *server) viaCompanyOutlook(tenant string, to, cc []string, subject, body string, att *outAttachment) (id string, sent bool) {
+func (s *server) viaCompanyOutlook(tenant string, to, cc []string, subject, body string, atts []outAttachment) (id string, sent bool) {
 	if !s.outlookOn() || s.systemSendVia(tenant) != "outlook" {
 		return "", false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	id, err := s.outlookSendFrom(ctx, tenant, companySub, to, cc, subject, body, att)
+	id, err := s.outlookSendFrom(ctx, tenant, companySub, to, cc, subject, body, atts)
 	if err == nil {
 		return id, true
 	}

@@ -123,3 +123,7 @@ ALTER TABLE public.correspondence_log ADD COLUMN IF NOT EXISTS provider_internet
 ALTER TABLE public.mail_messages ADD COLUMN IF NOT EXISTS provider_internet_id text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS correspondence_log_provider_msgid ON public.correspondence_log (tenant, provider_internet_id) WHERE provider_internet_id <> '';
 CREATE INDEX IF NOT EXISTS mail_messages_provider_msgid ON public.mail_messages (tenant, provider_internet_id) WHERE provider_internet_id <> '';
+
+-- An attachment of a mail filed under a dispute becomes one of its documents (mail_decisions.go): the document it
+-- became, so it is added once.
+ALTER TABLE public.mail_attachments ADD COLUMN IF NOT EXISTS case_doc_id text NOT NULL DEFAULT '';

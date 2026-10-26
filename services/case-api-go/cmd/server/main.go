@@ -812,9 +812,9 @@ func main() {
 		r.Put("/letter-settings", s.putLetterSettings)
 		r.Get("/template-variables", s.getTemplateVariables) // the office's values and its own {variables}
 		r.Put("/template-variables", s.putTemplateVariables)
-		r.Post("/cases/{caseId}/fwa", s.fwaAction)                  // fraud/waste/abuse: report, assign reviewer, conclude
-		r.Put("/program/contract-dates", s.setContractDates)        // admin: contract execution/effective/end dates
-		r.Get("/program/system-mail", s.getSystemMail) // the program's own address, or its company Outlook (system_mailbox.go)
+		r.Post("/cases/{caseId}/fwa", s.fwaAction)           // fraud/waste/abuse: report, assign reviewer, conclude
+		r.Put("/program/contract-dates", s.setContractDates) // admin: contract execution/effective/end dates
+		r.Get("/program/system-mail", s.getSystemMail)       // the program's own address, or its company Outlook (system_mailbox.go)
 		r.Put("/program/system-mail", s.setSystemMail)
 		r.Get("/program/recipients", s.getCorrespondenceRecipients) // agency contacts + PM copy addresses
 		r.Put("/program/recipients", s.setCorrespondenceRecipients) // admin

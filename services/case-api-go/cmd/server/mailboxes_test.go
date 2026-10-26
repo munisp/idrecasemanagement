@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/mail"
 	"net/url"
 	"strings"
 	"testing"
@@ -187,5 +192,87 @@ func TestSystemFromDefaultsToSMTPFrom(t *testing.T) {
 	}
 	if s.systemSendVia("zz") != "platform" {
 		t.Error("the program's mail goes through the platform unless Outlook was chosen")
+	}
+}
+
+func TestReplyText(t *testing.T) {
+	body := "Yes, please proceed with the full review.\n\nThanks,\nPat\n\nOn Mon, Oct 26, 2026 at 9:00 AM Florida Claims Disputes <cases@mail.upi.dev> wrote:\n> We need your permission to proceed. Do you wish to proceed?\n> Reply yes or no."
+	if got := replyText(body); got != "Yes, please proceed with the full review.\n\nThanks,\nPat" {
+		t.Errorf("only what the sender wrote: %q", got)
+	}
+	if got := replyText("We agree.\n-----Original Message-----\nFrom: x\nDo you agree?"); got != "We agree." {
+		t.Errorf("an Outlook reply's original is cut: %q", got)
+	}
+}
+
+func TestReadDecision(t *testing.T) {
+	for _, c := range []struct {
+		kind, text, want string
+		clear            bool
+	}{
+		{"PERMISSION", "Yes, please proceed with the full review.", "PROCEED", true},
+		{"PERMISSION", "We give you permission to go ahead.", "PROCEED", true},
+		{"PERMISSION", "Approved.", "PROCEED", true},
+		{"PERMISSION", "We do not wish to proceed.", "DECLINE", true},
+		{"PERMISSION", "Please don't proceed, we decline.", "DECLINE", true},
+		{"PERMISSION", "We no longer want to continue.", "DECLINE", true},
+		{"PERMISSION", "Should we proceed?", "", false},
+		{"PERMISSION", "We approve, but we decline the estimate.", "", false},
+		{"PERMISSION", "Can you confirm the deadline", "", false},
+		{"PERMISSION", "Thanks, received.", "", false},
+		{"EXTENSION", "That works for us, we agree to the extra time.", "AGREE", true},
+		{"EXTENSION", "We do not agree to more time.", "DECLINE", true},
+		{"EXTENSION", "We object.", "DECLINE", true},
+	} {
+		got, clear := readDecision(c.kind, c.text)
+		if got != c.want || clear != c.clear {
+			t.Errorf("%s %q = %q, %v; want %q, %v", c.kind, c.text, got, clear, c.want, c.clear)
+		}
+	}
+}
+
+func TestMailAuth(t *testing.T) {
+	h := authFromHeader("spf=pass (sender IP is 1.2.3.4) smtp.mailfrom=tpa.example; dkim=pass (signature was verified) header.d=tpa.example;dmarc=pass action=none")
+	if !mailPassedChecks(h) {
+		t.Errorf("an Outlook Authentication-Results header that passes: %v", h)
+	}
+	if mailPassedChecks(authFromHeader("spf=fail; dkim=none; dmarc=fail")) {
+		t.Error("a failing sender is not trusted")
+	}
+	if !mailPassedChecks(authResults([]byte(`{"spf":"pass","dkim":"pass","dmarc":"none"}`))) {
+		t.Error("SPF and DKIM passing is enough")
+	}
+	if mailPassedChecks(authResults([]byte(`{}`))) {
+		t.Error("no checks recorded: not trusted")
+	}
+}
+
+func TestWriteMixedParses(t *testing.T) {
+	var b strings.Builder
+	writeMailHeaders(&b, "Pat <pat@mail-dev.upi.dev>", []string{"a@b.test"}, nil, "Records", "<x@y>")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	writeMixed(&b, "See attached.", []outAttachment{{Name: "eob.pdf", ContentType: "application/pdf", Content: []byte("%PDF-1.4 fake")}, {Name: "notes.txt", Content: []byte("hello")}})
+	msg, err := mail.ReadMessage(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	names := []string{}
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if fn := part.FileName(); fn != "" {
+			raw, _ := io.ReadAll(base64.NewDecoder(base64.StdEncoding, part))
+			names = append(names, fn+":"+string(raw))
+		}
+	}
+	if strings.Join(names, ",") != "eob.pdf:%PDF-1.4 fake,notes.txt:hello" {
+		t.Errorf("both files, intact: %v", names)
 	}
 }
