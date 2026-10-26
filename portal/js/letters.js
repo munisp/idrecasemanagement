@@ -294,7 +294,7 @@ const Letters = (() => {
       body: `Claims on this case: <b>${nums.map(esc).join(", ")}</b>. Name the ones that are not eligible; the rest are accepted for review.`,
       fields: [{ name: "ineligible", label: "Ineligible claims (claim numbers, separated by commas)", required: true, value: marked.join(", ") },
         { name: "reason", label: "Why they are ineligible", type: "textarea", required: true,
-          value: esc((claims.find((c) => c.status === "INELIGIBLE") || {}).reason || ""),
+          value: (claims.find((c) => c.status === "INELIGIBLE") || {}).reason || "",
           hint: "Goes in the letter after the claim numbers, e.g. “were filed more than 12 months after the final determination.”" }] });
     if (!v) return false;
     try {

@@ -8,6 +8,10 @@ const UI = (() => {
   // Iconed, animated in/out, hover-to-pause, capped stack, aria-live.
   let region;
   const ICONS = { success: "✓", info: "ℹ", warn: "⚠", error: "✕" };
+  // Shared HTML escaper for every value interpolated into innerHTML below.
+  // Data (toast messages, field labels/values/options) is text, never markup;
+  // only the `html` escape-hatch of modal() is intentionally raw.
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   function toast(message, opts = {}) {
     if (!region) {
@@ -23,7 +27,7 @@ const UI = (() => {
     const kind = opts.kind || "success";
     const t = document.createElement("div");
     t.className = `toast t-${kind} toast-in`;
-    t.innerHTML = `<span class="toast-icon" aria-hidden="true">${ICONS[kind] || ICONS.info}</span><span class="toast-msg">${message}</span>`;
+    t.innerHTML = `<span class="toast-icon" aria-hidden="true">${ICONS[kind] || ICONS.info}</span><span class="toast-msg">${esc(message)}</span>`;
     if (opts.undo) {
       const b = document.createElement("button");
       b.textContent = "Undo";
@@ -100,23 +104,23 @@ const UI = (() => {
       const scrim = document.createElement("div");
       scrim.className = "modal-scrim";
       scrim.innerHTML = `
-        <div class="modal ${wide ? "modal-wide" : ""}" role="dialog" aria-modal="true" aria-label="${title}">
-          <div class="modal-h"><h2>${title}</h2>
+        <div class="modal ${wide ? "modal-wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+          <div class="modal-h"><h2>${esc(title)}</h2>
             <button class="icon-btn modal-x" aria-label="Close dialog">✕</button></div>
           <form class="modal-b" novalidate>
             ${body ? `<p class="modal-body">${body}</p>` : ""}
             ${html ? `<div class="modal-body">${html}</div>` : ""}
             ${fields.map((f) => `
-              <label class="mfield"><span>${f.label}${f.required ? ' <span class="req">*</span>' : ""}</span>
+              <label class="mfield"><span>${esc(f.label)}${f.required ? ' <span class="req">*</span>' : ""}</span>
                 ${f.options
-                  ? `<select name="${f.name}" ${f.required ? "required" : ""}>${f.options.map((o) =>
-                      `<option value="${o[0]}" ${o[0] === f.value ? "selected" : ""}>${o[1]}</option>`).join("")}</select>`
+                  ? `<select name="${esc(f.name)}" ${f.required ? "required" : ""}>${f.options.map((o) =>
+                      `<option value="${esc(o[0])}" ${o[0] === f.value ? "selected" : ""}>${esc(o[1])}</option>`).join("")}</select>`
                   : f.type === "textarea"
-                    ? `<textarea name="${f.name}" rows="3" placeholder="${f.placeholder || ""}" ${f.required ? "required" : ""}>${f.value || ""}</textarea>`
-                    : `<input name="${f.name}" type="${f.type || "text"}" value="${f.value || ""}"
-                        placeholder="${f.placeholder || ""}" ${f.required ? "required" : ""} ${f.step ? `step="${f.step}"` : ""}
-                        ${f.min ? `min="${f.min}"` : ""} ${f.max ? `max="${f.max}"` : ""} ${f.accept ? `accept="${f.accept}"` : ""} />`}
-                ${f.hint ? `<span class="mhint">${f.hint}</span>` : ""}
+                    ? `<textarea name="${esc(f.name)}" rows="3" placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""}>${esc(f.value || "")}</textarea>`
+                    : `<input name="${esc(f.name)}" type="${esc(f.type || "text")}" value="${esc(f.value || "")}"
+                        placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""} ${f.step ? `step="${esc(f.step)}"` : ""}
+                        ${f.min ? `min="${esc(f.min)}"` : ""} ${f.max ? `max="${esc(f.max)}"` : ""} ${f.accept ? `accept="${esc(f.accept)}"` : ""} />`}
+                ${f.hint ? `<span class="mhint">${esc(f.hint)}</span>` : ""}
               </label>`).join("")}
             <div class="modal-f">
               <button type="button" class="btn-secondary m-cancel">Cancel</button>
@@ -142,7 +146,7 @@ const UI = (() => {
         const form = scrim.querySelector("form");
         const setOptions = (name, opts) => {
           const sel = form.querySelector(`select[name="${name}"]`);
-          if (sel) sel.innerHTML = opts.map((o) => `<option value="${o[0]}">${o[1]}</option>`).join("");
+          if (sel) sel.innerHTML = opts.map((o) => `<option value="${esc(o[0])}">${esc(o[1])}</option>`).join("");
         };
         let tmr;
         form.addEventListener("input", () => {

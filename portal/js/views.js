@@ -10047,10 +10047,10 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       fields: [
         { name: "client_id", label: "Initiating party", required: true, value: x.client_id,
           options: clients.map((c) => [c.id, `${esc(c.party_name)} (${esc(c.party_type)})`]) },
-        { name: "contact_name", label: "Party contact name", value: esc(x.contact_name || "") },
+        { name: "contact_name", label: "Party contact name", value: x.contact_name || "" },
         { name: "amount", label: "Disputed amount (USD)", type: "number", step: "0.01",
           value: x.disputed_amount_cents ? (x.disputed_amount_cents / 100).toFixed(2) : "" },
-        { name: "notes", label: "Notes", type: "textarea", value: esc(x.notes || "") },
+        { name: "notes", label: "Notes", type: "textarea", value: x.notes || "" },
       ],
     });
     if (!v) return;
