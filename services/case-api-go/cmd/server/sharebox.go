@@ -101,7 +101,7 @@ func (s *server) shareLanding(w http.ResponseWriter, r *http.Request) {
 		body = fmt.Sprintf(`
 			<h1>Secure document upload</h1>
 			<p class="muted">Case <b>%s</b> · link expires %s · up to %d more file(s) of %d on this link</p>
-			<input type="file" id="f" accept="image/*,application/pdf" multiple />
+			<input type="file" id="f" accept="image/*,application/pdf,.docx,.xlsx,.pptx" multiple />
 			<p id="qual" class="muted"></p>
 			<button id="go" disabled>Upload securely</button>
 			<div id="bar" style="display:none;height:8px;background:#e5e7eb;border-radius:4px;margin:14px 0">

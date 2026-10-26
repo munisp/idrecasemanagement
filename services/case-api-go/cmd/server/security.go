@@ -110,10 +110,14 @@ var blockedExtensions = map[string]bool{
 // polyglot tricks (double extensions like bill.pdf.exe).
 func contentPolicy(filename string, head []byte) error {
 	lower := strings.ToLower(filename)
-	// double-extension evasion: anything.exe/.bat/… anywhere in the name
-	for ext := range blockedExtensions {
-		if strings.Contains(lower, ext) {
-			return fmt.Errorf("executable content is not accepted (%s)", ext)
+	// double-extension evasion: a blocked extension among the name's
+	// dot-delimited segments (bill.pdf.exe, report.sh.pdf). Matched as a real
+	// segment, so legitimate names that merely CONTAIN a blocked string —
+	// balance.sheet.pdf, claims.json.pdf, Q3.company.financials.pdf — are not
+	// rejected (the old strings.Contains check refused all of those).
+	for _, part := range strings.Split(lower, ".") {
+		if blockedExtensions["."+part] {
+			return fmt.Errorf("executable content is not accepted (.%s)", part)
 		}
 	}
 	if blockedExtensions[strings.ToLower(filepath.Ext(lower))] {

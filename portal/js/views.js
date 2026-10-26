@@ -2786,7 +2786,7 @@ const Views = (() => {
       <label id="pf-doc-label" style="display:none">Prefill from a recent document <select id="pf-doc"></select></label>
       <label>CMS case number <input name="case_number" required placeholder="CMS-TX-2026-00002" /></label>
       <label>Attach claim/EOB document <span class="muted">(optional — QPA and service line fill in automatically once analyzed, instead of typing them below)</span>
-        <input name="doc" type="file" accept=".pdf,.png,.jpg,.jpeg,.tiff,.webp" /></label>
+        <input name="doc" type="file" accept=".pdf,.png,.jpg,.jpeg,.tiff,.webp,.docx,.xlsx,.pptx" /></label>
       <label>Service line <select name="service_line"><option value="">— leave to auto-fill —</option><option>ER</option><option>AIR_AMBULANCE</option><option>ANESTHESIA</option><option>RADIOLOGY</option><option>LAB</option><option>OTHER</option></select></label>
       <label>Plan type <select name="plan_type"><option>SELF_FUNDED</option><option>FULLY_INSURED</option></select></label>
       <label>QPA (USD) <input name="qpa" type="number" step="0.01" placeholder="leave blank to auto-fill from document" /></label>
@@ -9067,7 +9067,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       const verdict = (s) => `${checkBadge(s.status)}${s.uploaded_by ? `<div class="muted">${esc(s.uploaded_by)}${s.uploaded_at ? " · " + when(s.uploaded_at) : ""}</div>` : ""}`;
       const why = (rs) => (rs || []).map((r2) => esc(r2.detail || r2.code)).join("; ");
       const change = (s) => !open ? "" : `<label class="mini button-like">${s.status === "MISSING" ? "Add…" : "Replace…"}
-          <input type="file" hidden accept=".pdf,application/pdf,image/*" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this,'${esc(s.status)}')" /></label>
+          <input type="file" hidden accept=".pdf,application/pdf,image/*,.docx,.xlsx,.pptx" onchange="Views.tpaSlotUpload('${packageId}','${s.slot}',this,'${esc(s.status)}')" /></label>
         ${s.status !== "MISSING" ? `<button type="button" class="mini ghost" onclick="Views.tpaSlotRemove('${packageId}','${s.slot}','${esc(s.filename || "")}')">Remove</button>` : ""}`;
       const history = (s) => (s.history || []).length ? `<tr class="pkg-hist"><td></td><td colspan="4"><details><summary class="muted">Earlier versions (${s.history.length})</summary>
           <table class="tbl" data-nosearch><thead><tr><th>File</th><th>Verdict</th><th>Why</th><th>Uploaded</th><th>What happened</th></tr></thead><tbody>
@@ -9454,7 +9454,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
         : '<p class="muted">None added yet.</p>'}
       ${open ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.moreDocsAdd(this,'${kind}','${p.package_id}')">
         <select name="kind" aria-label="What the document is">${kinds.map((k) => `<option value="${k}">${esc(MORE_LABEL[k] || k)}</option>`).join("")}</select>
-        <input name="file" type="file" multiple accept=".pdf,application/pdf,image/*" required aria-label="Files" />
+        <input name="file" type="file" multiple accept=".pdf,application/pdf,image/*,.docx,.xlsx,.pptx" required aria-label="Files" />
         <button class="mini">Add documents</button></form>` : ""}`;
   }
   async function moreDocsAdd(form, kind, packageId) {
