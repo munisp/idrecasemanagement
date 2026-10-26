@@ -37,8 +37,8 @@ import (
 // Filing size limits: a note can run long (far beyond a page) but is bounded,
 // and the whole filing body is capped so an unbounded payload cannot be posted.
 const (
-	maxFilingNoteBytes = 2 << 20 // 2 MB of free-text notes
-	maxFilingBodyBytes = 4 << 20 // 4 MB for the whole filing (note + packet + fields)
+	maxFilingNoteBytes = 5 << 20  // 5 MB of free-text notes
+	maxFilingBodyBytes = 10 << 20 // 10 MB for the whole filing (note + packet + fields)
 )
 
 type tpaOrg struct {
@@ -519,7 +519,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	// Notes may be long (far beyond a page), but not unbounded.
 	if len(in.Notes) > maxFilingNoteBytes {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "the notes are too long — keep them under 2 MB"})
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "the notes are too long — keep them under 5 MB"})
 		return
 	}
 	if msg := disputedAmountProblem(in.DisputedAmountCents, true); msg != "" {
