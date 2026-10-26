@@ -338,6 +338,19 @@ const Api = (() => {
     },
     // Personal timesheet: daily entry screen with day/week/month totals.
     // The program's company mailbox (e.g. where replies to case letters arrive), connected by a tenant admin.
+    // Who may email in on one dispute, and its reply code (case page).
+    caseSenders: {
+      get: (id) => req("GET", `${t()}/cases/${id}/mail-senders`),
+      add: (id, email) => req("POST", `${t()}/cases/${id}/mail-senders`, { email }),
+      remove: (id, email) => req("DELETE", `${t()}/cases/${id}/mail-senders`, { email }),
+      rotate: (id) => req("POST", `${t()}/cases/${id}/reply-code/rotate`),
+    },
+    // Every authorized address in the program (Mail log).
+    programSenders: {
+      list: (q) => req("GET", `${t()}/mail/authorized-senders` + qs({ q })),
+      add: (b) => req("POST", `${t()}/mail/authorized-senders`, b),
+      remove: (b) => req("DELETE", `${t()}/mail/authorized-senders`, b),
+    },
     // The addresses that email and answer for a TPA or a health plan (kind "tpa" | "hp").
     orgSenders: {
       list: (kind) => req("GET", `${t()}/${kind}/authorized-senders`),

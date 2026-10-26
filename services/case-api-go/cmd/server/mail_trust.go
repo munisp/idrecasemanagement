@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/mail"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -274,4 +275,156 @@ func (s *server) caseReplyCodeHTTP(kind string) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"code": s.caseReplyCode(r.Context(), tenant, caseID)})
 	}
+}
+
+// ---- the office's view: who may email in, per dispute and across the program ------------------------------------------
+
+var mailSenderEditors = []string{"PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+
+// caseSendersHTTP: GET/POST/DELETE /cases/{caseId}/mail-senders -- who may put mail on this dispute: the parties'
+// addresses (as the trust rules see them), the senders authorized on it (by code, by hand, by the office), and its
+// current reply code. The case's Reviewer, PMs and admins add or remove a sender for this dispute.
+func (s *server) caseSendersHTTP(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	if !hasAnyRole(p, append([]string{"CASE_MANAGER"}, mailSenderEditors...)...) || !s.caseVisible(r.Context(), p, tenant, caseID) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+		var in struct {
+			Email string `json:"email"`
+		}
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in)
+		a, perr := mail.ParseAddress(strings.TrimSpace(in.Email))
+		if perr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "give an email address"})
+			return
+		}
+		addr := strings.ToLower(a.Address)
+		if r.Method == http.MethodPost {
+			s.authorizeSender(r.Context(), tenant, "", addr, caseID, p.Username, "OFFICE")
+			s.logActivity(r.Context(), tenant, caseID, "MAIL_SENDER_AUTHORIZED", fmt.Sprintf("%s may now email in on this dispute (added by %s)", addr, p.Username))
+		} else {
+			_, _ = s.db.Exec(r.Context(), `DELETE FROM public.mail_authorized_senders WHERE tenant=$1 AND case_id=$2 AND email=$3`, tenant, caseID, addr)
+			s.logActivity(r.Context(), tenant, caseID, "MAIL_SENDER_REMOVED", fmt.Sprintf("%s's mail is no longer accepted on this dispute (removed by %s)", addr, p.Username))
+		}
+		s.logAudit(r.Context(), tenant, caseID, "MAIL_SENDER_"+map[string]string{http.MethodPost: "AUTHORIZED", http.MethodDelete: "REMOVED"}[r.Method],
+			map[string]any{"email": addr, "by": p.Username, "scope": "case"})
+	}
+	_, filerOrg, filerName, filer := s.partyAddresses(r.Context(), tenant, caseID)
+	other := s.sideContact(r.Context(), tenant, caseID, otherSide(s.filerSide(r.Context(), tenant, caseID)))
+	otherAddrs := []string{}
+	if _, a := splitAddress(other.email); a != "" {
+		otherAddrs = append(otherAddrs, a)
+	}
+	otherAddrs = append(otherAddrs, s.orgSenders(r.Context(), tenant, other.org)...)
+	filerList := []string{}
+	for a := range filer {
+		filerList = append(filerList, a)
+	}
+	sort.Strings(filerList)
+	rows, err := s.queryRows(r, `SELECT email, via, added_by, created_at FROM public.mail_authorized_senders WHERE tenant=$1 AND case_id=$2 ORDER BY created_at`, tenant, caseID)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reply_code":   s.caseReplyCode(r.Context(), tenant, caseID),
+		"filer":        map[string]any{"name": filerName, "org": filerOrg, "addresses": filerList},
+		"other":        map[string]any{"name": other.name, "org": other.org, "addresses": otherAddrs},
+		"case_senders": rows,
+		"may_edit":     true,
+	})
+}
+
+// caseReplyCodeRotate: POST /cases/{caseId}/reply-code/rotate -- the code was given to the wrong person, say: it stops
+// working and a new one is made.
+func (s *server) caseReplyCodeRotate(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	if !hasAnyRole(p, append([]string{"CASE_MANAGER"}, mailSenderEditors...)...) || !s.caseVisible(r.Context(), p, tenant, caseID) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	_, _ = s.db.Exec(r.Context(), `UPDATE public.case_reply_codes SET used_at=now(), used_by=$3 WHERE tenant=$1 AND case_id=$2 AND used_at IS NULL`,
+		tenant, caseID, "replaced by "+p.Username)
+	code := s.caseReplyCode(r.Context(), tenant, caseID)
+	s.logActivity(r.Context(), tenant, caseID, "REPLY_CODE_REPLACED", "The dispute's reply code was replaced by "+p.Username+"; the old one no longer works")
+	s.logAudit(r.Context(), tenant, caseID, "REPLY_CODE_REPLACED", map[string]any{"by": p.Username})
+	writeJSON(w, http.StatusOK, map[string]string{"reply_code": code})
+}
+
+// programSendersHTTP: GET/POST/DELETE /mail/authorized-senders -- every authorized address in the program: those an
+// organization added (or the office added for it) and those authorized on one dispute. PMs and admins edit.
+func (s *server) programSendersHTTP(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, append([]string{"CASE_MANAGER"}, mailSenderEditors...)...) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	t := sanitizeTenant(tenant)
+	if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+		if !hasAnyRole(p, mailSenderEditors...) {
+			http.Error(w, `{"error":"a PM or an admin adds and removes authorized addresses"}`, http.StatusForbidden)
+			return
+		}
+		var in struct {
+			Email      string `json:"email"`
+			Org        string `json:"org"`         // tpa:<id> | plan:<id>, for the whole organization
+			CaseNumber string `json:"case_number"` // or one dispute
+		}
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in)
+		a, perr := mail.ParseAddress(strings.TrimSpace(in.Email))
+		if perr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "give an email address"})
+			return
+		}
+		addr := strings.ToLower(a.Address)
+		caseID := ""
+		if n := strings.ToUpper(strings.TrimSpace(in.CaseNumber)); n != "" {
+			if caseID = s.existingCases(r.Context(), tenant, []string{n})[n]; caseID == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no dispute " + n})
+				return
+			}
+		}
+		org := strings.TrimSpace(in.Org)
+		if caseID == "" && !strings.HasPrefix(org, "tpa:") && !strings.HasPrefix(org, "plan:") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "choose an organization or give a dispute number"})
+			return
+		}
+		if caseID != "" {
+			org = ""
+		}
+		if r.Method == http.MethodPost {
+			s.authorizeSender(r.Context(), tenant, org, addr, caseID, p.Username, "OFFICE")
+		} else {
+			_, _ = s.db.Exec(r.Context(), `DELETE FROM public.mail_authorized_senders WHERE tenant=$1 AND org=$2 AND email=$3 AND case_id=$4`, tenant, org, addr, caseID)
+		}
+		s.logAudit(r.Context(), tenant, caseID, "MAIL_SENDER_"+map[string]string{http.MethodPost: "AUTHORIZED", http.MethodDelete: "REMOVED"}[r.Method],
+			map[string]any{"email": addr, "org": org, "by": p.Username})
+	}
+	args := []any{tenant}
+	where := ""
+	if q := searchLike(r.URL.Query().Get("q")); q != "" {
+		args = append(args, q)
+		where = ` AND (s.email ILIKE $2 OR coalesce(tp.name, hp.name, '') ILIKE $2 OR coalesce(k.case_number,'') ILIKE $2)`
+	}
+	rows, err := s.queryRows(r, `SELECT s.email, s.org, coalesce(tp.name, hp.name, '') AS org_name, s.case_id, coalesce(k.case_number,'') AS case_number,
+		s.via, s.added_by, s.created_at
+		FROM public.mail_authorized_senders s
+		LEFT JOIN public.tpas tp ON s.org = 'tpa:'||tp.id::text
+		LEFT JOIN public.health_plans hp ON s.org = 'plan:'||hp.id::text
+		LEFT JOIN tenant_`+t+`.cases k ON k.id::text = nullif(s.case_id,'')
+		WHERE s.tenant=$1`+where+` ORDER BY s.created_at DESC LIMIT 500`, args...)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	orgs, _ := s.queryRows(r, `SELECT 'tpa:'||id::text AS org, name, 'TPA' AS kind FROM public.tpas WHERE tenant=$1
+		UNION ALL SELECT 'plan:'||id::text, name, 'Health plan' FROM public.health_plans WHERE tenant=$1 ORDER BY 2`, tenant)
+	writeJSON(w, http.StatusOK, map[string]any{"senders": rows, "orgs": orgs, "may_edit": hasAnyRole(p, mailSenderEditors...)})
 }

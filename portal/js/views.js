@@ -3314,6 +3314,10 @@ const Views = (() => {
       <details class="prog-sec" id="p-mail-track" data-tab="mail" open><summary>Mail tracker <span class="muted">— every email of this dispute: where it is, who got it, what they did with its links</span></summary>
         <div id="p-mail-tracker" data-case-id="${esc(id)}"><p class="muted">Loading…</p></div></details>
 
+      ${can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<details class="prog-sec" id="p-senders" data-tab="mail"><summary>Accepted senders &amp; reply code
+        <span class="muted">— whose email goes onto this dispute, and the code for writing from any other address</span></summary>
+        <div id="p-case-senders"><p class="muted">Loading…</p></div></details>` : ""}
+
       <details class="prog-sec" id="p-send-details" data-tab="mail" open><summary>Write to the parties</summary>
       <form id="p-send" class="form" data-task="send_letter" data-case-id="${esc(id)}">
         ${corrTplCache = cfg.correspondence?.templates || [], ""}
@@ -3646,6 +3650,7 @@ const Views = (() => {
         } catch (e) { UI.toast(e.message, { kind: "warn" }); }
       });
       mailTrackerBox(id);
+      caseSendersBox(id);
       Api.program.correspondence(id).then((r) => {
         const el = document.getElementById("p-corr"); if (!el) return;
         const rows = r.correspondence || [];
@@ -7122,11 +7127,13 @@ const Views = (() => {
     afterRender(mailRecipientsBox);
     afterRender(systemMailBox);
     afterRender(companyOutlookBox);
+    afterRender(() => programSendersBox());
     return `<div class="view-head"><h1>Mail log</h1>
       <span class="muted">every inbound and outbound mail across the platform, with its delivery status — pending approval, sent, delivered, bounced or failed</span></div>
       <div id="mail-recipients"></div>
       <div id="system-mail"></div>
       <div id="company-outlook"></div>
+      <div id="program-senders"></div>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
         <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="UNMATCHED">Inbound — not matched to a case</option><option value="HELD">Inbound — held: unknown sender</option><option value="OUT">Outbound</option></select>
         <select name="status" title="delivery status"><option value="">Any delivery status</option>
@@ -7196,6 +7203,77 @@ const Views = (() => {
     const ok = await UI.modal({ title: "Reject this mail?", body: "It stays in the mail log, marked rejected, and never goes on the dispute.", submitLabel: "Reject", danger: true });
     if (!ok) return;
     try { await Api.program.rejectMail(id); UI.toast("Rejected"); mailLogBox(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // A dispute's accepted senders and reply code (case page, Mail tab).
+  async function caseSendersBox(id) {
+    const box = document.getElementById("p-case-senders");
+    if (!box) return;
+    let r;
+    try { r = await Api.caseSenders.get(id); } catch (e) { box.innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
+    const list = (xs) => xs.length ? xs.map((a) => `<code>${esc(a)}</code>`).join(", ") : `<span class="muted">none on record</span>`;
+    const VIA = { CODE: "used the reply code", FILED_BY_HAND: "mail filed by hand", OFFICE: "added by the office" };
+    const rows = r.case_senders || [];
+    box.innerHTML = `
+      <p><b>Reply code:</b> <code style="font-size:1.1em;user-select:all">${esc(r.reply_code || "—")}</code>
+        <button class="mini ghost" type="button" onclick="Views.caseReplyCodeRotate('${esc(id)}')">New code</button>
+        <span class="muted">Printed on every email about this dispute. Good once, from any address; a new one replaces it.</span></p>
+      <p><b>Filing party</b>${r.filer?.name ? ` (${esc(r.filer.name)})` : ""}: ${list(r.filer?.addresses || [])}
+        <br><span class="muted" style="font-size:.9em">Its registered address, portal team and the addresses it added — these can also answer for it.</span></p>
+      <p><b>Other party</b>${r.other?.name ? ` (${esc(r.other.name)})` : ""}: ${list(r.other?.addresses || [])}</p>
+      <p><b>Also accepted on this dispute</b></p>
+      ${rows.length ? `<table class="tbl"><tbody>${rows.map((x) => `<tr><td><code>${esc(x.email)}</code></td><td class="muted">${esc(VIA[x.via] || x.via)}${x.added_by ? ` · ${esc(x.added_by)}` : ""}</td>
+        <td class="muted">${fmtDate(x.created_at)}</td><td><button class="mini ghost" onclick="Views.caseSenderRemove('${esc(id)}', '${esc(x.email)}')">Remove</button></td></tr>`).join("")}</tbody></table>`
+        : `<p class="muted">No one else yet.</p>`}
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.caseSenderAdd('${esc(id)}', this)">
+        <input name="email" type="email" placeholder="someone@example.com" required style="min-width:16em" /><button class="mini">Accept their email on this dispute</button></form>
+      <p class="muted" style="font-size:.9em">Email from anyone else that names this dispute is held in the Mail log for you to file or reject.</p>`;
+  }
+  async function caseSenderAdd(id, f) {
+    try { await Api.caseSenders.add(id, f.email.value.trim()); UI.toast("Their email is now accepted on this dispute"); caseSendersBox(id); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function caseSenderRemove(id, email) {
+    try { await Api.caseSenders.remove(id, email); UI.toast("Removed"); caseSendersBox(id); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function caseReplyCodeRotate(id) {
+    const ok = await UI.modal({ title: "Make a new reply code?", body: "The current code stops working at once. Emails sent from now on carry the new one.", submitLabel: "New code" });
+    if (!ok) return;
+    try { const r = await Api.caseSenders.rotate(id); UI.toast(`New reply code: ${r.reply_code}`, { duration: 8000 }); caseSendersBox(id); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // Every authorized address in the program (Mail log): what each organization added, and who is accepted per dispute.
+  async function programSendersBox(q) {
+    const box = document.getElementById("program-senders");
+    if (!box) return;
+    let r;
+    try { r = await Api.programSenders.list(q || ""); } catch (e) { box.innerHTML = ""; return; }
+    const VIA = { TPA: "added by the TPA", PLAN: "added by the plan", OFFICE: "added by the office", CODE: "used the reply code", FILED_BY_HAND: "mail filed by hand" };
+    const rows = r.senders || [];
+    const orgOpts = (r.orgs || []).map((o) => `<option value="${esc(o.org)}">${esc(o.name)} (${esc(o.kind)})</option>`).join("");
+    box.innerHTML = `<details class="prog-sec" ${q ? "open" : ""}><summary>Authorized senders <span class="muted">— ${rows.length} address${rows.length === 1 ? "" : "es"} whose email is accepted beyond the parties' registered ones</span></summary>
+      <form class="inline-form" onsubmit="event.preventDefault(); Views.programSendersBox(this.q.value.trim())">
+        <input name="q" value="${esc(q || "")}" placeholder="search address, organization or dispute" style="min-width:18em" /><button class="mini">Search</button></form>
+      ${rows.length ? `<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Address</th><th>For</th><th>How</th><th>When</th><th></th></tr></thead><tbody>
+        ${rows.map((x) => `<tr><td><code>${esc(x.email)}</code></td>
+          <td>${x.case_number ? `dispute <a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a>` : esc(x.org_name || x.org)}</td>
+          <td class="muted">${esc(VIA[x.via] || x.via)}${x.added_by ? ` · ${esc(x.added_by)}` : ""}</td><td class="muted">${fmtDate(x.created_at)}</td>
+          <td>${r.may_edit ? `<button class="mini ghost" onclick="Views.programSenderRemove('${esc(x.email)}', '${esc(x.org)}', '${esc(x.case_number)}')">Remove</button>` : ""}</td></tr>`).join("")}
+        </tbody></table></div>` : `<p class="muted">None${q ? " match" : " yet"}.</p>`}
+      ${r.may_edit ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.programSenderAdd(this)">
+        <input name="email" type="email" placeholder="address" required style="min-width:14em" />
+        <select name="org"><option value="">for a dispute…</option>${orgOpts}</select>
+        <input name="case_number" placeholder="or dispute number" style="width:10em" />
+        <button class="mini">Authorize</button></form>` : ""}</details>`;
+  }
+  async function programSenderAdd(f) {
+    try { await Api.programSenders.add({ email: f.email.value.trim(), org: f.org.value, case_number: f.case_number.value.trim() }); UI.toast("Authorized"); programSendersBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function programSenderRemove(email, org, caseNumber) {
+    try { await Api.programSenders.remove({ email, org, case_number: caseNumber }); UI.toast("Removed"); programSendersBox(); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
   // An organization's authorized email addresses (TPA: Team tab; health plan: Document requests tab).
@@ -11853,5 +11931,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();
