@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	temporalclient "go.temporal.io/sdk/client"
 	"time"
 )
@@ -418,7 +419,18 @@ func (s *server) issueInitialFeeInvoice(r *http.Request, tenant, caseID, caseNum
 		INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
 		VALUES ($1,$2,$3,'PROVIDER','INITIAL_FEE',$4, (now() + make_interval(days => 30))::date)
 		ON CONFLICT (tenant, case_id, party, kind) DO UPDATE SET amount_cents=EXCLUDED.amount_cents, status='OPEN'
+		  WHERE invoices.status NOT IN ('PAID','REFUND_PENDING','REFUNDED')
 		RETURNING id`, tenant, caseID, caseNumber, amountCents).Scan(&invID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The fee is already settled: don't reopen it. Return the existing
+			// invoice's id so the caller carries on with the paid invoice.
+			if e := s.db.QueryRow(r.Context(),
+				`SELECT id FROM public.invoices WHERE tenant=$1 AND case_id=$2 AND party='PROVIDER' AND kind='INITIAL_FEE'`,
+				tenant, caseID).Scan(&invID); e != nil {
+				return "", e
+			}
+			return invID, nil
+		}
 		return "", err
 	}
 	s.finEvent(r, tenant, caseID, invID, "INVOICE_ISSUED", "NONE", amountCents, "PROVIDER", caseNumber, "system:ahca-intake")

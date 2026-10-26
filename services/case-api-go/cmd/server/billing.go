@@ -616,8 +616,10 @@ func (s *server) recordInvoicePayment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	if status != "ISSUED" && status != "PAID" {
-		http.Error(w, `{"error":"payments only against ISSUED invoices"}`, http.StatusConflict)
+	if status != "ISSUED" {
+		// Only ISSUED invoices take payments. Recording against an already-PAID
+		// invoice (or a DRAFT/VOID one) over-records and desyncs paid totals.
+		http.Error(w, fmt.Sprintf(`{"error":"payments only against ISSUED invoices (this one is %s)"}`, status), http.StatusConflict)
 		return
 	}
 	var paymentID int64

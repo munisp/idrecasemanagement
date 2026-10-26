@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 )
 
 // ---- Invoices / receivables (G8) --------------------------------------------
@@ -98,7 +99,15 @@ func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO public.invoices (tenant, case_id, invoice_no, party, kind, amount_cents, due_date)
 		VALUES ($1,$2,$3,$4,$5,$6, (`+dueFrom+` + make_interval(days => $7))::date)
 		ON CONFLICT (tenant, case_id, party, kind) DO UPDATE SET amount_cents=EXCLUDED.amount_cents, status='OPEN'
+		  WHERE invoices.status NOT IN ('PAID','REFUND_PENDING','REFUNDED')
 		RETURNING id`, tenant, caseID, caseNumber, in.Party, in.Kind, in.AmountCents, in.DueDays).Scan(&invID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A settled invoice already exists for this case/party/kind: re-issuing
+		// would silently flip it back to OPEN and lose the paid state (the
+		// payment row still says PAID). Refuse; the invoice must be voided first.
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this case already has a settled invoice for that party — void it before issuing a new one"})
+		return
+	}
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
