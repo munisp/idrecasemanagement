@@ -124,7 +124,10 @@ var wfStatusResume = func() map[string][]map[string]any {
 		sig("ATTORNEY_REVIEW_COMPLETE", nil))
 	sentFL := append(append([]map[string]any{}, reviewed...), sig("LETTER_SENT", map[string]any{"template": "final_order"}))
 	return map[string][]map[string]any{
-		"": {}, "Initial Review Pending": {}, "QA Initial Review": packet,
+		// "Initial Review Pending" is set in Stage 2, AFTER PACKET_COMPLETE
+		// (ahca_workflow.py), so a status-based resume for it must replay the
+		// packet signal — otherwise a resumed run waits at intake again.
+		"": {}, "Initial Review Pending": packet, "QA Initial Review": packet,
 		"Provider Acceptance Letter Issued": accepted, "Plan Notification Packet Issued": notified,
 		"Review In Progress": review, "Plan - No Response": review,
 		"RFI Pending Provider Response": append(append([]map[string]any{}, review...), sig("RFI_SENT", map[string]any{"to": "provider"})),
