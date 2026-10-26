@@ -116,9 +116,14 @@ func (s *server) mailFlood(ctx context.Context, tenant, from string) string {
 	default:
 		return ""
 	}
+	// One warning an hour: per sender for one sender's flood; one for the program when mail floods in from many.
+	key := orWord(from, "a sender")
+	if all >= mailTenantHourly {
+		key = "reached the program"
+	}
 	var told bool
 	_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.notifications WHERE tenant=$1 AND type='MAIL_FLOOD' AND body LIKE '%'||$2||'%'
-		AND created_at > now() - interval '1 hour')`, tenant, orWord(from, "a sender")).Scan(&told)
+		AND created_at > now() - interval '1 hour')`, tenant, key).Scan(&told)
 	if !told {
 		s.notifyCtx(ctx, tenant, "role:TENANT_ADMIN", "MAIL_FLOOD", "Email is arriving too fast: "+why+". Further mail from them is recorded but not processed for now.", "#/mail")
 		s.logAudit(ctx, tenant, "", "MAIL_FLOOD", map[string]any{"from": from, "why": why})
