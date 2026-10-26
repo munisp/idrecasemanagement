@@ -779,9 +779,13 @@ func main() {
 
 		// Third-party administrators (tpa.go): file/pay/track on behalf of
 		// multiple initiating parties (providers or health plans).
-		r.Post("/tpa/claim", s.claimTPA)             // burn a one-time claim code, bind user -> TPA
-		r.Post("/tpa/unlink", s.unlinkTPA)           // staff-only: undo "Act as this TPA"
-		r.Post("/tpa/invite-code", s.tpaInviteCode)  // mint a fresh claim code to add a teammate
+		r.Post("/tpa/claim", s.claimTPA)                          // burn a one-time claim code, bind user -> TPA
+		r.Post("/tpa/unlink", s.unlinkTPA)                        // staff-only: undo "Act as this TPA"
+		r.Post("/tpa/invite-code", s.tpaInviteCode)               // mint a fresh claim code to add a teammate
+		r.Get("/tpa/authorized-senders", s.orgSendersHTTP("tpa")) // addresses that email and answer for the TPA (mail_trust.go)
+		r.Post("/tpa/authorized-senders", s.orgSendersHTTP("tpa"))
+		r.Delete("/tpa/authorized-senders", s.orgSendersHTTP("tpa"))
+		r.Get("/tpa/disputes/{caseId}/reply-code", s.caseReplyCodeHTTP("tpa"))
 		r.Get("/tpa/team", s.tpaTeamList)            // the TPA's employees (tpa_team.go)
 		r.Post("/tpa/team", s.tpaTeamAdd)            // add an employee: their own login, emailed to them
 		r.Patch("/tpa/team/{sub}", s.tpaTeamSetRole) // ADMIN | STAFF
@@ -858,7 +862,11 @@ func main() {
 		r.Post("/tpa/tasks/{taskId}/done", s.tpaTaskDone)
 		r.Get("/tpa/fees/runs/{runId}", s.tpaFeeRun)
 		r.Get("/tpa/audit", s.orgAuditLog("tpa")) // the TPA's own audit trail (orgaudit.go)
-		r.Get("/hp/audit", s.orgAuditLog("hp"))   // the plan's own audit trail
+		r.Get("/hp/authorized-senders", s.orgSendersHTTP("hp"))
+		r.Post("/hp/authorized-senders", s.orgSendersHTTP("hp"))
+		r.Delete("/hp/authorized-senders", s.orgSendersHTTP("hp"))
+		r.Get("/hp/disputes/{caseId}/reply-code", s.caseReplyCodeHTTP("hp"))
+		r.Get("/hp/audit", s.orgAuditLog("hp")) // the plan's own audit trail
 		// Document requests (document_requests.go): asked on the case, answered in the portal.
 		r.Get("/tpa/sent-documents", s.orgSentDocs("tpa")) // what was sent to the TPA, by dispute (party_documents.go)
 		r.Get("/tpa/sent-documents/{docId}", s.orgSentDocDownload("tpa"))
@@ -945,8 +953,11 @@ func main() {
 		r.Post("/cases/{caseId}/correspondence/preview", s.previewCorrespondence)            // how it will read, before it is sent (mail_preview.go)
 		r.Get("/cases/{caseId}/correspondence", s.listCorrespondence)
 		r.Get("/cases/{caseId}/mail-tracker", s.caseMailTracker) // every email of the case, tracked (mail_tracker.go)
-		r.Post("/correspondence/{id}/file", s.fileMailToCase)    // file an unmatched inbound mail under a dispute (mailfiling.go)
+		r.Post("/correspondence/{id}/file", s.fileMailToCase)
+		r.Post("/correspondence/{id}/reject", s.rejectHeldMail) // a held mail is for no dispute (mail_trust.go)    // file an unmatched inbound mail under a dispute (mailfiling.go)
 		r.Get("/correspondence", s.listMailJournal)
+		r.Post("/internal/mail/jobs/{jobId}/{step}", s.mailJobHTTP) // worker-token: InboundMailWorkflow's steps (mail_jobs.go)
+		r.Post("/internal/mail/jobs/{jobId}/{step}/{attId}", s.mailJobHTTP)
 		r.Get("/correspondence/{id}/attachments", s.mailLogAttachments)
 		r.Get("/correspondence/{id}/attachments/{aid}", s.mailLogAttachment)
 		r.Get("/company-outlook", s.companyOutlookStatus) // the program's company mailbox (company_outlook.go)

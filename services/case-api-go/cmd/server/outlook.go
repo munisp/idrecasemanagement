@@ -568,52 +568,11 @@ func (s *server) fileOutlookMessage(ctx context.Context, tenant, sub, mbID, toke
 		return 0, err // already filed (or the insert failed): nothing new
 	}
 	s.mailEvent(ctx, id, "SYNCED", "from Outlook "+folder, "outlook")
-	if gm.HasAttachments {
-		s.fileOutlookAttachments(ctx, tenant, sub, id, token, base, gm.ID)
-	}
-	if dir == "IN" {
-		// Outlook mail about a dispute is filed under it. The rest of a person's Outlook stays in their own inbox; the
-		// rest of the company mailbox goes to the mail log's general inbound section, like the platform's own addresses.
-		s.fileInbound(ctx, inboundMail{Tenant: tenant, From: fromAddr, To: graphAddrs(gm.ToRecipients), Subject: gm.Subject, Body: text,
-			MessageID: gm.InternetMessageID, MailboxIDs: []string{id}, By: "outlook", Owners: []string{sub}, NotifyUnmatched: sub == companySub}, sub == companySub)
+	// Its attachments (scanned before they are kept), its filing and the rest: InboundMailWorkflow (mail_jobs.go).
+	if gm.HasAttachments || dir == "IN" {
+		s.newMailJob(ctx, tenant, "OUTLOOK", gm.ID, sub, fromAddr, nil, []string{id})
 	}
 	return 1, nil
-}
-
-func (s *server) fileOutlookAttachments(ctx context.Context, tenant, sub, messageID, token, base, graphID string) {
-	var res struct {
-		Value []struct {
-			Type        string `json:"@odata.type"`
-			ID          string `json:"id"`
-			Name        string `json:"name"`
-			ContentType string `json:"contentType"`
-			Size        int64  `json:"size"`
-			Content     string `json:"contentBytes"`
-		} `json:"value"`
-	}
-	if err := graphJSON(ctx, http.MethodGet, base+"/messages/"+url.PathEscape(graphID)+"/attachments", token, nil, &res); err != nil {
-		slog.Warn("outlook attachments not fetched", "err", err)
-		return
-	}
-	for _, a := range res.Value {
-		status, key := "STORED", ""
-		switch {
-		case !strings.HasSuffix(a.Type, "fileAttachment"):
-			status = "FAILED" // an attached item or reference link, not a file
-		case a.Size > maxMailAttachment:
-			status = "TOO_LARGE"
-		default:
-			data, err := base64.StdEncoding.DecodeString(a.Content)
-			if err == nil {
-				key, err = s.sealMailAttachment(ctx, tenant, sub, messageID, a.ID, data)
-			}
-			if err != nil {
-				status = "FAILED"
-			}
-		}
-		_, _ = s.db.Exec(ctx, `INSERT INTO public.mail_attachments (message_id, filename, content_type, size_bytes, object_key, status) VALUES ($1,$2,$3,$4,$5,$6)`,
-			messageID, orWord(a.Name, "attachment"), orWord(a.ContentType, "application/octet-stream"), a.Size, key, status)
-	}
 }
 
 // outlookBrokenNotice tells the connection's owner (the tenant admins, for the company mailbox) that it stopped working.

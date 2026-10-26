@@ -276,3 +276,20 @@ func TestWriteMixedParses(t *testing.T) {
 		t.Errorf("both files, intact: %v", names)
 	}
 }
+
+func TestReplyCode(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		c := newReplyCode()
+		if !replyCodeRE.MatchString(c) || len(c) != 12 || strings.ContainsAny(c[3:], "01ILO") {
+			t.Fatalf("a code a person can copy by hand: %q", c)
+		}
+		seen[c] = true
+	}
+	if len(seen) < 199 {
+		t.Error("codes are random")
+	}
+	if m := replyCodeRE.FindStringSubmatch("Please accept, our code is rc-7kq4-p2xm. Thanks"); m == nil {
+		t.Error("a code is found whatever its case")
+	}
+}

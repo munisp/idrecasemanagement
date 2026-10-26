@@ -338,6 +338,8 @@
     OUTLOOK_ERROR: "Outlook needs attention", COMPANY_OUTLOOK_ERROR: "Company Outlook needs attention",
     COMPANY_OUTLOOK_SEND_FAILED: "Company Outlook couldn't send", MAIL_DECISION_TO_CHECK: "Email answer to check",
     WITHDRAWAL_REQUESTED: "Withdrawal requested", DOCUMENTS_RECEIVED: "Answer received",
+    MAIL_ATTACHMENT_QUARANTINED: "Attachment removed", MAIL_PROCESSING_FAILED: "Email not processed",
+    MAIL_HELD: "Email held: unknown sender", MAIL_FLOOD: "Email arriving too fast",
   };
   const notifLabel = (t) => NOTIF_LABELS[t] || String(t || "").toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
   const notifEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -398,6 +400,39 @@
   };
   refreshBell();
   setInterval(refreshBell, 30000);
+
+  // First login: a short welcome to the bell and to email -- once per person (kept on the server, so not again on
+  // another device). Staff learn their own address and Outlook; outside parties learn they can answer by replying.
+  async function welcomeOnce() {
+    const sv = await Api.prefs.all().catch(() => null);
+    if (!sv || sv.welcome_seen) return;
+    const [mb, sys] = await Promise.all([
+      outside ? Promise.resolve(null) : Api.myMail.mailbox().catch(() => null),
+      Api.systemMail.get().catch(() => null)]);
+    const from = !sys ? "" : outside ? sys.address
+      : (sys.send_via === "outlook" ? (sys.company_outlook?.mailbox || sys.company_outlook?.email) : (sys.address || sys.default_from));
+    const e = notifEsc;
+    const bell = `<li><b>The bell</b> (top right) shows what needs you: a new email, an answer from a party, a letter to approve, a deadline.
+      Click one to go straight to it.</li>`;
+    const staff = `<ul class="welcome-list">${bell}
+      ${mb?.mailbox?.address ? `<li><b>Your email address</b> on the platform is <b>${e(mb.mailbox.address)}</b>. Open <b>My email</b> in the menu to read and
+        send mail, with attachments. Only you can read it.</li>` : ""}
+      <li><b>Outlook:</b> in My email you can connect your own Outlook account, so its mail shows here too.</li>
+      <li><b>Mail about a dispute files itself.</b> A message that answers a letter, or names a dispute number, goes onto that dispute's timeline,
+        and its attachments into the dispute's documents. Anything else waits in the Mail log for someone to file.</li>
+      <li><b>Answers by email count.</b> When a TPA replies to a letter with a clear answer — “yes, please proceed” — the dispute moves on as it
+        would from the portal. Unclear answers come to you to check.</li></ul>`;
+    const party = `<ul class="welcome-list">${bell}
+      <li><b>Document requests</b> list what the office needs from you: a permission, more time, or documents. Answer them there.</li>
+      <li><b>Or answer by email.</b> Reply to the letter's email${from ? ` (it comes from <b>${e(from)}</b>)` : ""} with a clear answer —
+        for example “Yes, please proceed with the full review” — and attach any documents. It is recorded on your dispute as if you had answered
+        here.</li>
+      <li><b>Email is accepted from your organization's addresses</b>: the one the letter went to, your team's, and any your admin adds
+        (Team → Authorized email addresses). From another address, include the dispute's <b>reply code</b>, printed on every email we send about it.</li></ul>`;
+    await UI.modal({ title: "Welcome — notifications and email", html: outside ? party : staff, submitLabel: "Got it" });
+    Api.prefs.put("welcome_seen", true).catch(() => {});
+  }
+  setTimeout(welcomeOnce, 1500); // after the first page has drawn
 
   // Identity. The avatar doubles as the sign-out control on narrow
   // viewports, where .who-txt (and the #lo link inside it) is hidden by

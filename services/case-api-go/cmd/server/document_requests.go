@@ -208,8 +208,9 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 	if pc.email != "" && reason == "EXTENSION" {
 		subject := fmt.Sprintf("More time requested — dispute %s", caseNumber)
 		body := fmt.Sprintf("The review team of dispute %s asks for more time:\n\n  • %s\n\nWhy: %s\n\n"+
-			"Please sign in to the portal by %s and agree or decline under Document requests:\n%s/app.html#/document-requests\n",
+			"Please agree or decline by %s: under Document requests in the portal (%s/app.html#/document-requests), or by replying to this email.\n",
 			caseNumber, what, message, due, strings.TrimRight(s.cfg.PortalBaseURL, "/"))
+		body = s.withReplyCode(r.Context(), tenant, caseID, body)
 		msgID, err := s.sendMailID(tenant, []string{pc.email}, nil, subject, body)
 		errs := []string{}
 		if err != nil {
@@ -230,17 +231,18 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 		}
 		fmt.Fprintf(&body, "\nPlease send them by %s.\n\n", due)
 		if pc.org != "" {
-			fmt.Fprintf(&body, "Sign in to the portal and upload them under Document requests:\n%s/app.html#/document-requests\n\n"+
-				"Please upload in the portal rather than replying to this email.", strings.TrimRight(s.cfg.PortalBaseURL, "/"))
+			fmt.Fprintf(&body, "Upload them under Document requests in the portal:\n%s/app.html#/document-requests\n\n"+
+				"Or reply to this email with them attached.", strings.TrimRight(s.cfg.PortalBaseURL, "/"))
 		} else {
 			fmt.Fprintf(&body, "Upload them through this secure link:\n%s", s.autoShareLink(r, tenant, caseID, "upload", ""))
 		}
-		msgID, err := s.sendMailID(tenant, []string{pc.email}, nil, subject, body.String())
+		text := s.withReplyCode(r.Context(), tenant, caseID, body.String())
+		msgID, err := s.sendMailID(tenant, []string{pc.email}, nil, subject, text)
 		errs := []string{}
 		if err != nil {
 			errs = append(errs, err.Error())
 		}
-		s.logCorrespondence(r, tenant, caseID, "OUT", "document_request", subject, body.String(), []string{pc.email}, nil, displayName(r.Context().Value(ctxPrincipal{}).(principal)), errs...)
+		s.logCorrespondence(r, tenant, caseID, "OUT", "document_request", subject, text, []string{pc.email}, nil, displayName(r.Context().Value(ctxPrincipal{}).(principal)), errs...)
 		s.noteMailMessageID(r.Context(), tenant, caseID, subject, msgID) // a reply is filed under the dispute by thread too
 	}
 	s.logActivity(r.Context(), tenant, caseID, "DOCUMENTS_REQUESTED", fmt.Sprintf("%s requested from the %s side: %s (due %s)%s",

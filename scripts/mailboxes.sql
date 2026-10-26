@@ -127,3 +127,64 @@ CREATE INDEX IF NOT EXISTS mail_messages_provider_msgid ON public.mail_messages 
 -- An attachment of a mail filed under a dispute becomes one of its documents (mail_decisions.go): the document it
 -- became, so it is added once.
 ALTER TABLE public.mail_attachments ADD COLUMN IF NOT EXISTS case_doc_id text NOT NULL DEFAULT '';
+
+-- Every received mail is processed by InboundMailWorkflow (mail_jobs.go), one job per message and program: what
+-- arrived, which step it reached, and why it stopped if it did. Attachments are listed PENDING and kept only once
+-- the malware scan passes (QUARANTINED when it does not).
+CREATE TABLE IF NOT EXISTS public.inbound_mail_jobs (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant       text NOT NULL,
+    source       text NOT NULL,                     -- RESEND | OUTLOOK
+    provider_id  text NOT NULL,                     -- Resend email id, or the Graph message id
+    owner_sub    text NOT NULL DEFAULT '',          -- whose Outlook (the 'company' mailbox, or a person)
+    event        jsonb NOT NULL DEFAULT '{}',       -- the provider's event, as received
+    mailbox_ids  jsonb NOT NULL DEFAULT '[]',       -- the mail_messages rows it became
+    refs         jsonb NOT NULL DEFAULT '[]',       -- In-Reply-To / References, for threading it to its dispute
+    status       text NOT NULL DEFAULT 'NEW',       -- NEW | RECEIVED | FILED | DONE | FAILED
+    step         text NOT NULL DEFAULT '',
+    last_error   text NOT NULL DEFAULT '',
+    filed        boolean NOT NULL DEFAULT false,
+    delivered    boolean NOT NULL DEFAULT false,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    finished_at  timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS inbound_mail_jobs_once ON public.inbound_mail_jobs (tenant, source, owner_sub, provider_id);
+CREATE INDEX IF NOT EXISTS inbound_mail_jobs_open ON public.inbound_mail_jobs (status, updated_at) WHERE status NOT IN ('DONE');
+ALTER TABLE public.mail_attachments ADD COLUMN IF NOT EXISTS provider_ref text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS mail_attachments_provider ON public.mail_attachments (message_id, provider_ref) WHERE provider_ref <> '';
+
+-- Who may put mail on a dispute (mail_trust.go). An organization's own extra addresses (case_id ''), or a sender
+-- authorized on one dispute (by its reply code, or a person filing their mail by hand).
+CREATE TABLE IF NOT EXISTS public.mail_authorized_senders (
+    tenant      text NOT NULL,
+    org         text NOT NULL DEFAULT '',     -- tpa:<id> | plan:<id>; '' for a one-dispute authorization
+    email       text NOT NULL,
+    case_id     text NOT NULL DEFAULT '',
+    added_by    text NOT NULL DEFAULT '',
+    via         text NOT NULL DEFAULT '',     -- TPA | PLAN | CODE | FILED_BY_HAND
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mail_authorized_senders_once ON public.mail_authorized_senders (tenant, org, email, case_id);
+CREATE INDEX IF NOT EXISTS mail_authorized_senders_email ON public.mail_authorized_senders (tenant, email);
+
+-- A dispute's reply code: printed on its emails, good once from any address.
+CREATE TABLE IF NOT EXISTS public.case_reply_codes (
+    tenant      text NOT NULL,
+    case_id     text NOT NULL,
+    code        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    used_at     timestamptz,
+    used_by     text NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS case_reply_codes_code ON public.case_reply_codes (tenant, code);
+CREATE INDEX IF NOT EXISTS case_reply_codes_case ON public.case_reply_codes (tenant, case_id) WHERE used_at IS NULL;
+
+-- Mail that names a dispute but isn't from a sender trusted for it: held, with the dispute it names.
+ALTER TABLE public.correspondence_log ADD COLUMN IF NOT EXISTS hold_status text NOT NULL DEFAULT '';   -- '' | HELD | REJECTED
+ALTER TABLE public.correspondence_log ADD COLUMN IF NOT EXISTS held_case_id text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS correspondence_log_held ON public.correspondence_log (tenant, created_at DESC) WHERE hold_status = 'HELD';
+
+-- Flood limits count received mail per sender (mail_jobs.go).
+ALTER TABLE public.inbound_mail_jobs ADD COLUMN IF NOT EXISTS from_addr text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS inbound_mail_jobs_sender ON public.inbound_mail_jobs (tenant, from_addr, created_at);

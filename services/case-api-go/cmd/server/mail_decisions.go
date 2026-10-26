@@ -142,6 +142,9 @@ func (s *server) partyAddresses(ctx context.Context, tenant, caseID string) (sid
 			addrs[x] = true
 		}
 	}
+	for _, e := range s.orgSenders(ctx, tenant, org) { // the addresses the organization authorized itself
+		addrs[e] = true
+	}
 	if id, ok := strings.CutPrefix(org, "tpa:"); ok {
 		rows, err := s.db.Query(ctx, `SELECT lower(email) FROM public.tpa_users WHERE tenant=$1 AND tpa_id::text=$2 AND coalesce(email,'') <> ''`, tenant, id)
 		if err == nil {

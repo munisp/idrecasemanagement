@@ -477,6 +477,7 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// No QA gate on this template — deliver immediately via SMTP. Mail the provider queued for later
 		// (mailqueue.go) is sent: it goes out automatically, so the letter counts as sent.
+		body = s.withReplyCode(r.Context(), tenant, caseID, body) // how to answer, and the dispute's reply code (mail_trust.go)
 		msgID, err := s.sendMailID(tenant, in.To, in.CC, subject, body)
 		if err != nil && !errors.Is(err, errMailQueued) {
 			s.logCorrespondence(r, tenant, caseID, "OUT", in.Template, subject, body, in.To, in.CC, p.Subject, err.Error())
@@ -1086,9 +1087,11 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT c.id, c.case_id, COALESCE(k.case_number,'') AS case_number, c.direction, c.template,
 	             c.subject, c.body, c.recipients, c.sent_by, c.created_at,
 	             c.delivery_status, coalesce(c.delivery_error,'') AS delivery_error,
-	             c.status_updated_at, coalesce(c.match_reason,'') AS match_reason, count(*) OVER() AS total_count
+	             c.status_updated_at, coalesce(c.match_reason,'') AS match_reason, coalesce(c.hold_status,'') AS hold_status,
+	             coalesce(hk.case_number,'') AS held_case_number, count(*) OVER() AS total_count
 	      FROM public.correspondence_log c
 	      LEFT JOIN tenant_` + sanitizeTenant(tenant) + `.cases k ON k.id::text = c.case_id
+	      LEFT JOIN tenant_` + sanitizeTenant(tenant) + `.cases hk ON hk.id::text = nullif(c.held_case_id,'')
 	      WHERE c.tenant=$1`
 	args := []any{tenant}
 	if d := r.URL.Query().Get("direction"); d == "IN" || d == "OUT" {
@@ -1097,7 +1100,11 @@ func (s *server) listMailJournal(w http.ResponseWriter, r *http.Request) {
 	}
 	// The general inbound section: received mail that names no dispute, waiting to be filed by hand (mailfiling.go).
 	if r.URL.Query().Get("unmatched") == "1" {
-		q += ` AND c.direction='IN' AND c.case_id=''`
+		q += ` AND c.direction='IN' AND c.case_id='' AND coalesce(c.hold_status,'') = ''`
+	}
+	// Held: mail that names a dispute but isn't from a sender trusted for it (mail_trust.go), waiting for a person.
+	if r.URL.Query().Get("held") == "1" {
+		q += ` AND c.direction='IN' AND c.hold_status='HELD'`
 	}
 	if term := strings.TrimSpace(r.URL.Query().Get("q")); term != "" {
 		q += fmt.Sprintf(` AND (c.subject ILIKE $%d OR c.body ILIKE $%d OR k.case_number ILIKE $%d)`, len(args)+1, len(args)+1, len(args)+1)
@@ -1278,6 +1285,7 @@ func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, case
 	if len(to) == 0 && len(cc) == 0 {
 		sendErr = fmt.Errorf("no recipient email address on this draft — enter one and send again")
 	} else {
+		body = s.withReplyCode(r.Context(), tenant, caseID, body) // how to answer, and the dispute's reply code (mail_trust.go)
 		msgID, sendErr = s.sendMailID(tenant, to, cc, subject, body)
 	}
 	queued := errors.Is(sendErr, errMailQueued)

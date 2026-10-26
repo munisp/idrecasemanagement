@@ -65,6 +65,17 @@ func (s *server) systemFrom(tenant string) (header, envelope string) {
 
 func (s *server) getSystemMail(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
+	if p := r.Context().Value(ctxPrincipal{}).(principal); isExternalOnly(p) || hasAnyRole(p, "PARTY") {
+		// A TPA, plan or party learns only where the letters come from (so it recognizes them and can reply).
+		header, envelope := s.systemFrom(tenant)
+		if s.systemSendVia(tenant) == "outlook" {
+			if o := s.outlookStatus(r.Context(), tenant, companySub); o.Connected {
+				envelope, header = orWord(o.Mailbox, o.Email), orWord(o.Mailbox, o.Email)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"address": envelope, "sends_as": header})
+		return
+	}
 	var addr, name, status string
 	_ = s.db.QueryRow(r.Context(), `SELECT address, display_name, status FROM public.user_mailboxes WHERE tenant=$1 AND user_sub=$2`,
 		tenant, systemSub).Scan(&addr, &name, &status)

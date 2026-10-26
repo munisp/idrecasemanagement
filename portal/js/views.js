@@ -6219,6 +6219,9 @@ const Views = (() => {
   }
 
   let inboxRows = [];
+  // An attachment not (yet) kept: why. Every received file is malware-scanned before it is stored (mail_jobs.go).
+  const ATT_STATUS = { TOO_LARGE: "too large to keep", PENDING: "being checked for malware", QUARANTINED: "removed: it carried malware",
+    FAILED: "could not be fetched" };
 
   async function inboxList(more) {
     const box = document.getElementById("inbox-list");
@@ -6261,7 +6264,7 @@ const Views = (() => {
         <div id="inbox-body"></div>
         ${attachments.length ? `<h3>Attachments</h3><ul>${attachments.map((a) => `<li>${a.status === "STORED"
           ? `<a href="javascript:void 0" onclick="Views.inboxAttachment('${m.id}','${a.id}')">${esc(a.filename)}</a>`
-          : `${esc(a.filename)} <span class="muted">(${a.status === "TOO_LARGE" ? "too large to keep" : "not saved"})</span>`}
+          : `${esc(a.filename)} <span class="muted">(${ATT_STATUS[a.status] || "not saved"})</span>`}
           <span class="muted">${Math.max(1, Math.round(a.size / 1024))} KB</span></li>`).join("")}</ul>` : ""}
         <p>${m.direction === "IN" ? `<button class="mini" onclick="Views.inboxCompose('${m.id}')">Reply</button>` : ""}
           <button class="mini ghost" onclick="document.getElementById('inbox-read').innerHTML=''">Close</button></p>
@@ -7107,9 +7110,11 @@ const Views = (() => {
   function mailLog() {
     if (!can("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"))
       return `<div class="view-head"><h1>Mail log</h1></div><p class="muted">Requires a staff role.</p>`;
-    if (new URLSearchParams(location.hash.split("?")[1] || "").get("unmatched")) {
-      mailLogFilterState = { direction: "IN", unmatched: "1" };
-      afterRender(() => { const sel = document.querySelector('select[name="direction"]'); if (sel) sel.value = "UNMATCHED"; });
+    const mlq = new URLSearchParams(location.hash.split("?")[1] || "");
+    if (mlq.get("unmatched") || mlq.get("held")) {
+      const held = !!mlq.get("held");
+      mailLogFilterState = { direction: "IN", unmatched: held ? "" : "1", held: held ? "1" : "" };
+      afterRender(() => { const sel = document.querySelector('select[name="direction"]'); if (sel) sel.value = held ? "HELD" : "UNMATCHED"; });
       history.replaceState(null, "", "#/mail");
     }
     outlookReturnToast("#/mail");
@@ -7123,7 +7128,7 @@ const Views = (() => {
       <div id="system-mail"></div>
       <div id="company-outlook"></div>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
-        <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="UNMATCHED">Inbound — not matched to a case</option><option value="OUT">Outbound</option></select>
+        <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="UNMATCHED">Inbound — not matched to a case</option><option value="HELD">Inbound — held: unknown sender</option><option value="OUT">Outbound</option></select>
         <select name="status" title="delivery status"><option value="">Any delivery status</option>
           ${["PENDING", "SENT", "DELIVERED", "BOUNCED", "FAILED", "COMPLAINED", "REJECTED"].map((x) => `<option>${x}</option>`).join("")}</select>
         <input name="q" placeholder="search subject / body / case number" style="min-width:18em" />
@@ -7174,12 +7179,50 @@ const Views = (() => {
         <button class="mini">Save recipients</button></form></details>`;
   }
   // File an inbound mail that named no dispute under the right one (it then shows on that dispute's timeline).
-  async function mailFileToCase(id) {
+  // Filing by hand vouches for the sender: their mail on that dispute is accepted from now on, and this one is treated
+  // as if it had been filed on arrival (its attachments become documents; a party's answer is recorded).
+  async function mailFileToCase(id, caseNumber) {
     const v = await UI.modal({ title: "File this mail under a dispute", submitLabel: "File",
-      fields: [{ name: "case_number", label: "Dispute number", placeholder: "FL26-019334", required: true }] });
+      body: "Its sender will be accepted on that dispute from now on, its attachments are added to the dispute's documents, and a party's answer in it is recorded.",
+      fields: [{ name: "case_number", label: "Dispute number", placeholder: "FL26-019334", value: caseNumber || "", required: true }] });
     if (!v) return;
-    try { const r = await Api.program.fileMail(id, v.case_number.trim()); UI.toast(`Filed under ${r.case_number}`); mailLogBox(); }
-    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+    try {
+      const r = await Api.program.fileMail(id, v.case_number.trim());
+      UI.toast(`Filed under ${r.case_number}` + (r.answer ? ` — the answer (${r.answer.toLowerCase()}) was recorded` : ""), { duration: 7000 });
+      mailLogBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
+  async function mailRejectHeld(id) {
+    const ok = await UI.modal({ title: "Reject this mail?", body: "It stays in the mail log, marked rejected, and never goes on the dispute.", submitLabel: "Reject", danger: true });
+    if (!ok) return;
+    try { await Api.program.rejectMail(id); UI.toast("Rejected"); mailLogBox(); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // An organization's authorized email addresses (TPA: Team tab; health plan: Document requests tab).
+  async function orgSendersBox(kind) {
+    const box = document.getElementById(kind + "-senders");
+    if (!box) return;
+    let r;
+    try { r = await Api.orgSenders.list(kind); } catch (e) { box.innerHTML = ""; return; }
+    const rows = r.senders || [];
+    box.innerHTML = `<div class="card"><h2>Authorized email addresses</h2>
+      <p class="muted">Email from these addresses is accepted on your disputes and can answer for your organization — a permission to proceed,
+        more time, documents — as if it were answered here. ${r.registered ? `Your registered address <b>${esc(r.registered)}</b> and your team's addresses always are.` : ""}
+        From any other address, include the dispute's reply code, printed on every email we send about it.</p>
+      ${rows.length ? `<table class="tbl"><tbody>${rows.map((x) => `<tr><td>${esc(x.email)}</td><td class="muted">added by ${esc(x.added_by || "—")}</td>
+        <td>${r.may_edit ? `<button class="mini ghost" onclick="Views.orgSenderRemove('${kind}', '${esc(x.email)}')">Remove</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+        : `<p class="muted">No other addresses yet.</p>`}
+      ${r.may_edit ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.orgSenderAdd('${kind}', this)">
+        <input name="email" type="email" placeholder="claims@yourcompany.com" required style="min-width:16em" /><button class="mini">Add address</button></form>`
+        : `<p class="muted" style="font-size:.9em">Your organization's admins add and remove these.</p>`}</div>`;
+  }
+  async function orgSenderAdd(kind, f) {
+    try { await Api.orgSenders.add(kind, f.email.value.trim()); UI.toast("Address added"); orgSendersBox(kind); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  async function orgSenderRemove(kind, email) {
+    try { await Api.orgSenders.remove(kind, email); UI.toast("Address removed"); orgSendersBox(kind); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
   async function saveMailRecipients(form) {
     const split = (v) => v.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
@@ -7188,8 +7231,9 @@ const Views = (() => {
   }
 
   function mailLogFilter(form) {
-    const unmatched = form.direction.value === "UNMATCHED";
-    mailLogFilterState = { direction: unmatched ? "IN" : (form.direction.value || ""), unmatched: unmatched ? "1" : "", status: form.status.value || "", q: form.q.value.trim() || "",
+    const unmatched = form.direction.value === "UNMATCHED", held = form.direction.value === "HELD";
+    mailLogFilterState = { direction: unmatched || held ? "IN" : (form.direction.value || ""), unmatched: unmatched ? "1" : "", held: held ? "1" : "",
+      status: form.status.value || "", q: form.q.value.trim() || "",
       from: form.from.value || "", to: form.to.value || "" };
     mailLogBox();
   }
@@ -7206,7 +7250,13 @@ const Views = (() => {
         return `<tr>
           <td>${badge(m.direction)}</td>
           <td>${m.case_id ? `<a href="#/cases/${m.case_id}">${esc(m.case_number || "case")}</a>` : m.direction === "IN" && can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")
-            ? `<button class="mini ghost" onclick="Views.mailFileToCase(${m.id})">File to case</button>` : `<span class="muted" title="pre-case or unmatched mail">—</span>`}
+            ? (m.hold_status === "HELD"
+              ? `<span class="badge warn" title="It names a dispute but isn't from a sender trusted for it">HELD</span>
+                 <button class="mini" onclick="Views.mailFileToCase(${m.id}, '${esc(m.held_case_number || "")}')">File${m.held_case_number ? ` to ${esc(m.held_case_number)}` : ""}</button>
+                 <button class="mini ghost" onclick="Views.mailRejectHeld(${m.id})">Reject</button>`
+              : m.hold_status === "REJECTED" ? `<span class="muted">rejected</span>`
+              : `<button class="mini ghost" onclick="Views.mailFileToCase(${m.id})">File to case</button>`)
+            : `<span class="muted" title="pre-case or unmatched mail">—</span>`}
             ${m.direction === "IN" && m.match_reason ? `<div class="muted" style="font-size:.85em;max-width:16em">${esc(m.match_reason)}</div>` : ""}</td>
           <td>${esc(m.subject || "")}${m.template && m.template !== "inbound" ? ` <span class="muted">(${esc(m.template)})</span>` : ""}</td>
           <td class="muted">${esc(who)}</td>
@@ -7238,7 +7288,7 @@ const Views = (() => {
         const as = r.attachments || [];
         box.innerHTML = as.length ? `<p><b>Attachments</b> ${as.map((a) => a.status === "STORED"
           ? `<a href="javascript:void 0" onclick="Views.mailLogAttachment(${id},'${a.id}')">${esc(a.filename)}</a>`
-          : `${esc(a.filename)} <span class="muted">(${a.status === "TOO_LARGE" ? "too large to keep" : "not saved"})</span>`).join(" · ")}</p>` : "";
+          : `${esc(a.filename)} <span class="muted">(${ATT_STATUS[a.status] || "not saved"})</span>`).join(" · ")}</p>` : "";
       }).catch(() => { box.innerHTML = ""; });
     }
   }
@@ -8833,10 +8883,12 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <p class="muted">Everyone at ${esc(r.tpa.name)} who signs in to this portal. <b>Admins</b> add and remove employees; <b>Staff</b> file, pay and track disputes. Each employee gets their own login, emailed to them.</p>
           <div id="tpa-team-list"><p class="muted">Loading…</p></div>
           <div id="tpa-team-add"></div></div>
+        <div id="tpa-senders"></div>
         <div class="card"><details class="tpa-more"><summary>Already have a portal login? Join with a code</summary>
           <p class="muted">A colleague who already has a portal account can join your organization with this code — Profile → Claim TPA. Generating a new code replaces the old one.</p>
           <p id="tpa-invite-code">${code ? `<span class="mono" style="font-weight:600;font-size:1.1em">${esc(code)}</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate new code</button>`
             : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></details></div>`;
+      orgSendersBox("tpa");
       tpaTeamBox();
       const tpaBody = document.getElementById("tpa-body");
       if (!tpaBody) return; // the page was left while it loaded
@@ -9085,7 +9137,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all above) and manage documents on behalf of the party. Once the reviewer finds it eligible, the provider is emailed that the dispute is against it, with a secure link to send its response.</p>
           </div>
         </section>
-        <section data-hp-panel="docreq" style="display:none"><div class="card"><h2>Document requests</h2>
+        <section data-hp-panel="docreq" style="display:none"><div id="hp-senders"></div><div class="card"><h2>Document requests</h2>
           <p class="muted">Documents the review team asked you for. Upload and send them here.</p>
           <div id="hp-docreq"><p class="muted">Loading…</p></div></div></section>
         <section data-hp-panel="audit" style="display:none"><div class="card"><h2>Audit log</h2>
@@ -9112,6 +9164,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   function hpTab(k, auto) {
     const btn = document.querySelector(`#hp-tabs [data-tab="${k}"]`);
     if (!btn || btn.style.display === "none") return;
+    if (k === "docreq") orgSendersBox("hp");
     if (!auto) try { localStorage.setItem("idre.hpTab", k); } catch { /* private window */ }
     document.querySelectorAll("#hp-tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === k));
     document.querySelectorAll("[data-hp-panel]").forEach((p) => { p.style.display = p.dataset.hpPanel === k ? "" : "none"; });
@@ -11800,5 +11853,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

@@ -16,6 +16,7 @@ const prefMaxValueBytes = 8192 // prefs are small; reject junk payloads
 
 var prefAllowedKeys = map[string]bool{
 	"theme": true, "density": true, "last_tenant": true, "recents": true,
+	"welcome_seen": true, // the first-login welcome (notifications and email) was shown
 }
 
 func (s *server) getPrefs(w http.ResponseWriter, r *http.Request) {

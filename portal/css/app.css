@@ -1609,3 +1609,7 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .prefill-note ul{margin:6px 0 0;padding-left:18px}
 .pkg-optional td{color:var(--text-secondary)}
 
+
+/* First-login welcome (app.js welcomeOnce) */
+.welcome-list{margin:0;padding-left:1.2em;display:grid;gap:10px;line-height:1.45}
+.welcome-list li{max-width:62ch}

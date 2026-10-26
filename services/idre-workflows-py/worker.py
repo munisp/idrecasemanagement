@@ -45,6 +45,7 @@ from ahca_workflow import AhcaDisputeWorkflow
 from fee_payments import (
     FeePaymentWorkflow, charge_fee_group, check_fee_group, give_up_fee_group, summarize_fee_run,
 )
+from mail_workflow import InboundMailWorkflow, mail_step
 
 
 async def run_workers(client: Client) -> None:
@@ -94,7 +95,15 @@ async def run_workers(client: Client) -> None:
         workflows=[FeePaymentWorkflow],
         activities=[charge_fee_group, check_fee_group, give_up_fee_group, summarize_fee_run],
     )
-    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run(), payments_worker.run())
+    # Received email, one workflow per message (mail_workflow.py).
+    mail_worker = Worker(
+        client,
+        task_queue="idre-mail",
+        workflows=[InboundMailWorkflow],
+        activities=[mail_step],
+        max_concurrent_activities=50,
+    )
+    await asyncio.gather(worker.run(), onboarding_worker.run(), ahca_worker.run(), payments_worker.run(), mail_worker.run())
 
 
 # ---- Dapr binding listener ---------------------------------------------------

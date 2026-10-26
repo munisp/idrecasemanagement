@@ -135,7 +135,27 @@ type inboundMail struct {
 // their own inbox. The same mail reaching several people, or arriving twice, is filed once.
 func (s *server) fileInbound(ctx context.Context, in inboundMail, general bool) caseMatch {
 	m := s.matchCase(ctx, in.Tenant, in.CaseHint, in.Subject, in.Body, in.Refs)
-	if m.CaseID == "" && !general {
+	if m.CaseID == "" { // no number and no thread: the dispute's reply code still says which one (mail_trust.go)
+		if cid, _ := s.replyCodeCase(ctx, in.Tenant, in.Subject+"\n"+replyText(in.Body)); cid != "" {
+			m = caseMatch{CaseID: cid, Reason: "the dispute's reply code"}
+			_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(in.Tenant)), cid).Scan(&m.CaseNumber)
+		}
+	}
+	// Which dispute a mail is about is not enough to put it on that dispute: its sender must be trusted for it.
+	heldFor, heldNumber := "", ""
+	if m.CaseID != "" {
+		if ok, why := s.mailTrust(ctx, in, m.CaseID); !ok {
+			if !general { // a person's own Outlook: it stays in their inbox, private
+				s.linkMailboxRows(ctx, in.MailboxIDs, "", 0, "not filed: "+why)
+				return caseMatch{Reason: why}
+			}
+			heldFor, heldNumber = m.CaseID, m.CaseNumber
+			m = caseMatch{Reason: "held: " + why + " — names " + heldNumber}
+		} else {
+			m.Reason += " · " + why
+		}
+	}
+	if m.CaseID == "" && heldFor == "" && !general {
 		s.linkMailboxRows(ctx, in.MailboxIDs, "", 0, "not filed: "+m.Reason)
 		return m
 	}
@@ -146,10 +166,21 @@ func (s *server) fileInbound(ctx context.Context, in inboundMail, general bool) 
 	}
 	if logID == 0 {
 		rcpts, _ := json.Marshal(map[string]any{"from": in.From, "to": in.To})
+		hold := ""
+		if heldFor != "" {
+			hold = "HELD"
+		}
 		if err := s.db.QueryRow(ctx, `INSERT INTO public.correspondence_log
-			(tenant, case_id, direction, template, subject, body, recipients, sent_by, internet_message_id, match_reason)
-			VALUES ($1,$2,'IN','inbound',$3,$4,$5,$6,$7,$8) RETURNING id`,
-			in.Tenant, m.CaseID, truncate(in.Subject, 500), truncate(in.Body, 20000), rcpts, in.From, in.MessageID, m.Reason).Scan(&logID); err != nil {
+			(tenant, case_id, direction, template, subject, body, recipients, sent_by, internet_message_id, match_reason, hold_status, held_case_id)
+			VALUES ($1,$2,'IN','inbound',$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+			in.Tenant, m.CaseID, truncate(in.Subject, 500), truncate(in.Body, 20000), rcpts, in.From, in.MessageID, m.Reason, hold, heldFor).Scan(&logID); err != nil {
+			return m
+		}
+		if heldFor != "" { // not on the dispute; its holder decides
+			holder := orWord(s.currentAssignee(ctx, in.Tenant, heldFor), "role:PM")
+			s.notifyCtx(ctx, in.Tenant, holder, "MAIL_HELD",
+				fmt.Sprintf("An email from %s names %s but isn't from an authorized sender — file it or reject it", strings.TrimSpace(in.From), heldNumber), "#/mail?held=1")
+			s.linkMailboxRows(ctx, in.MailboxIDs, "", logID, m.Reason)
 			return m
 		}
 		if m.CaseID != "" {
@@ -243,9 +274,40 @@ func (s *server) fileMailToCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reason := "filed by " + p.Username
-	_, _ = s.db.Exec(r.Context(), `UPDATE public.correspondence_log SET case_id=$3, match_reason=$4 WHERE id::text=$1 AND tenant=$2`, id, tenant, caseID, reason)
+	_, _ = s.db.Exec(r.Context(), `UPDATE public.correspondence_log SET case_id=$3, match_reason=$4, hold_status='' WHERE id::text=$1 AND tenant=$2`, id, tenant, caseID, reason)
 	_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET case_id=$2, updated_at=now() WHERE correspondence_id::text=$1`, id, caseID)
 	s.addInboundToTimeline(r.Context(), tenant, caseID, from, subject, body, reason)
-	s.logAudit(r.Context(), tenant, caseID, "INBOUND_MAIL_FILED", map[string]any{"by": p.Username, "mail": id, "case_number": n})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "filed", "case_id": caseID, "case_number": n})
+	// A person vouched for the sender: their mail on this dispute is accepted from now on, and this one is treated as
+	// if it had been filed on arrival -- its attachments become the dispute's documents, a party's answer is recorded.
+	_, addr := splitAddress(from)
+	s.authorizeSender(r.Context(), tenant, "", addr, caseID, p.Username, "FILED_BY_HAND")
+	var row, msgID string
+	_ = s.db.QueryRow(r.Context(), `SELECT id::text, internet_message_id FROM public.mail_messages WHERE correspondence_id::text=$1 ORDER BY created_at LIMIT 1`, id).Scan(&row, &msgID)
+	mail := inboundMail{Tenant: tenant, From: from, Subject: subject, Body: body, MessageID: msgID, By: "by hand"}
+	if row != "" {
+		mail.MailboxIDs = []string{row}
+	}
+	d := s.actOnFiledMail(r.Context(), mail, caseMatch{CaseID: caseID, CaseNumber: n, Reason: reason}, row)
+	s.logAudit(r.Context(), tenant, caseID, "INBOUND_MAIL_FILED", map[string]any{"by": p.Username, "mail": id, "case_number": n,
+		"sender_authorized": addr, "action": d.Action, "answer": d.Answer})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "filed", "case_id": caseID, "case_number": n, "action": d.Action, "answer": d.Answer, "why": d.Why})
+}
+
+// rejectHeldMail: POST /correspondence/{id}/reject -- a held mail is not for any dispute; it leaves the held list.
+func (s *server) rejectHeldMail(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	id := chi.URLParam(r, "id")
+	tag, _ := s.db.Exec(r.Context(), `UPDATE public.correspondence_log SET hold_status='REJECTED', match_reason=match_reason||' · rejected by '||$3
+		WHERE id::text=$1 AND tenant=$2 AND hold_status='HELD'`, id, tenant, p.Username)
+	if tag.RowsAffected() == 0 {
+		http.Error(w, `{"error":"no held mail with that id"}`, http.StatusNotFound)
+		return
+	}
+	s.logAudit(r.Context(), tenant, "", "INBOUND_MAIL_REJECTED", map[string]any{"by": p.Username, "mail": id})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
 }

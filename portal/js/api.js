@@ -338,6 +338,12 @@ const Api = (() => {
     },
     // Personal timesheet: daily entry screen with day/week/month totals.
     // The program's company mailbox (e.g. where replies to case letters arrive), connected by a tenant admin.
+    // The addresses that email and answer for a TPA or a health plan (kind "tpa" | "hp").
+    orgSenders: {
+      list: (kind) => req("GET", `${t()}/${kind}/authorized-senders`),
+      add: (kind, email) => req("POST", `${t()}/${kind}/authorized-senders`, { email }),
+      remove: (kind, email) => req("DELETE", `${t()}/${kind}/authorized-senders`, { email }),
+    },
     systemMail: {
       get: () => req("GET", `${t()}/program/system-mail`),
       set: (body) => req("PUT", `${t()}/program/system-mail`, body),
@@ -734,6 +740,7 @@ const Api = (() => {
       qaDecision: (id, decision, note, editedBody, to, cc) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined, to, cc }),
       mailJournal: (opts) => req("GET", `${t()}/correspondence${qs(opts || {})}`),
       fileMail: (id, caseNumber) => req("POST", `${t()}/correspondence/${id}/file`, { case_number: caseNumber }),
+      rejectMail: (id) => req("POST", `${t()}/correspondence/${id}/reject`),
       mailAttachments: (id) => req("GET", `${t()}/correspondence/${id}/attachments`),
       mailAttachment: (id, aid) => fetchBlob(`${t()}/correspondence/${id}/attachments/${aid}`),
       // Payment rails (moov-io): vault-sealed accounts, ACH/wire/ICL/Metro2 files, OFAC screening

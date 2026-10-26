@@ -174,7 +174,7 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 	// Mail received on a staff member's own address (mailboxes.go). A failure answers 502 so Resend retries; a retry
 	// files nothing twice.
 	if ev.Type == "email.received" {
-		n, err := s.handleReceivedEmail(r.Context(), body)
+		n, err := s.enqueueReceivedEmail(r.Context(), body) // processed by InboundMailWorkflow (mail_jobs.go)
 		if err != nil {
 			slog.Warn("received email not filed", "err", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "not filed yet: " + err.Error()})
