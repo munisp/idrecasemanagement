@@ -1,9 +1,27 @@
 # Author: Patrick Munis at newwave
+# CI for every push and pull request: secrets scan, each service built and its tests run with its own dependencies,
+# the portal's scripts parsed, the deploy YAML parsed, and every image built from its Dockerfile. On main and on
+# version tags (v*) the images are also published to the GitHub container registry of whoever owns the repository:
+#   ghcr.io/<owner>/idre-<service>:<git sha>   (and :main, or the tag)
+# Deploying them stays a step run against the cluster (docs/TECHNICAL-MANUAL.md, "Deploying").
 name: ci
-on: [push, pull_request]
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
+    permissions: { contents: read, pull-requests: write }
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }   # full history — secrets hide in old commits
@@ -11,39 +29,73 @@ jobs:
         env:
           GITLEAKS_ENABLE_COMMENTS: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   go:
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: services/case-api-go } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
-      - run: |
-          cd services/case-api-go
-          go build ./... && go vet ./cmd/server/ && go test ./cmd/server/
+        with: { go-version-file: services/case-api-go/go.mod, cache-dependency-path: services/case-api-go/go.sum }
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: services/vault-rs } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/vault-rs/target
+          key: cargo-${{ hashFiles('services/vault-rs/Cargo.lock') }}
+      - run: cargo build --locked
+      - run: cargo test --locked
+
+  # Each Python service with its own requirements.txt, so a dependency that no longer installs fails here.
   python:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: analytics-py, python: "3.11" }   # apache-flink has no Python 3.12 support
+          - { service: deid-py, python: "3.12" }
+          - { service: edge-bridge-py, python: "3.12" }
+          - { service: graph-intel-py, python: "3.12" }
+          - { service: idre-workflows-py, python: "3.12" }   # Temporal's time-skipping test server
+          - { service: lettergen-py, python: "3.12" }
+          - { service: outbox-relay-py, python: "3.12" }
+    defaults: { run: { working-directory: "services/${{ matrix.service }}" } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}", cache: pip, cache-dependency-path: "services/${{ matrix.service }}/requirements.txt" }
+      - run: pip install -q -r requirements.txt pytest pytest-asyncio
+      - run: python -m compileall -q .
+      - name: tests
+        run: |
+          python -m pytest -q || { rc=$?; [ $rc -eq 5 ] && echo "no tests in ${{ matrix.service }}" || exit $rc; }
+
+  # doc-intel's full requirements (Docling, Paddle, Torch) are several GB; its tests need only these, because those
+  # libraries are imported inside functions. The full set is still proven by the docker job's image build.
+  doc-intel:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: services/doc-intel-py } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: |
-          python -m compileall -q services/doc-intel-py services/idre-workflows-py \
-            services/analytics-py services/outbox-relay-py services/edge-bridge-py \
-            services/graph-intel-py services/lettergen-py
-          pip install -q pytest
-          # check_processor.py's and pipeline.py's own deps (not the full
-          # requirements.txt -- that also pulls in docling/paddlepaddle/
-          # paddleocr/torch, none of which test_check_processor.py's or
-          # test_pipeline.py's pure-function tests need since both modules
-          # import those heavy libs lazily inside function bodies, not at
-          # module scope; installing them here would make this job minutes
-          # slower for no reason). httpx/pyyaml are pipeline.py's own
-          # module-level imports -- needed just to collect test_pipeline.py.
-          pip install -q numpy opencv-python-headless pytesseract pillow httpx pyyaml pypdf
-          # main.py's own module-level clients -- small wheels, needed only so
-          # the tests that import helpers from main.py can collect it.
-          pip install -q "psycopg[binary]" confluent-kafka minio opensearch-py
-          cd services/doc-intel-py && python -m pytest -q
+          pip install -q pytest numpy opencv-python-headless pytesseract pillow httpx pyyaml pypdf \
+            "psycopg[binary]" confluent-kafka minio opensearch-py
+          python -m compileall -q .
+          python -m pytest -q
+
   portal:
     runs-on: ubuntu-latest
     steps:
@@ -52,8 +104,8 @@ jobs:
         with: { node-version: "20" }
       # The portal has no build step, so a syntax slip in any script would
       # only show up as a blank page in the browser. Parse every one.
-      - run: |
-          for f in portal/js/*.js; do node --check "$f"; done
+      - run: for f in portal/js/*.js; do node --check "$f"; done
+
   yaml:
     runs-on: ubuntu-latest
     steps:
@@ -61,7 +113,7 @@ jobs:
       - run: |
           pip install -q pyyaml
           python - <<'EOF'
-          import glob, yaml, sys
+          import glob, yaml
           # *.gotmpl.yaml are helmfile templates ({{ ... }} placeholders), only YAML once rendered.
           for f in glob.glob('deploy/**/*.yaml', recursive=True) + ['docker-compose.yml']:
               if f.endswith('.gotmpl.yaml'):
@@ -69,3 +121,51 @@ jobs:
               list(yaml.safe_load_all(open(f)))
           print('all deploy YAML parses')
           EOF
+
+  # Every image, built from its Dockerfile on every change; published only from main and version tags.
+  docker:
+    needs: [go, rust, python, doc-intel, portal]
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { name: case-api, context: services/case-api-go }
+          - { name: portal, context: portal }
+          - { name: vault, context: services/vault-rs }
+          - { name: workflows, context: services/idre-workflows-py }
+          - { name: doc-intel, context: services/doc-intel-py }
+          - { name: lettergen, context: services/lettergen-py }
+          - { name: deid, context: services/deid-py }
+          - { name: graph-intel, context: services/graph-intel-py }
+          - { name: outbox-relay, context: services/outbox-relay-py }
+          - { name: edge-bridge, context: services/edge-bridge-py }
+          - { name: analytics, context: services/analytics-py }
+    steps:
+      - uses: actions/checkout@v4
+      - name: room for the large images
+        if: matrix.image.name == 'doc-intel' || matrix.image.name == 'analytics'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: docker/setup-buildx-action@v3
+      - id: publish
+        run: echo "yes=${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        if: steps.publish.outputs.yes == 'true'
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/idre-${{ matrix.image.name }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          push: ${{ steps.publish.outputs.yes == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}

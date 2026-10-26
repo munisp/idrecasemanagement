@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Python 3.11: Apache Flink (apache-flink) has no Python 3.12 support yet; on 3.12 its install fails.
+FROM python:3.11-slim
 LABEL org.opencontainers.image.authors="Patrick Munis at newwave"
 WORKDIR /app
 COPY requirements.txt .
