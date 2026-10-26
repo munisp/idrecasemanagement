@@ -193,7 +193,7 @@ func (s *server) tpaTeamAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	tempPassword, _ := result["temporary_password"].(string)
 	subject, body := tpaStaffWelcomeMail(org.Name, in.FullName, displayName(p), username, tempPassword, s.cfg.PortalBaseURL)
-	if merr := s.sendMail([]string{in.Email}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
+	if merr := s.sendMail(tenant, []string{in.Email}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
 		// Nobody else holds the password: an account whose email never arrived is taken back.
 		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.tpa_users WHERE tenant=$1 AND user_sub=$2`, tenant, userID)
 		_ = s.kcDeleteUser(r.Context(), tok, userID)

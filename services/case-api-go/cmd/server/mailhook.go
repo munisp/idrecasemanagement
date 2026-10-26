@@ -125,6 +125,9 @@ type mailEvent struct {
 		EmailID   string   `json:"email_id"`
 		From      string   `json:"from"`
 		To        []string `json:"to"`
+		// The Message-ID the mail finally carried: the provider replaces ours with its own (Amazon SES's), so replies
+		// quote this one. Kept on the row (provider_internet_id) so a reply is filed under its case.
+		MessageID string `json:"message_id"`
 		Subject   string   `json:"subject"`
 		CreatedAt string   `json:"created_at"`
 		Bounce    struct {
@@ -181,7 +184,7 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := mailEventStatus(ev.Type)
-	if status == "" || len(ev.Data.To) == 0 {
+	if (status == "" && ev.Data.MessageID == "") || len(ev.Data.To) == 0 {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "type": ev.Type})
 		return
 	}
@@ -197,7 +200,7 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// A message a staff member sent from their own address: its own history, not the case mail log.
-	if s.applyMailboxDelivery(r.Context(), ev.Data.EmailID, ev.Type, detail, ev.Data.From, ev.Data.To, ev.Data.Subject) {
+	if s.applyMailboxDelivery(r.Context(), ev.Data.EmailID, ev.Type, detail, ev.Data.From, ev.Data.To, ev.Data.Subject, ev.Data.MessageID) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "type": ev.Type})
 		return
 	}
@@ -226,6 +229,14 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 		var tenant, caseID, current, sentBy string
 		if err := s.db.QueryRow(r.Context(), q, args...).Scan(&id, &tenant, &caseID, &current, &sentBy); err != nil {
 			slog.Warn("mail delivery report matched no mail-log row", "type", ev.Type, "to", addr, "subject", ev.Data.Subject, "email_id", ev.Data.EmailID)
+			continue
+		}
+		if ev.Data.MessageID != "" {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.correspondence_log SET provider_internet_id=$2, provider_message_id=coalesce(provider_message_id, nullif($3,''))
+				WHERE id=$1 AND provider_internet_id=''`, id, ev.Data.MessageID, ev.Data.EmailID)
+		}
+		if status == "" { // a report that says nothing about delivery (sent, delayed...): only its ids were wanted
+			updated++
 			continue
 		}
 		if !mailStatusMayReplace(current, status) {

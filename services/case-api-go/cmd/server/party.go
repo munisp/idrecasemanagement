@@ -94,7 +94,7 @@ func (s *server) inviteParty(w http.ResponseWriter, r *http.Request) {
 		"%s,\n\nYou have been given access to IDR case %s as the %s party.\nSign in at %s with username %s.\n\n"+
 			"Federal IDR process: 45 CFR Part 149. Your offer, once submitted, is cryptographically sealed until both parties have submitted or the window closes.\n",
 		in.Name, caseNumber, in.PartyID, s.cfg.PortalBaseURL, username)
-	_ = s.sendMail([]string{in.Email}, nil, "IDR case access: "+caseNumber, mailBody)
+	_ = s.sendMail(tenant, []string{in.Email}, nil, "IDR case access: "+caseNumber, mailBody)
 	s.logActivity(r.Context(), tenant, caseID, "PARTY_INVITED",
 		fmt.Sprintf("Party account %s invited as %s by %s", in.Email, in.PartyID, p.Subject))
 	s.logAudit(r.Context(), tenant, caseID, "PARTY_INVITED", map[string]any{

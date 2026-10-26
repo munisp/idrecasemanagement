@@ -204,7 +204,7 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 	tempPassword, _ := result["temporary_password"].(string)
 	subject, body := hpWelcomeMail(in.Name, in.ContactName, username, tempPassword, s.cfg.PortalBaseURL)
 	// A queued email (the provider's limit was reached) still arrives: the registration stands.
-	if merr := s.sendMail([]string{in.ContactEmail}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
+	if merr := s.sendMail(tenant, []string{in.ContactEmail}, nil, subject, body); merr != nil && !errors.Is(merr, errMailQueued) {
 		s.logCorrespondence(r, tenant, "", "OUT", "hp_welcome", subject, tpaWelcomeLogNote, []string{in.ContactEmail}, nil, "system:hp-register", merr.Error())
 		dropPlan()
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{

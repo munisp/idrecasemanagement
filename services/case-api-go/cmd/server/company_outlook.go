@@ -11,9 +11,15 @@ package main
 //	DELETE /company-outlook                  forget the tokens; mail already filed stays filed
 
 import (
+	"context"
+	"encoding/base64"
+	"log/slog"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -122,4 +128,71 @@ func (s *server) mailLogAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveMailAttachment(w, r, tenant, key, name, ctype)
+}
+
+// ---- sending the program's mail from its company Outlook -------------------------------------------------------------
+
+type outAttachment struct {
+	Name, ContentType string
+	Content           []byte
+}
+
+// outlookSendFrom sends one message from a connected Outlook account (a person's, or the company mailbox) and returns
+// its Message-ID: the message is created as a draft first, which gives the id, then sent; Outlook keeps it in Sent Items.
+func (s *server) outlookSendFrom(ctx context.Context, tenant, sub string, to, cc []string, subject, text string, att *outAttachment) (string, error) {
+	token, err := s.outlookAccess(ctx, tenant, sub)
+	if err != nil {
+		return "", err
+	}
+	rcpt := func(l []string) []map[string]any {
+		out := []map[string]any{}
+		for _, a := range l {
+			out = append(out, map[string]any{"emailAddress": map[string]string{"address": a}})
+		}
+		return out
+	}
+	msg := map[string]any{"subject": subject, "body": map[string]string{"contentType": "Text", "content": text}, "toRecipients": rcpt(to)}
+	if len(cc) > 0 {
+		msg["ccRecipients"] = rcpt(cc)
+	}
+	if att != nil {
+		msg["attachments"] = []map[string]any{{"@odata.type": "#microsoft.graph.fileAttachment", "name": att.Name,
+			"contentType": att.ContentType, "contentBytes": base64.StdEncoding.EncodeToString(att.Content)}}
+	}
+	base := s.outlookBase(ctx, tenant, sub)
+	var draft struct {
+		ID                string `json:"id"`
+		InternetMessageID string `json:"internetMessageId"`
+	}
+	if err := graphJSON(ctx, http.MethodPost, base+"/messages", token, msg, &draft); err != nil {
+		return "", err
+	}
+	if err := graphJSON(ctx, http.MethodPost, base+"/messages/"+url.PathEscape(draft.ID)+"/send", token, nil, nil); err != nil {
+		return "", err
+	}
+	return draft.InternetMessageID, nil
+}
+
+var outlookFallbackNoticed sync.Map // tenant -> time the admins were last told their Outlook couldn't send
+
+// viaCompanyOutlook sends the program's mail from its company Outlook when the tenant chose that (program_mail_settings).
+// sent=false means the caller sends it through the platform: Outlook isn't chosen, or it failed -- then the mail still
+// goes out, and the tenant admins are told (at most hourly) that Outlook needs attention.
+func (s *server) viaCompanyOutlook(tenant string, to, cc []string, subject, body string, att *outAttachment) (id string, sent bool) {
+	if !s.outlookOn() || s.systemSendVia(tenant) != "outlook" {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	id, err := s.outlookSendFrom(ctx, tenant, companySub, to, cc, subject, body, att)
+	if err == nil {
+		return id, true
+	}
+	slog.Warn("program mail not sent from Outlook; sending through the platform", "tenant", tenant, "err", err)
+	if v, ok := outlookFallbackNoticed.Load(tenant); !ok || time.Since(v.(time.Time)) > time.Hour {
+		outlookFallbackNoticed.Store(tenant, time.Now())
+		s.notifyCtx(ctx, tenant, "role:TENANT_ADMIN", "COMPANY_OUTLOOK_SEND_FAILED",
+			"The company Outlook couldn't send the program's mail ("+truncate(err.Error(), 120)+"), so it went out from the platform's address instead. Reconnect it in the mail log.", "#/mail")
+	}
+	return "", false
 }

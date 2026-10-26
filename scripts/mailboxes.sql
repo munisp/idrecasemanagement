@@ -106,3 +106,20 @@ CREATE INDEX IF NOT EXISTS correspondence_log_msgid ON public.correspondence_log
 -- read a shared mailbox through the signed-in admin's access (mailbox), and records which admin connected it.
 ALTER TABLE public.outlook_connections ADD COLUMN IF NOT EXISTS mailbox text NOT NULL DEFAULT '';
 ALTER TABLE public.outlook_connections ADD COLUMN IF NOT EXISTS connected_by text NOT NULL DEFAULT '';
+
+-- The program's own address (system_mailbox.go) is a user_mailboxes row owned by 'system', with the name its mail is
+-- sent under. How the program's mail goes out: from that address (platform) or from its company Outlook (outlook).
+ALTER TABLE public.user_mailboxes ADD COLUMN IF NOT EXISTS display_name text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS public.program_mail_settings (
+    tenant      text PRIMARY KEY,
+    send_via    text NOT NULL DEFAULT 'platform',   -- platform | outlook
+    updated_by  text NOT NULL DEFAULT '',
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- The Message-ID a sent mail finally carried: the provider (Resend, through Amazon SES) replaces ours, and replies quote
+-- its one. Recorded from the delivery reports so a reply is filed under the case its mail was about.
+ALTER TABLE public.correspondence_log ADD COLUMN IF NOT EXISTS provider_internet_id text NOT NULL DEFAULT '';
+ALTER TABLE public.mail_messages ADD COLUMN IF NOT EXISTS provider_internet_id text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS correspondence_log_provider_msgid ON public.correspondence_log (tenant, provider_internet_id) WHERE provider_internet_id <> '';
+CREATE INDEX IF NOT EXISTS mail_messages_provider_msgid ON public.mail_messages (tenant, provider_internet_id) WHERE provider_internet_id <> '';

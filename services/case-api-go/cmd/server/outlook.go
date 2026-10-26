@@ -31,13 +31,13 @@ import (
 )
 
 const (
-	graphAPI            = "https://graph.microsoft.com/v1.0"
-	outlookScopes       = "offline_access User.Read Mail.ReadWrite Mail.Send"
+	graphAPI      = "https://graph.microsoft.com/v1.0"
+	outlookScopes = "offline_access User.Read Mail.ReadWrite Mail.Send"
 	// Reading a shared mailbox the signed-in account has access to (it cannot sign in itself). Asked for only then:
 	// personal Microsoft accounts have no shared mailboxes and refuse these scopes.
 	outlookSharedScopes = outlookScopes + " Mail.ReadWrite.Shared Mail.Send.Shared"
 	// The owner of a program's company mailbox connection (a person's connection is under their Keycloak id).
-	companySub = "company"
+	companySub          = "company"
 	outlookFirstWindow  = 30 * 24 * time.Hour
 	outlookSyncInterval = 5 * time.Minute
 	outlookPageLimit    = 20 // pages of 50 per folder per sync
@@ -328,6 +328,9 @@ func (s *server) outlookAccess(ctx context.Context, tenant, sub string) (string,
 	}
 	t, err := s.outlookToken(ctx, outlookScopesFor(mailbox), url.Values{"grant_type": {"refresh_token"}, "refresh_token": {string(refresh)}})
 	if err != nil {
+		if status == "ACTIVE" {
+			s.outlookBrokenNotice(ctx, tenant, sub, "the Microsoft sign-in has expired")
+		}
 		_, _ = s.db.Exec(ctx, `UPDATE public.outlook_connections SET status='ERROR', last_error=$3, updated_at=now() WHERE tenant=$1 AND user_sub=$2`,
 			tenant, sub, truncate("sign-in expired: "+err.Error(), 500))
 		return "", err
@@ -450,8 +453,10 @@ func (s *server) syncOutlook(ctx context.Context, tenant, sub string) (int, erro
 	var inboxThrough, sentThrough *time.Time
 	_ = s.db.QueryRow(ctx, `SELECT inbox_synced_through, sent_synced_through FROM public.outlook_connections WHERE tenant=$1 AND user_sub=$2`,
 		tenant, sub).Scan(&inboxThrough, &sentThrough)
-	filed := 0
+	filed, fresh := 0, 0 // fresh: new inbox mail after the first sync (the first one brings in the last 30 days)
 	var syncErr error
+	var prevStatus string
+	_ = s.db.QueryRow(ctx, `SELECT status FROM public.outlook_connections WHERE tenant=$1 AND user_sub=$2`, tenant, sub).Scan(&prevStatus)
 	for _, f := range []struct {
 		graph, folder, dir, col string
 		through                 *time.Time
@@ -484,6 +489,9 @@ func (s *server) syncOutlook(ctx context.Context, tenant, sub string) (int, erro
 				}
 				if n, err := s.fileOutlookMessage(ctx, tenant, sub, mbID, token, base, f.folder, f.dir, gm, at); err == nil {
 					filed += n
+					if f.dir == "IN" && f.through != nil {
+						fresh += n
+					}
 				}
 				if at.After(newest) {
 					newest = at
@@ -502,6 +510,16 @@ func (s *server) syncOutlook(ctx context.Context, tenant, sub string) (int, erro
 	}
 	_, _ = s.db.Exec(ctx, `UPDATE public.outlook_connections SET last_sync_at=now(), last_error=$3, status=$4, updated_at=now() WHERE tenant=$1 AND user_sub=$2 AND status <> 'DISCONNECTED'`,
 		tenant, sub, errText, status)
+	if fresh > 0 && sub != companySub { // the company mailbox's mail is announced as it is filed (mailfiling.go)
+		msg := fmt.Sprintf("%d new emails in your Outlook", fresh)
+		if fresh == 1 {
+			msg = "1 new email in your Outlook"
+		}
+		s.notifyCtx(ctx, tenant, sub, "OUTLOOK_NEW_MAIL", msg, "#/inbox?source=OUTLOOK")
+	}
+	if status == "ERROR" && prevStatus == "ACTIVE" { // it just stopped working: say so once, not every 5 minutes
+		s.outlookBrokenNotice(ctx, tenant, sub, errText)
+	}
 	return filed, syncErr
 }
 
@@ -541,7 +559,7 @@ func (s *server) fileOutlookMessage(ctx context.Context, tenant, sub, mbID, toke
 		// Outlook mail about a dispute is filed under it. The rest of a person's Outlook stays in their own inbox; the
 		// rest of the company mailbox goes to the mail log's general inbound section, like the platform's own addresses.
 		s.fileInbound(ctx, inboundMail{Tenant: tenant, From: fromAddr, To: graphAddrs(gm.ToRecipients), Subject: gm.Subject, Body: text,
-			MessageID: gm.InternetMessageID, MailboxIDs: []string{id}, By: "outlook"}, sub == companySub)
+			MessageID: gm.InternetMessageID, MailboxIDs: []string{id}, By: "outlook", Owners: []string{sub}, NotifyUnmatched: sub == companySub}, sub == companySub)
 	}
 	return 1, nil
 }
@@ -582,24 +600,14 @@ func (s *server) fileOutlookAttachments(ctx context.Context, tenant, sub, messag
 	}
 }
 
-// outlookSend sends through the person's Outlook account; Outlook keeps it in Sent Items.
-func (s *server) outlookSend(ctx context.Context, tenant, sub string, to, cc []string, subject, text string) error {
-	token, err := s.outlookAccess(ctx, tenant, sub)
-	if err != nil {
-		return err
+// outlookBrokenNotice tells the connection's owner (the tenant admins, for the company mailbox) that it stopped working.
+func (s *server) outlookBrokenNotice(ctx context.Context, tenant, sub, why string) {
+	if sub == companySub {
+		s.notifyCtx(ctx, tenant, "role:TENANT_ADMIN", "COMPANY_OUTLOOK_ERROR",
+			"The company Outlook mailbox stopped syncing ("+truncate(why, 120)+"). Reconnect it in the mail log.", "#/mail")
+		return
 	}
-	rcpt := func(l []string) []map[string]any {
-		out := []map[string]any{}
-		for _, a := range l {
-			out = append(out, map[string]any{"emailAddress": map[string]string{"address": a}})
-		}
-		return out
-	}
-	msg := map[string]any{"subject": subject, "body": map[string]string{"contentType": "Text", "content": text}, "toRecipients": rcpt(to)}
-	if len(cc) > 0 {
-		msg["ccRecipients"] = rcpt(cc)
-	}
-	return graphJSON(ctx, http.MethodPost, s.outlookBase(ctx, tenant, sub)+"/sendMail", token, map[string]any{"message": msg, "saveToSentItems": true}, nil)
+	s.notifyCtx(ctx, tenant, sub, "OUTLOOK_ERROR", "Your Outlook stopped syncing ("+truncate(why, 120)+"). Reconnect it in My email.", "#/inbox")
 }
 
 // outlookSyncNow: POST /me/outlook/sync

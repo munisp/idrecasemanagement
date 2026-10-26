@@ -428,7 +428,8 @@ func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
 		msgID, err = s.sendFromMailbox(p.Username, m.Address, to, cc, in.Subject, in.Text, inReplyTo)
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET internet_message_id=$2 WHERE id=$1`, id, msgID)
 	} else {
-		err = s.outlookSend(r.Context(), m.Tenant, p.Subject, to, cc, in.Subject, in.Text)
+		msgID, err = s.outlookSendFrom(r.Context(), m.Tenant, p.Subject, to, cc, in.Subject, in.Text, nil)
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET internet_message_id=$2 WHERE id=$1`, id, msgID)
 	}
 	if errors.Is(err, errMailQueued) {
 		// The provider turned it away for now (its rate or daily limit): the platform's mail queue sends it again.
@@ -613,6 +614,8 @@ func (s *server) handleReceivedEmail(ctx context.Context, body []byte) (filed in
 		conv = conv[:i] // the thread's first message
 	}
 	filedFor := map[string][]string{} // tenant -> the new rows, so the mail is filed once per program
+	ownersFor := map[string][]string{}
+	businessFor := map[string]bool{} // it reached the program's own address
 	for _, b := range boxes {
 		var id string
 		err := s.db.QueryRow(ctx, `INSERT INTO public.mail_messages
@@ -627,17 +630,25 @@ func (s *server) handleReceivedEmail(ctx context.Context, body []byte) (filed in
 		}
 		filed++
 		filedFor[b.tenant] = append(filedFor[b.tenant], id)
+		if b.sub == systemSub {
+			businessFor[b.tenant] = true
+		} else {
+			ownersFor[b.tenant] = append(ownersFor[b.tenant], b.sub)
+		}
 		s.mailEvent(ctx, id, "RECEIVED", "from "+fromAddr+" to "+strings.Join(addrs, ", ")+authSummary(auth), "resend")
 		for _, a := range em.Attachments {
 			s.storeResendAttachment(ctx, b.tenant, b.sub, id, em.ID, a.ID, a.Filename, a.ContentType, a.Size)
 		}
-		_, _ = s.db.Exec(ctx, `INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES ($1,$2,'MAIL_RECEIVED',$3,'#/inbox')`,
-			b.tenant, b.sub, truncate("New email from "+orWord(fromName, fromAddr)+": "+orWord(em.Subject, "(no subject)"), 300))
+		if b.sub != systemSub { // the program's own address is no one's inbox: its mail is announced when filed
+			s.notifyCtx(ctx, b.tenant, b.sub, "MAIL_RECEIVED", "New email from "+orWord(fromName, fromAddr)+": "+orWord(em.Subject, "(no subject)"),
+				"#/inbox?open="+id)
+		}
 	}
 	refs := messageIDsIn(em.Headers["in-reply-to"] + " " + em.Headers["references"])
 	for tenant, ids := range filedFor {
 		s.fileInbound(ctx, inboundMail{Tenant: tenant, From: fromAddr, To: lowerAddrs(orList(em.To, ev.Data.To)), Subject: orWord(em.Subject, ev.Data.Subject),
-			Body: text, MessageID: orWord(em.MessageID, ev.Data.MessageID), Refs: refs, MailboxIDs: ids, By: "resend"}, true)
+			Body: text, MessageID: orWord(em.MessageID, ev.Data.MessageID), Refs: refs, MailboxIDs: ids, By: "resend",
+			Owners: ownersFor[tenant], NotifyUnmatched: businessFor[tenant]}, true)
 	}
 	return filed, nil
 }
@@ -709,9 +720,9 @@ func fetchLimited(ctx context.Context, url string, limit int64) ([]byte, error) 
 // applyMailboxDelivery: a Resend delivery report about a message sent from a personal address.
 // Mail sent over SMTP carries no Resend id at first: the first report is matched on sender, recipient and subject
 // (recent, newest first), and the id is kept so later reports match it directly.
-func (s *server) applyMailboxDelivery(ctx context.Context, emailID, eventType, detail, from string, to []string, subject string) bool {
+func (s *server) applyMailboxDelivery(ctx context.Context, emailID, eventType, detail, from string, to []string, subject, sentMsgID string) bool {
 	status := mailEventStatus(eventType)
-	if emailID == "" || status == "" {
+	if emailID == "" || (status == "" && sentMsgID == "") {
 		return false
 	}
 	if _, addr := splitAddress(from); s.mailboxesOn() && strings.HasSuffix(addr, "@"+s.cfg.MailboxDomain) && len(to) > 0 {
@@ -722,15 +733,23 @@ func (s *server) applyMailboxDelivery(ctx context.Context, emailID, eventType, d
 			 ORDER BY occurred_at DESC LIMIT 1)
 			AND NOT EXISTS (SELECT 1 FROM public.mail_messages WHERE source='RESEND' AND provider_message_id=$1)`, emailID, addr, subject, string(toJ))
 	}
-	rows, err := s.db.Query(ctx, `SELECT id, status FROM public.mail_messages WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1`, emailID)
+	if sentMsgID != "" {
+		tag, _ := s.db.Exec(ctx, `UPDATE public.mail_messages SET provider_internet_id=$2 WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1 AND provider_internet_id=''`, emailID, sentMsgID)
+		if status == "" {
+			var n int
+			_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.mail_messages WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1`, emailID).Scan(&n)
+			return n > 0 || tag.RowsAffected() > 0
+		}
+	}
+	rows, err := s.db.Query(ctx, `SELECT id, status, tenant, user_sub, subject FROM public.mail_messages WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1`, emailID)
 	if err != nil {
 		return false
 	}
-	type hit struct{ id, cur string }
+	type hit struct{ id, cur, tenant, sub, subject string }
 	hits := []hit{}
 	for rows.Next() {
 		var h hit
-		if rows.Scan(&h.id, &h.cur) == nil {
+		if rows.Scan(&h.id, &h.cur, &h.tenant, &h.sub, &h.subject) == nil {
 			hits = append(hits, h)
 		}
 	}
@@ -739,6 +758,11 @@ func (s *server) applyMailboxDelivery(ctx context.Context, emailID, eventType, d
 		s.mailEvent(ctx, h.id, status, detail, "resend")
 		if mailStatusMayReplace(h.cur, status) {
 			_, _ = s.db.Exec(ctx, `UPDATE public.mail_messages SET status=$2, status_detail=$3, updated_at=now() WHERE id=$1`, h.id, status, detail)
+			if (status == "BOUNCED" || status == "FAILED" || status == "COMPLAINED") && h.sub != systemSub {
+				what := map[string]string{"BOUNCED": "bounced", "FAILED": "wasn't delivered", "COMPLAINED": "was marked as spam by its recipient"}[status]
+				s.notifyCtx(ctx, h.tenant, h.sub, "MAIL_"+status, fmt.Sprintf("Your email %q %s%s", orWord(h.subject, "(no subject)"), what, orDash(" — "+detail)),
+					"#/inbox?open="+h.id)
+			}
 		}
 	}
 	return len(hits) > 0

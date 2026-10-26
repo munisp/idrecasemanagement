@@ -843,7 +843,7 @@ func (s *server) emailInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := s.fileInbound(r.Context(), inboundMail{Tenant: tenant, From: in.From, Subject: in.Subject, Body: in.Body, MessageID: in.MessageID,
-		Refs: messageIDsIn(in.InReplyTo), CaseHint: in.CaseRef, By: "email-inbound"}, true)
+		Refs: messageIDsIn(in.InReplyTo), CaseHint: in.CaseRef, By: "email-inbound", NotifyUnmatched: true}, true)
 	if m.CaseID != "" {
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "attached", "case_id": m.CaseID, "case_number": m.CaseNumber, "reason": m.Reason})
 		return

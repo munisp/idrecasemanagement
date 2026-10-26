@@ -330,6 +330,15 @@
   // at its 50-row page, so it never moved), refreshed on load, every 30s, and after anything is read. The panel pages
   // the unread list 10 at a time; reading one marks it read and opens its link without reloading the page.
   const NOTIF_PAGE = 10;
+  // What each kind of notification is, in words (the bell showed the raw type, e.g. MAIL_RECEIVED).
+  const NOTIF_LABELS = {
+    MAIL_RECEIVED: "New email", MAIL_FILED_TO_CASE: "Email on a dispute", MAIL_NOT_MATCHED: "Email to file",
+    MAIL_BOUNCED: "Email bounced", MAIL_FAILED: "Email not delivered", MAIL_COMPLAINED: "Email marked as spam",
+    EMAIL_BOUNCED: "Email bounced", EMAIL_COMPLAINED: "Email marked as spam", OUTLOOK_NEW_MAIL: "Outlook",
+    OUTLOOK_ERROR: "Outlook needs attention", COMPANY_OUTLOOK_ERROR: "Company Outlook needs attention",
+    COMPANY_OUTLOOK_SEND_FAILED: "Company Outlook couldn't send",
+  };
+  const notifLabel = (t) => NOTIF_LABELS[t] || String(t || "").toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
   const notifEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   let notifUnread = 0, notifPage = 0;
   async function refreshBell() {
@@ -352,7 +361,7 @@
     w.innerHTML = `<h3>Notifications ${notifUnread ? `<span class="muted notif-n">${notifUnread} unread</span>
         <a href="javascript:void(0)" class="notif-markall" data-act="all">Mark all as read</a>` : ""}</h3>
       <div class="notif-list">${list.length ? list.map((x) => `<div class="notif unread" data-id="${notifEsc(x.id)}" data-link="${notifEsc(x.link || "")}" role="button" tabindex="0">
-          <b>${notifEsc(x.type)}</b> — ${notifEsc(x.body)} <span class="muted">${notifEsc(new Date(x.at).toLocaleString())}</span></div>`).join("")
+          <b>${notifEsc(notifLabel(x.type))}</b> — ${notifEsc(x.body)} <span class="muted">${notifEsc(new Date(x.at).toLocaleString())}</span></div>`).join("")
         : `<p class="muted">No unread notifications.</p>`}</div>
       ${notifUnread > NOTIF_PAGE ? `<div class="notif-pager"><span class="muted">${from}–${to} of ${notifUnread}</span>
         <span class="tp-nav"><button type="button" class="mini" data-act="prev" ${notifPage === 0 ? "disabled" : ""}>‹ Previous</button>

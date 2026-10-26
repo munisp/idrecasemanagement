@@ -177,3 +177,15 @@ func TestOutlookAdminConsentURL(t *testing.T) {
 		t.Errorf("approval link: %s", u)
 	}
 }
+
+func TestSystemFromDefaultsToSMTPFrom(t *testing.T) {
+	systemFromCache.Delete("zz")
+	s := &server{cfg: Config{SMTPFrom: "IDRE <idre@upi.dev>"}}
+	h, env := s.systemFrom("zz")
+	if h != "IDRE <idre@upi.dev>" || env != "idre@upi.dev" {
+		t.Errorf("no program address: the platform default, as header and bare envelope: %q %q", h, env)
+	}
+	if s.systemSendVia("zz") != "platform" {
+		t.Error("the program's mail goes through the platform unless Outlook was chosen")
+	}
+}

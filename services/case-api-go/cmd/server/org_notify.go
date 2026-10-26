@@ -120,7 +120,7 @@ func (s *server) emailRespondentOpened(ctx context.Context, tenant, caseID strin
 	}
 	subject := fmt.Sprintf("Dispute %s filed against %s", caseNumber, name)
 	errs := []string{}
-	if err := s.sendMail(to, nil, subject, b.String()); err != nil {
+	if err := s.sendMail(tenant, to, nil, subject, b.String()); err != nil {
 		errs = append(errs, err.Error())
 	}
 	s.logCorrespondence(r, tenant, caseID, "OUT", "respondent_notice", subject, b.String(), to, nil, "system:respondent-notice", errs...)

@@ -13,7 +13,7 @@ func TestMailKeepsItsLayout(t *testing.T) {
 	body := "Case Number: FL26-1\n\nDear Pat,\n\nPay securely here: https://checkout.stripe.com/c/pay/cs_test_" + strings.Repeat("Ab9", 120) + "#fid.\n" +
 		"Questions? email flcdr@capitolbridge.com or call.\n\nThe Health Plan’s response is due."
 	var b strings.Builder
-	writeMailHeaders(&b, "no-reply@idre.test", []string{"a@b.test"}, nil, "Your account — Acme")
+	writeMailHeaders(&b, "no-reply@idre.test", []string{"a@b.test"}, nil, "Your account — Acme", messageID("no-reply@idre.test"))
 	b.WriteString("MIME-Version: 1.0\r\n")
 	writeAlternative(&b, body)
 	raw := b.String()

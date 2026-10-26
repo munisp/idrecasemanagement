@@ -209,7 +209,7 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 		body := fmt.Sprintf("The review team of dispute %s asks for more time:\n\n  • %s\n\nWhy: %s\n\n"+
 			"Please sign in to the portal by %s and agree or decline under Document requests:\n%s/app.html#/document-requests\n",
 			caseNumber, what, message, due, strings.TrimRight(s.cfg.PortalBaseURL, "/"))
-		err := s.sendMail([]string{pc.email}, nil, subject, body)
+		err := s.sendMail(tenant, []string{pc.email}, nil, subject, body)
 		errs := []string{}
 		if err != nil {
 			errs = append(errs, err.Error())
@@ -233,7 +233,7 @@ func (s *server) openDocRequest(r *http.Request, tenant, caseID, side, reason, s
 		} else {
 			fmt.Fprintf(&body, "Upload them through this secure link:\n%s", s.autoShareLink(r, tenant, caseID, "upload", ""))
 		}
-		err := s.sendMail([]string{pc.email}, nil, subject, body.String())
+		err := s.sendMail(tenant, []string{pc.email}, nil, subject, body.String())
 		errs := []string{}
 		if err != nil {
 			errs = append(errs, err.Error())

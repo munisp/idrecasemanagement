@@ -38,38 +38,50 @@ func cleanAddrs(list []string) ([]string, error) {
 }
 
 // sendMail delivers one message. Returns nil on acceptance by the relay.
-func (s *server) sendMail(to, cc []string, subject, body string) error {
-	cfg := s.cfg
-	if cfg.SMTPHost == "" {
-		return fmt.Errorf("smtp not configured")
+func (s *server) sendMail(tenant string, to, cc []string, subject, body string) error {
+	_, err := s.sendMailID(tenant, to, cc, subject, body)
+	return err
+}
+
+// sendMailID is sendMail, returning the Message-ID the mail carries, so the mail log can record it and a reply
+// (In-Reply-To) can be filed under the case the mail was about (mailfiling.go).
+func (s *server) sendMailID(tenant string, to, cc []string, subject, body string) (string, error) {
+	if s.cfg.SMTPHost == "" {
+		return "", fmt.Errorf("smtp not configured")
 	}
 	var err error
 	if to, err = cleanAddrs(to); err != nil {
-		return err
+		return "", err
 	}
 	if cc, err = cleanAddrs(cc); err != nil {
-		return err
+		return "", err
 	}
-	from := cfg.SMTPFrom
+	if id, sent := s.viaCompanyOutlook(tenant, to, cc, subject, body, nil); sent {
+		return id, nil
+	}
+	header, envelope := s.systemFrom(tenant)
+	id := messageID(envelope)
 	var b strings.Builder
-	writeMailHeaders(&b, from, to, cc, subject)
+	writeMailHeaders(&b, header, to, cc, subject, id)
 	b.WriteString("MIME-Version: 1.0\r\n")
 	writeAlternative(&b, body) // plain text + the same text as HTML (mailbody.go)
-	return s.deliver(from, to, cc, []byte(b.String()))
+	return id, s.deliver(envelope, to, cc, []byte(b.String()))
 }
 
 // sendMailWithAttachment delivers a plain-text body plus one attachment
 // (MIME multipart/mixed, base64 — RFC 2045). Used for report send-out: the
 // body is the human summary, the CSV is the working artifact.
-func (s *server) sendMailWithAttachment(to, cc []string, subject, body, filename string, content []byte) error {
-	cfg := s.cfg
-	if cfg.SMTPHost == "" {
+func (s *server) sendMailWithAttachment(tenant string, to, cc []string, subject, body, filename string, content []byte) error {
+	if s.cfg.SMTPHost == "" {
 		return fmt.Errorf("smtp not configured")
 	}
-	from := cfg.SMTPFrom
+	if _, sent := s.viaCompanyOutlook(tenant, to, cc, subject, body, &outAttachment{Name: filename, ContentType: "text/csv", Content: content}); sent {
+		return nil
+	}
+	header, from := s.systemFrom(tenant)
 	boundary := "idre-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	var b strings.Builder
-	writeMailHeaders(&b, from, to, cc, subject)
+	writeMailHeaders(&b, header, to, cc, subject, messageID(from))
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
 	fmt.Fprintf(&b, "--%s\r\n", boundary)
 	writeAlternative(&b, body)
@@ -87,7 +99,7 @@ func (s *server) sendMailWithAttachment(to, cc []string, subject, body, filename
 	return s.deliver(from, to, cc, []byte(b.String()))
 }
 
-func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject string) {
+func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject, msgID string) {
 	fmt.Fprintf(b, "From: %s\r\n", from)
 	fmt.Fprintf(b, "To: %s\r\n", strings.Join(to, ", "))
 	if len(cc) > 0 {
@@ -95,7 +107,7 @@ func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject 
 	}
 	fmt.Fprintf(b, "Subject: %s\r\n", headerText(subject))
 	fmt.Fprintf(b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
-	fmt.Fprintf(b, "Message-ID: %s\r\n", messageID(from))
+	fmt.Fprintf(b, "Message-ID: %s\r\n", msgID)
 }
 
 // smtpDeliver runs the SMTP transaction for an already-composed message (deliver, in mailqueue.go, paces and

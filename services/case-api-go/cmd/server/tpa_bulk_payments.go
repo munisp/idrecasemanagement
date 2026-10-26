@@ -81,7 +81,7 @@ func (s *server) emailBatchFiled(ctx context.Context, tenant, batchID string, ca
 	}
 	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/", nil)
 	subject := fmt.Sprintf("Bulk filing %s — %d dispute(s) filed", ref, len(caseNumbers))
-	if err := s.sendMail([]string{email}, nil, subject, body); err != nil {
+	if err := s.sendMail(tenant, []string{email}, nil, subject, body); err != nil {
 		s.logCorrespondence(r, tenant, "", "OUT", "bulk_filed", subject, body, []string{email}, nil, "system:tpa-bulk", err.Error())
 		return
 	}

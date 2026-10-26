@@ -477,7 +477,8 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// No QA gate on this template — deliver immediately via SMTP. Mail the provider queued for later
 		// (mailqueue.go) is sent: it goes out automatically, so the letter counts as sent.
-		if err := s.sendMail(in.To, in.CC, subject, body); err != nil && !errors.Is(err, errMailQueued) {
+		msgID, err := s.sendMailID(tenant, in.To, in.CC, subject, body)
+		if err != nil && !errors.Is(err, errMailQueued) {
 			s.logCorrespondence(r, tenant, caseID, "OUT", in.Template, subject, body, in.To, in.CC, p.Subject, err.Error())
 			s.logActivity(r.Context(), tenant, caseID, "EMAIL_DELIVERY_FAILED",
 				fmt.Sprintf("SMTP delivery failed for %q: %s", subject, err))
@@ -486,6 +487,7 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.qa_reviews SET sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
 		s.logCorrespondence(r, tenant, caseID, "OUT", in.Template, subject, body, in.To, in.CC, p.Subject)
+		s.noteMailMessageID(r.Context(), tenant, caseID, subject, msgID)
 		if len(in.To) > 0 {
 			s.logCorrespondenceInquiry(r, tenant, caseID, in.To[0], fmt.Sprintf("%s: %s", in.Template, subject), p.Subject)
 		}
@@ -1272,10 +1274,11 @@ func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, case
 		return block
 	}
 	var sendErr error
+	var msgID string
 	if len(to) == 0 && len(cc) == 0 {
 		sendErr = fmt.Errorf("no recipient email address on this draft — enter one and send again")
 	} else {
-		sendErr = s.sendMail(to, cc, subject, body)
+		msgID, sendErr = s.sendMailID(tenant, to, cc, subject, body)
 	}
 	queued := errors.Is(sendErr, errMailQueued)
 	if err := sendErr; err != nil && !queued {
@@ -1299,6 +1302,9 @@ func (s *server) deliverApproved(r *http.Request, p principal, tenant, qid, case
 			`UPDATE public.qa_reviews SET status='SENT', sent_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid)
 		if !s.settleHeldMail(r, tenant, qid, "SENT", "", body, to, cc) {
 			s.logCorrespondence(r, tenant, caseID, "OUT", "qa_approved", subject, body, to, cc, p.Subject)
+			s.noteMailMessageID(r.Context(), tenant, caseID, subject, msgID)
+		} else if msgID != "" { // the held row is the record: it carries the Message-ID a reply will quote
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.correspondence_log SET internet_message_id=$3 WHERE tenant=$1 AND qa_review_id=$2`, tenant, qid, msgID)
 		}
 		if len(to) > 0 {
 			s.logCorrespondenceInquiry(r, tenant, caseID, to[0], fmt.Sprintf("%s: %s", artifact, subject), p.Subject)

@@ -6130,7 +6130,11 @@ const Views = (() => {
   let inboxState = { folder: "inbox", source: "", q: "", open: "" };
 
   async function inbox() {
+    const linkTo = new URLSearchParams(location.hash.split("?")[1] || "");
     outlookReturnToast("#/inbox");
+    if (linkTo.get("source")) inboxState = { ...inboxState, source: linkTo.get("source").toUpperCase(), folder: "inbox" };
+    if (linkTo.get("open")) afterRender(() => inboxOpen(linkTo.get("open")));
+    if (linkTo.get("open") || linkTo.get("source")) history.replaceState(null, "", "#/inbox");
     let mb;
     try { mb = await Api.myMail.mailbox(); } catch (e) { return err(e); }
     afterRender(() => inboxList());
@@ -7078,13 +7082,20 @@ const Views = (() => {
   function mailLog() {
     if (!can("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"))
       return `<div class="view-head"><h1>Mail log</h1></div><p class="muted">Requires a staff role.</p>`;
+    if (new URLSearchParams(location.hash.split("?")[1] || "").get("unmatched")) {
+      mailLogFilterState = { direction: "IN", unmatched: "1" };
+      afterRender(() => { const sel = document.querySelector('select[name="direction"]'); if (sel) sel.value = "UNMATCHED"; });
+      history.replaceState(null, "", "#/mail");
+    }
     outlookReturnToast("#/mail");
     afterRender(mailLogBox);
     afterRender(mailRecipientsBox);
+    afterRender(systemMailBox);
     afterRender(companyOutlookBox);
     return `<div class="view-head"><h1>Mail log</h1>
       <span class="muted">every inbound and outbound mail across the platform, with its delivery status — pending approval, sent, delivered, bounced or failed</span></div>
       <div id="mail-recipients"></div>
+      <div id="system-mail"></div>
       <div id="company-outlook"></div>
       <form class="inline-form" onsubmit="event.preventDefault(); Views.mailLogFilter(this)">
         <select name="direction"><option value="">IN + OUT</option><option value="IN">Inbound</option><option value="UNMATCHED">Inbound — not matched to a case</option><option value="OUT">Outbound</option></select>
@@ -7209,6 +7220,45 @@ const Views = (() => {
 
   async function mailLogAttachment(id, aid) {
     try { saveBlob(await Api.program.mailAttachment(id, aid)); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+
+  // The program's own email: where its letters and notices come from, and so where replies arrive. A tenant admin
+  // picks an address on the platform's mail domain, or the company Outlook mailbox.
+  async function systemMailBox() {
+    const box = document.getElementById("system-mail");
+    if (!box) return;
+    let m;
+    try { m = await Api.systemMail.get(); } catch (e) { box.innerHTML = ""; return; }
+    const admin = can("TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+    const co = m.company_outlook || {};
+    const viaOutlook = m.send_via === "outlook";
+    const now = viaOutlook ? `the company Outlook mailbox <b>${esc(co.mailbox || co.email || "")}</b>` : `<b>${esc(m.sends_as || m.default_from)}</b>`;
+    if (!admin) { box.innerHTML = `<p class="muted">The program's letters and notices are sent from ${now}.</p>`; return; }
+    const local = (m.address || "").split("@")[0];
+    box.innerHTML = `<details class="prog-sec" ${m.active || viaOutlook ? "" : "open"}><summary>Program email — letters are sent from ${viaOutlook ? esc(co.mailbox || co.email || "Outlook") : esc(m.address || m.default_from)}</summary>
+      <p class="muted">The address the program's letters, notices and links come from. Replies come back to it and are filed like all inbound mail:
+        under their dispute when they name one or answer a letter, otherwise in “Inbound — not matched to a case”, and the PMs are told.</p>
+      <form class="form" onsubmit="event.preventDefault(); Views.systemMailSave(this)">
+        <label class="chk"><input type="radio" name="send_via" value="platform" ${viaOutlook ? "" : "checked"} />
+          An address of the program's own on the platform${m.domain ? "" : " — <span class=\"muted\">no mail domain is set up</span>"}</label>
+        <div class="inline-form" style="margin-left:1.6em">
+          <input name="local_part" value="${esc(local)}" placeholder="cases" style="width:10em" ${m.domain ? "" : "disabled"} /><span>@${esc(m.domain || "…")}</span>
+          <input name="display_name" value="${esc(m.display_name || "")}" placeholder="name shown, e.g. Florida Claims Disputes" style="min-width:16em" />
+        </div>
+        <label class="chk"><input type="radio" name="send_via" value="outlook" ${viaOutlook ? "checked" : ""} ${co.connected ? "" : "disabled"} />
+          The company Outlook mailbox ${co.connected ? `<b>${esc(co.mailbox || co.email)}</b> — letters go out from Outlook and stay in its Sent Items`
+            : `<span class="muted">— connect it below first</span>`}</label>
+        <p class="muted" style="font-size:.9em">If Outlook can't send (for example its sign-in expired), the mail still goes out from the platform address and the tenant admins are told.
+          Leave the address empty and choose the first option to send from the platform's default, ${esc(m.default_from)}.</p>
+        <button class="mini">Save</button></form></details>`;
+  }
+  async function systemMailSave(f) {
+    try {
+      const via = f.send_via.value;
+      const r = await Api.systemMail.set({ send_via: via, local_part: f.local_part.value.trim(), display_name: f.display_name.value.trim() });
+      UI.toast(via === "outlook" ? "Letters are now sent from the company Outlook" : r.active ? `Letters are now sent from ${r.sends_as || r.address}` : "Letters are sent from the platform's default address");
+      systemMailBox();
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
   }
 
   // The program's company mailbox: a tenant admin connects it; everything it receives is filed like inbound mail.
@@ -11725,5 +11775,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

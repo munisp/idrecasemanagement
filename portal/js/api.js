@@ -338,6 +338,10 @@ const Api = (() => {
     },
     // Personal timesheet: daily entry screen with day/week/month totals.
     // The program's company mailbox (e.g. where replies to case letters arrive), connected by a tenant admin.
+    systemMail: {
+      get: () => req("GET", `${t()}/program/system-mail`),
+      set: (body) => req("PUT", `${t()}/program/system-mail`, body),
+    },
     companyOutlook: {
       status: () => req("GET", `${t()}/company-outlook`),
       connect: (mailbox) => req("GET", `${t()}/company-outlook/connect` + qs({ mailbox })),

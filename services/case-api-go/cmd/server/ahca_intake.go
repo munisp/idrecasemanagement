@@ -277,7 +277,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 					"Once your payment is confirmed you will receive your case number, the filing " +
 					"instructions and packet, and your secure document-upload link. Documents cannot " +
 					"be accepted before payment."
-				if merr := s.sendMail([]string{email}, nil, "Claims dispute — payment required to open your case", body); merr == nil {
+				if merr := s.sendMail(tenant, []string{email}, nil, "Claims dispute — payment required to open your case", body); merr == nil {
 					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake")
 				} else {
 					s.logCorrespondence(r, tenant, caseID, "OUT", "payment_required", "Claims dispute — payment required to open your case", body, []string{email}, nil, "system:ahca-intake", merr.Error())
@@ -377,7 +377,7 @@ func (s *server) sendIntakeLinks(r *http.Request, tenant, caseID, caseNumber, em
 		shareBase := strings.TrimRight(s.cfg.PortalBaseURL, "/")
 		body := intakeLinksBody(s.renderTemplate(r, tenant, caseID, tpl.Body), caseNumber,
 			shareBase+"/api/share/"+downloadToken, shareBase+"/api/share/"+uploadToken)
-		if merr := s.sendMail([]string{email}, nil, subject, body); merr == nil {
+		if merr := s.sendMail(tenant, []string{email}, nil, subject, body); merr == nil {
 			s.logCorrespondence(r, tenant, caseID, "OUT", tpl.Key, subject, body, []string{email}, nil, "system:ahca-intake")
 			s.logCorrespondenceInquiry(r, tenant, caseID, email, fmt.Sprintf("%s: %s", tpl.Key, subject), "system:ahca-intake")
 		} else {

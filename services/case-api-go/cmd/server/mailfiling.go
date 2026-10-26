@@ -85,9 +85,9 @@ func (s *server) matchCase(ctx context.Context, tenant, hint, subject, body stri
 	if len(refs) > 0 {
 		var m caseMatch
 		if s.db.QueryRow(ctx, `SELECT case_id FROM public.correspondence_log
-			WHERE tenant=$1 AND case_id <> '' AND internet_message_id = ANY($2) ORDER BY created_at DESC LIMIT 1`, tenant, refs).Scan(&m.CaseID) == nil ||
+			WHERE tenant=$1 AND case_id <> '' AND (internet_message_id = ANY($2) OR provider_internet_id = ANY($2)) ORDER BY created_at DESC LIMIT 1`, tenant, refs).Scan(&m.CaseID) == nil ||
 			s.db.QueryRow(ctx, `SELECT case_id FROM public.mail_messages
-			WHERE tenant=$1 AND case_id <> '' AND internet_message_id = ANY($2) ORDER BY occurred_at DESC LIMIT 1`, tenant, refs).Scan(&m.CaseID) == nil {
+			WHERE tenant=$1 AND case_id <> '' AND (internet_message_id = ANY($2) OR provider_internet_id = ANY($2)) ORDER BY occurred_at DESC LIMIT 1`, tenant, refs).Scan(&m.CaseID) == nil {
 			_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), m.CaseID).Scan(&m.CaseNumber)
 			m.Reason = "a reply to mail filed under " + m.CaseNumber
 			return m
@@ -121,6 +121,10 @@ type inboundMail struct {
 	MessageID  string   // its own Message-ID
 	Refs       []string // In-Reply-To and References
 	CaseHint   string   // a dispute number the sender gave explicitly (the email-to-case endpoint)
+	Owners     []string // whose inboxes it reached (they were told already)
+	// Business mail -- to the program's own address, its company Outlook, email-to-case: when it matches no dispute
+	// the PMs are told it waits to be filed. A staff member's personal mail is not announced to anyone else.
+	NotifyUnmatched bool
 	MailboxIDs []string // the mail_messages rows (one per staff member it reached), when it came to a personal address
 	By         string   // what carried it: resend, outlook, email-inbound
 }
@@ -150,6 +154,7 @@ func (s *server) fileInbound(ctx context.Context, in inboundMail, general bool) 
 		if m.CaseID != "" {
 			s.addInboundToTimeline(ctx, in.Tenant, m.CaseID, in.From, in.Subject, in.Body, m.Reason)
 		}
+		s.announceInbound(ctx, in, m)
 	}
 	note := "in the mail log's inbound section: " + m.Reason
 	if m.CaseID != "" {
@@ -157,6 +162,29 @@ func (s *server) fileInbound(ctx context.Context, in inboundMail, general bool) 
 	}
 	s.linkMailboxRows(ctx, in.MailboxIDs, m.CaseID, logID, note)
 	return m
+}
+
+// announceInbound tells the people who should know about a newly filed mail: the dispute's holder (or the PMs when no
+// one holds it), or -- for business mail that matched none -- the PMs who file it by hand.
+func (s *server) announceInbound(ctx context.Context, in inboundMail, m caseMatch) {
+	who := strings.TrimSpace(in.From)
+	subject := orWord(strings.TrimSpace(in.Subject), "(no subject)")
+	if m.CaseID != "" {
+		target := s.currentAssignee(ctx, in.Tenant, m.CaseID)
+		if target == "" {
+			target = "role:PM"
+		}
+		if contains(in.Owners, target) {
+			return // it reached their own inbox: they were told there
+		}
+		s.notifyCtx(ctx, in.Tenant, target, "MAIL_FILED_TO_CASE",
+			fmt.Sprintf("Email from %s on %s: %s", who, m.CaseNumber, subject), "#/cases/"+m.CaseID)
+		return
+	}
+	if in.NotifyUnmatched {
+		s.notifyCtx(ctx, in.Tenant, "role:PM", "MAIL_NOT_MATCHED",
+			fmt.Sprintf("Email from %s waits to be filed under a dispute: %s", who, subject), "#/mail?unmatched=1")
+	}
 }
 
 func (s *server) addInboundToTimeline(ctx context.Context, tenant, caseID, from, subject, body, reason string) {
