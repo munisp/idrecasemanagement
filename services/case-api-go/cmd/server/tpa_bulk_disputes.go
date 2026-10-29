@@ -407,6 +407,14 @@ type bulkDisputeRow struct {
 	Errors     []string `json:"errors,omitempty"`
 }
 
+// clientHasPaymentRail: the client has a verified card or bank account on file.
+func (s *server) clientHasPaymentRail(ctx context.Context, tenant, clientID string) bool {
+	var rails int
+	_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.tpa_payment_methods
+		WHERE tenant=$1 AND client_id::text=$2 AND verified AND status='ACTIVE'`, tenant, clientID).Scan(&rails)
+	return rails > 0
+}
+
 // bulkProviderType reads a provider_type cell as a person writes it. The
 // program's own codes pass, however they are cased or spaced ("Hospital
 // outpatient" is hospital_outpatient); anything else ("Cardiology", "Urgent
@@ -563,6 +571,7 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 	waiting, failed := 0, 0
 	var filedNums []string // CSV on its own: the disputes filed in this upload
 	program := s.loadProgram(r, tenant)
+	onboardingRequired := s.featureEnabled(r, tenant, "onboarding_required")
 	for i, rec := range records[1:] {
 		row := bulkDisputeRow{Row: i + 2, DisputeRef: get(rec, "dispute_ref"), Party: get(rec, "party_name"), Status: "ERROR"}
 		fail := func(msg string) {
@@ -608,7 +617,12 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		answersJSON, _ := json.Marshal(answers)
-		clientID, cstatus, npi, tin, addr, why := s.bulkClient(r.Context(), tenant, org.ID, row.Party, get(rec, "provider_group"))
+		// The same gates as a single filing (tpaIntake): the client's NPI, TIN
+		// and address are not required to file; an NPI held for review or
+		// rejected, or an exclusion-list hit, still stops it; a payment method
+		// on file is required only when the tenant turns on onboarding_required
+		// -- otherwise the fee is paid after filing (Pay now / Pay all).
+		clientID, cstatus, _, _, _, why := s.bulkClient(r.Context(), tenant, org.ID, row.Party, get(rec, "provider_group"))
 		if why != "" {
 			fail(why)
 			continue
@@ -617,18 +631,11 @@ func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
 			fail("this client is suspended")
 			continue
 		}
-		if npi == nil || *npi == "" || tin == nil || *tin == "" || addr == nil || *addr == "" {
-			fail("the client's profile (NPI, TIN, address) is not complete")
-			continue
-		}
 		if why := s.clientNPIBlock(r.Context(), tenant, clientID); why != "" {
 			fail(why)
 			continue
 		}
-		var rails int
-		_ = s.db.QueryRow(r.Context(), `SELECT count(*) FROM public.tpa_payment_methods
-			WHERE tenant=$1 AND client_id=$2 AND verified AND status='ACTIVE'`, tenant, clientID).Scan(&rails)
-		if rails == 0 {
+		if onboardingRequired && !s.clientHasPaymentRail(r.Context(), tenant, clientID) {
 			fail("the client has no verified payment method")
 			continue
 		}
@@ -915,10 +922,7 @@ func (s *server) fileOneBulkDispute(ctx context.Context, tenant, tpaID, clientID
 	if why := s.clientNPIBlock(ctx, tenant, clientID); why != "" {
 		return "", "", fmt.Errorf("%s", why)
 	}
-	var rails int
-	_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.tpa_payment_methods WHERE tenant=$1 AND client_id::text=$2 AND verified AND status='ACTIVE'`,
-		tenant, clientID).Scan(&rails)
-	if rails == 0 {
+	if s.featureEnabled(r, tenant, "onboarding_required") && !s.clientHasPaymentRail(ctx, tenant, clientID) {
 		return "", "", fmt.Errorf("the client has no verified payment method any more")
 	}
 	if pkgID != "" { // disputes.csv on its own files with no package
