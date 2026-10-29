@@ -56,3 +56,24 @@ func TestZipFoldersPerDispute(t *testing.T) {
 		t.Fatal("a folder of slot files is a discrete package")
 	}
 }
+
+// A provider_type cell is read as a person writes it: the program's codes pass
+// however cased or spaced, anything else is left for the reviewer (not refused)
+// and handed back so it is kept in the notes.
+func TestBulkProviderType(t *testing.T) {
+	cfg := &ProgramConfig{}
+	cfg.Eligibility.Thresholds = []ThresholdRule{{ProviderType: "hospital_outpatient"}, {ProviderType: "physician_dentist"}}
+	for _, c := range []struct{ in, code, kept string }{
+		{"", "", ""},
+		{"hospital_outpatient", "hospital_outpatient", ""},
+		{"Hospital Outpatient", "hospital_outpatient", ""},
+		{"physician-dentist", "physician_dentist", ""},
+		{"Cardiology", "", "Cardiology"},
+		{" Urgent Care ", "", "Urgent Care"},
+	} {
+		code, kept := bulkProviderType(cfg, c.in)
+		if code != c.code || kept != c.kept {
+			t.Errorf("bulkProviderType(%q) = %q, %q; want %q, %q", c.in, code, kept, c.code, c.kept)
+		}
+	}
+}

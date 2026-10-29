@@ -8802,6 +8802,7 @@ const Views = (() => {
         <section data-tpa-panel="bulk" style="display:none">
           ${onb ? `<div class="card"><h2>File many disputes at once</h2>
             <p class="muted">Upload one ZIP with a list of the disputes and a folder of documents for each. Every dispute is filed by itself as soon as its documents have been read — whatever documents it has, as many as it relies on. A document that doesn't look like what it's named is flagged for the reviewer, not refused.</p>
+            <p class="muted"><b>No documents yet?</b> Upload <code>disputes.csv</code> on its own instead of a ZIP: every dispute in it is filed straight away without documents, and you add them on each dispute afterwards (or answer the reviewer's document requests).</p>
             <details class="tpa-more" open><summary>How to prepare the ZIP</summary>
               <div class="tpa-zip-howto">
                 <pre class="tpa-tree">disputes.zip
@@ -8830,8 +8831,8 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
             <p class="muted upl-rules">Accepted: PDF up to 100 MB · Word, Excel, PowerPoint up to 50 MB · images up to 30 MB · text and CSV up to 10 MB · ZIP up to 512 MB (at most 2,000 files, no passwords, no archives inside). Every file is scanned for viruses. Files over 8 MB go up in parts you can pause and resume.</p>
             <form class="inline-form" data-task="bulk_filing" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
-              <input name="file" type="file" accept=".zip,application/zip" required />
-              <button class="mini">Upload disputes ZIP</button></form>
+              <input name="file" type="file" accept=".zip,application/zip,.csv,text/csv" required />
+              <button class="mini">Upload ZIP or CSV</button></form>
             <div id="tpa-bd-result"></div></div>
           <div class="card"><h2>Your bulk filings</h2>
             <div id="tpa-bd-batches"><p class="muted">Loading…</p></div>
@@ -10211,15 +10212,15 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   async function tpaBulkDisputesFn(form) {
     const out = document.getElementById("tpa-bd-result");
     const btn = form.querySelector("button"); btn.disabled = true;
-    out.innerHTML = '<p class="muted">Uploading and reading the ZIP…</p>';
+    out.innerHTML = '<p class="muted">Uploading and reading the file…</p>';
     try {
       const r = await Api.program.tpaBulkDisputes(form.batch_ref.value.trim(), form.file.files[0]);
       if (r.idempotent_replay) { out.innerHTML = `<p class="muted">${esc(r.note)}</p>`; tpaBdToggle(r.batch_id, true); return; }
-      out.innerHTML = `<p>${r.waiting_for_documents} dispute(s) accepted and waiting for their documents to be checked${r.refused ? `, <b>${r.refused} refused</b>` : ""}.</p>
+      out.innerHTML = `<p>${r.filed ? `<b>${r.filed} dispute(s) filed</b> without documents — add them on each dispute` : `${r.waiting_for_documents} dispute(s) accepted and waiting for their documents to be checked`}${r.refused ? `, <b>${r.refused} refused</b>` : ""}.</p>
         <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Documents</th><th>Result</th></tr></thead><tbody>
         ${(r.rows || []).map((x) => `<tr><td>${x.row}</td><td>${esc(x.dispute_ref)}</td><td>${esc(x.party)}</td>
           <td>${x.mode ? esc(x.mode === "MERGED" ? "merged PDF" : (x.attached || []).length + ((x.attached || []).length === 1 ? " file" : " files")) : "—"}</td>
-          <td>${x.status === "WAITING_DOCS" ? '<span class="badge s-validating">Checking documents</span>' : '<span class="badge s-rejected">Refused</span>'}${(x.errors || []).length ? `<br><span class="muted">${(x.errors || []).map(esc).join("<br>")}</span>` : ""}</td></tr>`).join("")}
+          <td>${x.status === "FILED" ? `<span class="badge s-filed">Filed ${esc(x.case_number || "")}</span>` : x.status === "WAITING_DOCS" ? '<span class="badge s-validating">Checking documents</span>' : '<span class="badge s-rejected">Refused</span>'}${(x.errors || []).length ? `<br><span class="muted">${(x.errors || []).map(esc).join("<br>")}</span>` : ""}</td></tr>`).join("")}
         </tbody></table>`;
       if (window.Telemetry) Telemetry.taskDone("bulk_filing", { rows: (r.rows || []).length, refused: r.refused || 0 });
       form.reset(); await tpaBdBatchesBox(); tpaBdToggle(r.batch_id, true);
@@ -10241,7 +10242,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <td>${Number(b.unpaid) ? `${b.unpaid} · ${usdC(b.unpaid_cents)}` : '<span class="muted">—</span>'}</td>
           <td><span class="bd-chevron" id="bd-chev-${b.id}">▸</span></td></tr>
           <tr id="bd-detail-${b.id}" class="row-detail" style="display:none"><td colspan="8"><div id="bd-report-${b.id}"></div></td></tr>`).join("")}</tbody></table>`
-        : '<p class="muted">No bulk filings yet — upload a disputes ZIP above.</p>';
+        : '<p class="muted">No bulk filings yet — upload a disputes ZIP or CSV above.</p>';
       open.forEach((id) => tpaBdToggle(id, true));
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
