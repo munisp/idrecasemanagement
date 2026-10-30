@@ -101,7 +101,8 @@ func (s *server) payerFor(r *http.Request, tenant, kind string) (payer, error) {
 type feeScope struct {
 	label                     string // on the Stripe line item
 	batchID, clientID, caseID string
-	back                      string // portal page to come back to; "" = the payer's own page
+	caseIDs                   []string // the disputes a filer ticked: only its own unpaid ones among them are charged
+	back                      string   // portal page to come back to; "" = the payer's own page
 }
 
 type unpaidFee struct {
@@ -135,6 +136,10 @@ func (s *server) unpaidFees(ctx context.Context, tenant string, py payer, sc fee
 	if sc.caseID != "" {
 		args = append(args, sc.caseID)
 		q += fmt.Sprintf(` AND o.case_id=$%d`, len(args))
+	}
+	if len(sc.caseIDs) > 0 {
+		args = append(args, sc.caseIDs)
+		q += fmt.Sprintf(` AND o.case_id = ANY($%d)`, len(args))
 	}
 	rows, err := s.db.Query(ctx, q+` ORDER BY c.case_number`, args...)
 	if err != nil {
@@ -258,6 +263,10 @@ func (s *server) scopedCheckout(w http.ResponseWriter, r *http.Request, kind str
 	// saved card or bank account, or the TPA's (tpa_saved_payments.go).
 	var in savedPayRequest
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in)
+	if kind == "tpa" && len(in.CaseIDs) > 0 {
+		sc.caseIDs = in.CaseIDs
+		sc.label = fmt.Sprintf("%d selected disputes", len(in.CaseIDs))
+	}
 	if kind == "tpa" && (in.Source == "CLIENT" || in.Source == "TPA") {
 		s.feeChargeSaved(w, r, tenant, py, sc, in)
 		return

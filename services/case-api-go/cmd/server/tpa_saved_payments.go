@@ -475,16 +475,17 @@ func (s *server) tpaFeeOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		CaseID   string `json:"case_id"`
-		ClientID string `json:"client_id"`
-		BatchID  string `json:"batch_id"`
+		CaseID   string   `json:"case_id"`
+		ClientID string   `json:"client_id"`
+		BatchID  string   `json:"batch_id"`
+		CaseIDs  []string `json:"case_ids"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&in)
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in)
 	if in.CaseID != "" && !s.payerOwnsCase(r.Context(), tenant, py, in.CaseID) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{caseID: in.CaseID, clientID: in.ClientID, batchID: in.BatchID})
+	fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{caseID: in.CaseID, clientID: in.ClientID, batchID: in.BatchID, caseIDs: in.CaseIDs})
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -516,6 +517,7 @@ type savedPayRequest struct {
 	PaymentMethodID string            `json:"payment_method_id"` // TPA: which of its methods
 	ClientMethods   map[string]string `json:"client_methods"`    // CLIENT: client_id -> method (default: its newest chargeable)
 	Method          string            `json:"method"`            // CHECKOUT: card (default; adds the card fee) | bank
+	CaseIDs         []string          `json:"case_ids"`          // pay only these disputes (the ones ticked)
 }
 
 // feeChargeSaved charges the fees in scope to saved methods and hands the

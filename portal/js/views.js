@@ -8755,7 +8755,7 @@ const Views = (() => {
           <div class="card"><h2>Your parties' disputes</h2>
             <p class="muted">Every dispute you filed, for every client. Open a case number for its details, payment and documents.</p>
             <div id="tpa-fees"></div>
-            <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div>
+            <div id="tpa-rollup"></div><div id="tpa-cases-filters"></div><div id="tpa-pick-bar"></div>
             <div id="tpa-cases" data-nosearch><p class="muted">Loading…</p></div></div>
         </section>
 
@@ -10174,8 +10174,9 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
             ? `<span class="badge s-needs-review">${unpaid.length} unpaid · ${usdC(due)}</span>${canPay ? ` <button class="mini" onclick="Views.payClientFn('${g.id}', this)">Pay all — ${usdC(due)}</button>` : ""}`
             : '<span class="badge s-filed">Nothing owed</span>'}${canPay && g.id ? ` <button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {client_id: '${g.id}'}, this)">Download documents</button>` : ""}</span></div>
         <div class="prov-body"${open ? "" : " hidden"}>
-        <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
+        <div class="tbl-wrap"><table class="tbl"><thead><tr><th>${canPay && unpaid.length ? `<input type="checkbox" aria-label="Select all of ${esc(g.name || "this client")}'s unpaid disputes" onclick="event.stopPropagation()" onchange="Views.tpaPickGroup(this)" ${unpaid.every((x) => tpaPick.has(x.case_id)) ? "checked" : ""} />` : ""}</th><th>Case</th><th>Status</th><th>Disputed</th><th>Fee</th><th>Payment</th><th>Filed</th><th></th></tr></thead><tbody>
         ${g.rows.map((x) => `<tr>
+          <td>${canPay && feePayable(x) ? `<input type="checkbox" class="fee-pick" data-case="${esc(x.case_id)}" data-cents="${Number(x.fee_cents || 0)}" aria-label="Select ${esc(x.case_number || "this dispute")} to pay" onchange="Views.tpaPickToggle(this)" ${tpaPick.has(x.case_id) ? "checked" : ""} />` : ""}</td>
           <td>${x.case_id ? `<a href="#/cases/${x.case_id}">${esc(x.case_number || x.case_id.slice(0, 8))}</a>` : "—"}</td>
           <td>${x.agency_status && x.status !== "AWAITING_PAYMENT" ? `<span class="badge" title="The dispute's status with the Agency">${esc(x.agency_status)}</span>` : badge(x.status)}</td><td>${usdC(x.disputed_amount_cents)}</td><td>${x.fee_cents ? usdC(x.fee_cents) : "—"}</td>
           <td>${feePill(x)}</td><td>${esc(x.filed)}</td>
@@ -10185,6 +10186,38 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
         </tbody></table></div></div></section>`;
     }).join("");
   }
+  // The disputes ticked to pay together, kept while the list is filtered or redrawn.
+  const tpaPick = new Map(); // case id -> fee in cents
+  function tpaPickDraw() {
+    const bar = document.getElementById("tpa-pick-bar");
+    if (!bar) return;
+    // A dispute paid meanwhile is no longer on offer.
+    const payable = new Map((window._tpaCases || []).filter(feePayable).map((x) => [x.case_id, Number(x.fee_cents || 0)]));
+    for (const id of [...tpaPick.keys()]) { if (payable.has(id)) tpaPick.set(id, payable.get(id)); else tpaPick.delete(id); }
+    const cents = [...tpaPick.values()].reduce((n, c) => n + c, 0);
+    bar.innerHTML = tpaPick.size ? `<div class="pick-bar" role="status"><b>${plural(tpaPick.size, "dispute")} selected · ${usdC(cents)}</b>
+      <button class="mini" onclick="Views.tpaPickPay(this)">Pay selected — ${usdC(cents)}</button>
+      <button class="mini ghost" onclick="Views.tpaPickClear()">Clear</button></div>` : "";
+  }
+  function tpaPickToggle(cb) {
+    if (cb.checked) tpaPick.set(cb.dataset.case, Number(cb.dataset.cents)); else tpaPick.delete(cb.dataset.case);
+    const table = cb.closest("table"), all = table.querySelector("thead input[type=checkbox]"), boxes = [...table.querySelectorAll("input.fee-pick")];
+    if (all) all.checked = boxes.every((b) => b.checked);
+    tpaPickDraw();
+  }
+  function tpaPickGroup(all) {
+    all.closest("table").querySelectorAll("input.fee-pick").forEach((cb) => {
+      cb.checked = all.checked;
+      if (all.checked) tpaPick.set(cb.dataset.case, Number(cb.dataset.cents)); else tpaPick.delete(cb.dataset.case);
+    });
+    tpaPickDraw();
+  }
+  function tpaPickClear() {
+    tpaPick.clear();
+    document.querySelectorAll("#tpa-cases input[type=checkbox]").forEach((cb) => { cb.checked = false; });
+    tpaPickDraw();
+  }
+  const tpaPickPay = (btn) => tpaPayDialog({ case_ids: [...tpaPick.keys()] }, btn);
   function tpaProvToggle(id, open) { window._tpaProvOpen[id] = open; }
   function tpaProvClick(btn, id) {
     const sec = btn.closest(".prov"), body = sec && sec.querySelector(".prov-body");
@@ -10232,6 +10265,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const q = (document.getElementById("tpa-cases-q")?.value || "").trim().toLowerCase();
     const box = document.getElementById("tpa-cases");
     if (box) box.innerHTML = tpaCasesHtml(window._tpaCases || [], status, q, window._tpaPay || "");
+    tpaPickDraw();
   }
   // The payment switch over the TPA's disputes, each state with its count.
   function tpaPaySegs() {
@@ -10277,6 +10311,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
         <span class="spacer"></span>
         ${window._tpaCanEdit ? `<button class="mini secondary" onclick="Views.orgDocsDownload('tpa', {}, this)">Download all documents</button>` : ""}</div>` : "";
       box.innerHTML = tpaCasesHtml(cs, "", "", window._tpaPay);
+      tpaPickDraw();
     } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
@@ -10634,7 +10669,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   async function tpaPayDialog(scope, btn, from) {
     if (btn) btn.disabled = true;
     // "Pay all" with one client chosen pays that client's fees, the ones on screen, not every client's.
-    if (Api.program.tpaSelected().id && !scope.case_id && !scope.client_id && !scope.batch_id) scope = { client_id: Api.program.tpaSelected().id };
+    if (Api.program.tpaSelected().id && !scope.case_id && !scope.client_id && !scope.batch_id && !scope.case_ids) scope = { client_id: Api.program.tpaSelected().id };
     let o;
     try { o = await Api.program.tpaFeeOptions(scope); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
@@ -10688,6 +10723,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       const source = (form.querySelector("input[name=source]:checked") || {}).value;
       if (!source) return;
       const body = { source };
+      if (scope.case_ids) body.case_ids = scope.case_ids;
       if (source === "CHECKOUT") body.method = (form.querySelector("input[name=method]:checked") || {}).value || "card";
       if (source === "TPA") body.payment_method_id = form.own.value;
       if (source === "CLIENT") { body.client_methods = {}; form.querySelectorAll("select[name^=cm-]").forEach((s) => { body.client_methods[s.name.slice(3)] = s.value; }); }
@@ -12095,5 +12131,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

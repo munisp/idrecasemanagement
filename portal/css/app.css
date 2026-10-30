@@ -1494,6 +1494,7 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .tpa-client-pick select{max-width:280px}
 .tpa-client-h{margin:14px 0 0;font-size:17px}
 .fin-r{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pick-bar{position:sticky;top:8px;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:10px 0;padding:10px 14px;background:var(--surface-raised);border:1px solid var(--border-default);border-radius:10px}
 .pkg-more-h{margin:18px 0 4px;font-size:14px}
 
 /* ---------- Steps as the office's workflow document numbers them ---------- */
