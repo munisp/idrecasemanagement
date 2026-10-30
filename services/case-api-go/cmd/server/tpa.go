@@ -52,6 +52,11 @@ type tpaOrg struct {
 	// #/tpa dashboard so they can add a second staff member at their firm
 	// themselves (generate a fresh one via tpaInviteCode if none is live).
 	InviteCode *string `json:"invite_code"`
+	// The login's standing in the org (tpa_client_scope.go): ADMIN | STAFF | FINANCE, and the one client it is limited
+	// to ("" = the whole TPA). From the verified login, never from the request.
+	TeamRole        string `json:"team_role"`
+	ClientScope     string `json:"client_scope"`
+	ClientScopeName string `json:"client_scope_name"`
 }
 
 // tpaForPrincipal resolves the caller's TPA org (linked via tpa_users).
@@ -59,10 +64,12 @@ func (s *server) tpaForPrincipal(r *http.Request, tenant string) (*tpaOrg, error
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	var o tpaOrg
 	err := s.db.QueryRow(r.Context(), `
-		SELECT t.id, t.name, t.contact_name, t.contact_email, t.status, t.claim_code
+		SELECT t.id, t.name, t.contact_name, t.contact_email, t.status, t.claim_code,
+		       u.team_role, coalesce(u.client_id::text,''), coalesce(cl.party_name,'')
 		FROM public.tpa_users u JOIN public.tpas t ON t.id = u.tpa_id
+		LEFT JOIN public.tpa_clients cl ON cl.id = u.client_id
 		WHERE u.tenant=$1 AND u.user_sub=$2`, tenant, p.Subject).
-		Scan(&o.ID, &o.Name, &o.ContactName, &o.ContactEmail, &o.Status, &o.InviteCode)
+		Scan(&o.ID, &o.Name, &o.ContactName, &o.ContactEmail, &o.Status, &o.InviteCode, &o.TeamRole, &o.ClientScope, &o.ClientScopeName)
 	if err != nil {
 		return nil, fmt.Errorf("no TPA organization linked to your account — claim one with your claim code")
 	}
@@ -437,12 +444,17 @@ func (s *server) tpaListClients(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
 		return
 	}
+	clientID, ok := s.tpaClientFilter(r, tenant, org)
+	if !ok {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
 	rows, _ := s.queryRows(r, `
 		SELECT c.id, c.party_name, c.party_type, c.contact_email, c.status, c.created_at,
 		       (SELECT count(*) FROM public.case_origin o WHERE o.client_id=c.id) AS case_count,
 		       coalesce(c.group_id::text,'') AS group_id, coalesce(g.name,'') AS group_name
 		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
-		WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY lower(coalesce(g.name,'~')), c.party_name`, tenant, org.ID)
+		WHERE c.tenant=$1 AND c.tpa_id=$2 AND ($3::text='' OR c.id::text=$3) ORDER BY lower(coalesce(g.name,'~')), c.party_name`, tenant, org.ID, clientID)
 	writeJSON(w, http.StatusOK, map[string]any{"clients": rows})
 }
 
@@ -515,6 +527,10 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ClientID == "" {
 		http.Error(w, `{"error":"client_id required"}`, http.StatusBadRequest)
+		return
+	}
+	if org.ClientScope != "" && in.ClientID != org.ClientScope { // a client's login files for that client only
+		http.Error(w, `{"error":"client not found"}`, http.StatusNotFound)
 		return
 	}
 	// Notes may be long (far beyond a page), but not unbounded.
@@ -631,17 +647,23 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 	// staffer who had clicked "Act as this TPA" is linked to that org, the
 	// page then loads this dashboard without a tpa_id, and it failed.
 	isStaff := hasAnyRole(p, "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
-	orgID := ""
+	orgID, clientID, clientOK := "", "", true
 	if q := r.URL.Query().Get("tpa_id"); q != "" && isStaff {
 		orgID = q
+		clientID, clientOK = s.tpaClientParam(r, tenant, q)
 	} else if org, err := s.tpaForPrincipal(r, tenant); err == nil {
 		orgID = org.ID
+		clientID, clientOK = s.tpaClientFilter(r, tenant, org)
 	} else if !isStaff {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
 		return
 	}
 	if orgID == "" {
 		http.Error(w, `{"error":"not linked to a TPA organization -- pass tpa_id to view one"}`, http.StatusBadRequest)
+		return
+	}
+	if !clientOK {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 	rows, err := s.queryRows(r, fmt.Sprintf(`
@@ -658,8 +680,8 @@ func (s *server) tpaDashboard(w http.ResponseWriter, r *http.Request) {
 		FROM public.case_origin o
 		JOIN public.tpa_clients cl ON cl.id = o.client_id
 		JOIN tenant_%s.cases c ON c.id::text = o.case_id
-		WHERE o.tenant=$1 AND o.tpa_id=$2
-		ORDER BY o.created_at DESC LIMIT 500`, sanitizeTenant(tenant)), tenant, orgID)
+		WHERE o.tenant=$1 AND o.tpa_id=$2 AND ($3::text='' OR o.client_id::text=$3)
+		ORDER BY o.created_at DESC LIMIT 500`, sanitizeTenant(tenant)), tenant, orgID, clientID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

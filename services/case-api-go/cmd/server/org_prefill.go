@@ -177,6 +177,10 @@ func (s *server) orgPrefill(kind string) http.HandlerFunc {
 			return
 		}
 		pkg := r.URL.Query().Get("package_id")
+		if py.clientID != "" && !s.tpaResourceInClient(r.Context(), tenant, py.clientID, "package", pkg) {
+			http.Error(w, `{"error":"no such document set of yours"}`, http.StatusNotFound)
+			return
+		}
 		prefix, owner := "tpa", "tpa_id"
 		if kind == "hp" {
 			prefix, owner = "hp", "plan_id"

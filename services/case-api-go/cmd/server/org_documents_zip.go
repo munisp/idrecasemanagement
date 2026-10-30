@@ -43,7 +43,11 @@ func (s *server) orgDocumentsZip(kind string) http.HandlerFunc {
 			args = append(args, ids)
 			where += fmt.Sprintf(" AND o.case_id = ANY($%d)", len(args))
 		}
-		if c := q.Get("client_id"); c != "" && kind == "tpa" {
+		c := q.Get("client_id")
+		if py.clientID != "" { // a client's login: that client's documents, whatever it asks for
+			c = py.clientID
+		}
+		if c != "" && kind == "tpa" {
 			args = append(args, c)
 			where += fmt.Sprintf(" AND o.client_id::text=$%d", len(args))
 		}

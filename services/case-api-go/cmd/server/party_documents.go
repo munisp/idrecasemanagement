@@ -305,8 +305,13 @@ func (s *server) orgSentDocs(kind string) http.HandlerFunc {
 			http.Error(w, `{"error":"not linked to an organization"}`, http.StatusNotFound)
 			return
 		}
+		clientID, ok := s.payerClientFilter(r, tenant, py)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
 		t := sanitizeTenant(tenant)
-		where, args := "p.tenant=$1 AND p.org=$2", []any{tenant, py.org()}
+		where, args := "p.tenant=$1 AND p.org=$2"+inClientSQL("p.case_id", clientID), []any{tenant, py.org()}
 		if c := r.URL.Query().Get("case_id"); c != "" {
 			args = append(args, c)
 			where += " AND p.case_id=$3"

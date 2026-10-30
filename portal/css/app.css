@@ -1490,6 +1490,10 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .cl-part-h{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
 .cl-detail .cl-steps{margin-top:0}
 .cl-detail .cl-act{justify-content:flex-start}
+.tpa-client-pick{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
+.tpa-client-pick select{max-width:280px}
+.tpa-client-h{margin:14px 0 0;font-size:17px}
+.fin-r{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .pkg-more-h{margin:18px 0 4px;font-size:14px}
 
 /* ---------- Steps as the office's workflow document numbers them ---------- */

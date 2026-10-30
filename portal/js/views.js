@@ -811,6 +811,9 @@ const Views = (() => {
     const org = tpa ? (me.tpa || {}) : (me.health_plan || {});
     const g = (tab) => `Views.orgGo('${kind}','${tab}')`;
     const cards = [];
+    // One client: a login limited to it, or one a whole-TPA login chose on the TPA page.
+    const oneClient = tpa ? (org.client_scope_name || Api.program.tpaSelected().name) : "";
+    if (oneClient) cards.push(homeCard("Showing one client", esc(oneClient), [org.client_scope ? "Your login covers this client" : "Change it on the TPA page"], "location.hash='#/tpa'"));
     // Money owed now
     cards.push(homeCard("Fees owed", fees.unpaid ? usdC(fees.amount_cents) : "Nothing owed",
       [fees.unpaid ? `${plural(fees.unpaid, "dispute")} waiting for the initial fee` : "Every filed dispute is paid"],
@@ -843,7 +846,7 @@ const Views = (() => {
          ...soon.slice(0, 3).map((i) => `${fmtDate(i.due)} · ${esc(i.label)}`), !soon.length ? "Nothing due this week" : ""],
         "location.hash='#/calendar'", "", overdue ? "tone-bad" : ""));
       const bs = batches.batches || [];
-      cards.push(homeCard("Bulk filings", String(bs.length), [bs[0] ? `latest: ${esc(bs[0].batch_ref || "")} · ${fmtDate(bs[0].created_at)}` : "File many disputes from one ZIP"], g("bulk")));
+      if (!org.client_scope && org.team_role !== "FINANCE") cards.push(homeCard("Bulk filings", String(bs.length), [bs[0] ? `latest: ${esc(bs[0].batch_ref || "")} · ${fmtDate(bs[0].created_at)}` : "File many disputes from one ZIP"], g("bulk")));
       const paid = cs.reduce((n, c) => n + Number(c.paid_cents || 0), 0);
       cards.push(homeCard("Paid to date", usdC(paid), [`across ${plural(cs.filter((c) => Number(c.paid_cents) > 0).length, "dispute")}`], g("disputes")));
     } else {
@@ -8722,8 +8725,9 @@ const Views = (() => {
     return `<div class="view-head"><h1>Third-party administrators</h1>
       <span class="muted">File, pay and track disputes for the providers and plans you represent</span></div>
       <div id="tpa-org"></div>
+      <div id="tpa-client-kpis"></div>
       <div class="rpt-tabs" role="tablist" id="tpa-tabs">
-        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("groups", "Provider groups", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("paymethods", "Payment methods", true)}${tab("docreq", "Document requests", true)}${tab("audit", "Audit log", true)}
+        ${tab("disputes", "Disputes", true)}${tab("clients", "Clients", true)}${tab("groups", "Provider groups", true)}${tab("file", "File a dispute", true)}${tab("bulk", "Bulk filing", true)}${tab("team", "Team", true)}${tab("paymethods", "Payment methods", true)}${tab("docreq", "Document requests", true)}${tab("finance", "Finance", true)}${tab("audit", "Audit log", true)}
         ${staff ? tab("oversight", "All TPAs", false) + (onb ? tab("reviews", "Documents to review", false) : "") : ""}
       </div>
       ${onb ? `<div class="card tpa-pkg" id="tpa-pkg-card" style="display:none"><div class="tpa-pkg-head"><h2>Documents for one dispute</h2>
@@ -8738,6 +8742,13 @@ const Views = (() => {
             <div id="tpa-cases" data-nosearch><p class="muted">Loading…</p></div></div>
         </section>
 
+
+        <section data-tpa-panel="finance" style="display:none">
+          <div class="card"><div class="cl-head"><h2>Finance</h2>
+            <span class="cl-head-act"><button class="mini" onclick="Views.tpaFinanceExport(this)">Export CSV</button></span></div>
+            <p class="muted">What your disputes owe and have paid: initial fees, and review invoices billed to your providers.</p>
+            <div id="tpa-finance"><p class="muted">Loading…</p></div></div>
+        </section>
 
         <section data-tpa-panel="paymethods" style="display:none">
           <div class="card"><h2>Your organization's cards and bank accounts</h2>
@@ -8899,7 +8910,9 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       audit: () => orgAuditBox("tpa-audit", "tpa"),
       docreq: () => orgDocReqBox("tpa-docreq", "tpa"),
       paymethods: () => tpaOwnMethodsBox(),
+      finance: () => tpaFinanceBox(),
     }[k] || (() => {}))();
+    if (k === "finance" && !tpaTab._booted) tpaFinanceBox();
     if (k === "paymethods" && !tpaTab._booted) tpaOwnMethodsBox();
     if (k === "groups" && !tpaTab._booted) tpaGroupsBox();
     if (k === "audit" && !tpaTab._booted) orgAuditBox("tpa-audit", "tpa");
@@ -8956,31 +8969,52 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       if (!can("TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) { orgBox.innerHTML = ""; tpaAdminBox(); return; }
       const r = await Api.program.tpaMe();
       const code = r.tpa.invite_code;
+      const login = window._tpaLogin = { team_role: r.tpa.team_role || "", client_scope: r.tpa.client_scope || "", client_name: r.tpa.client_scope_name || "" };
+      const limited = !!login.client_scope, fin = login.team_role === "FINANCE";
+      let picker = "";
+      if (limited) Api.program.tpaSelect("");
+      else {
+        const all = ((await Api.program.tpaClientsAll()).clients || []);
+        const sel = Api.program.tpaSelected();
+        if (sel.id && !all.some((c) => c.id === sel.id)) Api.program.tpaSelect("");
+        const cur = Api.program.tpaSelected().id;
+        picker = `<label class="tpa-client-pick"><span class="muted">Client</span>
+          <select aria-label="Show one client" onchange="Views.tpaClientSelect(this)"><option value="">All clients</option>
+            ${all.map((c) => `<option value="${esc(c.id)}"${c.id === cur ? " selected" : ""}>${esc(c.party_name)}</option>`).join("")}</select></label>`;
+      }
       const isStaff = can("CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
       orgBox.innerHTML = `<div class="tpa-org-line"><span class="tpa-org-name">${esc(r.tpa.name)}</span>
         <span class="muted">${esc(r.tpa.contact_email)}</span> ${badge(r.tpa.status)}
+        ${limited ? `<span class="badge s-ck-clear">Client: ${esc(login.client_name)}</span>` : ""}${fin ? '<span class="badge">Finance</span>' : ""}${picker}
         ${App.feature("entity360") && isStaff ? `<button class="mini" onclick="CrmViews.openEntity360('tpas','${r.tpa.id}')">Entity 360</button>` : ""}
         ${isStaff ? `<button class="mini" onclick="Views.tpaUnlinkFn()">Stop acting as this TPA</button>` : ""}</div>`;
       document.getElementById("tpa-team").innerHTML = `
         <div class="card"><h2>Employees</h2>
-          <p class="muted">Everyone at ${esc(r.tpa.name)} who signs in to this portal. <b>Admins</b> add and remove employees; <b>Staff</b> file, pay and track disputes. Each employee gets their own login, emailed to them.</p>
+          <p class="muted">Everyone at ${esc(r.tpa.name)} who signs in to this portal. <b>Admins</b> add and remove employees; <b>Staff</b> file, pay and track disputes; <b>Finance</b> handles payments only. An employee limited to one client sees and acts on that client alone. Each employee gets their own login, emailed to them.</p>
           <div id="tpa-team-list"><p class="muted">Loading…</p></div>
           <div id="tpa-team-add"></div></div>
-        <div id="tpa-senders"></div>
-        <div class="card"><details class="tpa-more"><summary>Already have a portal login? Join with a code</summary>
+        ${limited ? "" : `<div id="tpa-senders"></div>`}
+        ${limited ? "" : `<div class="card"><details class="tpa-more"><summary>Already have a portal login? Join with a code</summary>
           <p class="muted">A colleague who already has a portal account can join your organization with this code — Profile → Claim TPA. Generating a new code replaces the old one.</p>
           <p id="tpa-invite-code">${code ? `<span class="mono" style="font-weight:600;font-size:1.1em">${esc(code)}</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate new code</button>`
-            : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></details></div>`;
-      orgSendersBox("tpa");
-      tpaTeamBox();
+            : `<span class="muted">No code pending.</span> <button class="mini" onclick="Views.tpaInviteCodeFn()">Generate invite code</button>`}</p></details></div>`}`;
+      if (!limited && !fin) orgSendersBox("tpa");
+      if (!fin) tpaTeamBox();
       const tpaBody = document.getElementById("tpa-body");
       if (!tpaBody) return; // the page was left while it loaded
       tpaBody.style.display = "";
       document.querySelectorAll("#tpa-tabs .tpa-ws").forEach((b) => { b.style.display = ""; });
+      // Hiding is a courtesy; the server refuses all of these (tpa_client_scope.go).
+      const hide = [...(limited || fin ? ["groups", "bulk"] : []), ...(limited ? ["paymethods"] : []), ...(fin ? ["file", "team", "docreq"] : []),
+        ...(limited && login.team_role === "STAFF" ? ["team"] : []), ...(["ADMIN", "FINANCE"].includes(login.team_role) || can("FEDERAL_ADMIN", "PLATFORM_ADMIN") ? [] : ["finance"])];
+      hide.forEach((k) => { const b = document.querySelector(`#tpa-tabs [data-tab="${k}"]`); if (b) b.style.display = "none"; });
+      if (limited || fin) document.querySelectorAll('[data-tpa-panel="clients"] .cl-head-act, [data-tpa-panel="clients"] details.tpa-more').forEach((el) => { el.style.display = "none"; });
       let saved = ""; try { saved = localStorage.getItem("idre.tpaTab") || ""; } catch { /* private window */ }
-      tpaTab(saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`) ? saved : "disputes", true);
-      tpaGroupsBox().then(tpaClientsBox); tpaDashBox(); tpaFeesBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox();
-      feeReturn("tpa", () => { tpaFeesBox(); tpaDashBox(); if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); });
+      const savedBtn = saved && document.querySelector(`#tpa-tabs [data-tab="${saved}"]`);
+      tpaTab(savedBtn && savedBtn.style.display !== "none" ? saved : "disputes", true);
+      const batches = () => { if (limited || fin) return; if (App.feature("tpa_onboarding")) tpaBdBatchesBox(); else tpaBatchesBox(); };
+      tpaGroupsBox().then(tpaClientsBox); tpaDashBox(); tpaFeesBox(); batches(); tpaClientKpis();
+      feeReturn("tpa", () => { tpaFeesBox(); tpaDashBox(); batches(); tpaClientKpis(); });
       tpaSetupReturn();
       if (App.feature("tpa_onboarding")) tpaOnboardingBox();
       window._tpaBulk = { items: [] };
@@ -9006,6 +9040,59 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
 
   // Where each client stands is part of the Clients list now (tpaClientsBox).
   async function tpaOnboardingBox() { await tpaClientsBox(); }
+
+  // ── One client's workspace, and the Finance view (tpa_client_scope.go) ──
+  function tpaClientSelect(sel) {
+    Api.program.tpaSelect(sel.value, sel.value ? sel.options[sel.selectedIndex].textContent : "");
+    App.rerender();
+  }
+  // The client being looked at, in figures: a client's own login always, a whole-TPA login once it chooses one.
+  async function tpaClientKpis() {
+    const box = document.getElementById("tpa-client-kpis");
+    if (!box) return;
+    const login = window._tpaLogin || {};
+    const name = login.client_name || Api.program.tpaSelected().name;
+    if (!name) { box.innerHTML = ""; return; }
+    try {
+      const [d, f] = await Promise.all([Api.program.tpaDashboard(), Api.program.tpaFees()]);
+      const cs = d.cases || [];
+      const closed = (c) => ["CLOSED", "INELIGIBLE", "WITHDRAWN"].includes(c.status) || c.agency_status === "Closed";
+      box.innerHTML = `<h2 class="tpa-client-h">${esc(name)}</h2><div class="kpi-row">
+        <div class="kpi"><span class="kpi-n">${cs.length}</span><span class="kpi-l">Disputes filed</span></div>
+        <div class="kpi"><span class="kpi-n">${cs.filter((c) => !closed(c) && c.status !== "AWAITING_PAYMENT").length}</span><span class="kpi-l">Open</span></div>
+        <div class="kpi"><span class="kpi-n">${cs.filter(closed).length}</span><span class="kpi-l">Closed</span></div>
+        <div class="kpi"><span class="kpi-n">${usdC(f.amount_cents || 0)}</span><span class="kpi-l">Fees owed</span></div>
+        <div class="kpi"><span class="kpi-n">${usdC(cs.reduce((n, c) => n + Number(c.paid_cents || 0), 0))}</span><span class="kpi-l">Paid to date</span></div></div>`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function tpaFinanceBox() {
+    const box = document.getElementById("tpa-finance");
+    if (!box) return;
+    try {
+      const r = await Api.program.tpaFinance();
+      const inv = r.invoices || [], clients = r.clients || [];
+      const today = new Date().toISOString().slice(0, 10);
+      box.innerHTML = `<div class="kpi-row">
+          <div class="kpi"><span class="kpi-n">${usdC(r.outstanding_cents)}</span><span class="kpi-l">Outstanding · ${r.open} invoice${r.open === 1 ? "" : "s"}</span></div>
+          <div class="kpi${r.overdue ? " kpi-danger" : ""}"><span class="kpi-n">${usdC(r.overdue_cents)}</span><span class="kpi-l">Overdue · ${r.overdue}</span></div>
+          <div class="kpi"><span class="kpi-n">${usdC(r.paid_cents)}</span><span class="kpi-l">Paid · ${r.paid}</span></div>
+          <div class="kpi"><span class="kpi-n">${r.pending}</span><span class="kpi-l">Payments clearing</span></div>
+          <div class="kpi${r.failed ? " kpi-danger" : ""}"><span class="kpi-n">${r.failed}</span><span class="kpi-l">Payments failed</span></div></div>
+        ${clients.length > 1 ? `<h3>By client</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Client</th><th class="fin-r">Invoices</th><th class="fin-r">Outstanding</th><th class="fin-r">Overdue</th><th class="fin-r">Paid</th></tr></thead><tbody>
+          ${clients.map((c) => `<tr><td>${esc(c.name)}</td><td class="fin-r">${c.invoices}</td><td class="fin-r">${usdC(c.outstanding_cents)}</td><td class="fin-r">${usdC(c.overdue_cents)}</td><td class="fin-r">${usdC(c.paid_cents)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+        <h3>Invoices</h3>${inv.length ? `<div class="tbl-wrap"><table class="tbl" data-nosearch><thead><tr><th>Case</th><th>Client</th><th>For</th><th class="fin-r">Amount</th><th>Status</th><th>Issued</th><th>Due</th><th>Paid</th><th></th></tr></thead><tbody>
+          ${inv.slice(0, 200).map((x) => `<tr><td><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td><td>${esc(x.client_name)}</td>
+            <td>${x.kind === "INITIAL_FEE" ? "Initial fee" : "Review invoice"}</td><td class="fin-r">${usdC(x.amount_cents)}</td>
+            <td>${badge(x.status)}${x.payment_status === "FAILED" && x.status === "OPEN" ? ' <span class="badge s-rejected">Last payment failed</span>' : ""}${x.status === "OPEN" && x.due_date && x.due_date < today ? ' <span class="badge s-rejected">Overdue</span>' : ""}</td>
+            <td>${esc(x.issued)}</td><td>${esc(x.due_date || "—")}</td><td>${esc(x.paid_at || "—")}</td>
+            <td>${x.status === "OPEN" && x.kind === "INITIAL_FEE" ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${esc(x.case_id)}', this)">Pay now</button>` : ""}</td></tr>`).join("")}</tbody></table></div>
+          ${inv.length > 200 ? `<p class="muted">Showing the latest 200 of ${inv.length}. Export CSV has them all.</p>` : ""}` : '<p class="muted">No invoices here yet.</p>'}`;
+    } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+  async function tpaFinanceExport(btn) {
+    btn.disabled = true;
+    try { await Api.program.tpaFinanceCsv(); } catch (e) { UI.toast(e.message, { kind: "warn" }); } finally { btn.disabled = false; }
+  }
 
   async function tpaImportFn(form) {
     const out = document.getElementById("tpa-import-result");
@@ -9648,7 +9735,8 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const setup = (c) => {
       if (c.status !== "ACTIVE" || !onb) return '<span class="muted">Nothing to set up</span>';
       const o = c.onb || {};
-      const step = (done, label, fn) => done ? `<span class="cl-step">✓ ${label}</span>` : `<button class="mini" onclick="${fn}">Add ${label.toLowerCase()}</button>`;
+      const fin = (window._tpaLogin || {}).team_role === "FINANCE";
+      const step = (done, label, fn) => done ? `<span class="cl-step">✓ ${label}</span>` : fin && label === "Profile" ? '<span class="cl-step muted">No profile yet</span>' : `<button class="mini" onclick="${fn}">Add ${label.toLowerCase()}</button>`;
       return `<div class="cl-steps">${step(o.profile_complete, "Profile", `Views.tpaProfileForm('${c.id}')`)}${step(o.verified_payments > 0, "Payment method", `Views.tpaPaymentForm('${c.id}')`)}</div>`;
     };
     const checks = (c) => {
@@ -9673,10 +9761,11 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       <button class="mini" onclick="Views.payClientFn('${c.id}', this)">Pay ${usdC(c.owed.cents)}</button></div>` : ""}`;
     const groupSel = (c) => groups.length ? `<select class="mini" aria-label="Provider group for ${esc(c.party_name)}" onchange="Views.tpaClientGroupFn('${c.id}', this.value)">
         <option value="">No group</option>${groups.map((g) => `<option value="${g.id}"${g.id === c.group_id ? " selected" : ""}>${esc(g.name)}</option>`).join("")}</select>` : "";
-    const actions = (c) => `<div class="cl-act">${tpaClReady(c) ? `<button class="mini" onclick="Views.tpaFileFor('${c.id}')">File a dispute</button>` : ""}
-      ${onb ? `<button class="mini ghost" onclick="Views.tpaProfileForm('${c.id}')">Profile</button><button class="mini ghost" onclick="Views.tpaPaymentForm('${c.id}')">Payment</button>` : ""}
-      ${groupSel(c)}
-      <button class="mini ghost" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></div>`;
+    const lg = window._tpaLogin || {}, fin = lg.team_role === "FINANCE", restricted = fin || !!lg.client_scope;
+    const actions = (c) => `<div class="cl-act">${tpaClReady(c) && !fin ? `<button class="mini" onclick="Views.tpaFileFor('${c.id}')">File a dispute</button>` : ""}
+      ${onb ? `${fin ? "" : `<button class="mini ghost" onclick="Views.tpaProfileForm('${c.id}')">Profile</button>`}<button class="mini ghost" onclick="Views.tpaPaymentForm('${c.id}')">Payment</button>` : ""}
+      ${restricted ? "" : `${groupSel(c)}
+      <button class="mini ghost" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button>`}</div>`;
     const row = (c) => {
       const open = onlyOne || tpaCl.open.has(c.id);
       if (open) tpaCl.open.add(c.id);
@@ -9802,20 +9891,29 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     try {
       const r = await Api.program.tpaTeam();
       const team = r.team || [], admin = r.can_manage;
+      const roleWords = { ADMIN: "Admin", STAFF: "Staff", FINANCE: "Finance" };
+      const roleOpts = (cur) => Object.entries(roleWords).map(([k, w]) => `<option value="${k}"${k === cur ? " selected" : ""}>${w}</option>`).join("");
       const roleCell = (m) => admin && !m.is_me
-        ? `<select class="mini" aria-label="Role for ${esc(m.full_name || m.email)}" onchange="Views.tpaTeamRoleFn('${m.user_sub}', this.value)">
-            <option value="STAFF"${m.team_role === "STAFF" ? " selected" : ""}>Staff</option><option value="ADMIN"${m.team_role === "ADMIN" ? " selected" : ""}>Admin</option></select>`
-        : badge(m.team_role === "ADMIN" ? "Admin" : "Staff");
-      list.innerHTML = team.length ? `<table class="tbl"><thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Role</th><th>Since</th><th></th></tr></thead><tbody>
+        ? `<select class="mini" aria-label="Role for ${esc(m.full_name || m.email)}" onchange="Views.tpaTeamRoleFn('${m.user_sub}', this.value)">${roleOpts(m.team_role)}</select>`
+        : badge(roleWords[m.team_role] || m.team_role);
+      // A client's admin works inside its client; the organization's own admins place each login.
+      const limited = !!(window._tpaLogin || {}).client_scope;
+      const clients = admin && !limited ? ((await Api.program.tpaClientsAll()).clients || []) : [];
+      const clientOpts = (cur) => `<option value="">All clients</option>${clients.map((c) => `<option value="${esc(c.id)}"${c.id === cur ? " selected" : ""}>${esc(c.party_name)}</option>`).join("")}`;
+      const clientCell = (m) => admin && !limited && !m.is_me
+        ? `<select class="mini" aria-label="Client for ${esc(m.full_name || m.email)}" onchange="Views.tpaTeamClientFn('${m.user_sub}', '${m.team_role}', this.value)">${clientOpts(m.client_id)}</select>`
+        : esc(m.client_name || "All clients");
+      list.innerHTML = team.length ? `<table class="tbl"><thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Role</th><th>Client</th><th>Since</th><th></th></tr></thead><tbody>
         ${team.map((m) => `<tr><td>${esc(m.full_name || "—")}${m.is_me ? ' <span class="muted">(you)</span>' : ""}</td><td>${esc(m.email || "—")}</td>
-          <td class="mono">${esc(m.username || "—")}</td><td>${roleCell(m)}</td><td>${fmtDate(m.linked_at)}</td>
+          <td class="mono">${esc(m.username || "—")}</td><td>${roleCell(m)}</td><td>${clientCell(m)}</td><td>${fmtDate(m.linked_at)}</td>
           <td>${admin && !m.is_me ? `<button class="mini ghost" onclick="Views.tpaTeamRemoveFn('${m.user_sub}', '${esc((m.full_name || m.email || "").replace(/'/g, ""))}')">Remove</button>` : ""}</td></tr>`).join("")}</tbody></table>`
         : '<p class="muted">No employees yet.</p>';
       add.innerHTML = admin ? `<h3>Add an employee</h3>
         <form class="inline-form" onsubmit="event.preventDefault(); Views.tpaTeamAddFn(this)">
           <input name="full_name" placeholder="full name" required />
           <input name="email" type="email" data-email-check placeholder="work email — sign-in details go here" required />
-          <select name="team_role"><option value="STAFF">Staff</option><option value="ADMIN">Admin</option></select>
+          <select name="team_role" aria-label="Role">${roleOpts("STAFF")}</select>
+          ${limited ? "" : `<select name="client_id" aria-label="Client">${clientOpts(Api.program.tpaSelected().id)}</select>`}
           <button class="mini">Add employee</button></form><div id="tpa-team-msg"></div>`
         : '<p class="muted">Ask one of your admins to add or remove employees.</p>';
     } catch (e) { list.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -9825,7 +9923,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const msg = document.getElementById("tpa-team-msg"), btn = form.querySelector("button");
     btn.disabled = true;
     try {
-      const r = await Api.program.tpaTeamAdd({ full_name: form.full_name.value, email: form.email.value, team_role: form.team_role.value });
+      const r = await Api.program.tpaTeamAdd({ full_name: form.full_name.value, email: form.email.value, team_role: form.team_role.value, client_id: form.client_id ? form.client_id.value : "" });
       msg.innerHTML = `<p class="ok">Added — ${esc(r.note)}. Their username is <span class="mono">${esc(r.username)}</span>.</p>`;
       form.reset(); tpaTeamBox();
     } catch (e) { msg.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -9833,7 +9931,12 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   }
 
   async function tpaTeamRoleFn(sub, role) {
-    try { await Api.program.tpaTeamRole(sub, role); UI.toast(role === "ADMIN" ? "Now an admin" : "Now staff"); }
+    try { await Api.program.tpaTeamRole(sub, role); UI.toast({ ADMIN: "Now an admin", FINANCE: "Now finance" }[role] || "Now staff"); }
+    catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    tpaTeamBox();
+  }
+  async function tpaTeamClientFn(sub, role, clientId) {
+    try { await Api.program.tpaTeamRole(sub, role, clientId); UI.toast(clientId ? "Now limited to that client" : "Now covers all clients"); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
     tpaTeamBox();
   }
@@ -10052,7 +10155,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <td>${feePill(x)}</td><td>${esc(x.filed)}</td>
           <td class="row-actions">${(window._tpaSent || {})[x.case_id] ? `<button class="mini ghost" onclick="Views.sentRecordOpen('tpa', '${x.case_id}', '${esc(x.case_number || "")}')" title="The letters sent to you on this dispute, with their documents">Letters (${window._tpaSent[x.case_id]})</button>` : ""}
             ${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
-            ${x.status === "AWAITING_PAYMENT" && canPay ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}
+            ${x.status === "AWAITING_PAYMENT" && canPay && (window._tpaLogin || {}).team_role !== "FINANCE" ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}
         </tbody></table></div></div></section>`;
     }).join("");
   }
@@ -10504,6 +10607,8 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   }
   async function tpaPayDialog(scope, btn, from) {
     if (btn) btn.disabled = true;
+    // "Pay all" with one client chosen pays that client's fees, the ones on screen, not every client's.
+    if (Api.program.tpaSelected().id && !scope.case_id && !scope.client_id && !scope.batch_id) scope = { client_id: Api.program.tpaSelected().id };
     let o;
     try { o = await Api.program.tpaFeeOptions(scope); }
     catch (e) { UI.toast(e.message, { kind: "warn" }); return; }
@@ -10527,10 +10632,10 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <span><b>Each client's own card or bank account</b><span class="muted"> — one charge per client, on the method saved for it</span></span></label>
         <div class="pay-sub" data-for="CLIENT"><table class="tbl"><thead><tr><th>Client</th><th class="num">Disputes</th><th class="num">Fees</th><th>Charged to</th></tr></thead><tbody>${clientRows}</tbody></table>
           ${clientsReady < clients.length ? `<p class="muted">${clients.length - clientsReady} client${clients.length - clientsReady === 1 ? " has" : "s have"} nothing ready on file; ${clients.length - clientsReady === 1 ? "its" : "their"} disputes stay unpaid this time.</p>` : ""}</div>
-        <label class="pay-opt"><input type="radio" name="source" value="TPA" ${ownReady.length ? "" : "disabled"} ${!clientsReady && ownReady.length ? "checked" : ""} />
+        ${(window._tpaLogin || {}).client_scope ? "" : `<label class="pay-opt"><input type="radio" name="source" value="TPA" ${ownReady.length ? "" : "disabled"} ${!clientsReady && ownReady.length ? "checked" : ""} />
           <span><b>Your organization's card or bank account</b><span class="muted"> — one charge for all of them</span></span></label>
         <div class="pay-sub" data-for="TPA">${ownReady.length ? `<select name="own">${ownReady.map((m) => `<option value="${esc(m.id)}">${methodWords(m).replace(/<[^>]+>/g, "")}</option>`).join("")}</select>`
-          : `<span class="muted">Nothing saved yet.</span> <button type="button" class="mini" onclick="Views.tpaMethodAdd('')">Add a card or bank account</button>`}</div>
+          : `<span class="muted">Nothing saved yet.</span> <button type="button" class="mini" onclick="Views.tpaMethodAdd('')">Add a card or bank account</button>`}</div>`}
         <label class="pay-opt"><input type="radio" name="source" value="CHECKOUT" ${!clientsReady && !ownReady.length ? "checked" : ""} />
           <span><b>Card or bank account on Stripe's page</b><span class="muted"> — enter it now, nothing is saved</span></span></label>
         <div class="pay-sub" data-for="CHECKOUT">
@@ -11964,5 +12069,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

@@ -196,7 +196,7 @@ func (s *server) callerOrgs(ctx context.Context, tenant, sub string) map[string]
 func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tenant := r.Context().Value(ctxTenant{}).(string)
-		var orgID string
+		var orgID, clientCond string
 		if kind == "tpa" {
 			org, err := s.tpaForPrincipal(r, tenant)
 			if err != nil {
@@ -204,6 +204,14 @@ func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 				return
 			}
 			orgID = org.ID
+			clientID, ok := s.tpaClientFilter(r, tenant, org)
+			if !ok {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			if clientID != "" { // entries on the client's disputes, or naming it; the id comes from the database
+				clientCond = " AND (a.payload LIKE '%" + clientID + "%'" + " OR a.case_id IN (SELECT co.case_id FROM public.case_origin co WHERE co.client_id::text='" + clientID + "'))"
+			}
 		} else {
 			org, err := s.healthPlanForPrincipal(r, tenant)
 			if err != nil {
@@ -216,7 +224,7 @@ func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 		if kind == "hp" {
 			prefix = "plan" // entries name the organization as "plan:<id>" (auditOrg, payer.org)
 		}
-		s.auditEntries(w, r, tenant, "a.org=$2", prefix+":"+orgID)
+		s.auditEntries(w, r, tenant, "a.org=$2"+clientCond, prefix+":"+orgID)
 	}
 }
 

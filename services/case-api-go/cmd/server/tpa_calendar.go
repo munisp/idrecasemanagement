@@ -40,7 +40,7 @@ type calItem struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
-func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calItem {
+func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID, clientID string) []calItem {
 	ctx, t := r.Context(), sanitizeTenant(tenant)
 	var out []calItem
 	add := func(it calItem) {
@@ -56,9 +56,9 @@ func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calIt
 		FROM public.invoices f
 		JOIN public.case_origin o ON o.tenant=f.tenant AND o.case_id=f.case_id
 		JOIN tenant_%s.cases c ON c.id::text=f.case_id
-		WHERE f.tenant=$1 AND o.tpa_id::text=$2 AND f.status='OPEN' AND f.due_date IS NOT NULL
+		WHERE f.tenant=$1 AND o.tpa_id::text=$2 AND ($3::text='' OR o.client_id::text=$3) AND f.status='OPEN' AND f.due_date IS NOT NULL
 		  AND (f.kind='INITIAL_FEE' OR f.party='PROVIDER')
-		  AND c.status NOT IN ('WITHDRAWN','CLOSED','INELIGIBLE')`, t), tenant, tpaID); err == nil {
+		  AND c.status NOT IN ('WITHDRAWN','CLOSED','INELIGIBLE')`, t), tenant, tpaID, clientID); err == nil {
 		for rows.Next() {
 			var id, kind, due, caseID, num string
 			var cents int64
@@ -77,7 +77,7 @@ func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calIt
 	if rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT q.id::text, q.due_date::text, q.case_id, c.case_number, jsonb_array_length(coalesce(q.items,'[]'::jsonb))
 		FROM public.document_requests q JOIN tenant_%s.cases c ON c.id::text=q.case_id
-		WHERE q.tenant=$1 AND q.org=$2 AND q.status='OPEN' AND q.due_date IS NOT NULL`, t), tenant, "tpa:"+tpaID); err == nil {
+		WHERE q.tenant=$1 AND q.org=$2 AND q.status='OPEN' AND q.due_date IS NOT NULL`+inClientSQL("q.case_id", clientID), t), tenant, "tpa:"+tpaID); err == nil {
 		for rows.Next() {
 			var id, due, caseID, num string
 			var n int
@@ -105,10 +105,10 @@ func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calIt
 		SELECT c.id::text, c.case_number, coalesce(c.program_dates,'{}'::jsonb),
 		       EXISTS (SELECT 1 FROM public.case_activities a WHERE a.tenant=$1 AND a.case_id=c.id::text AND a.type='ESTIMATE_PERMISSION')
 		FROM public.case_origin o JOIN tenant_%s.cases c ON c.id::text=o.case_id
-		WHERE o.tenant=$1 AND o.tpa_id::text=$2
+		WHERE o.tenant=$1 AND o.tpa_id::text=$2 AND ($3::text='' OR o.client_id::text=$3)
 		  AND c.status NOT IN ('WITHDRAWN','CLOSED','INELIGIBLE','AWAITING_PAYMENT')
 		  AND coalesce(c.internal_status,'') NOT IN ('Provider Closure Letter Issued','Ineligible','Dismissed','Withdrawn',
-		      'Provider - Withdrawal','Plan Opt-Out','Invoice Paid','Decided - Invoice Paid','Closed-Refunded')`, t), tenant, tpaID); err == nil {
+		      'Provider - Withdrawal','Plan Opt-Out','Invoice Paid','Decided - Invoice Paid','Closed-Refunded')`, t), tenant, tpaID, clientID); err == nil {
 		for rows.Next() {
 			var oc openCase
 			var raw map[string]any
@@ -147,8 +147,8 @@ func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calIt
 		FROM public.case_respondents rs
 		JOIN public.case_origin o ON o.tenant=rs.tenant AND o.case_id=rs.case_id
 		JOIN tenant_%s.cases c ON c.id::text=rs.case_id
-		WHERE rs.tenant=$1 AND o.tpa_id::text=$2 AND rs.response_status='AWAITING'
-		  AND (rs.notified_at IS NOT NULL OR rs.emailed_at IS NOT NULL)`, t), tenant, tpaID); err == nil {
+		WHERE rs.tenant=$1 AND o.tpa_id::text=$2 AND ($3::text='' OR o.client_id::text=$3) AND rs.response_status='AWAITING'
+		  AND (rs.notified_at IS NOT NULL OR rs.emailed_at IS NOT NULL)`, t), tenant, tpaID, clientID); err == nil {
 		s.fillResponseDue(r, tenant, rows)
 		for _, x := range rows {
 			due, _ := x["response_due"].(string)
@@ -160,7 +160,13 @@ func (s *server) tpaCalendarItems(r *http.Request, tenant, tpaID string) []calIt
 		}
 	}
 
-	// Its own tasks.
+	// Its own tasks: the whole organization's, so not in one client's calendar.
+	if clientID != "" {
+		if out == nil {
+			out = []calItem{}
+		}
+		return out
+	}
 	if rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT k.id::text, k.subject, k.due_date::text, coalesce(k.case_id,''), coalesce(c.case_number,''),
 		       k.status='DONE', coalesce(to_char(k.completed_at,'YYYY-MM-DD"T"HH24:MI'),'')

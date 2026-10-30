@@ -918,6 +918,11 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusNotFound)
 		return
 	}
+	clientID, ok := s.tpaClientFilter(r, tenant, org)
+	if !ok {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
 	rows, err := s.db.Query(r.Context(), `
 		SELECT c.id, c.party_name, c.party_type, c.onboarding_status, c.status,
 		       coalesce(c.npi,''), coalesce(c.tin,''), coalesce(c.npi_status,''), coalesce(c.npi_registry_name,''), coalesce(c.npi_review_note,''),
@@ -929,8 +934,8 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		        FROM public.tpa_packages pk WHERE pk.tenant=c.tenant AND pk.client_id=c.id AND pk.status<>'FILED'),
 		       coalesce(g.name,'')
 		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
-		WHERE c.tenant=$1 AND c.tpa_id=$2 ORDER BY c.party_name`,
-		tenant, org.ID)
+		WHERE c.tenant=$1 AND c.tpa_id=$2 AND ($3::text='' OR c.id::text=$3) ORDER BY c.party_name`,
+		tenant, org.ID, clientID)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return

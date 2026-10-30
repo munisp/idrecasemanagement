@@ -213,6 +213,10 @@ func (s *server) accessGuard(next http.Handler) http.Handler {
 				rel = ""
 			}
 		}
+		// A TPA login limited to one client or to payments passes its own, deny-by-default rules first (tpa_client_scope.go).
+		if hasRole(p, "TPA") && !s.tpaScopeGuard(w, r, p, tenant, strings.TrimRight(rel, "/")) {
+			return
+		}
 		decision, caseID, reason := accessDecision(p, r.Method, strings.TrimRight(rel, "/"))
 		switch decision {
 		case "allow":

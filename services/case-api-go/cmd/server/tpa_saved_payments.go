@@ -200,6 +200,9 @@ func (s *server) tpaPaymentSetup(w http.ResponseWriter, r *http.Request) {
 		Label    string `json:"label"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&in)
+	if org.ClientScope != "" { // a client's login saves methods for that client, never for the TPA
+		in.ClientID = org.ClientScope
+	}
 	ownerKind, ownerID, name, email := "tpa", org.ID, org.Name, org.ContactEmail
 	if in.ClientID != "" {
 		if s.db.QueryRow(r.Context(), `SELECT party_name, coalesce(contact_email,'') FROM public.tpa_clients WHERE tenant=$1 AND tpa_id::text=$2 AND id::text=$3`,
@@ -350,9 +353,9 @@ func (s *server) tpaPaymentSetupConfirm(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusBadRequest)
 		return
 	}
-	var owner string
-	_ = s.db.QueryRow(r.Context(), `SELECT tpa_id::text FROM public.tpa_payment_methods WHERE id::text=$1`, m.ID).Scan(&owner)
-	if owner != org.ID {
+	var owner, ownerClient string
+	_ = s.db.QueryRow(r.Context(), `SELECT tpa_id::text, coalesce(client_id::text,'') FROM public.tpa_payment_methods WHERE id::text=$1`, m.ID).Scan(&owner, &ownerClient)
+	if owner != org.ID || (org.ClientScope != "" && ownerClient != org.ClientScope) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
@@ -367,7 +370,11 @@ func (s *server) tpaSavedMethodsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"payment_methods": s.savedMethods(r.Context(), tenant, org.ID, r.URL.Query().Get("client_id"))})
+	clientID := r.URL.Query().Get("client_id")
+	if org.ClientScope != "" { // never the TPA's own methods, nor another client's
+		clientID = org.ClientScope
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payment_methods": s.savedMethods(r.Context(), tenant, org.ID, clientID)})
 }
 
 // tpaSavedMethodRemove: DELETE /tpa/payment-methods/{methodId} -- detached at
@@ -496,8 +503,12 @@ func (s *server) tpaFeeOptions(w http.ResponseWriter, r *http.Request) {
 			g.CardFee += perCard[id]
 		}
 	}
+	tpaMethods := []savedMethod{}
+	if py.clientID == "" { // a client's login is not offered the TPA's own card
+		tpaMethods = s.savedMethods(r.Context(), tenant, py.id, "")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"disputes": len(fees), "amount_cents": total, "card_fee_cents": cardFee,
-		"clients": clients, "tpa_methods": s.savedMethods(r.Context(), tenant, py.id, "")})
+		"clients": clients, "tpa_methods": tpaMethods})
 }
 
 type savedPayRequest struct {
@@ -541,6 +552,10 @@ func (s *server) feeChargeSaved(w http.ResponseWriter, r *http.Request, tenant s
 	}
 	switch in.Source {
 	case "TPA":
+		if py.clientID != "" { // only the TPA's own logins charge the TPA's own card
+			http.Error(w, `{"error":"forbidden: this login cannot charge your organization's own payment methods"}`, http.StatusForbidden)
+			return
+		}
 		m, ok := pick(s.savedMethods(r.Context(), tenant, py.id, ""), in.PaymentMethodID)
 		if !ok {
 			http.Error(w, `{"error":"add a card or bank account for your organization first (Payment methods), or pick one that is ready"}`, http.StatusConflict)

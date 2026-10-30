@@ -214,6 +214,11 @@ const Api = (() => {
     return { prepare, policy };
   })();
   // query-string builder: drops empty values, returns "" or "?a=1&b=2"
+  // The client a whole-TPA login chose on the TPA page: every list of the TPA's follows it until changed. The server
+  // decides what a login may see; a login limited to one client gets that client whatever is sent here.
+  let tpaSel = { id: "", name: "" };
+  try { tpaSel = JSON.parse(sessionStorage.getItem("idre.tpaClient") || "") || tpaSel; } catch { /* none, or a private window */ }
+  const tpaCq = () => (tpaSel.id ? `?client_id=${encodeURIComponent(tpaSel.id)}` : "");
   const qs = (params) => {
     const s = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v != null)).toString();
     return s ? `?${s}` : "";
@@ -454,7 +459,7 @@ const Api = (() => {
       relationships: (caseId) => req("GET", `${t()}/cases/${caseId}/relationships`),
       checklist: (caseId) => req("GET", `${t()}/cases/${caseId}/checklist`),
       checkItem: (itemId) => req("POST", `${t()}/checklists/${itemId}/check`),
-      calendar: () => req("GET", `${t()}/calendar`),
+      calendar: () => req("GET", `${t()}/calendar${tpaCq()}`),
       notifications: (opts) => req("GET", `${t()}/notifications` + qs(opts || {})),
       notifCount: () => req("GET", `${t()}/notifications/count`),
       readNotif: (id) => req("POST", `${t()}/notifications/${id}/read`),
@@ -582,11 +587,19 @@ const Api = (() => {
       tpaUnlink: () => req("POST", `${t()}/tpa/unlink`, {}),
       tpaInviteCode: () => req("POST", `${t()}/tpa/invite-code`, {}),
       tpaMe: () => req("GET", `${t()}/tpa/me`),
-      tpaClients: () => req("GET", `${t()}/tpa/clients`),
+      tpaClients: () => req("GET", `${t()}/tpa/clients${tpaCq()}`),
+      tpaClientsAll: () => req("GET", `${t()}/tpa/clients`),
+      tpaSelected: () => tpaSel,
+      tpaSelect: (id, name) => {
+        tpaSel = { id: id || "", name: name || "" };
+        try { if (id) sessionStorage.setItem("idre.tpaClient", JSON.stringify(tpaSel)); else sessionStorage.removeItem("idre.tpaClient"); } catch { /* private window */ }
+      },
+      tpaFinance: () => req("GET", `${t()}/tpa/finance${tpaCq()}`),
+      tpaFinanceCsv: () => download(`${t()}/tpa/finance${tpaCq() ? tpaCq() + "&" : "?"}format=csv`, "tpa-finance.csv"),
       tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),
       tpaTeam: () => req("GET", `${t()}/tpa/team`),
       tpaTeamAdd: (body) => req("POST", `${t()}/tpa/team`, body),
-      tpaTeamRole: (sub, role) => req("PATCH", `${t()}/tpa/team/${encodeURIComponent(sub)}`, { team_role: role }),
+      tpaTeamRole: (sub, role, clientId) => req("PATCH", `${t()}/tpa/team/${encodeURIComponent(sub)}`, clientId === undefined ? { team_role: role } : { team_role: role, client_id: clientId }),
       tpaTeamRemove: (sub) => req("DELETE", `${t()}/tpa/team/${encodeURIComponent(sub)}`),
       tpaGroups: () => req("GET", `${t()}/tpa/groups`),
       tpaGroupAdd: (body) => req("POST", `${t()}/tpa/groups`, body),
@@ -595,10 +608,10 @@ const Api = (() => {
       tpaClientStatus: (id, status) => req("POST", `${t()}/tpa/clients/${id}/status`, { status }),
       tpaIntake: (body) => req("POST", `${t()}/tpa/intake`, body),
       tpaEditDispute: (caseId, body) => req("PATCH", `${t()}/tpa/disputes/${caseId}`, body),
-      tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${qs(tpaId ? { tpa_id: tpaId } : {})}`),
+      tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${tpaId ? qs({ tpa_id: tpaId }) : tpaCq()}`),
       adminTpas: () => req("GET", `${t()}/admin/tpas`),
       adminTpaStatus: (id, status) => req("POST", `${t()}/admin/tpas/${id}/status`, { status }),
-      tpaOnboarding: () => req("GET", `${t()}/tpa/onboarding`),
+      tpaOnboarding: () => req("GET", `${t()}/tpa/onboarding${tpaCq()}`),
       tpaClientProfile: (clientId, body) => req("PUT", `${t()}/tpa/clients/${clientId}/profile`, body),
       tpaImportClients: (file) => {
         const fd = new FormData();
@@ -634,7 +647,7 @@ const Api = (() => {
       tpaBulkDisputeBatches: () => req("GET", `${t()}/tpa/disputes/bulk`),
       tpaBulkDisputeBatch: (id) => req("GET", `${t()}/tpa/disputes/bulk/${id}`),
       tpaBulkCheckout: (id, body) => req("POST", `${t()}/tpa/disputes/bulk/${id}/checkout`, body || {}),
-      tpaFees: () => req("GET", `${t()}/tpa/fees`),
+      tpaFees: () => req("GET", `${t()}/tpa/fees${tpaCq()}`),
       // Fee payments: the server works out what is owed; these only name the scope.
       payDispute: (kind, caseId, from, body) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/pay${from ? "?from=" + from : ""}`, body),
       disputeFee: (kind, caseId) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/fee`),
@@ -655,11 +668,12 @@ const Api = (() => {
       // An organization's own disputes' documents in one ZIP: {case_id:[..]} | {client_id} | {batch_id} | {party_id} | {} (all).
       orgDocsZip: (kind, params) => {
         const q = new URLSearchParams();
+        if (kind !== "hp" && tpaSel.id && !(params || {}).client_id && !(params || {}).case_id && !(params || {}).batch_id) q.append("client_id", tpaSel.id);
         for (const [k, v] of Object.entries(params || {})) (Array.isArray(v) ? v : [v]).forEach((x) => x && q.append(k, x));
         return download(`${t()}/${kind === "hp" ? "hp" : "tpa"}/documents.zip${q.toString() ? "?" + q : ""}`, "documents.zip");
       },
       uploadPolicy: () => Uploads.policy(),
-      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "mine" ? "audit/mine" : kind === "hp" ? "hp/audit" : "tpa/audit"}?` + new URLSearchParams(params || {})),
+      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "mine" ? "audit/mine" : kind === "hp" ? "hp/audit" : "tpa/audit"}?` + new URLSearchParams({ ...(kind === "tpa" && tpaSel.id ? { client_id: tpaSel.id } : {}), ...(params || {}) })),
       // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
       respondList: (k) => req("GET", `${t()}/${k}/responding`),
       // Document requests: asked on the case by the review team, answered in the portal.
@@ -673,7 +687,7 @@ const Api = (() => {
       sentDocPath: (k, docId) => `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`,
       disputeSummary: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/disputes/${caseId}/summary`),
       sentDocGet: (k, docId, name) => download(`${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`, name || "document"),
-      orgDocRequests: (k) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests`),
+      orgDocRequests: (k) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests${k === "hp" ? "" : tpaCq()}`),
       orgDocRequestUpload: (k, reqId, file) => {
         const fd = new FormData(); fd.append("file", file);
         return req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/files`, fd, true);

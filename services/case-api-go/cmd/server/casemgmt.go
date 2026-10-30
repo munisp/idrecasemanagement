@@ -657,7 +657,12 @@ func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The deadlines on its own disputes and its own tasks (tpa_calendar.go).
-		writeJSON(w, http.StatusOK, s.tpaCalendarItems(r, tenant, org.ID))
+		clientID, ok := s.tpaClientFilter(r, tenant, org)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.tpaCalendarItems(r, tenant, org.ID, clientID))
 		return
 	}
 	deadlines, _ := s.queryRows(r, fmt.Sprintf(`

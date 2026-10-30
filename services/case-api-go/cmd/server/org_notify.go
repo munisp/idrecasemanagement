@@ -22,6 +22,13 @@ func (s *server) notifyOrg(ctx context.Context, tenant, kind, orgID, caseID, typ
 	_, _ = s.db.Exec(ctx, `
 		INSERT INTO public.notifications (tenant, user_sub, type, body, link)
 		VALUES ($1,$2,$3,$4,$5)`, tenant, kind+":"+orgID, typ, body, link)
+	// A TPA login limited to one client hears only about that client's disputes (tpa_client_scope.go).
+	if kind == "tpa" && caseID != "" {
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+			SELECT $1, 'tpa-client:'||o.client_id::text, $3, $4, $5 FROM public.case_origin o
+			WHERE o.tenant=$1 AND o.case_id=$2 AND o.client_id IS NOT NULL`, tenant, caseID, typ, body, link)
+	}
 	// What the organization was told is part of its trail.
 	s.logAudit(ctx, tenant, caseID, typ, map[string]any{"org": kind + ":" + orgID, "notice": body, "by": "system"})
 }
@@ -30,7 +37,8 @@ func (s *server) notifyOrg(ctx context.Context, tenant, kind, orgID, caseID, typ
 func (s *server) notifTargetsFor(ctx context.Context, tenant string, p principal) []string {
 	out := notifTargets(p)
 	rows, err := s.db.Query(ctx, `
-		SELECT 'tpa:' || tpa_id::text FROM public.tpa_users WHERE tenant=$1 AND user_sub=$2
+		SELECT CASE WHEN client_id IS NULL THEN 'tpa:' || tpa_id::text ELSE 'tpa-client:' || client_id::text END
+		FROM public.tpa_users WHERE tenant=$1 AND user_sub=$2
 		UNION ALL
 		SELECT 'plan:' || plan_id::text FROM public.health_plan_users WHERE tenant=$1 AND user_sub=$2`, tenant, p.Subject)
 	if err != nil {

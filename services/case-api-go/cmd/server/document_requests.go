@@ -389,7 +389,12 @@ func (s *server) orgDocRequests(kind string) http.HandlerFunc {
 			http.Error(w, `{"error":"not linked"}`, http.StatusNotFound)
 			return
 		}
-		reqs, err := s.docRequests(r.Context(), tenant, "r.org=$2 AND r.status <> 'CANCELLED'", py.org())
+		clientID, ok := s.payerClientFilter(r, tenant, py)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		reqs, err := s.docRequests(r.Context(), tenant, "r.org=$2 AND r.status <> 'CANCELLED'"+inClientSQL("r.case_id", clientID), py.org())
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return

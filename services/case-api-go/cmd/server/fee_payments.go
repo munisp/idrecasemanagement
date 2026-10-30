@@ -42,6 +42,27 @@ import (
 // payer is the organization paying: a TPA or a health plan.
 type payer struct {
 	kind, id, name, email string // kind: tpa | plan
+	clientID              string // a TPA login limited to one client: it pays for, and sees, that client only (tpa_client_scope.go)
+}
+
+// payerClientFilter is the client a payer's list is narrowed to: its login's own, or the ?client_id= a whole-TPA login
+// chose. The id comes back from the database, so it is safe to put in a query. ok=false: not this TPA's client.
+func (s *server) payerClientFilter(r *http.Request, tenant string, py payer) (string, bool) {
+	if py.clientID != "" {
+		return py.clientID, true
+	}
+	if py.kind != "tpa" {
+		return "", true
+	}
+	return s.tpaClientParam(r, tenant, py.id)
+}
+
+// inClientSQL narrows a query on a case id column to one client's disputes; id from payerClientFilter or tpaClientFilter.
+func inClientSQL(col, clientID string) string {
+	if clientID == "" {
+		return ""
+	}
+	return " AND " + col + " IN (SELECT co.case_id FROM public.case_origin co WHERE co.client_id::text='" + clientID + "')"
 }
 
 func (py payer) originCol() string {
@@ -67,13 +88,13 @@ func (s *server) payerFor(r *http.Request, tenant, kind string) (payer, error) {
 		if err != nil {
 			return payer{}, err
 		}
-		return payer{"plan", o.ID, o.Name, o.ContactEmail}, nil
+		return payer{kind: "plan", id: o.ID, name: o.Name, email: o.ContactEmail}, nil
 	}
 	o, err := s.tpaForPrincipal(r, tenant)
 	if err != nil {
 		return payer{}, err
 	}
-	return payer{"tpa", o.ID, o.Name, o.ContactEmail}, nil
+	return payer{kind: "tpa", id: o.ID, name: o.Name, email: o.ContactEmail, clientID: o.ClientScope}, nil
 }
 
 // feeScope narrows what a checkout pays for.
@@ -99,6 +120,10 @@ func (s *server) unpaidFees(ctx context.Context, tenant string, py payer, sc fee
 		                      AND f.status='OPEN' AND f.amount_cents > 0
 		WHERE o.tenant=$1 AND o.%s::text=$2`, sanitizeTenant(tenant), py.originCol())
 	args := []any{tenant, py.id}
+	if py.clientID != "" {
+		args = append(args, py.clientID)
+		q += fmt.Sprintf(` AND o.client_id::text=$%d`, len(args))
+	}
 	if sc.batchID != "" {
 		args = append(args, sc.batchID)
 		q += fmt.Sprintf(` AND o.case_id IN (SELECT case_id FROM public.tpa_dispute_batch_items WHERE batch_id::text=$%d AND status='FILED')`, len(args))
@@ -135,7 +160,12 @@ func (s *server) orgFees(kind string) http.HandlerFunc {
 			http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusNotFound)
 			return
 		}
-		fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{})
+		clientID, ok := s.payerClientFilter(r, tenant, py)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{clientID: clientID})
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
@@ -207,8 +237,8 @@ func (s *server) disputePay(kind string) http.HandlerFunc {
 
 func (s *server) payerOwnsCase(ctx context.Context, tenant string, py payer, caseID string) bool {
 	var ok bool
-	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM public.case_origin WHERE tenant=$1 AND case_id=$2 AND %s::text=$3)`,
-		py.originCol()), tenant, caseID, py.id).Scan(&ok)
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM public.case_origin WHERE tenant=$1 AND case_id=$2 AND %s::text=$3
+		AND ($4::text='' OR client_id::text=$4))`, py.originCol()), tenant, caseID, py.id, py.clientID).Scan(&ok)
 	return ok
 }
 

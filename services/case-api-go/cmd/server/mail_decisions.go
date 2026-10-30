@@ -146,7 +146,8 @@ func (s *server) partyAddresses(ctx context.Context, tenant, caseID string) (sid
 		addrs[e] = true
 	}
 	if id, ok := strings.CutPrefix(org, "tpa:"); ok {
-		rows, err := s.db.Query(ctx, `SELECT lower(email) FROM public.tpa_users WHERE tenant=$1 AND tpa_id::text=$2 AND coalesce(email,'') <> ''`, tenant, id)
+		rows, err := s.db.Query(ctx, `SELECT lower(email) FROM public.tpa_users WHERE tenant=$1 AND tpa_id::text=$2 AND coalesce(email,'') <> ''
+			AND client_id IS NULL AND team_role <> 'FINANCE'`, tenant, id)
 		if err == nil {
 			for rows.Next() {
 				var e string

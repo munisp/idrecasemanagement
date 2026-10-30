@@ -2,7 +2,9 @@
 //
 // Employees: each login linked to a TPA (public.tpa_users) is one of its staff. A TPA admin adds an employee by
 // name and email: the platform creates the login (role TPA, in the program's tenant group), links it to the TPA and
-// emails the sign-in details to that address only. ADMIN manages the team; STAFF does everything else on the TPA page.
+// emails the sign-in details to that address only. ADMIN manages the team; STAFF does everything else on the TPA page;
+// FINANCE handles payments only. A login may also be limited to one client (tpa_client_scope.go): a client's admin then
+// manages only that client's logins, and everyone it adds is limited to that client.
 // Removing an employee unlinks the login and disables it (the account stays for the audit trail).
 //
 // Provider groups: TPA -> provider groups -> providers. A group is a practice or health system the TPA acts for;
@@ -61,9 +63,12 @@ func (s *server) tpaTeamList(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	s.tpaTeamFillNames(r, tenant, org.ID)
 	rows, _ := s.queryRows(r, `
-		SELECT user_sub, team_role, coalesce(full_name,'') AS full_name, coalesce(email,'') AS email,
-		       coalesce(username,'') AS username, linked_at, (user_sub = $3) AS is_me
-		FROM public.tpa_users WHERE tenant=$1 AND tpa_id=$2 ORDER BY team_role, full_name, linked_at`, tenant, org.ID, p.Subject)
+		SELECT u.user_sub, u.team_role, coalesce(u.full_name,'') AS full_name, coalesce(u.email,'') AS email,
+		       coalesce(u.username,'') AS username, u.linked_at, (u.user_sub = $3) AS is_me,
+		       coalesce(u.client_id::text,'') AS client_id, coalesce(cl.party_name,'') AS client_name
+		FROM public.tpa_users u LEFT JOIN public.tpa_clients cl ON cl.id=u.client_id
+		WHERE u.tenant=$1 AND u.tpa_id=$2 AND ($4::text='' OR u.client_id::text=$4)
+		ORDER BY u.team_role, u.full_name, u.linked_at`, tenant, org.ID, p.Subject, org.ClientScope)
 	writeJSON(w, http.StatusOK, map[string]any{"team": rows, "can_manage": s.tpaTeamAdmin(r, tenant, org.ID)})
 }
 
@@ -126,6 +131,7 @@ func (s *server) tpaTeamAdd(w http.ResponseWriter, r *http.Request) {
 		FullName string `json:"full_name"`
 		Email    string `json:"email"`
 		TeamRole string `json:"team_role"`
+		ClientID string `json:"client_id"` // limit the login to this client; "" = the whole TPA
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&in); err != nil {
 		http.Error(w, `{"error":"bad json"}`, http.StatusBadRequest)
@@ -143,8 +149,15 @@ func (s *server) tpaTeamAdd(w http.ResponseWriter, r *http.Request) {
 	case !validMailbox(in.Email):
 		http.Error(w, `{"error":"enter the employee's work email — their sign-in details are sent there"}`, http.StatusBadRequest)
 		return
-	case role != "ADMIN" && role != "STAFF":
-		http.Error(w, `{"error":"team_role must be ADMIN or STAFF"}`, http.StatusBadRequest)
+	case !tpaTeamRoles[role]:
+		http.Error(w, `{"error":"team_role must be ADMIN, STAFF or FINANCE"}`, http.StatusBadRequest)
+		return
+	}
+	in.ClientID = strings.TrimSpace(in.ClientID)
+	if org.ClientScope != "" { // a client's admin adds logins to its own client, whatever the request says
+		in.ClientID = org.ClientScope
+	} else if in.ClientID != "" && !s.tpaHasClient(r, tenant, org.ID, in.ClientID) {
+		http.Error(w, `{"error":"that client is not one of your organization's"}`, http.StatusBadRequest)
 		return
 	}
 	tok, err := s.kcAdminToken(r.Context())
@@ -185,8 +198,8 @@ func (s *server) tpaTeamAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if _, err := s.db.Exec(r.Context(), `
-		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id, team_role, full_name, email, username, added_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, tenant, userID, org.ID, role, in.FullName, in.Email, username, displayName(p)); err != nil {
+		INSERT INTO public.tpa_users (tenant, user_sub, tpa_id, team_role, full_name, email, username, added_by, client_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,nullif($9,'')::uuid)`, tenant, userID, org.ID, role, in.FullName, in.Email, username, displayName(p), in.ClientID); err != nil {
 		_ = s.kcDeleteUser(r.Context(), tok, userID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "the employee could not be added — try again"})
 		return
@@ -203,8 +216,8 @@ func (s *server) tpaTeamAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logCorrespondence(r, tenant, "", "OUT", "tpa_staff_welcome", subject, tpaWelcomeLogNote, []string{in.Email}, nil, displayName(p))
 	s.logAudit(r.Context(), tenant, "", "TPA_EMPLOYEE_ADDED", map[string]any{"tpa_id": org.ID, "user_id": userID,
-		"username": username, "email": in.Email, "team_role": role, "by": p.Subject})
-	writeJSON(w, http.StatusCreated, map[string]any{"user_sub": userID, "username": username, "team_role": role,
+		"username": username, "email": in.Email, "team_role": role, "client_id": in.ClientID, "by": p.Subject})
+	writeJSON(w, http.StatusCreated, map[string]any{"user_sub": userID, "username": username, "team_role": role, "client_id": in.ClientID,
 		"note": "sign-in details were emailed to " + in.Email})
 }
 
@@ -219,7 +232,18 @@ func (s *server) kcEmailTaken(r *http.Request, tok, email string) bool {
 	return json.NewDecoder(resp.Body).Decode(&users) == nil && len(users) > 0
 }
 
-// PATCH /tpa/team/{sub} {team_role} -- make an employee an admin, or staff.
+// tpaTeamRoles are the roles a TPA's login can hold.
+var tpaTeamRoles = map[string]bool{"ADMIN": true, "STAFF": true, "FINANCE": true}
+
+// tpaHasClient: the client is one of this TPA's.
+func (s *server) tpaHasClient(r *http.Request, tenant, tpaID, clientID string) bool {
+	var ok bool
+	_ = s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM public.tpa_clients WHERE tenant=$1 AND tpa_id::text=$2 AND id::text=$3)`, tenant, tpaID, clientID).Scan(&ok)
+	return ok
+}
+
+// PATCH /tpa/team/{sub} {team_role, client_id?} -- change an employee's role, and (for the TPA's own admins) the client
+// the login is limited to: omitted leaves it, "" makes it whole-TPA.
 func (s *server) tpaTeamSetRole(w http.ResponseWriter, r *http.Request) {
 	org, tenant, ok := s.tpaOrgOr404(w, r, tpaRoles...)
 	if !ok {
@@ -230,21 +254,41 @@ func (s *server) tpaTeamSetRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		TeamRole string `json:"team_role"`
+		TeamRole string  `json:"team_role"`
+		ClientID *string `json:"client_id"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&in)
 	role := strings.ToUpper(strings.TrimSpace(in.TeamRole))
-	if role != "ADMIN" && role != "STAFF" {
-		http.Error(w, `{"error":"team_role must be ADMIN or STAFF"}`, http.StatusBadRequest)
+	if !tpaTeamRoles[role] {
+		http.Error(w, `{"error":"team_role must be ADMIN, STAFF or FINANCE"}`, http.StatusBadRequest)
 		return
 	}
+	if in.ClientID != nil {
+		c := strings.TrimSpace(*in.ClientID)
+		switch {
+		case org.ClientScope != "":
+			http.Error(w, `{"error":"forbidden: a client's admin cannot move a login to another client"}`, http.StatusForbidden)
+			return
+		case c != "" && !s.tpaHasClient(r, tenant, org.ID, c):
+			http.Error(w, `{"error":"that client is not one of your organization's"}`, http.StatusBadRequest)
+			return
+		}
+		in.ClientID = &c
+	}
 	sub := chi.URLParam(r, "sub")
-	if role == "STAFF" && s.tpaLastAdmin(r, tenant, org.ID, sub) {
+	narrowing := in.ClientID != nil && *in.ClientID != ""
+	if (role != "ADMIN" || narrowing) && s.tpaLastAdmin(r, tenant, org.ID, sub) {
 		http.Error(w, `{"error":"your organization needs at least one admin — make someone else an admin first"}`, http.StatusConflict)
 		return
 	}
-	res, err := s.db.Exec(r.Context(), `UPDATE public.tpa_users SET team_role=$4 WHERE tenant=$1 AND tpa_id=$2 AND user_sub=$3`,
-		tenant, org.ID, sub, role)
+	newClient := ""
+	if in.ClientID != nil {
+		newClient = *in.ClientID
+	}
+	res, err := s.db.Exec(r.Context(), `UPDATE public.tpa_users
+		SET team_role=$4, client_id=CASE WHEN $6::bool THEN nullif($7,'')::uuid ELSE client_id END
+		WHERE tenant=$1 AND tpa_id=$2 AND user_sub=$3 AND ($5::text='' OR client_id::text=$5)`,
+		tenant, org.ID, sub, role, org.ClientScope, in.ClientID != nil, newClient)
 	if err != nil || res.RowsAffected() == 0 {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
@@ -274,7 +318,7 @@ func (s *server) tpaTeamRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"your organization needs at least one admin — make someone else an admin first"}`, http.StatusConflict)
 		return
 	}
-	res, err := s.db.Exec(r.Context(), `DELETE FROM public.tpa_users WHERE tenant=$1 AND tpa_id=$2 AND user_sub=$3`, tenant, org.ID, sub)
+	res, err := s.db.Exec(r.Context(), `DELETE FROM public.tpa_users WHERE tenant=$1 AND tpa_id=$2 AND user_sub=$3 AND ($4::text='' OR client_id::text=$4)`, tenant, org.ID, sub, org.ClientScope)
 	if err != nil || res.RowsAffected() == 0 {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
@@ -305,12 +349,12 @@ func onlyTPARole(roles []string) bool {
 	return true
 }
 
-// tpaLastAdmin: sub is the TPA's only admin.
+// tpaLastAdmin: sub is the TPA's only whole-TPA admin (a client's admin cannot run the organization).
 func (s *server) tpaLastAdmin(r *http.Request, tenant, tpaID, sub string) bool {
 	var others int
 	var isAdmin bool
 	_ = s.db.QueryRow(r.Context(), `
-		SELECT count(*) FILTER (WHERE team_role='ADMIN' AND user_sub<>$3), bool_or(team_role='ADMIN' AND user_sub=$3)
+		SELECT count(*) FILTER (WHERE team_role='ADMIN' AND client_id IS NULL AND user_sub<>$3), bool_or(team_role='ADMIN' AND client_id IS NULL AND user_sub=$3)
 		FROM public.tpa_users WHERE tenant=$1 AND tpa_id=$2`, tenant, tpaID, sub).Scan(&others, &isAdmin)
 	return isAdmin && others == 0
 }
@@ -380,6 +424,10 @@ func (g *tpaGroupIn) check() string {
 func (s *server) tpaGroupsList(w http.ResponseWriter, r *http.Request) {
 	org, tenant, ok := s.tpaOrgOr404(w, r, append(tpaRoles, "FINANCE")...)
 	if !ok {
+		return
+	}
+	if org.ClientScope != "" { // a client's login does not see how the TPA arranges its other clients
+		writeJSON(w, http.StatusOK, map[string]any{"groups": []any{}})
 		return
 	}
 	rows, _ := s.queryRows(r, `
