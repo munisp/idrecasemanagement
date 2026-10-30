@@ -135,7 +135,7 @@ window.PacketForm = (() => {
         <p class="pf-q">Health plan contact for dispute notices</p>
         <p class="pf-hint">Not on the PDF packet. When a provider files, this is where the health plan is told about the dispute and sent its documents.</p>
         <div class="pf-grid">${text(d, "health_plan_contact", "Contact person")}${text(d, "health_plan_email", "E-mail address", 'type="email"')}
-          ${text(d, "health_plan_phone", "Telephone number", 'type="tel"')}</div>
+          ${text(d, "health_plan_phone", "Telephone number", 'type="tel"')}${text(d, "health_plan_naic", "NAIC (optional)")}</div>
         <p class="pf-q">Health plan type</p>${radios(d, "plan_type", PLAN_TYPES)}${text(d, "plan_type_other", "Other plan type")}</fieldset>
       <fieldset class="pf-sec"><legend>The dispute</legend>
         <p class="pf-q">Is the provider contracted with the health plan?</p>${radios(d, "contracted", [["true", "Yes"], ["false", "No"]], "pf-inline")}

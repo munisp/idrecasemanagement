@@ -86,6 +86,7 @@ var tpaScopedRoutes = []tpaScopedRoute{
 	tpaRoute("POST", `^/tpa/intake$`, "", false, true), // the handler checks the client it names
 	tpaRoute("GET", `^/tpa/prefill$`, "", false, true), // the handler checks the package it names
 	tpaRoute("PATCH", `^/tpa/disputes/`+anyID+`$`, "case", false, true),
+	tpaRoute("POST", `^/tpa/disputes/`+anyID+`/documents$`, "case", false, true),
 	tpaRoute("GET", `^/tpa/disputes/`+anyID+`/reply-code$`, "case", false, true),
 	tpaRoute("PUT", `^/tpa/clients/`+anyID+`/profile$`, "client", false, true),
 	tpaRoute("POST", `^/tpa/clients/`+anyID+`/packages$`, "client", false, true),

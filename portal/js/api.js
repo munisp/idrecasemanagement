@@ -650,6 +650,10 @@ const Api = (() => {
       tpaFees: () => req("GET", `${t()}/tpa/fees${tpaCq()}`),
       // Fee payments: the server works out what is owed; these only name the scope.
       payDispute: (kind, caseId, from, body) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/pay${from ? "?from=" + from : ""}`, body),
+      disputeDocAdd: (kind, caseId, file) => {
+        const fd = new FormData(); fd.append("file", file);
+        return req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/documents`, fd, true);
+      },
       disputeFee: (kind, caseId) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/fee`),
       payClient: (clientId, body) => req("POST", `${t()}/tpa/clients/${clientId}/fees/checkout`, body),
       // Saved cards and bank accounts (ACH): the TPA's own (no client_id) or a client's.

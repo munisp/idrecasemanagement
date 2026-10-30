@@ -885,6 +885,8 @@ func main() {
 		r.Post("/cases/{caseId}/document-requests/{reqId}/close", s.closeDocRequest)
 		// Fee payments (fee_payments.go): one dispute, one provider, a bulk upload, or everything.
 		r.Post("/tpa/clients/{clientId}/fees/checkout", s.tpaClientCheckout)
+		r.Post("/tpa/disputes/{caseId}/documents", s.orgDisputeDocument("tpa")) // the filer adds a document to its own dispute
+		r.Post("/hp/disputes/{caseId}/documents", s.orgDisputeDocument("hp"))
 		r.Post("/tpa/disputes/{caseId}/pay", s.disputePay("tpa"))
 		r.Get("/tpa/disputes/{caseId}/fee", s.disputeFee("tpa"))
 		r.Get("/tpa/disputes/{caseId}/summary", s.orgDisputeSummary("tpa")) // the dispute as the TPA sees it (party_dispute_view.go)

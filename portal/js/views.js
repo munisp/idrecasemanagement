@@ -2172,6 +2172,20 @@ const Views = (() => {
     catch (e) { el.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
 
+  // The organization that filed a dispute adds documents to it, one upload per file so one refusal keeps the others.
+  async function disputeDocAddFn(form, kind, id) {
+    const btn = form.querySelector("button"), msg = form.parentElement.querySelector(".doc-add-msg");
+    btn.disabled = true;
+    const bad = [];
+    let added = 0;
+    for (const file of form.file.files) {
+      msg.textContent = `Uploading ${file.name}…`;
+      try { await Api.program.disputeDocAdd(kind, id, file); added++; } catch (e) { bad.push(`${file.name}: ${e.message}`); }
+    }
+    btn.disabled = false;
+    if (added) { UI.toast(`${added} document${added === 1 ? "" : "s"} added`); App.rerender(); }
+    if (bad.length) { if (added) setTimeout(() => UI.toast(bad.join("; "), { kind: "warn", duration: 9000 }), 300); else msg.innerHTML = `<span class="error">${esc(bad.join("; "))}</span>`; }
+  }
   async function filerCase(id) {
     const kind = can("TPA") ? "tpa" : can("HEALTH_PLAN") ? "hp" : ""; // an invited party pays and answers elsewhere
     if (kind) {
@@ -2198,7 +2212,10 @@ const Views = (() => {
         list.map((x) => `<tr><td>${esc(x.filename || x.name || "document")}</td><td>${esc(x.doc_type || "")}</td><td>${fmtDate(x.uploaded_at || x.created_at)}</td>
           <td><a href="javascript:void(0)" onclick="Views.previewCaseDoc('${id}','${x.doc_id}', this.dataset.name)" data-name="${esc(x.filename || "")}">view</a> ·
             <a href="javascript:void(0)" onclick="Views.downloadDoc('${id}','${x.doc_id}')">download</a></td></tr>`).join("") + `</tbody></table>`
-        : `<p class="muted">No documents yet. Use the upload link in your email to send the claim documents.</p>`}</div>
+        : `<p class="muted">${kind ? "No documents yet." : "No documents yet. Use the upload link in your email to send the claim documents."}</p>`}
+        ${kind && c.status !== "CLOSED" && (window._tpaLogin || {}).team_role !== "FINANCE" ? `<form class="inline-form" onsubmit="event.preventDefault(); Views.disputeDocAddFn(this, '${kind}', '${id}')">
+          <input name="file" type="file" multiple required aria-label="Documents to add" accept=".pdf,application/pdf,image/*,.docx,.xlsx,.pptx" />
+          <button class="mini">Add documents</button></form><div class="doc-add-msg" aria-live="polite"></div>` : ""}</div>
       ${kind ? `<div class="card"><h2>Letters and documents sent to you</h2><div id="filer-record-${id}"><p class="muted">Loading…</p></div></div>` : ""}
       <p><a href="${outsideHome()}">Back to your disputes</a></p>`;
   }
@@ -8787,27 +8804,20 @@ const Views = (() => {
 
         <section data-tpa-panel="file" style="display:none">
           <div class="card"><h2>File one dispute</h2>
-            <p class="muted">${onb ? "Pick the client and add this dispute's documents. To file many disputes, each with its own documents, use Bulk filing." : "Pick the client and enter the disputed amount."}</p>
-            <form class="inline-form" data-task="file_dispute" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
-              <select name="client_id" id="tpa-file-client" required onchange="Views.tpaFileDocsReset()"></select>
-              <input type="hidden" name="package_id" id="tpa-file-package" />
-              <input name="contact_name" placeholder="client contact for this dispute" />
-              <input name="amount" type="number" step="0.01" min="0" placeholder="disputed amount $" />
-              <input name="other_party_name" placeholder="health plan the dispute is against" required />
-              <input name="other_party_email" type="email" data-email-check placeholder="health plan's email for notices" required />
-              <input name="other_party_naic" placeholder="plan NAIC (optional)" />
-              <select name="provider_type" id="tpa-file-ptype" title="What kind of provider the client is — used to check the dispute meets the minimum amount"><option value="">Provider type — not sure</option></select>
-              <select name="in_network" title="Whether the client has a contract with this health plan"><option value="">In the plan's network? — not sure</option><option value="no">Not in the plan's network</option><option value="yes">In the plan's network</option></select>
-              <input name="notes" placeholder="notes" />
-              <button class="mini">File dispute</button></form>
+            <p class="muted">Pick the client, add this dispute's documents, and complete the filing packet below.${onb ? " To file many disputes, use Bulk filing." : ""}</p>
+            <form id="tpa-file-form" class="inline-form" data-task="file_dispute" onsubmit="event.preventDefault(); Views.tpaFileFn(this)">
+              <label>Filing for <select name="client_id" id="tpa-file-client" required onchange="Views.tpaFileDocsReset(); Views.tpaFilePacketClient()"></select></label>
+              <input type="hidden" name="package_id" id="tpa-file-package" /></form>
             <div id="tpa-file-prefill"></div>
-            <div id="tpa-file-result" aria-live="assertive"></div>
             ${onb ? `<div class="file-docs"><b>Documents for this dispute</b> <span class="muted">— optional: every document the dispute relies on, as many as it needs — claim forms, EOBs and denials, the itemized bill, proof of coverage, the Florida license, the contract, medical records, correspondence… Each one is read and flagged if it doesn't look like what it's filed as; nothing is refused for that, and the reviewer checks them.</span>
               <div id="tpa-file-docs"></div></div>` : ""}
-            ${packetBlockHtml("tpa-packet", "<b>Filing packet</b> — fill in the packet's sections here, or pick the filled packet PDF")}
-            ${(setTimeout(() => packetInit("tpa-packet", {}), 0), "")}
+            <h3>Filing packet</h3>
+            ${PacketForm.pdfPicker("#tpa-packet")}<div id="tpa-packet"></div>
+            ${(setTimeout(() => { packetInit("tpa-packet", {}); tpaFilePacketClient(); }, 0), "")}
             <p class="muted">Provider type and network status decide the minimum amount a dispute must reach. If you're not sure, leave them: we read them from the documents where they say, and the reviewer confirms.</p>
-            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all). Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p></div>
+            <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all). Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p>
+            <div id="tpa-file-result" aria-live="assertive"></div>
+            <p><button class="btn-primary" id="tpa-file-btn" type="submit" form="tpa-file-form">File dispute</button></p></div>
         </section>
 
         <section data-tpa-panel="bulk" style="display:none">
@@ -9685,6 +9695,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
         sel.innerHTML = [...byGroup.entries()].map(([g, list]) => g ? `<optgroup label="${esc(g)}">${list.map(opt).join("")}</optgroup>`
           : (byGroup.size > 1 ? `<optgroup label="Not in a group">${list.map(opt).join("")}</optgroup>` : list.map(opt).join(""))).join("");
         if (keep && active.some((c) => c.id === keep)) sel.value = keep;
+        tpaFilePacketClient(); // the list arrives after the packet is drawn
       }
       tpaFileDocsDraw();
     } catch (e) { if (box) box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
@@ -10025,7 +10036,13 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     try { r = await Api.program.orgPrefill(kind, packageId); } catch (e) { if (!auto) UI.toast(e.message, { kind: "warn" }); return; }
     const filled = [], skipped = [];
     for (const [name, v] of Object.entries(r.fields || {})) {
-      const el = form.elements[name];
+      let el = form.elements[name];
+      if (!el && kind === "tpa" && name === "in_network" && (v.value === "yes" || v.value === "no")) { // the packet's own question
+        const radio = document.querySelector(`#tpa-packet [name="d.contracted"][value="${v.value === "yes" ? "true" : "false"}"]`);
+        if (radio && !document.querySelector('#tpa-packet [name="d.contracted"]:checked')) { radio.checked = true; filled.push(`<li><b>${esc(PREFILL_LABEL[name])}</b>: ${esc(v.value)} <span class="muted">— ${esc(v.why)}</span></li>`); }
+        continue;
+      }
+      if (!el && kind === "tpa") el = document.querySelector(`#tpa-packet [name="${{ amount: "disputed_amount", other_party_name: "d.health_plan", other_party_email: "d.health_plan_email", other_party_naic: "d.health_plan_naic" }[name] || ""}"]`);
       if (!el || !v.value) continue;
       if (name === "client_id") { // the client is chosen before the documents: only say if they point elsewhere
         if (el.value && el.value !== v.value) skipped.push(`these documents look like they are for another client (${esc(v.why)})`);
@@ -10082,40 +10099,49 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const packetBad = /packet/i.test(text);
     out.innerHTML = `<div class="file-alert" role="alert"><b>${esc(title)}</b>
       <p>${esc(msg)}</p>${(problems || []).length ? `<ul>${problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
-      ${field ? `<p class="muted">Check ${esc(hit[2])} — it's outlined in red above.</p>` : packetBad ? `<p class="muted">Check the filing packet below.</p>` : ""}</div>`;
+      ${field ? `<p class="muted">Check ${esc(hit[2])} — it's outlined in red above.</p>` : packetBad ? `<p class="muted">Check the filing packet.</p>` : ""}</div>`;
     out.scrollIntoView({ behavior: "smooth", block: "center" });
     if (field) setTimeout(() => field.focus({ preventScroll: true }), 400);
     UI.toast(`${title} ${msg}`, { kind: "warn", duration: 9000 });
   }
 
+  // The packet names the provider it is filed for: start it with the chosen client, unless the filer changed it.
+  function tpaFilePacketClient() {
+    const sel = document.getElementById("tpa-file-client"), el = document.querySelector('#tpa-packet [name="d.provider_org"]');
+    if (!sel || !el || !sel.selectedOptions[0]) return;
+    const name = sel.selectedOptions[0].textContent.replace(/ \((PROVIDER|HEALTH_PLAN)\)$/, "");
+    if (!el.value || el.dataset.fromClient === el.value) { el.value = name; el.dataset.fromClient = name; }
+  }
   async function tpaFileFn(form) {
     const out = document.getElementById("tpa-file-result");
-    const btn = form.querySelector("button");
+    const btn = document.getElementById("tpa-file-btn");
     out.innerHTML = "";
-    const packetHost = document.getElementById("tpa-packet");
-    const packetProblems = packetHost && PacketForm.touched(packetHost) ? PacketForm.read(packetHost).problems : [];
-    if (packetProblems.length) { fileAlert(form, out, "This dispute wasn't filed.", "The filing packet isn't complete:", packetProblems); return; }
-    const packet = packetFrom("tpa-packet", out);
-    if (packet === false) return;
-    if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = "Filing…"; }
+    const { packet, problems } = PacketForm.read(document.getElementById("tpa-packet"));
+    const d = packet.details;
+    // What a dispute cannot be filed without; the rest of the packet can follow from its documents and the reviewer.
+    const fromClaims = packet.claims.reduce((n, c) => n + Number(c.disputed_cents || 0), 0);
+    const amount = packet.disputed_amount_cents || fromClaims;
+    if (!d.health_plan) problems.push("Health plan: name the plan the dispute is against");
+    if (!d.health_plan_email) problems.push("Health plan contact for dispute notices: enter its e-mail address");
+    if (!amount) problems.push("The dispute: enter the aggregated disputed amount, or the amount in dispute on each claim");
+    if (problems.length) { fileAlert(form, out, "This dispute wasn't filed.", "The filing packet isn't complete:", problems); return; }
+    if (!packet.disputed_amount_cents) packet.disputed_amount_cents = amount;
+    if (btn) { btn.disabled = true; btn.textContent = "Filing…"; }
     try {
       const r = await Api.program.tpaIntake({
-        packet: packet || undefined,
-        client_id: form.client_id.value, package_id: form.package_id ? form.package_id.value : "",
-        contact_name: form.contact_name.value,
-        disputed_amount_cents: Math.round(Number(form.amount.value || 0) * 100), notes: form.notes.value,
-        other_party_name: form.other_party_name.value, other_party_email: form.other_party_email.value, other_party_naic: form.other_party_naic.value,
-        provider_type: form.provider_type ? form.provider_type.value : "", in_network: form.in_network ? form.in_network.value : "",
+        packet, client_id: form.client_id.value, package_id: form.package_id ? form.package_id.value : "",
+        contact_name: d.provider_contact || "", disputed_amount_cents: amount, notes: "",
+        other_party_name: d.health_plan, other_party_email: d.health_plan_email, other_party_naic: d.health_plan_naic || "",
       });
       out.innerHTML = `<p class="ok">Filed — case <a href="#/cases/${r.case_id}">${esc(r.case_number)}</a> (${esc(r.status)}) for <b>${esc(r.initiating_party)}</b>. ${r.payment_required ? `Pay its fee to open it: <a href="#/cases/${r.case_id}">Pay now</a>.` : ""}</p>`;
       if (window.Telemetry) Telemetry.taskDone("file_dispute", prefillOutcome(form));
       const pn = document.getElementById("tpa-file-prefill"); if (pn) pn.innerHTML = "";
       // A filed package leaves the board and the "file with" list.
-      form.reset(); packetInit("tpa-packet", {}); tpaFileDocsReset(); tpaPkgClose(); tpaDashBox(); tpaClientsBox();
+      form.reset(); packetInit("tpa-packet", {}); tpaFilePacketClient(); tpaFileDocsReset(); tpaPkgClose(); tpaDashBox(); tpaClientsBox();
       out.scrollIntoView({ behavior: "smooth", block: "center" });
       UI.toast(`Dispute ${r.case_number} filed`);
     } catch (e) { if (window.Telemetry) Telemetry.taskError("file_dispute", e.message); fileAlert(form, out, "This dispute wasn't filed.", e.message, e.problems); }
-    finally { if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || "File dispute"; } }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "File dispute"; } }
   }
 
   // The TPA's disputes, grouped under the provider (client) they were filed
@@ -12069,5 +12095,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

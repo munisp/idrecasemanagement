@@ -43,7 +43,7 @@ var (
 		"provider_contact": 200, "provider_alt_address": 300, "provider_phone": 40, "provider_fax": 40, "provider_email": 200,
 		"provider_type_other": 100, "health_plan": 200, "health_plan_trade_name": 200, "plan_type_other": 100,
 		// Not on the PDF packet: where the health plan's dispute notices go (it is the other side when a provider files).
-		"health_plan_contact": 200, "health_plan_email": 200, "health_plan_phone": 40,
+		"health_plan_contact": 200, "health_plan_email": 200, "health_plan_phone": 40, "health_plan_naic": 20,
 		"type_of_service_other": 100, "documents_other": 300,
 		"attested_by_name": 200, "attested_by_title": 200, "aor_provider": 200, "aor_health_plan": 200,
 		"aor_representative": 200, "aor_signed_by_name": 200, "aor_signed_by_title": 200,
@@ -426,6 +426,7 @@ func (pk *filingPacket) otherParty(rsp respondent) respondent {
 	}
 	rsp.Name = first(rsp.Name, str("health_plan"), str("health_plan_trade_name"))
 	rsp.Email = first(rsp.Email, str("health_plan_email"))
+	rsp.NAIC = first(rsp.NAIC, str("health_plan_naic"))
 	return rsp
 }
 

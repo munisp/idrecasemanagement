@@ -25,6 +25,8 @@ func TestTPAScopedDecision(t *testing.T) {
 		{"package checked", client, "POST", "/tpa/packages/" + id + "/docs", true, "package"},
 		{"request checked", client, "POST", "/tpa/document-requests/" + id + "/submit", true, "request"},
 		{"pay checked", client, "POST", "/tpa/disputes/" + id + "/pay", true, "case"},
+		{"adding a document checked", client, "POST", "/tpa/disputes/" + id + "/documents", true, "case"},
+		{"finance cannot add a document", finance, "POST", "/tpa/disputes/" + id + "/documents", false, ""},
 		{"bulk filing closed", client, "POST", "/tpa/disputes/bulk", false, ""},
 		{"bulk report closed", client, "GET", "/tpa/disputes/bulk/" + id, false, ""},
 		{"old bulk closed", client, "POST", "/intake/bulk", false, ""},

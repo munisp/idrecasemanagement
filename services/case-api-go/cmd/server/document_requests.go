@@ -517,6 +517,50 @@ func (s *server) storeCaseUpload(w http.ResponseWriter, r *http.Request, tenant,
 	return docID, filename, code, msg
 }
 
+// orgDisputeDocument: POST /tpa/disputes/{caseId}/documents, /hp/... (multipart "file") -- the organization that filed
+// a dispute adds a document to it. Documents are optional at filing, so a dispute filed without them (disputes.csv on
+// its own) gets them here, also while its fee is unpaid, as documents filed with the dispute are. Not once it is closed.
+func (s *server) orgDisputeDocument(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenant := r.Context().Value(ctxTenant{}).(string)
+		caseID := chi.URLParam(r, "caseId")
+		py, err := s.payerFor(r, tenant, kind)
+		if err != nil || !s.payerOwnsCase(r.Context(), tenant, py, caseID) {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		var status string
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT status FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&status)
+		if status == "CLOSED" {
+			http.Error(w, `{"error":"this dispute is closed — it no longer takes documents"}`, http.StatusConflict)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxDocBytes)
+		if err := r.ParseMultipartForm(maxDocBytes); err != nil {
+			http.Error(w, `{"error":"file too large or malformed"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, `{"error":"file field required"}`, http.StatusBadRequest)
+			return
+		}
+		defer f.Close()
+		raw, err := io.ReadAll(f)
+		if err != nil {
+			http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
+			return
+		}
+		docID, code, msg := s.storeCaseFile(r.Context(), tenant, caseID, py.kind+":"+py.name, hdr.Filename, hdr.Filename, hdr.Header.Get("Content-Type"), raw, "PARTY_UPLOADS")
+		if code != 0 {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), code)
+			return
+		}
+		s.logActivity(r.Context(), tenant, caseID, "FILER_DOCUMENT", fmt.Sprintf("%s added a document: %s", py.name, hdr.Filename))
+		writeJSON(w, http.StatusCreated, map[string]any{"doc_id": docID, "filename": hdr.Filename})
+	}
+}
+
 // storeCaseFile files bytes as a document of the case, the way every party upload is filed: the file-type and
 // content checks, the malware scan (fail-closed), sealed by the vault, recorded in the case's documents, and
 // announced so doc-intel reads it. An upload and an email's attachment (mail_decisions.go) both come through here.
