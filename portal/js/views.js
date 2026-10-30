@@ -826,7 +826,7 @@ const Views = (() => {
       const closed = cs.filter(isClosed).length;
       cards.unshift(homeCard("Disputes", String(cs.length), [`${open} open`, waitPay ? `${waitPay} awaiting payment` : "", closed ? `${closed} closed` : ""], g("disputes")));
       const clients = onb.clients || [];
-      const ready = clients.filter((c) => ["READY", "DOCS_PENDING"].includes(c.onboarding_status)).length;
+      const ready = clients.filter((c) => c.status === "ACTIVE" && tpaCanFile(c.onboarding_status)).length;
       const needProfile = clients.filter((c) => c.onboarding_status === "PROFILE_INCOMPLETE").length;
       const needPay = clients.filter((c) => c.onboarding_status === "PAYMENT_PENDING").length;
       cards.push(homeCard("Clients ready to file", `${ready} of ${clients.length}`,
@@ -8758,11 +8758,11 @@ const Views = (() => {
               <span class="cl-head-act"><button class="mini" onclick="Views.tpaClientAddOpen()">Add a client</button>
                 <button class="mini ghost" onclick="Views.tpaGroupAddOpen()">Add a provider group</button></span></div>
             <p class="muted">The providers and plans you file for, each under the provider group (practice or health system) it belongs to.
-              ${onb ? "A client is <b>ready to file</b> once its profile (NPI, TIN, address) and a payment method are set. Documents belong to each dispute: you add them when you file it." : ""}</p>
+              ${onb ? (App.feature("onboarding_required") ? "A client is <b>ready to file</b> once its profile (NPI, TIN, address) and a payment method are set." : "A client can file straight away: its NPI, TIN, address and a payment method are optional, and the fee is paid after filing.") + " Documents belong to each dispute: you add them when you file it." : ""}</p>
             <div class="cl-tools">
               <input type="search" placeholder="Find a client" aria-label="Find a client" oninput="Views.tpaClientFilter({ q: this.value })" />
               <select aria-label="Show" onchange="Views.tpaClientFilter({ show: this.value })">
-                <option value="">All clients</option><option value="setup">Needs setting up</option><option value="ready">Ready to file</option>
+                <option value="">All clients</option><option value="setup">Can't file yet</option><option value="ready">Ready to file</option>
                 <option value="owes">Fees owed</option><option value="suspended">Suspended</option></select></div>
             <div id="tpa-clients"><p class="muted">Loading…</p></div>
             ${onb ? `<details class="tpa-more"><summary>Add many clients from a spreadsheet (CSV)</summary>
@@ -8822,7 +8822,7 @@ const Views = (() => {
                   <pre class="tpa-tree">dispute_ref,provider_group,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes,provider_type,in_network
 CLAIM-001,Gulf Coast Medical Group,Gulf Coast Clinic,1980,Sunshine Health,disputes@sunshine.test,12345,Dr Lee,ER visit 08/14,physician_dentist,no
 CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
-                  <p class="muted"><code>party_name</code> must match a client in the Clients tab that is ready (profile and payment done). <code>provider_group</code> is the provider group that client is in (optional): fill it in when two of your providers share a name — a provider that isn't in the group named is refused, so nothing is filed for the wrong provider. <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. <code>provider_type</code> (<code>hospital_inpatient</code>, <code>hospital_outpatient</code>, <code>physician_dentist</code>, <code>rural_hospital</code> or <code>other</code>) and <code>in_network</code> (<code>yes</code> or <code>no</code>) are optional: leave them blank if you're not sure. Up to 500 disputes per ZIP.</p>
+                  <p class="muted"><code>party_name</code> must match a client in the Clients tab. Its NPI, TIN and address aren't needed to file, and the fee is paid after filing (Pay now / Pay all). <code>provider_group</code> is the provider group that client is in (optional): fill it in when two of your providers share a name — a provider that isn't in the group named is refused, so nothing is filed for the wrong provider. <code>other_party_name</code> and <code>other_party_email</code> name the health plan each dispute is against and where its notices go. <code>provider_type</code> (<code>hospital_inpatient</code>, <code>hospital_outpatient</code>, <code>physician_dentist</code>, <code>rural_hospital</code> or <code>other</code>) and <code>in_network</code> (<code>yes</code> or <code>no</code>) are optional: leave them blank if you're not sure. Up to 500 disputes per ZIP.</p>
                   <button type="button" class="mini" onclick="Views.tpaBdTemplate(this)">Download disputes.csv with my ready clients</button></div></div>
               <div class="tpa-samples"><p><b>Sample ZIPs to copy</b> — open one to see the exact layout. They are filled in with your clients where you have them;
                 every sample document says what the real one must show. Replace the sample PDFs before uploading: a ZIP that still holds them is refused.</p>
@@ -8910,6 +8910,10 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const el = document.getElementById("tpa-tc-" + k);
     if (el) el.textContent = text ? String(text) : "";
   }
+  // Who can file, the same gates as the server's: an NPI or exclusion-list hold stops a client; a profile and a
+  // payment method are needed first only when the tenant turns on onboarding_required (else the fee is paid after filing).
+  const tpaCanFile = (st) => App.feature("onboarding_required") ? ["READY", "DOCS_PENDING"].includes(st)
+    : !["NPI_REVIEW", "NPI_REJECTED", "EXCLUSION_REVIEW", "EXCLUDED"].includes(st);
   const ONB_STATUS = { PROFILE_INCOMPLETE: "Needs profile", NPI_REVIEW: "NPI under review", NPI_REJECTED: "NPI rejected", EXCLUSION_REVIEW: "Exclusion check under review", EXCLUDED: "On the exclusion list", PAYMENT_PENDING: "Needs payment", DOCS_PENDING: "Ready", READY: "Ready" };
   // The national NPI registry's answer on a client's NPI.
   function npiLine(c) {
@@ -9561,8 +9565,8 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
   // ── Clients: one list, each client under the provider group it belongs to ──
   // The roster (group, email, disputes, status), where each client stands (profile, payment method, NPI and
   // exclusion-list checks; tpa_onboarding) and what it owes (the dashboard), drawn as one row per client.
-  const tpaCl = { rows: [], q: "", show: "", onb: false };
-  const tpaClReady = (c) => c.status === "ACTIVE" && (!tpaCl.onb || ["READY", "DOCS_PENDING"].includes(c.onb && c.onb.onboarding_status));
+  const tpaCl = { rows: [], q: "", show: "", onb: false, open: new Set() };
+  const tpaClReady = (c) => c.status === "ACTIVE" && (!tpaCl.onb || tpaCanFile(c.onb && c.onb.onboarding_status));
   async function tpaClientsBox() {
     const box = document.getElementById("tpa-clients");
     const onb = App.feature("tpa_onboarding");
@@ -9599,6 +9603,15 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     } catch (e) { if (box) box.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
   }
   function tpaClientFilter(f) { Object.assign(tpaCl, f); tpaClientsDraw(); }
+  // A client's row drops down its details; what is open stays open across redraws.
+  function tpaClientToggle(id) {
+    const open = !tpaCl.open.has(id);
+    if (open) tpaCl.open.add(id); else tpaCl.open.delete(id);
+    const row = document.getElementById(`cl-row-${id}`), detail = document.getElementById(`cl-detail-${id}`), chev = document.getElementById(`cl-chev-${id}`);
+    if (detail) detail.style.display = open ? "" : "none";
+    if (row) row.setAttribute("aria-expanded", open ? "true" : "false");
+    if (chev) chev.textContent = open ? "▾" : "▸";
+  }
   function tpaClientsDraw() {
     const box = document.getElementById("tpa-clients");
     if (!box) return;
@@ -9618,20 +9631,25 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const filtering = !!(needle || show);
     const shown = sections.map((x) => ({ ...x, list: x.list.filter(match) })).filter((x) => x.list.length || (x.g && !filtering));
     if (!shown.some((x) => x.list.length) && filtering) { box.innerHTML = '<p class="muted">No client matches.</p>'; return; }
-    const cols = onb ? 5 : 4;
+    const cols = 4;
+    const onlyOne = filtering && shown.reduce((n, x) => n + x.list.length, 0) === 1; // a search that finds one client shows it
     const groupHead = (g) => `<b>${esc(g.name)}</b>
       <span class="muted">${[g.tin && "TIN " + esc(g.tin), g.npi && "NPI " + esc(g.npi), g.contact_email && esc(g.contact_email)].filter(Boolean).join(" · ")}</span>
       ${g.status !== "ACTIVE" ? '<span class="badge">Suspended</span>' : ""}
       <span class="cl-grp-act"><button class="mini ghost" onclick="Views.tpaGroupRenameFn('${g.id}', '${esc(g.name.replace(/'/g, ""))}')">Rename</button>
         <button class="mini ghost" onclick="Views.tpaGroupStatusFn('${g.id}','${g.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${g.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></span>`;
-    const setup = (c) => {
+    const statusPill = (c) => {
       if (c.status !== "ACTIVE") return '<span class="badge">Suspended</span>';
       if (!onb) return '<span class="badge s-ck-clear">Active</span>';
       const o = c.onb || {};
-      const step = (done, label, fn) => done ? `<span class="cl-step">✓ ${label}</span>` : `<button class="mini" onclick="${fn}">Add ${label.toLowerCase()}</button>`;
-      const pill = tpaClReady(c) ? '<span class="badge s-ck-clear">Ready to file</span>'
+      return tpaClReady(c) ? '<span class="badge s-ck-clear">Ready to file</span>'
         : `<span class="badge ${["NPI_REJECTED", "EXCLUDED"].includes(o.onboarding_status) ? "s-ck-excluded" : "s-ck-review"}">${esc(ONB_STATUS[o.onboarding_status] || "Needs setting up")}</span>`;
-      return `${pill}<div class="cl-steps">${step(o.profile_complete, "Profile", `Views.tpaProfileForm('${c.id}')`)}${step(o.verified_payments > 0, "Payment method", `Views.tpaPaymentForm('${c.id}')`)}</div>`;
+    };
+    const setup = (c) => {
+      if (c.status !== "ACTIVE" || !onb) return '<span class="muted">Nothing to set up</span>';
+      const o = c.onb || {};
+      const step = (done, label, fn) => done ? `<span class="cl-step">✓ ${label}</span>` : `<button class="mini" onclick="${fn}">Add ${label.toLowerCase()}</button>`;
+      return `<div class="cl-steps">${step(o.profile_complete, "Profile", `Views.tpaProfileForm('${c.id}')`)}${step(o.verified_payments > 0, "Payment method", `Views.tpaPaymentForm('${c.id}')`)}</div>`;
     };
     const checks = (c) => {
       const o = c.onb || {}, out = [];
@@ -9659,10 +9677,24 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       ${onb ? `<button class="mini ghost" onclick="Views.tpaProfileForm('${c.id}')">Profile</button><button class="mini ghost" onclick="Views.tpaPaymentForm('${c.id}')">Payment</button>` : ""}
       ${groupSel(c)}
       <button class="mini ghost" onclick="Views.tpaClientStatusFn('${c.id}','${c.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE"}')">${c.status === "ACTIVE" ? "Suspend" : "Reactivate"}</button></div>`;
-    const row = (c) => `<tr class="${c.status !== "ACTIVE" ? "cl-off" : ""}"><td><b>${esc(c.party_name)}</b>
-        <div class="muted">${c.party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"} · ${esc(c.contact_email || "no email")}</div></td>
-      <td>${setup(c)}</td>${onb ? `<td>${checks(c)}</td>` : ""}<td>${disputes(c)}</td><td>${actions(c)}</td></tr>`;
-    box.innerHTML = `<table class="tbl cl-tbl" data-nosearch><thead><tr><th>Client</th><th>Set up</th>${onb ? "<th>Checks</th>" : ""}<th>Disputes</th><th></th></tr></thead>
+    const row = (c) => {
+      const open = onlyOne || tpaCl.open.has(c.id);
+      if (open) tpaCl.open.add(c.id);
+      const part = (label, html) => `<div class="cl-part"><div class="cl-part-h">${label}</div>${html}</div>`;
+      return `<tr id="cl-row-${c.id}" class="bd-row ${c.status !== "ACTIVE" ? "cl-off" : ""}" role="button" tabindex="0" aria-expanded="${open}" aria-controls="cl-detail-${c.id}"
+          onclick="Views.tpaClientToggle('${c.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Views.tpaClientToggle('${c.id}')}">
+        <td><b>${esc(c.party_name)}</b><div class="muted">${c.party_type === "HEALTH_PLAN" ? "Health plan" : "Provider"}</div></td>
+        <td>${statusPill(c)}</td>
+        <td>${c.case_count || 0} filed${c.owed ? ` <span class="badge s-ck-review">${c.owed.n} unpaid · ${usdC(c.owed.cents)}</span>` : ""}</td>
+        <td class="cl-chev"><span class="bd-chevron" id="cl-chev-${c.id}">${open ? "▾" : "▸"}</span></td></tr>
+      <tr id="cl-detail-${c.id}" class="row-detail"${open ? "" : ' style="display:none"'}><td colspan="${cols}"><div class="cl-detail">
+        ${part("Contact", esc(c.contact_email || "No email"))}
+        ${part("Set up", setup(c))}
+        ${onb ? part("Checks", checks(c)) : ""}
+        ${part("Disputes", disputes(c))}
+        ${part("Actions", actions(c))}</div></td></tr>`;
+    };
+    box.innerHTML = `<table class="tbl cl-tbl" data-nosearch><thead><tr><th>Client</th><th>Status</th><th>Disputes</th><th></th></tr></thead>
       ${shown.map(({ g, list }) => `<tbody>${g || groups.length ? `<tr class="cl-grp"><td colspan="${cols}">${g ? groupHead(g) : "<b>Not in a provider group</b>"}</td></tr>` : ""}
         ${list.length ? list.map(row).join("") : `<tr><td colspan="${cols}" class="muted">No providers in this group yet: pick the group in a client's row.</td></tr>`}</tbody>`).join("")}</table>`;
   }
@@ -9673,7 +9705,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       { name: "party_type", label: "Type", options: [["PROVIDER", "Provider"], ["HEALTH_PLAN", "Health plan"]], value: "PROVIDER" },
       { name: "contact_email", label: "Contact email", type: "email" },
       ...(gs.length ? [{ name: "group_id", label: "Provider group", options: [["", "Not in a group"], ...gs.map((g) => [g.id, g.name])] }] : []),
-    ], body: tpaCl.onb ? "Next, add its profile (NPI, TIN, address) and a payment method; then it's ready to file." : "" });
+    ], body: !tpaCl.onb ? "" : App.feature("onboarding_required") ? "Next, add its profile (NPI, TIN, address) and a payment method; then it's ready to file." : "You can file for it straight away; its profile (NPI, TIN, address) and a payment method can be added any time." });
     if (!v) return;
     try {
       await Api.program.tpaAddClient({ party_name: v.party_name.trim(), party_type: v.party_type, contact_email: v.contact_email.trim(), group_id: v.group_id || "" });
@@ -10655,7 +10687,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     btn.disabled = true;
     try {
       const cs = ((await Api.program.tpaOnboarding()).clients || [])
-        .filter((c) => c.status === "ACTIVE" && ["READY", "DOCS_PENDING"].includes(c.onboarding_status));
+        .filter((c) => c.status === "ACTIVE" && tpaCanFile(c.onboarding_status));
       if (!cs.length) { UI.toast("No client is ready yet: finish a client's profile and payment method in the Clients tab first.", { kind: "warn" }); return; }
       const q = (v) => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
       const csv = "dispute_ref,provider_group,party_name,disputed_amount,other_party_name,other_party_email,other_party_naic,contact_name,notes,provider_type,in_network\n" +
@@ -11932,5 +11964,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaOnboardingBox, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();
