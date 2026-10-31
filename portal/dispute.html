@@ -40,22 +40,11 @@
           <option value="HEALTH_PLAN">Health plan / payer</option>
         </select>
       </label>
-      <label>Organization name <input id="f-org" maxlength="200" placeholder="Your organization" /></label>
-      <div class="grid2">
-        <label>Contact name <input id="f-contact" maxlength="120" /></label>
-        <label>Contact email * <input id="f-email" type="email" data-email-check required maxlength="200" /></label>
-      </div>
-      <div class="grid2">
-        <label><span id="f-other-name-l">Health plan the dispute is against *</span> <input id="f-other-name" required maxlength="200" /></label>
-        <label><span id="f-other-email-l">Health plan's email for dispute notices *</span> <input id="f-other-email" type="email" data-email-check required maxlength="200" /></label>
-      </div>
-      <label>Disputed amount <input id="f-amount" type="number" step="0.01" min="0" placeholder="$0.00" /></label>
-      <details class="pf-wrap" open><summary><b>The filing packet</b> — fill it in here instead of the PDF</summary>
-        <p class="muted">The same sections as the Claim Dispute Resolution Program filing packet. Anything you fill in here
-          goes straight onto your case, so nobody has to type it again. You still upload the supporting documents with the
-          link we email you.</p>
-        <div id="f-pdf"></div>
-        <div id="f-packet"></div></details>
+      <h2>Filing packet</h2>
+      <p class="muted">The same sections as the Claim Dispute Resolution Program filing packet. Complete it here, or pick your filled
+        packet PDF to fill it in. You upload the supporting documents with the link we email you.</p>
+      <div id="f-pdf"></div>
+      <div id="f-packet"></div>
       <p id="f-problems" class="pf-problems" role="alert"></p>
       <button class="btn solid lg" type="submit" id="f-submit">Start my dispute</button>
       <p id="f-msg" class="form-msg" role="status"></p>
@@ -136,31 +125,12 @@
     pkHost.innerHTML = PacketForm.html({}, { id: "f-pf", partyFixed: party.value });
     PacketForm.bind(pkHost);
     document.getElementById("f-pdf").innerHTML = PacketForm.pdfPicker("#f-packet");
-    // The other side and where its notices go: the health plan when a provider files, the provider when a plan files.
-    const otherLabels = () => {
-      const plan = party.value === "HEALTH_PLAN";
-      document.getElementById("f-other-name-l").textContent = plan ? "Provider the dispute is against *" : "Health plan the dispute is against *";
-      document.getElementById("f-other-email-l").textContent = plan ? "Provider's email for dispute notices *" : "Health plan's email for dispute notices *";
-    };
-    const otherFromPacket = (d) => {
-      const plan = party.value === "HEALTH_PLAN", set = (id, v) => { const el = document.getElementById(id); if (el && !el.value && v) el.value = v; };
-      set("f-other-name", plan ? (d.provider_org || d.provider_legal_entity) : d.health_plan);
-      set("f-other-email", plan ? d.provider_email : d.health_plan_email);
-    };
-    otherLabels();
     party.addEventListener("change", () => {
-      const { packet } = PacketForm.read(pkHost);
-      PacketForm.fill(pkHost, packet, { partyFixed: party.value });
-      otherLabels();
+      PacketForm.fill(pkHost, PacketForm.read(pkHost).packet, { partyFixed: party.value });
     });
-    pkHost.addEventListener("input", () => otherFromPacket(PacketForm.read(pkHost).packet.details));
     pkHost.addEventListener("packetfilled", (ev) => {
-      const d = ev.detail.details || {}, set = (id, v) => { const el = document.getElementById(id); if (el && !el.value && v) el.value = v; };
+      const d = ev.detail.details || {};
       if (d.filing_party_type && d.filing_party_type !== party.value) { party.value = d.filing_party_type; PacketForm.fill(pkHost, ev.detail, { partyFixed: party.value, touched: true }); }
-      set("f-org", d.filing_party_type === "HEALTH_PLAN" ? d.health_plan : (d.provider_org || d.provider_legal_entity));
-      set("f-contact", d.provider_contact); set("f-email", d.provider_email);
-      otherFromPacket(d);
-      if (ev.detail.disputed_amount_cents) set("f-amount", (ev.detail.disputed_amount_cents / 100).toFixed(2));
     });
 
     document.getElementById("dispute-form").addEventListener("submit", async (e) => {
@@ -168,33 +138,23 @@
       const msg = document.getElementById("f-msg"), btn = document.getElementById("f-submit");
       let filed = false;
       msg.className = "form-msg"; msg.textContent = "";
-      const amount = document.getElementById("f-amount").value;
-      const body = {
-        tenant: sel.value,
-        filing_party_type: document.getElementById("f-party").value,
-        org: document.getElementById("f-org").value.trim(),
-        contact_name: document.getElementById("f-contact").value.trim(),
-        email: document.getElementById("f-email").value.trim(),
-        disputed_amount_cents: amount ? Math.round(parseFloat(amount) * 100) : 0,
-        other_party_name: document.getElementById("f-other-name").value.trim(),
-        other_party_email: document.getElementById("f-other-email").value.trim(),
-      };
+      const { packet, problems } = PacketForm.read(pkHost);
+      const who = PacketForm.sides(packet);
+      const yours = who.plan ? "Health plan" : "Provider";
+      if (!who.filerEmail) problems.push(`${yours}: enter your e-mail address`);
+      if (!who.otherName) problems.push(`${who.otherLabel}: name the side the dispute is against`);
+      if (!who.otherEmail) problems.push(`${who.otherLabel}: enter its e-mail address for dispute notices`);
       const probs = document.getElementById("f-problems");
-      probs.textContent = "";
-      if (PacketForm.touched(pkHost)) {
-        const { packet, problems } = PacketForm.read(pkHost);
-        if (problems.length) { probs.textContent = "Please fix the filing packet: " + problems.join("; "); return; }
-        body.packet = packet;
-        if (!body.disputed_amount_cents && packet.disputed_amount_cents) body.disputed_amount_cents = packet.disputed_amount_cents;
-      }
-      if (!body.tenant || !body.email) {
-        msg.classList.add("err"); msg.textContent = "Please select your state and enter your email."; return;
-      }
-      if (!body.other_party_name || !body.other_party_email) {
-        msg.classList.add("err");
-        msg.textContent = `Please name the ${party.value === "HEALTH_PLAN" ? "provider" : "health plan"} the dispute is against and its email for dispute notices.`;
-        return;
-      }
+      probs.textContent = problems.length ? "Please complete the filing packet: " + problems.join("; ") : "";
+      if (problems.length) return;
+      if (!sel.value) { msg.classList.add("err"); msg.textContent = "Please select your state."; return; }
+      const fromClaims = packet.claims.reduce((n, c) => n + Number(c.disputed_cents || 0), 0);
+      const body = {
+        tenant: sel.value, filing_party_type: party.value,
+        org: who.filerOrg, contact_name: who.filerContact, email: who.filerEmail,
+        disputed_amount_cents: packet.disputed_amount_cents || fromClaims,
+        other_party_name: who.otherName, other_party_email: who.otherEmail, packet,
+      };
       btn.disabled = true; btn.textContent = "Submitting…";
       try {
         const resp = await fetch("/api/public/ahca-intake", {

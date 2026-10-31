@@ -306,7 +306,7 @@ func (s *server) docRequests(ctx context.Context, tenant, where string, arg any)
 		LEFT JOIN tenant_%s.cases c ON c.id::text=r.case_id
 		LEFT JOIN public.case_respondents rs ON rs.tenant=r.tenant AND rs.case_id=r.case_id
 		WHERE r.tenant=$1 AND %s
-		ORDER BY (r.status='OPEN') DESC, r.created_at DESC LIMIT 300`, sanitizeTenant(tenant), where), tenant, arg)
+		ORDER BY (r.status='OPEN') DESC, r.created_at DESC LIMIT 1000`, sanitizeTenant(tenant), where), tenant, arg)
 	if err != nil {
 		return nil, err
 	}

@@ -594,6 +594,15 @@ const Api = (() => {
         tpaSel = { id: id || "", name: name || "" };
         try { if (id) sessionStorage.setItem("idre.tpaClient", JSON.stringify(tpaSel)); else sessionStorage.removeItem("idre.tpaClient"); } catch { /* private window */ }
       },
+      tpaLetterAdd: (clientId, file) => {
+        const fd = new FormData(); fd.append("file", file);
+        return req("POST", `${t()}/tpa/clients/${clientId}/authorization-letter`, fd, true);
+      },
+      tpaLetterGet: (clientId, name) => download(`${t()}/tpa/clients/${clientId}/authorization-letter`, name || "authorization-letter"),
+      tpaLetterRemove: (clientId) => req("DELETE", `${t()}/tpa/clients/${clientId}/authorization-letter`),
+      draftGet: (form) => req("GET", `${t()}/drafts/${form}`),
+      draftPut: (form, data) => req("PUT", `${t()}/drafts/${form}`, data),
+      draftDelete: (form) => req("DELETE", `${t()}/drafts/${form}`),
       tpaFinance: () => req("GET", `${t()}/tpa/finance${tpaCq()}`),
       tpaFinanceCsv: () => download(`${t()}/tpa/finance${tpaCq() ? tpaCq() + "&" : "?"}format=csv`, "tpa-finance.csv"),
       tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),

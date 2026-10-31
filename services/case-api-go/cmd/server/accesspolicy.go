@@ -61,6 +61,7 @@ var hpOpenPaths = []*regexp.Regexp{
 var outsideShellPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/program$`),             // the portal reads the program's settings to draw itself
 	regexp.MustCompile(`^/prefs$`),               // the caller's own preferences
+	regexp.MustCompile(`^/drafts/[a-z-]+$`),      // the caller's own unfinished dispute forms
 	regexp.MustCompile(`^/program/system-mail$`), // the address the program's letters come from (outside callers see only that)
 	regexp.MustCompile(`^/notifications(/|$)`),   // the caller's own notifications
 	regexp.MustCompile(`^/audit/mine$`),          // the caller's own audit trail

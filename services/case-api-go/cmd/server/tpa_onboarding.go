@@ -894,6 +894,18 @@ func (s *server) packageFileable(ctx context.Context, tenant, prefix, pkgID stri
 	return status != "FILED" && docs > 0 && reading == 0, status
 }
 
+// packageEmpty: a filer opened a set for the dispute's documents but added none. Unless documents are required the
+// dispute files without it, as the filer is told it can.
+func (s *server) packageEmpty(ctx context.Context, tenant, prefix, pkgID string) bool {
+	var docs int
+	if err := s.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT count(*) FROM public.%[1]s_package_docs d JOIN public.%[1]s_packages pk ON pk.id=d.package_id
+		WHERE pk.tenant=$1 AND pk.id::text=$2`, prefix), tenant, pkgID).Scan(&docs); err != nil {
+		return false
+	}
+	return docs == 0
+}
+
 // moreDocsOf: a set's additional documents (each with its kind), oldest first.
 func moreDocsOf(bySlot map[string]map[string]any) []map[string]any {
 	out := []map[string]any{}

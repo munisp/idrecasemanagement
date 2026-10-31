@@ -452,8 +452,10 @@ func (s *server) tpaListClients(w http.ResponseWriter, r *http.Request) {
 	rows, _ := s.queryRows(r, `
 		SELECT c.id, c.party_name, c.party_type, c.contact_email, c.status, c.created_at,
 		       (SELECT count(*) FROM public.case_origin o WHERE o.client_id=c.id) AS case_count,
-		       coalesce(c.group_id::text,'') AS group_id, coalesce(g.name,'') AS group_name
+		       coalesce(c.group_id::text,'') AS group_id, coalesce(g.name,'') AS group_name,
+		       coalesce(l.filename,'') AS auth_letter, coalesce(l.uploaded_at::text,'') AS auth_letter_at
 		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id
+		LEFT JOIN public.tpa_client_letters l ON l.tenant=c.tenant AND l.client_id=c.id AND l.ended_at IS NULL
 		WHERE c.tenant=$1 AND c.tpa_id=$2 AND ($3::text='' OR c.id::text=$3) ORDER BY lower(coalesce(g.name,'~')), c.party_name`, tenant, org.ID, clientID)
 	writeJSON(w, http.StatusOK, map[string]any{"clients": rows})
 }
@@ -582,6 +584,13 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 	// and a verified payment rail. A package named on a filing must be READY.
 	if s.featureEnabled(r, tenant, "tpa_onboarding") {
 		required := s.featureEnabled(r, tenant, "onboarding_required")
+		if in.PackageID != "" && s.packageEmpty(r.Context(), tenant, "tpa", in.PackageID) {
+			if required {
+				http.Error(w, `{"error":"add this dispute's documents before filing it"}`, http.StatusConflict)
+				return
+			}
+			in.PackageID = ""
+		}
 		if required || in.PackageID != "" {
 			if in.PackageID == "" {
 				http.Error(w, `{"error":"filings must reference this client's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)
@@ -821,6 +830,7 @@ func (s *server) fileTPADisputeOpt(r *http.Request, tenant string, org *tpaOrg, 
 		// The checked documents belong to the dispute: put them on the case.
 		s.attachPackageDocsToCase(r, tenant, onboardingKinds["tpa"], packageID, caseID, "tpa:"+org.Name)
 	}
+	s.attachClientLetter(r, tenant, clientID, caseID, "tpa:"+org.Name)
 	// Attribute the intake-fee payment row: paid by the TPA on behalf of the party.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,

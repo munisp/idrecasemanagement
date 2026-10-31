@@ -261,6 +261,14 @@ window.PacketForm = (() => {
     return { packet: { details, disputed_amount_cents: amt, claims, remove_claims: remove }, problems };
   }
 
+  // Who is who in a read packet: the side filing and the side the dispute is against, from its own fields.
+  function sides(packet) {
+    const d = packet.details, plan = d.filing_party_type === "HEALTH_PLAN", provider = d.provider_org || d.provider_legal_entity || "";
+    return { plan, otherLabel: plan ? "Provider" : "Health plan",
+      filerEmail: (plan ? d.health_plan_email : d.provider_email) || "", filerContact: (plan ? d.health_plan_contact : d.provider_contact) || "", filerOrg: (plan ? d.health_plan : provider) || "",
+      otherName: (plan ? provider : d.health_plan) || "", otherEmail: (plan ? d.provider_email : d.health_plan_email) || "", otherNpi: plan ? (d.provider_npi || "") : "" };
+  }
+
   // Re-render a form with new values. opts.partyFixed changes the fixed filing party; otherwise it is kept.
   function fill(root, values, opts = {}) {
     const host = root.querySelector(".pf")?.parentElement || root;
@@ -348,5 +356,5 @@ window.PacketForm = (() => {
     } catch (e) { msg.textContent = e.message; }
   }
 
-  return { html, bind, read, fill, touched, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS };
+  return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS };
 })();

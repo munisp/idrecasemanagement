@@ -686,7 +686,10 @@ func main() {
 		r.Post("/notifications/read-all", s.readAllNotifications)
 		r.Get("/views", s.listSavedViews)
 		r.Post("/views", s.saveView)
-		r.Get("/prefs", s.getPrefs) // server-side user preferences (source of truth)
+		r.Get("/prefs", s.getPrefs)            // server-side user preferences (source of truth)
+		r.Get("/drafts/{form}", s.filingDraft) // save as you go: the caller's own unfinished dispute form (drafts.go)
+		r.Put("/drafts/{form}", s.filingDraft)
+		r.Delete("/drafts/{form}", s.filingDraft)
 		r.Put("/prefs", s.putPref)
 		r.Get("/cases/clocks", s.casesClocks)                                          // batch statutory-clock projection (grids)
 		r.Get("/cases/{caseId}/clocks", s.caseClocks)                                  // per-case projection (workspace header)
@@ -835,7 +838,10 @@ func main() {
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)      // Attorney rules on a flagged AOR
 		// TPA onboarding (tpa_onboarding.go): profile -> payment -> 6-doc package.
 		r.Put("/tpa/clients/{clientId}/profile", s.tpaUpdateClientProfile)
-		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)        // bulk roster (CSV)
+		r.Post("/tpa/clients/import", s.tpaImportClientsCSV)                      // bulk roster (CSV)
+		r.Post("/tpa/clients/{clientId}/authorization-letter", s.tpaLetterUpload) // the client's letter of authorization (tpa_client_letter.go)
+		r.Get("/tpa/clients/{clientId}/authorization-letter", s.tpaLetterGet)
+		r.Delete("/tpa/clients/{clientId}/authorization-letter", s.tpaLetterRemove)
 		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment) // CARD/ACH rail
 		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
 		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)

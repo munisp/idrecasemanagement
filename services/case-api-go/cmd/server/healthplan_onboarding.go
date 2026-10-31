@@ -1321,6 +1321,13 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 	// Onboarding gate: optional unless the tenant turns on onboarding_required
 	// (READY package + verified payment rail). A package named must be READY.
 	required := s.featureEnabled(r, tenant, "onboarding_required")
+	if in.PackageID != "" && s.packageEmpty(r.Context(), tenant, "hp", in.PackageID) {
+		if required {
+			http.Error(w, `{"error":"add this dispute's documents before filing it"}`, http.StatusConflict)
+			return
+		}
+		in.PackageID = ""
+	}
 	if required || in.PackageID != "" {
 		if in.PackageID == "" {
 			http.Error(w, `{"error":"filings must reference this party's READY package (package_id) — complete its onboarding first"}`, http.StatusConflict)

@@ -26,6 +26,9 @@ func TestTPAScopedDecision(t *testing.T) {
 		{"request checked", client, "POST", "/tpa/document-requests/" + id + "/submit", true, "request"},
 		{"pay checked", client, "POST", "/tpa/disputes/" + id + "/pay", true, "case"},
 		{"adding a document checked", client, "POST", "/tpa/disputes/" + id + "/documents", true, "case"},
+		{"letter upload checked", client, "POST", "/tpa/clients/" + id + "/authorization-letter", true, "client"},
+		{"finance reads the letter", finance, "GET", "/tpa/clients/" + id + "/authorization-letter", true, ""},
+		{"finance cannot change the letter", finance, "POST", "/tpa/clients/" + id + "/authorization-letter", false, ""},
 		{"finance cannot add a document", finance, "POST", "/tpa/disputes/" + id + "/documents", false, ""},
 		{"bulk filing closed", client, "POST", "/tpa/disputes/bulk", false, ""},
 		{"bulk report closed", client, "GET", "/tpa/disputes/bulk/" + id, false, ""},
@@ -80,5 +83,17 @@ func TestTPAFinanceSummary(t *testing.T) {
 func TestCSVKeepsFormulasOut(t *testing.T) {
 	if csvNoFormula("=HYPERLINK(1)") != "'=HYPERLINK(1)" || csvNoFormula("Clinic") != "Clinic" || csvNoFormula("") != "" {
 		t.Error("csvNoFormula")
+	}
+}
+
+// A draft is the caller's own: reachable by outside logins and by a client-limited or Finance login.
+func TestDraftsAreOpenToEveryLogin(t *testing.T) {
+	for _, l := range []tpaLogin{{ClientID: "c", Role: "STAFF"}, {Role: "FINANCE"}} {
+		if ok, check, _ := tpaScopedDecision(l, "PUT", "/drafts/tpa-file"); !ok || check != "" {
+			t.Errorf("%+v: drafts refused", l)
+		}
+	}
+	if d, _, _ := accessDecision(principal{Roles: []string{"TPA"}}, "PUT", "/drafts/tpa-file"); d != "allow" {
+		t.Errorf("outside login refused its own draft: %s", d)
 	}
 }

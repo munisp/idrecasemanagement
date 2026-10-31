@@ -834,6 +834,7 @@ func (s *server) fileReadyBulkDisputes() int {
 	ctx := context.Background()
 	s.healStuckPackages(ctx)
 	s.sweepExpiredUploads(ctx)
+	s.purgeOldDrafts(ctx)
 	s.reconcileOpenFeeCheckouts(ctx)
 	s.reconcilePendingRefunds(ctx)
 	s.reconcilePendingSetups(ctx)
