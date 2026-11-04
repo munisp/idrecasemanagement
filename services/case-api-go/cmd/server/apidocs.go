@@ -85,9 +85,9 @@ type apiAudience struct {
 }
 
 var (
-	audTPA      = apiAudience{"tpa", "idre API for TPAs", "/tpa/"}
-	audPlan     = apiAudience{"health-plan", "idre API for health plans", "/hp/"}
-	audInternal = apiAudience{"internal", "idre API — internal reference", ""}
+	audTPA      = apiAudience{"tpa", "API for TPAs", "/tpa/"}
+	audPlan     = apiAudience{"health-plan", "API for health plans", "/hp/"}
+	audInternal = apiAudience{"internal", "API — internal reference", ""}
 )
 
 // GET /api/public/docs/{audience}.json
@@ -160,7 +160,7 @@ func (s *server) buildAPISpec(r *http.Request, aud apiAudience) map[string]any {
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title": aud.title, "version": "1",
+			"title": aud.title, "version": "1.0",
 			"description": apiIntro(aud, base, s.apiTokenURL()),
 			"contact":     map[string]string{"name": "idre support", "url": base},
 		},
@@ -422,10 +422,10 @@ func apiIntro(aud apiAudience, base, tokenURL string) string {
 			"3. File your own: `POST …/hp/intake`.\n" +
 			"4. Answer the office: `GET …/hp/document-requests`.\n"
 	}
-	return "Connect your " + who + "'s own systems to idre. Everything you can do in the portal's " + who + " area you can do here, " +
+	return "Connect your " + who + "'s own systems to the dispute resolution portal. Everything you can do in the portal's " + who + " area you can do here, " +
 		"with the same rules.\n\n" +
 		"## 1. Get an API key\n\n" +
-		"In the portal, open your " + who + " page → **API keys** → **New key** (" + map[string]string{"/tpa": "TPA admins only", "/hp": "any of your plan's logins"}[area] + "). " +
+		"In the portal, open **API keys** in the menu → **New key** (" + map[string]string{"/tpa": "TPA admins only", "/hp": "any of your plan's logins"}[area] + "). " +
 		"You get a **client id** and a **client secret**. The secret is shown once: store it like a password. " +
 		"Keys can be limited and revoked at any time; each key's actions appear in your activity log under its name.\n\n" +
 		"## 2. Get a token\n\n" +
