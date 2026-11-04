@@ -68,6 +68,7 @@ func (s *server) tpaTeamList(w http.ResponseWriter, r *http.Request) {
 		       coalesce(u.client_id::text,'') AS client_id, coalesce(cl.party_name,'') AS client_name
 		FROM public.tpa_users u LEFT JOIN public.tpa_clients cl ON cl.id=u.client_id
 		WHERE u.tenant=$1 AND u.tpa_id=$2 AND ($4::text='' OR u.client_id::text=$4)
+		  AND NOT EXISTS (SELECT 1 FROM public.api_keys k WHERE k.sa_user_sub = u.user_sub) -- keys are listed under API keys
 		ORDER BY u.team_role, u.full_name, u.linked_at`, tenant, org.ID, p.Subject, org.ClientScope)
 	writeJSON(w, http.StatusOK, map[string]any{"team": rows, "can_manage": s.tpaTeamAdmin(r, tenant, org.ID)})
 }

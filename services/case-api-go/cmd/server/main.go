@@ -383,13 +383,14 @@ func isAuditorOnly(p principal) bool {
 // ---------------------------------------------------------------------------
 
 type server struct {
-	cfg     Config
-	db      *pgxpool.Pool
-	tc      temporalclient.Client
-	tb      tb.Client
-	docs    *docStore
-	rds     *redisClient // cache + idempotency (fail-open)
-	permify string       // Permify base URL ("" = ReBAC check disabled, dev mode)
+	apiRoutes []apiRoute // the live route table, for the API reference (apidocs.go)
+	cfg       Config
+	db        *pgxpool.Pool
+	tc        temporalclient.Client
+	tb        tb.Client
+	docs      *docStore
+	rds       *redisClient // cache + idempotency (fail-open)
+	permify   string       // Permify base URL ("" = ReBAC check disabled, dev mode)
 	// graphBackends: the Entity 360 relationship-graph provider chain
 	// (GRAPH_BACKENDS — sql | age | falkordb; sql always last). See
 	// graph_provider.go.
@@ -556,7 +557,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, noteActor, tenancy, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
+		r.Use(a.middleware, noteActor, tenancy, s.apiKeyGuard, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases/prefill", s.casePrefill)      // prefill suggestions for the initiation form
 		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
@@ -789,6 +790,15 @@ func main() {
 		r.Post("/tpa/authorized-senders", s.orgSendersHTTP("tpa"))
 		r.Delete("/tpa/authorized-senders", s.orgSendersHTTP("tpa"))
 		r.Get("/tpa/disputes/{caseId}/reply-code", s.caseReplyCodeHTTP("tpa"))
+		r.Get("/tpa/api-keys", s.orgAPIKeysList("tpa"))             // the TPA's API keys (api_keys.go)
+		r.Post("/tpa/api-keys", s.orgAPIKeyCreate("tpa"))           // new key; the secret is in this answer only
+		r.Delete("/tpa/api-keys/{keyId}", s.orgAPIKeyRevoke("tpa")) // revoke a key
+		r.Get("/hp/api-keys", s.orgAPIKeysList("plan"))             // the health plan's API keys
+		r.Post("/hp/api-keys", s.orgAPIKeyCreate("plan"))
+		r.Delete("/hp/api-keys/{keyId}", s.orgAPIKeyRevoke("plan"))
+		r.Get("/api-keys", s.staffAPIKeysList)             // every partner key in the tenant (tenant admins)
+		r.Get("/api-docs/internal.json", s.internalAPIDoc) // the full API reference, office staff only
+		r.Delete("/api-keys/{keyId}", s.staffAPIKeyRevoke)
 		r.Get("/tpa/team", s.tpaTeamList)            // the TPA's employees (tpa_team.go)
 		r.Post("/tpa/team", s.tpaTeamAdd)            // add an employee: their own login, emailed to them
 		r.Patch("/tpa/team/{sub}", s.tpaTeamSetRole) // ADMIN | STAFF
@@ -1129,7 +1139,8 @@ func main() {
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
 	r.Get("/api/public/brand", s.publicBrand)
-	r.Get("/api/public/email-check", s.emailCheck) // does this address take mail (emailcheck.go)
+	r.Get("/api/public/docs/{audience}", s.publicAPIDoc) // TPA and health plan API references (apidocs.go)
+	r.Get("/api/public/email-check", s.emailCheck)       // does this address take mail (emailcheck.go)
 	r.Post("/api/public/healthplan/register", s.registerHealthPlan)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
@@ -1223,6 +1234,7 @@ func main() {
 		}
 	}()
 
+	s.apiRoutes = collectAPIRoutes(r)
 	srv := &http.Server{Addr: cfg.Addr, Handler: r,
 		ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second}
 	// Graceful shutdown: drain in-flight requests on SIGTERM/SIGINT so a

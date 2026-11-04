@@ -225,6 +225,13 @@ const Api = (() => {
   };
   return {
     setTenant, getTenant, download, fetchBlob,
+    // Partner API keys (api_keys.go): kind "tpa" | "hp" for an organization's own keys, "staff" for every key in the tenant.
+    apiKeys: {
+      list: (kind) => req("GET", `${t()}/${kind === "staff" ? "" : kind + "/"}api-keys`),
+      create: (kind, body) => req("POST", `${t()}/${kind}/api-keys`, body),
+      revoke: (kind, id) => req("DELETE", `${t()}/${kind === "staff" ? "" : kind + "/"}api-keys/${encodeURIComponent(id)}`),
+      internalSpec: () => req("GET", `${t()}/api-docs/internal.json`),
+    },
     analytics: {
       payers: () => req("GET", `${t()}/analytics/payers`),
       fraudSignals: () => req("GET", `${t()}/analytics/fraud-signals`),

@@ -269,6 +269,9 @@
   else if (outside && has("TPA", "HEALTH_PLAN")) links.push(["#/org-audit", "⌘", "Audit log"]);
   else links.push(["#/my-activity", "⌘", "Audit log"]);
   if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);
+  // Partner API keys: an organization's own (TPA admins / plan logins; the page explains who), every key for tenant admins.
+  if ((outside && has("TPA", "HEALTH_PLAN")) || has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/api-keys", "⌗", outside ? "API keys" : "Partner API keys"]);
+  if (!outside) links.push(["#/api-reference", "⌗", "API reference"]);
   menu = new Set(links.map(([h]) => h.slice(2)));
   }
   buildLinks();
@@ -580,6 +583,8 @@
     [/^#\/org-audit$/, Views.orgAuditPage],
     [/^#\/my-activity$/, Views.myActivityPage],
     [/^#\/document-requests$/, Views.docReqPage],
+    [/^#\/api-keys$/, ApiKeysViews.page],
+    [/^#\/api-reference$/, ApiKeysViews.reference],
   ];
 
   // One rule for every way of reaching a page -- the rail, a typed or

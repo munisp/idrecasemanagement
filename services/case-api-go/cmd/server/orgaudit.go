@@ -35,6 +35,8 @@ var orgAuditQuiet = map[string]bool{
 
 // orgActionLabels say in words what an action was, for the organization's log.
 var orgActionLabels = map[string]string{
+	"GET /tpa/api-keys": "Viewed API keys", "POST /tpa/api-keys": "API key created", "DELETE /tpa/api-keys/{keyId}": "API key revoked",
+	"GET /hp/api-keys": "Viewed API keys", "POST /hp/api-keys": "API key created", "DELETE /hp/api-keys/{keyId}": "API key revoked",
 	"GET /tpa/me": "Opened the TPA page", "GET /tpa/dashboard": "Viewed the disputes list", "GET /tpa/clients": "Viewed the clients",
 	"GET /tpa/onboarding": "Viewed client onboarding", "GET /tpa/fees": "Viewed fees owed",
 	"GET /tpa/disputes/bulk": "Viewed bulk filings", "GET /tpa/disputes/bulk/{batchId}": "Opened a bulk filing",

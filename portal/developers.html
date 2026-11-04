@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>API for TPAs and health plans</title>
+  <meta name="description" content="Connect your TPA's or health plan's systems to the dispute resolution portal: API keys, tokens and every endpoint." />
+  <style>
+    :root { --ink: #14213d; --muted: #5b6577; --line: #d9dee7; --bg: #f6f7f9; --accent: #1d4ed8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: #fff; }
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; z-index: 10; }
+    header .brand { font-weight: 700; font-size: 17px; }
+    header .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 13px; }
+    nav[role="tablist"] { display: flex; gap: 4px; }
+    nav button { font: inherit; border: 1px solid var(--line); background: #fff; color: var(--ink); padding: 7px 14px; border-radius: 6px; cursor: pointer; }
+    nav button[aria-selected="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+    nav button:focus-visible, header a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+    header .links { margin-left: auto; display: flex; gap: 16px; font-size: 14px; }
+    header a { color: var(--accent); }
+    #status { padding: 24px 20px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">Developer API <small id="brand-sub">For TPAs and health plans</small></div>
+    <nav role="tablist" aria-label="Which API">
+      <button role="tab" id="tab-tpa" aria-selected="true" data-doc="tpa">TPAs</button>
+      <button role="tab" id="tab-health-plan" aria-selected="false" data-doc="health-plan">Health plans</button>
+    </nav>
+    <div class="links"><a href="/app.html">Sign in to the portal</a><a href="/api/public/docs/tpa.json" id="raw">OpenAPI file</a></div>
+  </header>
+  <p id="status" role="status">Loading the reference…</p>
+  <div id="redoc"></div>
+  <script src="/js/vendor/redoc-2.1.5.standalone.js"></script>
+  <script>
+    (function () {
+      var tabs = document.querySelectorAll('nav button');
+      var status = document.getElementById('status');
+      var raw = document.getElementById('raw');
+      function show(doc) {
+        tabs.forEach(function (b) { b.setAttribute('aria-selected', String(b.dataset.doc === doc)); });
+        var url = '/api/public/docs/' + doc + '.json';
+        raw.href = url;
+        status.hidden = false;
+        status.textContent = 'Loading the reference…';
+        if (location.hash.slice(1) !== doc) history.replaceState(null, '', '#' + doc);
+        Redoc.init(url, {
+          hideDownloadButton: false, expandResponses: '200,201,202', jsonSampleExpandLevel: 3, sortTagsAlphabetically: false,
+          theme: { colors: { primary: { main: '#14213d' } }, typography: { fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+            headings: { fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif' } }, sidebar: { backgroundColor: '#f6f7f9' } },
+        }, document.getElementById('redoc'), function (err) {
+          if (err) { status.textContent = 'The reference could not be loaded. Try again shortly.'; return; }
+          status.hidden = true;
+        });
+      }
+      tabs.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.doc); }); });
+      fetch('/api/public/brand').then(function (r) { return r.ok ? r.json() : null; }).then(function (b) {
+        var name = b && (b.brand_name || b.name);
+        if (name) { document.getElementById('brand-sub').textContent = name + ' · for TPAs and health plans'; document.title = name + ' API'; }
+      }).catch(function () {});
+      show(location.hash.slice(1) === 'health-plan' ? 'health-plan' : 'tpa');
+    })();
+  </script>
+</body>
+</html>
