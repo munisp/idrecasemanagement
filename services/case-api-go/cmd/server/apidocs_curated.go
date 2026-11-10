@@ -143,10 +143,10 @@ var apiCurated = func() map[string]apiDoc {
 		"GET /tpa/team": {Summary: "Your team", Description: "The people with logins at your TPA (API keys are listed separately)."},
 
 		// ── TPA: clients ────────────────────────────────────────────────
-		"GET /tpa/clients": {Summary: "List your clients", Description: "The providers you file for, with each one's onboarding status. A client is ready to file once its profile, a payment method and its document package are complete.",
+		"GET /tpa/clients": {Summary: "List your clients", Description: "The providers you file for, with each one's onboarding status. Filing needs the client's profile (an NPI that isn't blocked); some state programs also require a payment method and a document set for every dispute.",
 			Response: map[string]any{"clients": []map[string]any{{"id": "5e2…", "party_name": "Coral Gables Imaging", "party_type": "PROVIDER",
 				"contact_email": "billing@coralimaging.example", "status": "ACTIVE", "case_count": 4}}}},
-		"POST /tpa/clients": {Summary: "Add a client", Description: "Adds a provider you file for. Next: set its profile, add a payment method, and complete its document package.",
+		"POST /tpa/clients": {Summary: "Add a client", Description: "Adds a provider you file for. Next: set its profile and add a payment method; then start a document set for each dispute.",
 			Body: &apiBody{Properties: map[string]any{
 				"party_name":    docStr("The provider's legal name."),
 				"party_type":    docEnum("PROVIDER (default) or HEALTH_PLAN.", "PROVIDER", "HEALTH_PLAN"),
@@ -165,9 +165,9 @@ var apiCurated = func() map[string]apiDoc {
 		// ── TPA: document packages ──────────────────────────────────────
 		"POST /tpa/clients/{clientId}/packages": {Summary: "Start a document package",
 			Description: "A dispute needs six documents: " + "`EOB`, `ITEMIZED_BILL`, `PROOF_OF_COVERAGE`, `OPEN_NEGOTIATION_NOTICE`, `OFFER_SUBSTANTIATION`, `IDRE_ATTESTATION`. " +
-				"Start a package, then upload each slot, or one merged PDF that is split for you.",
-			Body:   &apiBody{Properties: map[string]any{"mode": docEnum("SLOTS (upload one by one) or MERGED (one PDF).", "SLOTS", "MERGED")}, Example: map[string]any{"mode": "SLOTS"}},
-			Status: "201", Response: map[string]any{"package_id": "a41…", "mode": "SLOTS", "status": "ASSEMBLING", "slots": slotNames}},
+				"Start a set for each dispute, then upload each slot (`DISCRETE`) or one PDF that is split for you (`MERGED`).",
+			Body:   &apiBody{Properties: map[string]any{"mode": docEnum("DISCRETE (upload one by one, the default) or MERGED (one PDF).", "DISCRETE", "MERGED")}, Example: map[string]any{"mode": "DISCRETE"}},
+			Status: "201", Response: map[string]any{"package_id": "a41…", "mode": "DISCRETE", "status": "ASSEMBLING", "slots": slotNames}},
 		"POST /tpa/packages/{packageId}/docs": {Summary: "Upload one document to a package",
 			Description: "Upload a file into one slot. Each document is checked automatically; poll the package for the verdict. " +
 				"Extra documents go in `MORE_<KIND>` slots (e.g. `MORE_MEDICAL_RECORDS`).",
@@ -176,16 +176,17 @@ var apiCurated = func() map[string]apiDoc {
 		"POST /tpa/packages/{packageId}/merged": {Summary: "Upload all six documents as one PDF",
 			Body:   &apiBody{Multipart: true, Properties: map[string]any{"file": docFile("One PDF with all six documents.")}, Required: []string{"file"}},
 			Status: "202", Response: map[string]any{"package_id": "a41…", "status": "VALIDATING", "note": "doc-intel is splitting the PDF into the six required slots; poll the package for per-slot verdicts"}},
-		"GET /tpa/packages/{packageId}": {Summary: "Check a package", Description: "Per-slot verdicts. The package is READY when all six are accepted; then you can file with it.",
-			Response: map[string]any{"package_id": "a41…", "client_id": "5e2…", "mode": "SLOTS", "status": "READY", "slots": []map[string]any{{"slot": "EOB", "status": "ACCEPTED"}}}},
+		"GET /tpa/packages/{packageId}": {Summary: "Check a package", Description: "Per-slot verdicts: `ACCEPTED`, `NEEDS_REVIEW`, `REJECTED`, `MISSING` (no file), or `PENDING`/`ANALYZING` while a file is read. " +
+			"You can file with the set once no file is still being read; a verdict is a note for the reviewer, never a block.",
+			Response: map[string]any{"package_id": "a41…", "client_id": "5e2…", "mode": "DISCRETE", "status": "READY", "slots": []map[string]any{{"slot": "EOB", "status": "ACCEPTED"}}}},
 
 		// ── TPA: filing ─────────────────────────────────────────────────
 		"POST /tpa/intake": {Summary: "File a dispute",
-			Description: "Files one dispute for one of your clients. The client must be ready to file (profile, payment method, document package). " +
+			Description: "Files one dispute for one of your clients (its NPI must not be blocked). With `package_id`, every file in the set must have been read first; some state programs require a set and a verified payment method. " +
 				"The answer says whether a fee is due (`payment_required`); pay it with the fees endpoints.",
 			Body: &apiBody{Properties: map[string]any{
 				"client_id":             docStr("Your client (provider) filing the dispute."),
-				"package_id":            docStr("Its READY document package."),
+				"package_id":            docStr("This dispute's document set (optional unless your state program requires it); its files must have been read."),
 				"disputed_amount_cents": docInt("Amount in dispute, in cents."),
 				"other_party_name":      docStr("The health plan the dispute is against."),
 				"other_party_email":     docStr("Where the other side's notices go."),
@@ -256,7 +257,7 @@ var apiCurated = func() map[string]apiDoc {
 			Body: &apiBody{Properties: map[string]any{"reason": docStr("Why.")}, Required: []string{"reason"}}, Response: map[string]any{"status": "OPT_OUT_REQUESTED"}},
 		"POST /hp/intake": {Summary: "File a dispute for one of your parties",
 			Body: &apiBody{Properties: map[string]any{
-				"party_id": docStr("Your party filing the dispute."), "package_id": docStr("Its READY document package."),
+				"party_id": docStr("Your party filing the dispute."), "package_id": docStr("This dispute's document set (optional unless your state program requires it); its files must have been read."),
 				"disputed_amount_cents": docInt("Amount in dispute, in cents."), "other_party_name": docStr("The provider the dispute is against."),
 				"other_party_email": docStr("Where the other side's notices go."), "other_party_npi": docStr("The provider's NPI."),
 				"notes": docStr(""), "packet": packetSchema,

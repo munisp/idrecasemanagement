@@ -1,0 +1,7 @@
+idre_tpa.py
+pyproject.toml
+idre_tpa.egg-info/PKG-INFO
+idre_tpa.egg-info/SOURCES.txt
+idre_tpa.egg-info/dependency_links.txt
+idre_tpa.egg-info/requires.txt
+idre_tpa.egg-info/top_level.txt

@@ -19,6 +19,10 @@
     header .links { margin-left: auto; display: flex; gap: 16px; font-size: 14px; }
     header a { color: var(--accent); }
     #status { padding: 24px 20px; color: var(--muted); }
+    #sdk { margin: 16px 20px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-size: 14px; line-height: 1.5; }
+    #sdk h2 { margin: 0 0 6px; font-size: 16px; }
+    #sdk pre { margin: 8px 0 0; padding: 10px 12px; overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+    #sdk a { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -28,8 +32,21 @@
       <button role="tab" id="tab-tpa" aria-selected="true" data-doc="tpa">TPAs</button>
       <button role="tab" id="tab-health-plan" aria-selected="false" data-doc="health-plan">Health plans</button>
     </nav>
-    <div class="links"><a href="/app.html">Sign in to the portal</a><a href="/api/public/docs/tpa.json" id="raw">OpenAPI file</a></div>
+    <div class="links"><a href="/app.html">Sign in to the portal</a><a href="#sdk" id="sdk-link">Python SDK</a><a href="/api/public/docs/tpa.json" id="raw">OpenAPI file</a></div>
   </header>
+  <section id="sdk" aria-labelledby="sdk-title">
+    <h2 id="sdk-title">Python SDK for TPAs</h2>
+    One file and one dependency (<code>requests</code>): tokens renewed for you, plain-language errors, and every step from adding a client to filing and paying.
+    <a href="/sdk/python/idre_tpa.py" download>idre_tpa.py</a> ·
+    <a href="/sdk/python/README.md">guide</a> ·
+    <a href="/sdk/python/example_file_dispute.py" download>worked example</a>
+    <pre>pip install requests
+curl -O <span class="site"></span>/sdk/python/idre_tpa.py
+
+from idre_tpa import IdreClient, Claim
+idre = IdreClient(client_id="api-key-…", client_secret="…", environment="<span class="env">test</span>")
+print(idre.me()["tpa"]["name"])</pre>
+  </section>
   <p id="status" role="status">Loading the reference…</p>
   <div id="redoc"></div>
   <script src="/js/vendor/redoc-2.1.5.standalone.js"></script>
@@ -38,8 +55,13 @@
       var tabs = document.querySelectorAll('nav button');
       var status = document.getElementById('status');
       var raw = document.getElementById('raw');
+      document.querySelectorAll('#sdk .site').forEach(function (el) { el.textContent = location.origin; });
+      document.querySelectorAll('#sdk .env').forEach(function (el) { el.textContent = /idre-prod/.test(location.hostname) ? 'production' : 'test'; });
       function show(doc) {
         tabs.forEach(function (b) { b.setAttribute('aria-selected', String(b.dataset.doc === doc)); });
+        // The SDK covers the TPA API; health plans see the reference only.
+        document.getElementById('sdk').hidden = doc !== 'tpa';
+        document.getElementById('sdk-link').hidden = doc !== 'tpa';
         var url = '/api/public/docs/' + doc + '.json';
         raw.href = url;
         status.hidden = false;

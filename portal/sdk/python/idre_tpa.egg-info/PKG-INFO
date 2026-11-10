@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: idre-tpa
+Version: 1.0.0
+Summary: Python client for the dispute resolution portal's TPA API: file and follow IDR disputes from your own systems.
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.28

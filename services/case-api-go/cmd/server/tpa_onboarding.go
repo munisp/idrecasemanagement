@@ -521,6 +521,11 @@ func (s *server) tpaAddPayment(w http.ResponseWriter, r *http.Request) {
 		RETURNING id`,
 		tenant, org.ID, clientID, in.Method, in.Label, strings.ToUpper(in.Brand),
 		in.Last4, in.Routing, in.ProcessorRef, in.AuthReceived, verified).Scan(&id)
+	if isUniqueViolation(err) {
+		// A processor's payment method token (pm_…) is saved once: answer that, not a server failure.
+		http.Error(w, `{"error":"this payment method (processor_ref) is already saved"}`, http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(w, `{"error":"save failed"}`, http.StatusInternalServerError)
 		return
