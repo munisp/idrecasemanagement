@@ -53,9 +53,13 @@ def money(value) -> str:
 
 @app.errorhandler(IdreError)
 def refused(error: IdreError):
-    # Show the API's own plain-language reason on the page the person came from.
-    flash(f"The API refused that ({error.status or 'not reached'}): {error.message}", "error")
-    return redirect(request.referrer or url_for("home"))
+    message = f"The API refused that ({error.status or 'not reached'}): {error.message}"
+    if request.method == "POST":
+        # After a form, go back to the page it came from and say why.
+        flash(message, "error")
+        return redirect(request.referrer or url_for("home"))
+    # Loading a page failed (e.g. a wrong or revoked key): explain it here; redirecting would just fail again.
+    return render_template("problem.html", message=message), 502 if not error.status else (error.status if error.status >= 400 else 502)
 
 
 @app.context_processor
@@ -226,6 +230,11 @@ app.jinja_loader = DictLoader({
 </main>
 <script>document.querySelectorAll('form[data-slow]').forEach(f => f.addEventListener('submit', () => { f.classList.add('sending'); f.querySelector('button').disabled = true }))</script>
 </body></html>""",
+
+    "problem.html": """{% extends "base.html" %}{% block title %}Problem{% endblock %}{% block body %}
+<h1>That page couldn't be loaded</h1><div class="flash error" role="alert">{{ message }}</div>
+<p class="muted">If the API key was refused, check IDRE_CLIENT_ID, IDRE_CLIENT_SECRET and IDRE_ENVIRONMENT (a test key only works with
+IDRE_ENVIRONMENT=test), then restart the app.</p>{% endblock %}""",
 
     "home.html": """{% extends "base.html" %}{% block title %}Disputes{% endblock %}{% block body %}
 <h1>Your disputes</h1>
