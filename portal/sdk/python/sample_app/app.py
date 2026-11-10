@@ -319,8 +319,8 @@ IDRE_ENVIRONMENT=test), then restart the app.</p>{% endblock %}""",
   <label>Your reference for this batch<input name="batch_ref" placeholder="2026-11-batch-1"><small>Sending the same reference again never files twice</small></label>
 </div><p><button>Upload</button> <span class="busy muted">Uploading…</span></p></form>
 {% set rows = batches.batches if batches is mapping and batches.batches is defined else [] %}
-{% if rows %}<h2>Earlier batches</h2><table><tr><th>Batch</th><th>Reference</th><th>Uploaded</th></tr>
-{% for b in rows %}<tr><td><a href="{{ url_for('bulk_batch', batch_id=b.batch_id or b.id) }}">{{ (b.batch_id or b.id)[:8] }}</a></td><td>{{ b.batch_ref }}</td><td>{{ b.created_at }}</td></tr>{% endfor %}</table>{% endif %}
+{% if rows %}<h2>Earlier batches</h2><div class="wrap"><table><tr><th>Reference</th><th>Rows</th><th>Filed</th><th>Refused</th><th>Waiting on documents</th><th>Unpaid fees</th><th>Uploaded</th></tr>
+{% for b in rows %}<tr><td><a href="{{ url_for('bulk_batch', batch_id=b.id) }}">{{ b.batch_ref or b.id[:8] }}</a></td><td>{{ b.rows }}</td><td>{{ b.filed }}</td><td>{{ b.refused }}</td><td>{{ b.waiting }}</td><td>{{ b.unpaid_cents|money }}</td><td>{{ (b.created_at or '')[:16] }}</td></tr>{% endfor %}</table></div>{% endif %}
 {% endblock %}""",
 
     "batch.html": """{% extends "base.html" %}{% block title %}Bulk filing{% endblock %}{% block body %}

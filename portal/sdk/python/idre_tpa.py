@@ -247,13 +247,27 @@ class IdreClient:
         """
         if not batch_ref:
             raise ValueError("batch_ref is required: it is what makes a retry safe")
-        return self.post("/tpa/disputes/bulk", data={"batch_ref": batch_ref}, files=_file_field(file, None))
+        try:
+            return self.post("/tpa/disputes/bulk", data={"batch_ref": batch_ref}, files=_file_field(file, None))
+        except IdreError as error:
+            # The same batch_ref is still being uploaded (e.g. a retry overlapping the first attempt): nothing is filed
+            # twice, so answer with that batch instead of an error.
+            if error.status != 409 or "batch_ref" not in error.message:
+                raise
+            for _ in range(30):
+                for row in self.bulk_batches().get("batches", []):
+                    if row.get("batch_ref") == batch_ref:
+                        return {"batch_id": row.get("id"), "batch_ref": batch_ref, "already_sent": True}
+                time.sleep(2)
+            raise
 
     def bulk_batch(self, batch_id: str) -> dict:
         """Each row's outcome: FILED (with its case number), waiting for documents, or refused and why."""
         return self.get(f"/tpa/disputes/bulk/{batch_id}")
 
     def bulk_batches(self) -> dict:
+        """Your batches, newest first: `{"batches": [{"id", "batch_ref", "rows", "filed", "refused", "waiting",
+        "unpaid", "unpaid_cents", "created_at"}, …]}`."""
         return self.get("/tpa/disputes/bulk")
 
     def wait_for_bulk(self, batch_id: str, timeout: float = 900, interval: float = 10, until_filed: bool = False) -> dict:
