@@ -1,8 +1,8 @@
 """Worked example: file one dispute for a provider you represent, from start to payment link.
 
-    pip install requests
-    export IDRE_CLIENT_ID=api-key-…  IDRE_CLIENT_SECRET=…   # from the portal: API keys → New key
-    python example_file_dispute.py ./documents/            # a folder with the six PDFs, named by slot
+    python3 -m venv .venv && source .venv/bin/activate && pip install requests
+    export IDRE_CLIENT_ID=api-key-…  IDRE_CLIENT_SECRET=…   (an API key from the portal: API keys → New key)
+    python example_file_dispute.py documents               (a folder with the six PDFs, named by slot)
 
 First fill in the dispute's details in the block at the top of this file. The folder holds EOB.pdf, ITEMIZED_BILL.pdf, PROOF_OF_COVERAGE.pdf, OPEN_NEGOTIATION_NOTICE.pdf,
 OFFER_SUBSTANTIATION.pdf and IDRE_ATTESTATION.pdf. Runs against the test site unless IDRE_ENVIRONMENT=production.

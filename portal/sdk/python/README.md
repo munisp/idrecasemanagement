@@ -13,9 +13,14 @@ Full endpoint reference: **https://idre.newfire.app/developers.html** (test) ·
 ## Install
 
 ```bash
+curl -O https://idre.newfire.app/sdk/python/idre_tpa.py
+python3 -m venv .venv
+source .venv/bin/activate
 pip install requests
-curl -O https://idre.newfire.app/sdk/python/idre_tpa.py      # or: pip install ./  (from this folder)
 ```
+
+On macOS use `python3` (there is no `python` or `pip` until the virtual environment is active). On Windows:
+`py -m venv .venv` and `.venv\Scripts\activate`.
 
 ## 1. Get an API key
 

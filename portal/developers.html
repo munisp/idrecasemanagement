@@ -41,8 +41,9 @@
     <a href="/sdk/python/README.md">guide</a> ·
     <a href="/sdk/python/example_file_dispute.py" download>worked example</a> ·
     <a href="/sdk/python/sample_app/README.md">sample web app</a>
-    <pre>pip install requests
-curl -O <span class="site"></span>/sdk/python/idre_tpa.py
+    <pre>curl -O <span class="site"></span>/sdk/python/idre_tpa.py
+python3 -m venv .venv && source .venv/bin/activate
+pip install requests
 
 from idre_tpa import IdreClient, Claim
 idre = IdreClient(client_id="api-key-…", client_secret="…", environment="<span class="env">test</span>")

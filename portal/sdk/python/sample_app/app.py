@@ -2,11 +2,11 @@
 
 A starting point for your own integration, not a replacement for the portal. It runs on your computer only.
 
-    pip install flask requests
-    # put idre_tpa.py next to this file (download it from the developers page)
-    export IDRE_CLIENT_ID=api-key-…  IDRE_CLIENT_SECRET=…   # an API key: portal → API keys → New key
-    export IDRE_ENVIRONMENT=test                            # or production
-    python app.py                                           # then open http://127.0.0.1:5000
+    (put idre_tpa.py next to this file; download it from the developers page)
+    python3 -m venv .venv && source .venv/bin/activate && pip install flask requests
+    export IDRE_CLIENT_ID=api-key-…  IDRE_CLIENT_SECRET=…  IDRE_ENVIRONMENT=test
+    python app.py
+    then open http://127.0.0.1:5000 (IDRE_ENVIRONMENT=production with a production key)
 
 The API key is read from the environment and never shown in or sent to the browser.
 """
