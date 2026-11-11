@@ -819,16 +819,22 @@ func (s *server) nextCaseNumber(r *http.Request, tenant string, cfg *ProgramConf
 	// invoice number. The counter starts above every number already issued.
 	yy := time.Now().Format("06")
 	var n int64
-	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+	// The year's counter usually exists: move it on without touching the cases table. (The seeding INSERT below
+	// counts and regex-scans every case even when its ON CONFLICT branch is taken -- O(cases) per filing, the top
+	// query in a load test -- so it only runs when the year has no counter yet.)
+	if err := s.db.QueryRow(r.Context(), `UPDATE public.case_sequences SET last = last + 1 WHERE tenant=$1 AND yy=$2 RETURNING last`,
+		tenant, yy).Scan(&n); err != nil {
+		err = s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO public.case_sequences (tenant, yy, last)
 		SELECT $1::text, $2::text, greatest(count(*), coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0)) + 1
 		FROM tenant_%s.cases
 		ON CONFLICT (tenant, yy) DO UPDATE SET last = public.case_sequences.last + 1
 		RETURNING last`, sanitizeTenant(tenant)), tenant, yy).Scan(&n)
-	if err != nil {
-		// No counter table yet (older database): fall back to the count.
-		_ = s.db.QueryRow(r.Context(),
-			fmt.Sprintf(`SELECT count(*) + 1 FROM tenant_%s.cases`, sanitizeTenant(tenant))).Scan(&n)
+		if err != nil {
+			// No counter table yet (older database): fall back to the count.
+			_ = s.db.QueryRow(r.Context(),
+				fmt.Sprintf(`SELECT count(*) + 1 FROM tenant_%s.cases`, sanitizeTenant(tenant))).Scan(&n)
+		}
 	}
 	seq := fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, n)
 	out := strings.ReplaceAll(cfg.CaseNumber.Pattern, "{yy}", yy)
