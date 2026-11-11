@@ -223,6 +223,15 @@ func (s *server) takeTurn(ctx context.Context, tenant, role, skip string, apply 
 // it from the pool). Returns who got it ("" = nobody).
 func (s *server) autoAssignNewCase(r *http.Request, tenant, caseID, caseNumber string) string {
 	ctx := r.Context()
+	// A case waiting on its fee (or already assigned) can't take a turn: the update in takeTurn would match no row.
+	// Say so before takeTurn's rotation lock, which every new case otherwise queues on while the open caseload is
+	// counted -- that held TPA filings (all AWAITING_PAYMENT) to ~4 a second. A paid case comes back here then.
+	var status string
+	var assigned *string
+	if err := s.db.QueryRow(ctx, fmt.Sprintf(`SELECT status, assigned_to FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)),
+		caseID).Scan(&status, &assigned); err == nil && (status == "AWAITING_PAYMENT" || (assigned != nil && *assigned != "" && *assigned != "unassigned-pool")) {
+		return ""
+	}
 	who, name, err := s.takeTurn(ctx, tenant, "CASE_MANAGER", "", func(tx pgx.Tx, who string) (bool, error) {
 		tag, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role='CASE_MANAGER', updated_at=now()
 			WHERE id=$2 AND (assigned_to IS NULL OR assigned_to='unassigned-pool') AND status<>'AWAITING_PAYMENT'`, sanitizeTenant(tenant)), who, caseID)
