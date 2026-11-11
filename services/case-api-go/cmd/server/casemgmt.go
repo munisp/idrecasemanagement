@@ -7,13 +7,10 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -124,31 +121,10 @@ func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, pa
 	if err != nil {
 		return
 	}
-	// One writer at a time per tenant: two entries written at once both read
-	// the same last hash, and the chain forked. Every outside organization's
-	// action is audited now (orgaudit.go), so "at once" is common.
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		slog.Error("audit", "action", action, "err", err)
-		return
-	}
-	defer tx.Rollback(ctx)
-	_, _ = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('audit_log:' || $1))`, tenant)
-	var prevHash string
-	if err := tx.QueryRow(ctx,
-		`SELECT hash FROM public.audit_log WHERE tenant=$1 ORDER BY id DESC LIMIT 1`, tenant).
-		Scan(&prevHash); err != nil {
-		prevHash = "GENESIS"
-	}
-	sum := sha256.Sum256([]byte(prevHash + string(body)))
-	hash := hex.EncodeToString(sum[:])
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org, actor)
-		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''))`, tenant, caseID, action, string(body), prevHash, hash, auditOrg(payload), auditActor(payload)); err != nil {
-		slog.Error("audit", "action", action, "err", err)
-		return
-	}
-	_ = tx.Commit(ctx)
+	// Written by the group writer (audit_group.go): one locked transaction per group of entries waiting at the
+	// same moment, same chain, same order. This call still returns only once its entry is committed.
+	s.appendAudit(&auditEntry{tenant: tenant, caseID: caseID, action: action, body: string(body),
+		org: auditOrg(payload), actor: auditActor(payload)})
 }
 
 // auditActor: the person an entry records ("by"), for their own trail
