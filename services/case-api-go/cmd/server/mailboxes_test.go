@@ -293,3 +293,21 @@ func TestReplyCode(t *testing.T) {
 		t.Error("a code is found whatever its case")
 	}
 }
+
+func TestTestOnlyMailSkipsThePace(t *testing.T) {
+	t.Setenv("EMAIL_TEST_DOMAINS", ".test")
+	t.Setenv("MAIL_MAX_PER_SECOND", "1")
+	s := &server{cfg: Config{SMTPHost: "smtp.invalid", SMTPPort: 587}}
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		if err := s.deliver("idre@upi.dev", []string{"a@idre.test"}, nil, []byte("x")); err != nil {
+			t.Fatalf("test-only mail: %v", err)
+		}
+	}
+	if time.Since(start) > time.Second {
+		t.Errorf("20 test-only mails took %v: they waited for sending slots they never use", time.Since(start))
+	}
+	if !onlyTestAddresses([]string{"a@idre.test"}, []string{"b@x.test"}) || onlyTestAddresses([]string{"a@idre.test", "real@example.com"}, nil) || onlyTestAddresses(nil, nil) {
+		t.Error("onlyTestAddresses")
+	}
+}

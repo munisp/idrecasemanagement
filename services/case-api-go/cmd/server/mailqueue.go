@@ -74,8 +74,26 @@ func (s *server) mailPace() {
 	}
 }
 
+// onlyTestAddresses: every recipient is on an EMAIL_TEST_DOMAINS domain (dev's .test suites), so smtpDeliver
+// would drop the mail without sending it.
+func onlyTestAddresses(to, cc []string) bool {
+	all := append(append([]string{}, to...), cc...)
+	for _, a := range all {
+		if !emailTestDomain(strings.ToLower(a[strings.LastIndex(a, "@")+1:])) {
+			return false
+		}
+	}
+	return len(all) > 0
+}
+
 // deliver: paced, retried once on a rate answer, queued if still refused for now.
 func (s *server) deliver(from string, to, cc []string, msg []byte) error {
+	if onlyTestAddresses(to, cc) {
+		// Not sent (smtpDeliver drops it), so it must not take one of the paced sending slots either: a load test
+		// on .test addresses was held to ~4 filings/s by mail it never sent, and delayed real people's mail.
+		slog.Info("mail to test addresses only, not sent", "to", to, "cc", cc)
+		return nil
+	}
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		s.mailPace()
