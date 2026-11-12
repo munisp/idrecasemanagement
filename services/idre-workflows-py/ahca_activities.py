@@ -11,6 +11,8 @@ import httpx
 import psycopg
 from temporalio import activity
 
+from case_guard import ensure_case
+
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
 
@@ -25,6 +27,7 @@ def _auth_headers() -> dict:
 
 @activity.defn
 async def set_dual_status(tenant: str, case_id: str, internal_status: str, agency_status: str = "") -> None:
+    await ensure_case(DSN, tenant, case_id)
     async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/cases/{case_id}/status",
@@ -36,6 +39,7 @@ async def set_dual_status(tenant: str, case_id: str, internal_status: str, agenc
 
 @activity.defn
 async def set_program_date(tenant: str, case_id: str, key: str, value: str) -> None:
+    await ensure_case(DSN, tenant, case_id)
     async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/cases/{case_id}/program-date",
@@ -54,6 +58,7 @@ async def recommendation_days_left(tenant: str, case_id: str) -> int:
     already run) -- unless it is still awaiting its initial fee: then it has not
     been received at all, its clock has not started, and the full 60 days are
     reported so the caller waits instead of flagging a breach."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         st = c.execute(f"SELECT status FROM tenant_{tenant}.cases WHERE id=%s", (case_id,)).fetchone()
         if st and st[0] == "AWAITING_PAYMENT":
@@ -74,6 +79,7 @@ async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, bo
     """Tell the people who must act, not the whole tenant: one notification
     per role (user_sub 'role:<ROLE>', which case-api shows to holders of that
     role), plus a line on the case timeline."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         c.execute(
             "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,%s,%s)",
@@ -97,6 +103,7 @@ async def send_correspondence(tenant: str, case_id: str, template: str, body: st
     that omits them. Used for the RFI day-15 lapse notice, which the source
     narrative lists as its own named email template, not just a logged
     reminder."""
+    await ensure_case(DSN, tenant, case_id)
     async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/cases/{case_id}/correspondence",
@@ -117,6 +124,7 @@ async def set_case_outcome(
     review, instead of leaving them as a separate step someone has to
     remember -- fields are only sent when provided, via the same
     setCaseDetails route (and field_schema validation) the portal uses."""
+    await ensure_case(DSN, tenant, case_id)
     fields: dict = {}
     if case_outcome:
         fields["case_outcome"] = case_outcome
@@ -149,6 +157,7 @@ async def record_followup_action(tenant: str, case_id: str, action: str, detail:
 
     The "tell AHCA at day 13" follow-up applies to Medicaid plans only: for a
     case recorded as another line of business it is skipped."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         row = c.execute(
             f"SELECT case_number, coalesce(assigned_to,''), coalesce(details->>'line_of_business','') "

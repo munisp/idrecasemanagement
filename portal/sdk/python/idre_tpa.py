@@ -374,11 +374,19 @@ class IdreClient:
 
     def _access_token(self, refresh: bool = False) -> str:
         if refresh or not self._token.value or time.time() >= self._token.expires_at:
-            try:
-                response = self._http.post(self.token_url, timeout=self.timeout, data={
-                    "grant_type": "client_credentials", "client_id": self._client_id, "client_secret": self._client_secret})
-            except requests.RequestException as exc:
-                raise IdreError(0, f"the sign-in service couldn't be reached: {exc}") from exc
+            # Asking for a token changes nothing on the server, so a dropped connection or timeout is retried (three
+            # tries, 0.5 s then 1 s apart). A 1M-filing run lost a filing to one connection reset here.
+            for attempt in range(3):
+                try:
+                    response = self._http.post(self.token_url, timeout=self.timeout, data={
+                        "grant_type": "client_credentials", "client_id": self._client_id, "client_secret": self._client_secret})
+                    break
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    if attempt == 2:
+                        raise IdreError(0, f"the sign-in service couldn't be reached: {exc}") from exc
+                    time.sleep(0.5 * (attempt + 1))
+                except requests.RequestException as exc:
+                    raise IdreError(0, f"the sign-in service couldn't be reached: {exc}") from exc
             if response.status_code != 200:
                 raise IdreError(response.status_code, "the API key was refused: check the client id and secret, "
                                 "that the key wasn't revoked, and that it belongs to this environment", _body(response), "POST", self.token_url)
