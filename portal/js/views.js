@@ -471,16 +471,25 @@ const Views = (() => {
         return;
       }
       const day = 86400000, now = Date.now();
+      const notYet = '<span class="muted">not entered yet</span>';
       const rows = list.map((d) => {
         const s = d.summary || {}, left = Math.ceil((new Date(d.updated_at).getTime() + 90 * day - now) / day);
-        return `<tr><td><b>${esc(d.ref)}</b></td><td>${esc(s.client || "—")}</td><td>${esc(s.provider && s.provider !== s.client ? s.provider : "—")}</td><td>${esc(s.other_party || "—")}</td>
-          <td>${esc(s.claim || "—")}</td><td style="text-align:right">${esc(s.amount || "—")}</td>
-          <td>${esc(draftTime(d.updated_at))}${left <= 30 ? `<div class="muted">deleted in ${plural(Math.max(left, 0), "day")} unless opened</div>` : ""}</td>
-          <td style="white-space:nowrap"><button class="mini" onclick="Views.draftsTabOpen('${kind}','${d.id}')">Open</button>
+        const provider = s.provider && s.provider !== s.client ? s.provider : "";
+        const missing = [!s.other_party && "health plan", !s.claim && "claim number", !s.amount && "amount"].filter(Boolean);
+        const left90 = left <= 30 ? `<div class="muted">deleted in ${plural(Math.max(left, 0), "day")} unless you continue it</div>` : "";
+        return `<tr>
+          <td><b>${esc(s.client || "Client not picked yet")}</b>${provider ? `<div>${esc(provider)}</div>` : ""}<div class="muted">Draft ${esc(d.ref)}</div></td>
+          <td>${s.other_party ? esc(s.other_party) : notYet}</td>
+          <td style="white-space:nowrap">${s.claim ? esc(s.claim) : notYet}</td>
+          <td style="text-align:right">${s.amount ? esc(s.amount) : notYet}</td>
+          <td>${missing.length ? `<span class="badge s-ck-review">Still needed</span> <span class="muted">${esc(missing.join(", "))}</span>`
+            : `<span class="badge s-ck-clear">Looks complete</span> <span class="muted">check the documents and file</span>`}</td>
+          <td>${esc(draftTime(d.updated_at))}${left90}</td>
+          <td style="white-space:nowrap"><button class="mini" onclick="Views.draftsTabOpen('${kind}','${d.id}')">Continue</button>
             <button class="mini ghost" onclick="Views.draftsTabDiscard('${kind}','${d.id}','${esc(d.ref)}')">Discard</button></td></tr>`;
       }).join("");
-      box.innerHTML = `<div style="overflow-x:auto"><table><thead><tr><th>Draft</th><th>For</th><th>Provider</th><th>Against</th><th>Claim</th><th style="text-align:right">Amount</th><th>Last saved</th><th></th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
+      box.innerHTML = `<div style="overflow-x:auto"><table class="drafts-table"><thead><tr><th>Who it's for</th><th>Against (health plan)</th><th>Claim</th>
+        <th style="text-align:right">Amount</th><th>What's left</th><th>Last changed</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
     } catch (e) { box.innerHTML = err(e); }
   }
   // Open a draft in File a dispute (or a blank form: id "new").
@@ -9040,7 +9049,7 @@ const Views = (() => {
         <section data-tpa-panel="drafts" style="display:none">
           <div class="card"><div class="cl-head"><h2>Your drafts</h2>
             <span class="cl-head-act"><button class="mini" onclick="Views.draftsTabNew('tpa')">Start a new draft</button></span></div>
-            <p class="muted">Disputes you started and haven't filed yet. Each one saved itself as you typed. Only you can see your drafts. A draft gets its case number when it is filed; one left untouched for 90 days is deleted.</p>
+            <p class="muted">Disputes you started but haven't filed. Click <b>Continue</b> to pick up where you left off. A draft gets its case number only when you file it. Only you can see your drafts, and one left untouched for 90 days is deleted.</p>
             <div id="tpa-drafts"><p class="muted">Loading…</p></div></div>
         </section>
         <section data-tpa-panel="file" style="display:none">
@@ -9576,7 +9585,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
         <section data-hp-panel="drafts" style="display:none">
           <div class="card"><div class="cl-head"><h2>Your drafts</h2>
             <span class="cl-head-act"><button class="mini" onclick="Views.draftsTabNew('hp')">Start a new draft</button></span></div>
-            <p class="muted">Disputes you started and haven't filed yet. Each one saved itself as you typed. Only you can see your drafts. A draft gets its case number when it is filed; one left untouched for 90 days is deleted.</p>
+            <p class="muted">Disputes you started but haven't filed. Click <b>Continue</b> to pick up where you left off. A draft gets its case number only when you file it. Only you can see your drafts, and one left untouched for 90 days is deleted.</p>
             <div id="hp-drafts"><p class="muted">Loading…</p></div></div>
         </section>
         <section data-hp-panel="file" style="display:none">
