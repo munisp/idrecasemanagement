@@ -1494,7 +1494,14 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .tpa-client-pick select{max-width:280px}
 .tpa-client-h{margin:14px 0 0;font-size:17px}
 .fin-r{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-.draft-status{min-height:20px;margin:4px 0 8px;font-size:13px;display:flex;align-items:center;gap:8px}
+.draft-status{min-height:20px;margin:4px 0 10px;font-size:13px}
+.draft-status .draft-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.draft-status .draft-hint{margin-top:2px;font-size:12px}
+.draft-status .draft-others{margin-top:6px}
+.draft-status .draft-others summary{cursor:pointer;font-size:13px}
+.draft-status .draft-others ul{margin:6px 0 0;padding-left:18px}
+.draft-status .draft-others li{margin:3px 0;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.pkg-pick{display:inline-flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .docreq-filters{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 12px}
 .docreq-seg{display:inline-flex;gap:0}
 .docreq-seg button{border-radius:0;margin:0}

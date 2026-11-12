@@ -947,7 +947,12 @@ func (s *server) tpaOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		         WHERE m.tenant=c.tenant AND m.client_id=c.id AND m.verified AND m.status='ACTIVE'),
 		       (SELECT count(*) FROM public.tpa_packages pk
 		         WHERE pk.tenant=c.tenant AND pk.client_id=c.id AND pk.status='READY'),
-		       (SELECT json_agg(json_build_object('id',pk.id,'mode',pk.mode,'status',pk.status))
+		       (SELECT json_agg(json_build_object('id',pk.id,'mode',pk.mode,'status',pk.status,
+		               'created_at',pk.created_at,'updated_at',pk.updated_at,
+		               'docs',(SELECT count(*) FROM public.tpa_package_docs d WHERE d.package_id=pk.id),
+		               'pages',(SELECT max(d.page_end) FROM public.tpa_package_docs d WHERE d.package_id=pk.id),
+		               'first_file',(SELECT d.filename FROM public.tpa_package_docs d WHERE d.package_id=pk.id ORDER BY d.created_at LIMIT 1))
+		               ORDER BY pk.updated_at DESC)
 		        FROM public.tpa_packages pk WHERE pk.tenant=c.tenant AND pk.client_id=c.id AND pk.status<>'FILED'),
 		       coalesce(g.name,'')
 		FROM public.tpa_clients c LEFT JOIN public.tpa_provider_groups g ON g.id=c.group_id

@@ -1056,7 +1056,12 @@ func (s *server) hpOnboardingBoard(w http.ResponseWriter, r *http.Request) {
 		         WHERE m.tenant=c.tenant AND m.party_id=c.id AND m.verified AND m.status='ACTIVE'),
 		       (SELECT count(*) FROM public.hp_packages pk
 		         WHERE pk.tenant=c.tenant AND pk.party_id=c.id AND pk.status='READY'),
-		       (SELECT json_agg(json_build_object('id',pk.id,'mode',pk.mode,'status',pk.status))
+		       (SELECT json_agg(json_build_object('id',pk.id,'mode',pk.mode,'status',pk.status,
+		               'created_at',pk.created_at,'updated_at',pk.updated_at,
+		               'docs',(SELECT count(*) FROM public.hp_package_docs d WHERE d.package_id=pk.id),
+		               'pages',(SELECT max(d.page_end) FROM public.hp_package_docs d WHERE d.package_id=pk.id),
+		               'first_file',(SELECT d.filename FROM public.hp_package_docs d WHERE d.package_id=pk.id ORDER BY d.created_at LIMIT 1))
+		               ORDER BY pk.updated_at DESC)
 		        FROM public.hp_packages pk WHERE pk.tenant=c.tenant AND pk.party_id=c.id AND pk.status<>'FILED')
 		FROM public.hp_parties c WHERE c.tenant=$1 AND c.plan_id=$2 ORDER BY c.party_name`,
 		tenant, org.ID)

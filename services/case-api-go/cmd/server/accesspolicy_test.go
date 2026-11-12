@@ -58,7 +58,8 @@ func TestATPACannotReachTheRestOfTheTenant(t *testing.T) {
 		}
 	}
 	for _, path := range []string{"/tpa/me", "/tpa/dashboard", "/tpa/intake", "/tpa/disputes/" + caseA, "/program", "/prefs",
-		"/notifications", "/notifications/read-all", "/calendar", "/intake/bulk", "/intake/bulk/" + caseA} {
+		"/notifications", "/notifications/read-all", "/calendar", "/intake/bulk", "/intake/bulk/" + caseA,
+		"/drafts", "/drafts/tpa-file", "/drafts/tpa-file/" + caseA} {
 		if d, _, _ := accessDecision(tpa, http.MethodGet, path); d != "allow" {
 			t.Errorf("TPA %s should be open to a TPA, got %q", path, d)
 		}
@@ -68,7 +69,8 @@ func TestATPACannotReachTheRestOfTheTenant(t *testing.T) {
 		t.Errorf("PARTY GET a case: got %q, want own-case", d)
 	}
 	// Path tricks do not turn a staff route into the TPA's own area.
-	for _, path := range []string{"/tpaX/me", "/cases/" + caseA + "/documents/../activities", "/cases/not-a-uuid", "/tpa/../cases"} {
+	for _, path := range []string{"/tpaX/me", "/cases/" + caseA + "/documents/../activities", "/cases/not-a-uuid", "/tpa/../cases",
+		"/drafts/tpa-file/not-an-id", "/drafts/tpa-file/" + caseA + "/x", "/draftsX"} {
 		if d, _, _ := accessDecision(tpa, http.MethodGet, path); path != "/tpa/../cases" && d == "allow" {
 			t.Errorf("TPA %s: allowed", path)
 		}

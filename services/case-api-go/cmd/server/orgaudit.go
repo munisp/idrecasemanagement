@@ -29,6 +29,7 @@ import (
 var orgAuditQuiet = map[string]bool{
 	"POST /presence/ping": true, "GET /notifications": true, "GET /program": true, "GET /prefs": true, "PUT /prefs": true,
 	"GET /drafts/{form}": true, "PUT /drafts/{form}": true, "DELETE /drafts/{form}": true,
+	"GET /drafts": true, "POST /drafts/{form}": true, "GET /drafts/{form}/{draftId}": true, "PUT /drafts/{form}/{draftId}": true, "DELETE /drafts/{form}/{draftId}": true,
 	// A resumable upload's chunks: the upload is recorded once, where it is used.
 	"PATCH /uploads/{uploadId}": true, "GET /uploads/{uploadId}": true, "HEAD /uploads/{uploadId}": true, "GET /upload-policy": true,
 }

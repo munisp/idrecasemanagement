@@ -59,14 +59,14 @@ var hpOpenPaths = []*regexp.Regexp{
 
 // outsideShellPaths are what every signed-in page needs, for any outside account.
 var outsideShellPaths = []*regexp.Regexp{
-	regexp.MustCompile(`^/program$`),             // the portal reads the program's settings to draw itself
-	regexp.MustCompile(`^/prefs$`),               // the caller's own preferences
-	regexp.MustCompile(`^/drafts/[a-z-]+$`),      // the caller's own unfinished dispute forms
-	regexp.MustCompile(`^/program/system-mail$`), // the address the program's letters come from (outside callers see only that)
-	regexp.MustCompile(`^/notifications(/|$)`),   // the caller's own notifications
-	regexp.MustCompile(`^/audit/mine$`),          // the caller's own audit trail
-	regexp.MustCompile(`^/upload-policy$`),       // what may be uploaded, and how big
-	regexp.MustCompile(`^/uploads(/|$)`),         // the caller's own resumable uploads
+	regexp.MustCompile(`^/program$`),                            // the portal reads the program's settings to draw itself
+	regexp.MustCompile(`^/prefs$`),                              // the caller's own preferences
+	regexp.MustCompile(`^/drafts(/[a-z-]+(/[0-9a-f-]{36})?)?$`), // the caller's own unfinished dispute forms: the list, a form, one draft
+	regexp.MustCompile(`^/program/system-mail$`),                // the address the program's letters come from (outside callers see only that)
+	regexp.MustCompile(`^/notifications(/|$)`),                  // the caller's own notifications
+	regexp.MustCompile(`^/audit/mine$`),                         // the caller's own audit trail
+	regexp.MustCompile(`^/upload-policy$`),                      // what may be uploaded, and how big
+	regexp.MustCompile(`^/uploads(/|$)`),                        // the caller's own resumable uploads
 	regexp.MustCompile(`^/presence/ping$`),
 	regexp.MustCompile(`^/telemetry/events$`), // the caller's own portal-use counts (telemetry.go; never what is typed)
 }
