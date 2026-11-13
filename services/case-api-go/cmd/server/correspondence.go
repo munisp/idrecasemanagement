@@ -849,6 +849,29 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	if qaRole == "" {
 		qaRole = programQARole
 	}
+	// The uploaded decision report (decision_report.go) has no template. Decided 2026-11-13: the PM, the Attorney or
+	// the Arbitrator approves it -- named here instead of falling through to "any case staff" -- and every decision is
+	// audited with the role it was made in.
+	var extraQARoles []string
+	if qaRole == "" && artifact == "final_order_rationale" {
+		qaRole, extraQARoles = "PM", []string{"ATTORNEY", "ARBITRATOR"}
+	}
+	// What every QA audit entry carries: which draft, of what kind, whose, the role the step needed and the role the
+	// decider acted in.
+	decidedAs := ""
+	for _, rl := range append(append([]string{qaPreRole, qaRole}, extraQARoles...), "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "ATTORNEY", "ARBITRATOR", "CASE_MANAGER") {
+		if rl != "" && hasAnyRole(p, rl) {
+			decidedAs = rl
+			break
+		}
+	}
+	withQA := func(m map[string]any) map[string]any {
+		m["qa_id"], m["artifact"], m["drafted_by"], m["required_role"], m["decided_as"], m["roles"] = qid, artifact, draftedBy, qaRole, decidedAs, p.Roles
+		return m
+	}
+	if adminSelf {
+		s.logAudit(r.Context(), tenant, caseID, "QA_SELF_DECIDED", withQA(map[string]any{"by": p.Subject, "decision": in.Decision}))
+	}
 	// Two-stage QA: until the first role has checked the draft, an APPROVE
 	// from that role records the check and leaves the draft pending for the
 	// second role; nothing is sent yet.
@@ -866,6 +889,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 				`UPDATE public.qa_reviews SET pre_approved_by=$3, pre_approved_at=now() WHERE tenant=$1 AND id=$2`, tenant, qid, displayName(p))
 			s.logActivity(r.Context(), tenant, caseID, "QA_FIRST_CHECK",
 				fmt.Sprintf("%s checked by %s — now with the %s for approval", subject, displayName(p), wfOwnerLabels[qaRole]))
+			s.logAudit(r.Context(), tenant, caseID, "QA_FIRST_CHECK", withQA(map[string]any{"by": p.Subject, "decided_as": qaPreRole}))
 			s.notify(r, tenant, "role:"+qaRole, "QA_REVIEW",
 				fmt.Sprintf("%s draft on case %s has passed the %s's check and awaits your approval", artifact, caseID, wfOwnerLabels[qaPreRole]), "#/qa")
 			writeJSON(w, http.StatusOK, map[string]any{"status": "PENDING", "first_check": "recorded",
@@ -878,8 +902,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if qaRole != "" {
-		if !hasAnyRole(p, qaRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-			http.Error(w, fmt.Sprintf(`{"error":"forbidden: requires %s, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, qaRole), http.StatusForbidden)
+		if !hasAnyRole(p, append([]string{qaRole, "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, extraQARoles...)...) {
+			who := strings.Join(append([]string{qaRole}, extraQARoles...), ", ")
+			http.Error(w, fmt.Sprintf(`{"error":"forbidden: requires %s, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, who), http.StatusForbidden)
 			return
 		}
 		// ARBITRATOR added: the portal's own QA Gate nav link already shows
@@ -958,9 +983,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		if party := map[string]string{"invoice_health_plan": "HEALTH_PLAN", "invoice_provider": "PROVIDER"}[artifact]; party != "" {
 			s.draftInvoiceEmail(r, tenant, caseID, party, qid)
 		}
-		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", withQA(map[string]any{
 			"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "channel": channel,
-		})
+		}))
 		if requestedBySub != "" {
 			s.notify(r, tenant, requestedBySub, "DRAFT_APPROVED",
 				fmt.Sprintf("The letter %q passed QA.", subject), "#/cases/"+caseID)
@@ -973,9 +998,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		// rationale on the case timeline — nothing is emailed, ever.
 		s.logActivity(r.Context(), tenant, caseID, "DETERMINATION_RATIONALE_FILED",
 			fmt.Sprintf("Rationale approved in QA by %s:\n%s", p.Subject, truncate(body, 6000)))
-		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+		s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", withQA(map[string]any{
 			"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "channel": channel,
-		})
+		}))
 		if requestedBySub != "" {
 			s.notify(r, tenant, requestedBySub,
 				"DRAFT_APPROVED", fmt.Sprintf("Your draft %q was approved and filed on the case.", subject), "#/cases/"+caseID)
@@ -1016,9 +1041,9 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("%q passed QA — check the addresses and send it", subject), "#/qa")
 			s.logActivity(r.Context(), tenant, caseID, "QA_APPROVED",
 				fmt.Sprintf("QA-approved by %s: %s — back with the Reviewer to send", displayName(p), subject))
-			s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+			s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", withQA(map[string]any{
 				"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "sent": false,
-			})
+			}))
 			writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "next": "with the Reviewer to send"})
 			return
 		}
@@ -1038,10 +1063,10 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("Your correspondence draft %q was rejected%s", subject, orDash(" — "+in.Note)), "#/cases/"+caseID)
 		}
 	}
-	s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", map[string]any{
+	s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", withQA(map[string]any{
 		"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note,
 		"email_delivery_error": deliveryError,
-	})
+	}))
 	out := map[string]any{"status": newStatus}
 	if deliveryError != "" {
 		out["email_delivery_error"] = deliveryError

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -60,6 +61,18 @@ func (s *server) letterVars(r *http.Request, tenant string) map[string]string {
 		"{agency_salutation}": sal,
 	} {
 		out[k] = v
+	}
+	// The initial fee as the admin's fee schedule (Configuration > Fees) has it today -- the amount a filing made now
+	// is charged -- so a template never states a fee by hand: {initial_fee}, {card_fee} (what paying by card adds)
+	// and {initial_fee_by_card}.
+	if cfg := s.loadProgram(r, tenant); cfg != nil && cfg.Fees.InitialFeeCents > 0 {
+		var card int64
+		if st, ok := stepAt(cfg.Fees.InitialFeeSchedule, time.Now(), cfg.location()); ok {
+			card = st.CardFeeCents
+		}
+		out["{initial_fee}"] = usd(cfg.Fees.InitialFeeCents)
+		out["{card_fee}"] = usd(card)
+		out["{initial_fee_by_card}"] = usd(cfg.Fees.InitialFeeCents + card)
 	}
 	return out
 }

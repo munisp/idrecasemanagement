@@ -239,13 +239,6 @@ func roleList(roles []string) string {
 	return strings.Join(rs, ",")
 }
 
-func clientIP(r *http.Request) string {
-	if f := r.Header.Get("X-Forwarded-For"); f != "" {
-		return strings.TrimSpace(strings.Split(f, ",")[0])
-	}
-	return r.RemoteAddr
-}
-
 // sensitiveKey: fields an event line never carries -- contact details, bank
 // and card numbers, secrets, and free text (letters, notes, messages).
 var sensitiveKey = regexp.MustCompile(`(?i)email|phone|ssn|dob|birth|account|routing|card|iban|token|secret|password|key|address|body|content|text|note|message|html`)

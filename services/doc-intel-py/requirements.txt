@@ -11,6 +11,9 @@ httpx>=0.27
 psycopg[binary]>=3.2
 opensearch-py>=2.6
 pyyaml>=6.0
-pillow>=10.4
+pillow>=13.0.0         # 13.0.0+: the 42 known issues of 12.x (audit F-11); decodes uploaded images
 opencv-python-headless
-pypdf>=4.0             # the filing packet's fillable form fields (packet_docs.py)
+pypdf>=6.21.4          # the filing packet's fillable form fields (packet_docs.py); 6.21.4+: audit F-11
+filelock>=4.2.1        # audit F-11 (transitive)
+setuptools>=84.1.0     # audit F-11 (transitive)
+soupsieve>=4.0.0       # audit F-11 (transitive)

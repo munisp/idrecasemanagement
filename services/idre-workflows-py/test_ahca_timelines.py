@@ -65,7 +65,9 @@ async def test_no_permission_in_15_days_is_a_dismissal_with_no_reminder_or_grace
 
 
 @pytest.mark.asyncio
-async def test_plan_gets_one_reminder_on_day_13_then_default_after_day_15():
+async def test_plan_gets_the_workflow_follow_ups_then_default_after_day_15():
+    """Confirmed 2026-11-13 (audit F-04): day 13 a reminder to the plan and, for a Medicaid plan, a notice to AHCA
+    (the activity itself skips other lines of business); day 14 call and email; day 15 call again; then default."""
     rec.calls.clear()
     env = await WorkflowEnvironment.start_time_skipping()
     async with env:
@@ -77,13 +79,18 @@ async def test_plan_gets_one_reminder_on_day_13_then_default_after_day_15():
             await env.sleep(timedelta(days=12))
             await _settle(h)
             assert "plan_due_date_reminder" not in _followups()
+            await env.sleep(timedelta(days=1, hours=1))
+            await _settle(h)
+            f = _followups()
+            assert f.count("plan_due_date_reminder") == 1 and f.count("medicaid_ahca_notify") == 1   # day 13
+            assert "call_and_email" not in f                                                       # not before day 14
+            await env.sleep(timedelta(days=1))
+            await _settle(h)
+            assert _followups().count("call_and_email") == 1                                        # day 14
             await env.sleep(timedelta(days=2))
             await _settle(h)
-            assert _followups().count("plan_due_date_reminder") == 1   # day 13
-            await env.sleep(timedelta(days=3))
-            await _settle(h)
     f = _followups()
-    assert "call_and_email" not in f and "call_again" not in f and "medicaid_ahca_notify" not in f
+    assert f.count("call_again") == 1                                                                # day 15
     assert ("set_dual_status", "Plan - No Response") in rec.calls     # default determination
 
 

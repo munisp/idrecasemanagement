@@ -38,10 +38,7 @@ import (
 )
 
 func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
-	ip := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = strings.Split(fwd, ",")[0]
-	}
+	ip := clientIP(r)
 	if !s.rateLimit("ahca-intake:"+ip, 10, 3600) {
 		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
 		return

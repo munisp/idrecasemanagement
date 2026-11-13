@@ -57,6 +57,15 @@ func (s *server) uploadCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"image/jpeg, png, tiff or webp only"}`, http.StatusUnsupportedMediaType)
 		return
 	}
+	// The browser's Content-Type is only a claim (audit F-09): the bytes must be an image, and the image is scanned
+	// like every other upload before it is stored and handed to the check reader. Fail-closed when the scanner is down.
+	if head := img[:min(len(img), 512)]; sniffKind(head) != "image" {
+		http.Error(w, `{"error":"the file is not an image — upload a scan or photo of the check"}`, http.StatusUnsupportedMediaType)
+		return
+	}
+	if _, ok := s.scanOrRefuse(w, bytes.NewReader(img), "check"); !ok {
+		return
+	}
 
 	checkID := newUUID()
 	key := fmt.Sprintf("checks/%s/%s.bin", tenant, checkID)

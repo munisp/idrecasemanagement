@@ -449,6 +449,142 @@ const Views = (() => {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") Object.values(draftState).forEach((st) => { if (st.pending) draftSave(st); });
   });
+
+  // ── A TPA's dispute in full (tpa_filing.go): every detail it filed, edited directly until the fee is paid and by a
+  // change request after that (a case manager approves or rejects), with the change history its team and the office
+  // see. Every change is recorded: who, when, and each value before and after.
+  const CHANGE_FIELD_LABELS = Object.fromEntries([...PACKET_FACTS, ...PACKET_POSITIONS,
+    ["provider_org", "Provider"], ["provider_street", "Street address"], ["provider_city", "City"], ["provider_state", "State"],
+    ["provider_postal", "ZIP code"], ["provider_contact", "Contact person"], ["health_plan", "Health plan"],
+    ["health_plan_email", "Health plan e-mail"], ["disputed_amount", "Disputed amount"], ["initiating_party", "Client"],
+    ["contact_name", "Contact name"], ["filing_notes", "Notes"], ["claims_submitted", "Number of claims"]]);
+  const changeFieldLabel = (f) => {
+    const m = /^claim (.+?): (.+)$/.exec(f);
+    if (m) return `Claim ${m[1]}: ${m[2]}`;
+    if (/^claim /.test(f)) return "Claim " + f.slice(6);
+    return CHANGE_FIELD_LABELS[f] || f.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  };
+  const CHANGE_KIND = { EDITED: "Edited", REQUESTED: "Change requested", APPROVED: "Change approved and applied",
+    REJECTED: "Change request rejected", WITHDRAWN: "Change request withdrawn", CORRECTED: "Corrected by the case team" };
+  function changeTable(changes) {
+    const list = Array.isArray(changes) ? changes : [];
+    if (!list.length) return "";
+    return `<table class="change-tbl"><thead><tr><th>What</th><th>Was</th><th>Now</th></tr></thead><tbody>${list.map((c) =>
+      `<tr><td>${esc(changeFieldLabel(c.field))}</td><td>${c.from ? esc(c.from) : '<span class="muted">empty</span>'}</td>
+        <td>${c.to ? esc(c.to) : '<span class="muted">empty</span>'}</td></tr>`).join("")}</tbody></table>`;
+  }
+  function changeHistoryHtml(history, viewer) {
+    if (!(history || []).length) return `<p class="muted">No changes since this dispute was filed.</p>`;
+    const who = (h) => viewer === "tpa" ? (h.side === "FILER" ? "your team" : "the case team") : (h.side === "FILER" ? "the filer" : "case team");
+    return `<ol class="change-hist">${history.map((h) => `<li>
+      <div><b>${esc(CHANGE_KIND[h.kind] || h.kind)}</b> <span class="muted">by ${esc(h.by || "—")} (${who(h)}) · ${esc(fmtDate(h.at))}</span></div>
+      ${h.reason ? `<div class="muted">${h.kind === "REQUESTED" ? "Reason" : "Note"}: ${esc(h.reason)}</div>` : ""}
+      ${changeTable(h.changes)}</li>`).join("")}</ol>`;
+  }
+  const tpaFilingState = {};
+  async function tpaFilingOpen(caseId, number) {
+    const p = UI.modal({ title: `Dispute ${number || ""}`, wide: true, submitLabel: "Close",
+      html: `<div id="tpa-filing-box"><p class="muted">Loading…</p></div>` });
+    tpaFilingState[caseId] = { editing: false };
+    await tpaFilingDraw(caseId);
+    await p;
+    tpaDashBox();
+  }
+  async function tpaFilingDraw(caseId) {
+    const box = document.getElementById("tpa-filing-box");
+    if (!box) return;
+    const st = tpaFilingState[caseId] || (tpaFilingState[caseId] = { editing: false });
+    let r;
+    try { r = await Api.program.tpaFiling(caseId); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    st.data = r;
+    const fin = (window._tpaLogin || {}).team_role === "FINANCE";
+    const req = r.open_request;
+    const how = { direct: "The fee isn't paid yet, so you can edit everything below directly. Every change is recorded.",
+      request: "The fee is paid and the case team is working on this dispute: a change goes to them as a request, and they approve or reject it. Every request and decision is recorded.",
+      closed: `This dispute is ${r.status.toLowerCase().replace(/_/g, " ")}: it can no longer be changed.` }[r.mode];
+    let actions = "";
+    if (!fin && !st.editing && r.mode === "direct") actions = `<button type="button" class="mini" onclick="Views.tpaFilingEdit('${caseId}')">Edit details</button>`;
+    if (!fin && !st.editing && r.mode === "request") actions = req ? `<span class="muted">A change request is waiting for the case team.</span>`
+      : `<button type="button" class="mini" onclick="Views.tpaFilingEdit('${caseId}')">Request a change</button>`;
+    if (st.editing) actions = `${r.mode === "request" ? `<label class="mfield"><span>Why is this change needed? <span class="req">*</span></span>
+        <textarea id="tpa-filing-reason" rows="2" placeholder="For example: the claim amount was typed wrong; the corrected EOB is attached to the dispute"></textarea></label>` : ""}
+      <button type="button" class="mini" onclick="Views.tpaFilingSave('${caseId}', this)">${r.mode === "request" ? "Send the change request" : "Save changes"}</button>
+      <button type="button" class="mini ghost" onclick="Views.tpaFilingCancel('${caseId}')">Cancel</button>`;
+    box.innerHTML = `<p>${badge(r.status)} <span class="muted">${esc(how)}</span></p>
+      ${req ? `<div class="card change-req"><b>Change request waiting for the case team</b>
+        <span class="muted">sent by ${esc(req.requested_by)} · ${esc(fmtDate(req.created_at))}</span>
+        <div class="muted">Reason: ${esc(req.reason)}</div>${changeTable(req.changes)}
+        ${fin ? "" : `<button type="button" class="mini ghost" onclick="Views.tpaFilingWithdraw('${caseId}','${req.id}')">Withdraw this request</button>`}</div>` : ""}
+      <h3>${st.editing ? (r.mode === "request" ? "Change the details, then send the request" : "Edit the details") : "Everything filed"}</h3>
+      <div id="tpa-filing-pf"></div>
+      <div id="tpa-filing-out"></div>
+      <div class="tpa-filing-actions">${actions}</div>
+      <h3>Change history</h3><p class="muted">Every change to this dispute's details: who made it, when, and what each value was and became. Your team and the case team see it; the health plan does not.</p>
+      ${changeHistoryHtml(r.history, "tpa")}`;
+    packetInit("tpa-filing-pf", r.filing, { readOnly: !st.editing, partyFixed: (r.filing.details || {}).filing_party_type });
+  }
+  function tpaFilingEdit(caseId) { (tpaFilingState[caseId] || (tpaFilingState[caseId] = {})).editing = true; tpaFilingDraw(caseId); }
+  function tpaFilingCancel(caseId) { (tpaFilingState[caseId] || {}).editing = false; tpaFilingDraw(caseId); }
+  async function tpaFilingSave(caseId, btn) {
+    const st = tpaFilingState[caseId], out = document.getElementById("tpa-filing-out");
+    const { packet, problems } = PacketForm.read(document.getElementById("tpa-filing-pf"));
+    if (problems.length) { out.innerHTML = `<p class="error">Fix these first: ${esc(problems.join("; "))}</p>`; return; }
+    const request = st.data.mode === "request";
+    const reason = request ? (document.getElementById("tpa-filing-reason")?.value || "").trim() : "";
+    if (request && !reason) { out.innerHTML = `<p class="error">Say why the change is needed: the case team reads this.</p>`; return; }
+    await UI.run(btn, async () => {
+      try {
+        const r = request ? await Api.program.tpaChangeRequest(caseId, packet, reason) : await Api.program.tpaFilingSave(caseId, packet);
+        const n = (r.changes || []).length;
+        UI.toast(request ? `Change request sent to the case team (${plural(n, "change")})` : n ? `Saved: ${plural(n, "change")}, recorded in the history` : "Nothing had changed");
+        st.editing = false;
+        tpaFilingDraw(caseId);
+      } catch (e) { out.innerHTML = `<p class="error">${packetErr(e)}</p>`; }
+    }, request ? "Sending…" : "Saving…");
+  }
+  async function tpaFilingWithdraw(caseId, reqId) {
+    if (!(await UI.confirm("Withdraw this change request?", "The case team will not act on it. The request and its withdrawal stay in the history.", "Withdraw", true))) return;
+    try { await Api.program.tpaChangeWithdraw(caseId, reqId); UI.toast("Change request withdrawn"); } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+    tpaFilingDraw(caseId);
+  }
+  // The staff case page: the filer's change requests (approve applies the change; reject needs a note) and the history.
+  function caseChangesHtml(id) {
+    setTimeout(() => caseChangesBox(id), 0);
+    return `<details class="prog-sec" id="p-changes"><summary>Filer's changes <span class="tab-count" id="p-changes-count"></span></summary>
+      <div id="p-changes-box"><p class="muted">Loading…</p></div></details>`;
+  }
+  async function caseChangesBox(id) {
+    const box = document.getElementById("p-changes-box");
+    if (!box) return;
+    let r;
+    try { r = await Api.program.caseChangeRequests(id); } catch (e) { box.innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
+    const open = (r.requests || []).filter((q) => q.status === "PENDING");
+    const cnt = document.getElementById("p-changes-count");
+    if (cnt) cnt.textContent = open.length ? `${open.length} waiting` : "";
+    if (open.length) document.getElementById("p-changes")?.setAttribute("open", "");
+    box.innerHTML = `${open.map((q) => `<div class="card change-req"><b>Change request from the filer</b>
+        <span class="muted">sent by ${esc(q.requested_by)} · ${esc(fmtDate(q.created_at))}</span>
+        <div>Reason: ${esc(q.reason)}</div>${changeTable(q.changes)}
+        ${r.can_decide ? `<button class="mini" onclick="Views.caseChangeDecideFn('${id}','${q.id}', true, this)">Approve and apply</button>
+          <button class="mini ghost" onclick="Views.caseChangeDecideFn('${id}','${q.id}', false, this)">Reject</button>` : '<p class="muted">A case manager or the PM decides.</p>'}</div>`).join("")}
+      <h4>Change history</h4>${changeHistoryHtml(r.history, "staff")}`;
+  }
+  async function caseChangeDecideFn(id, reqId, approve, btn) {
+    let note = "";
+    if (!approve) {
+      const v = await UI.modal({ title: "Reject the change request", submitLabel: "Reject", danger: true,
+        fields: [{ name: "note", label: "Why? The filer sees this note.", type: "textarea", required: true }] });
+      if (!v || !v.note.trim()) return;
+      note = v.note.trim();
+    } else if (!(await UI.confirm("Approve and apply this change?", "The dispute's details change as the filer asked. This is recorded.", "Approve and apply"))) return;
+    await UI.run(btn, async () => {
+      try {
+        const r = await Api.program.caseChangeDecide(id, reqId, approve, note);
+        UI.toast(approve ? `Applied: ${plural((r.changes || []).length, "change")}` : "Change request rejected");
+        App.rerender();
+      } catch (e) { UI.toast(packetErr(e), { kind: "warn", duration: 9000 }); }
+    }, approve ? "Applying…" : "Rejecting…");
+  }
   // ── Drafts tab (TPA, health plan): every unfinished dispute of this login, newest first, to open or discard.
   const DRAFT_FORM = { tpa: "tpa-file", hp: "hp-file" };
   function draftCountRefresh(form) {
@@ -533,7 +669,7 @@ const Views = (() => {
         ${staff ? "Correct anything here and save: your values replace the case's." : "Kept by the Reviewer and the PM."}</p>
       ${staff ? PacketForm.pdfPicker("#p-packet") : ""}<div id="p-packet"></div>
       ${staff ? `<button class="mini" onclick="Views.savePacketForm('${id}', this)">Save filing packet</button>` : ""}
-      <div id="p-packet-out"></div></details>`;
+      <div id="p-packet-out"></div></details>${caseChangesHtml(id)}`;
   }
   async function savePacketForm(id, btn) {
     const out = document.getElementById("p-packet-out"), h = document.getElementById("p-packet");
@@ -3719,6 +3855,18 @@ const Views = (() => {
                     <select name="side" aria-label="Who is asked"><option value="">The side that filed (the TPA)</option><option value="PROVIDER">The provider's side</option><option value="HEALTH_PLAN">The health plan</option></select>
                     <label>Answer within <input name="due_days" type="number" min="1" max="30" value="5" /> days</label>
                     <button type="button" class="mini secondary" data-ask="1">Ask for agreement</button></span></form></details>` : `<span class="muted" title="Statutory window — cannot be extended">fixed</span>`}</td>` : ""}</tr>`).join("") + `</tbody></table>`;
+          // Past the clock's contract limit an extension needs AHCA's approval (audit F-05): the server says so, the PM
+          // enters AHCA's approval reference, and the same request goes again with it.
+          const withAgencyApproval = async (send) => {
+            try { return await send(""); } catch (e) {
+              if (!(e.data && e.data.needs_agency_approval)) throw e;
+              const v = await UI.modal({ title: "AHCA's approval needed",
+                body: `${esc(e.message)}.<br><br>Enter AHCA's approval: who approved it, when, and how (email, letter or call reference). It is kept with the extension and on the audit record.`,
+                fields: [{ name: "ref", label: "AHCA approval reference", type: "textarea", required: true }], submitLabel: "Extend with AHCA's approval" });
+              if (!v || (v.ref || "").trim().length < 4) throw new Error("Not extended: an extension past the contract limit needs AHCA's approval");
+              return await send(v.ref.trim());
+            }
+          };
           // Asking for agreement: the side answers in its portal; agreeing extends the deadline by itself.
           el.querySelectorAll(".clock-extend-form [data-ask]").forEach((b) => b.addEventListener("click", async () => {
             const f = b.form, days = parseInt(f.days.value, 10), reason = f.reason.value.trim();
@@ -3726,7 +3874,8 @@ const Views = (() => {
             if (reason.length < 10) { UI.toast("Give the reason for the extension (at least 10 characters)", { kind: "warn" }); return; }
             await UI.run(b, async () => {
               try {
-                const r = await Api.cm.requestExtension(id, f.dataset.clock, { days, reason, side: f.side.value, due_days: parseInt(f.due_days.value, 10) || 5 });
+                const r = await withAgencyApproval((appr) => Api.cm.requestExtension(id, f.dataset.clock,
+                  { days, reason, side: f.side.value, due_days: parseInt(f.due_days.value, 10) || 5, ...(appr ? { agency_approval: appr } : {}) }));
                 UI.toast(`Asked ${r.asked || "the side"} for ${days} more day${days === 1 ? "" : "s"} — the deadline moves when they agree`, { duration: 7000 });
                 loadDates();
               } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
@@ -3739,7 +3888,7 @@ const Views = (() => {
             if (reason.length < 10) { UI.toast("Give the reason for the extension (at least 10 characters)", { kind: "warn" }); return; }
             await UI.run(f.querySelector("button"), async () => {
               try {
-                const r = await Api.cm.extendClock(id, f.dataset.clock, days, reason);
+                const r = await withAgencyApproval((appr) => Api.cm.extendClock(id, f.dataset.clock, days, reason, appr));
                 UI.toast(r.workflow_signalled ? `Deadline extended by ${days} day${days === 1 ? "" : "s"}`
                   : `Deadline extended by ${days} day${days === 1 ? "" : "s"} (the case's workflow wasn't reachable — its reminders keep the old date)`,
                   r.workflow_signalled ? {} : { kind: "warn" });
@@ -10498,7 +10647,8 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           <td>${feePill(x)}</td><td>${esc(x.filed)}</td>
           <td class="row-actions">${(window._tpaSent || {})[x.case_id] ? `<button class="mini ghost" onclick="Views.sentRecordOpen('tpa', '${x.case_id}', '${esc(x.case_number || "")}')" title="The letters sent to you on this dispute, with their documents">Letters (${window._tpaSent[x.case_id]})</button>` : ""}
             ${canPay && feePayable(x) ? `<button class="mini" onclick="Views.payDisputeFn('tpa', '${x.case_id}', this)">Pay now</button>` : ""}
-            ${x.status === "AWAITING_PAYMENT" && canPay && (window._tpaLogin || {}).team_role !== "FINANCE" ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')">Edit</button>` : ""}</td></tr>`).join("")}
+            ${x.case_id ? `<button class="mini" onclick="Views.tpaFilingOpen('${x.case_id}', '${esc(x.case_number || "")}')" title="Everything filed on this dispute, edit or request a change, and its change history">Details</button>` : ""}
+            ${x.status === "AWAITING_PAYMENT" && canPay && (window._tpaLogin || {}).team_role !== "FINANCE" ? `<button class="mini secondary" onclick="Views.tpaEditDisputeFn('${x.case_id}')" title="Change the client, the contact name or the notes">Client &amp; notes</button>` : ""}</td></tr>`).join("")}
         </tbody></table></div></div></section>`;
     }).join("");
   }
@@ -12471,5 +12621,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck };
 })();

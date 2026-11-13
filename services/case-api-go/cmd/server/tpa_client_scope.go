@@ -80,12 +80,16 @@ var tpaScopedRoutes = []tpaScopedRoute{
 	tpaRoute("POST", `^/tpa/disputes/bulk/`+anyID+`/checkout$`, "", true, false),
 	// Reading one dispute.
 	tpaRoute("GET", `^/tpa/disputes/`+anyID+`/summary$`, "case", true, true),
+	tpaRoute("GET", `^/tpa/disputes/`+anyID+`/filing$`, "case", true, true),
 	tpaRoute("GET", `^/tpa/sent-documents/`+anyID+`$`, "sentdoc", true, true),
 	tpaRoute("GET", `^/cases/`+anyID+`(?:/clocks|/documents|/documents/[0-9a-fA-F-]{36}/download)?$`, "case", true, true),
 	// Filing and working one client's disputes: not for Finance.
 	tpaRoute("POST", `^/tpa/intake$`, "", false, true), // the handler checks the client it names
 	tpaRoute("GET", `^/tpa/prefill$`, "", false, true), // the handler checks the package it names
 	tpaRoute("PATCH", `^/tpa/disputes/`+anyID+`$`, "case", false, true),
+	tpaRoute("PUT", `^/tpa/disputes/`+anyID+`/filing$`, "case", false, true),
+	tpaRoute("POST", `^/tpa/disputes/`+anyID+`/change-requests$`, "case", false, true),
+	tpaRoute("DELETE", `^/tpa/disputes/`+anyID+`/change-requests/[0-9a-fA-F-]{36}$`, "case", false, true),
 	tpaRoute("POST", `^/tpa/disputes/`+anyID+`/documents$`, "case", false, true),
 	tpaRoute("GET", `^/tpa/disputes/`+anyID+`/reply-code$`, "case", false, true),
 	tpaRoute("PUT", `^/tpa/clients/`+anyID+`/profile$`, "client", false, true),

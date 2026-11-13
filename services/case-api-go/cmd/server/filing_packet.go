@@ -495,6 +495,7 @@ func (s *server) putFilingPacket(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the filing packet has problems", "problems": problems})
 		return
 	}
+	before, _, _, _ := s.readFilingState(r.Context(), tenant, caseID)
 	keys, err := s.applyFilingPacket(r.Context(), tenant, caseID, details, disputed, claims, pk.RemoveClaims, true)
 	if err != nil {
 		if err.Error() == "case not found" {
@@ -507,7 +508,16 @@ func (s *server) putFilingPacket(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "FILING_PACKET_UPDATED",
 		fmt.Sprintf("Filing packet updated by %s: %d field(s), %d claim(s)%s", displayName(p), len(keys), len(claims),
 			map[bool]string{true: fmt.Sprintf(", %d claim(s) removed", len(pk.RemoveClaims)), false: ""}[len(pk.RemoveClaims) > 0]))
+	after, _, _, _ := s.readFilingState(r.Context(), tenant, caseID)
+	changes := diffFiling(before, after)
+	// A corrected amount can cross the program's $1M escalation trigger (audit F-06): the same check as a filer's edit.
+	if disputed != nil {
+		s.amountRaised(r, tenant, caseID, amountOf(before.Amount), *disputed)
+	}
+	if len(changes) > 0 {
+		s.recordChange(r.Context(), tenant, caseID, "CORRECTED", p.Subject, displayName(p), "OFFICE", changes, "", "")
+	}
 	s.logAudit(r.Context(), tenant, caseID, "FILING_PACKET_UPDATED", map[string]any{
-		"by": p.Subject, "fields": keys, "claims": len(claims), "removed": pk.RemoveClaims})
+		"by": p.Subject, "fields": keys, "claims": len(claims), "removed": pk.RemoveClaims, "changes": changes})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "fields": keys, "claims": len(claims)})
 }

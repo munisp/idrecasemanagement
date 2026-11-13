@@ -127,10 +127,7 @@ func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"NAIC company code is required (5 digits) for an insured line of business"}`, http.StatusBadRequest)
 		return
 	}
-	ip := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
+	ip := clientIP(r)
 	if !s.rateLimit("hp-register:"+ip, 10, 3600) {
 		http.Error(w, `{"error":"too many registrations from this address — try again later"}`, http.StatusTooManyRequests)
 		return

@@ -589,7 +589,9 @@ func main() {
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
-		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket) // the filing packet form (filing_packet.go)
+		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket)                        // the filing packet form (filing_packet.go)
+		r.Get("/cases/{caseId}/change-requests", s.caseChangeRequests)                   // the filer's change requests + history (tpa_filing.go)
+		r.Post("/cases/{caseId}/change-requests/{requestId}/decide", s.caseChangeDecide) // approve (applied) or reject
 		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
 		r.Get("/cases/{caseId}/documents.zip", s.zipCaseDocuments)
 		r.Post("/deliverables/request", s.requestAdhocDeliverable)
@@ -816,18 +818,22 @@ func main() {
 		r.Post("/tpa/clients", s.tpaAddClient) // add an initiating party I represent
 		r.Get("/tpa/clients", s.tpaListClients)
 		r.Post("/tpa/clients/{clientId}/status", s.tpaSetClientStatus)
-		r.Post("/tpa/intake", s.tpaIntake)                                           // file a dispute on behalf of a client
-		r.Get("/tpa/dashboard", s.tpaDashboard)                                      // status of all my clients' disputes
-		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                          // correct my own filing while it awaits payment
-		r.Get("/admin/tpas", s.adminListTPAs)                                        // state oversight
-		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                    // suspend|reactivate
-		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                    // threshold matrix + filing window (G2)
-		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)                   // past reviews (G2)
-		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote) // notes on a review (Reviewer, PM, Attorney)
-		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist)       // printable Eligibility Checklist
-		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                            // the SOP steps: done, next, upcoming
-		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                           // Reviewer: outcome, claims reviewed, award, party billed
-		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                // the written decision: sections, amounts, claims tables
+		r.Post("/tpa/intake", s.tpaIntake)                                                         // file a dispute on behalf of a client
+		r.Get("/tpa/dashboard", s.tpaDashboard)                                                    // status of all my clients' disputes
+		r.Patch("/tpa/disputes/{caseId}", s.tpaEditDispute)                                        // correct my own filing while it awaits payment
+		r.Get("/tpa/disputes/{caseId}/filing", s.tpaFilingGet)                                     // my dispute in full + its change history (tpa_filing.go)
+		r.Put("/tpa/disputes/{caseId}/filing", s.tpaFilingPut)                                     // edit it directly while the fee is unpaid
+		r.Post("/tpa/disputes/{caseId}/change-requests", s.tpaChangeRequest)                       // ask for a change once paid
+		r.Delete("/tpa/disputes/{caseId}/change-requests/{requestId}", s.tpaChangeRequestWithdraw) // withdraw my open request
+		r.Get("/admin/tpas", s.adminListTPAs)                                                      // state oversight
+		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                                  // suspend|reactivate
+		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                                  // threshold matrix + filing window (G2)
+		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)                                 // past reviews (G2)
+		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote)               // notes on a review (Reviewer, PM, Attorney)
+		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist)                     // printable Eligibility Checklist
+		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                                          // the SOP steps: done, next, upcoming
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Reviewer: outcome, claims reviewed, award, party billed
+		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                              // the written decision: sections, amounts, claims tables
 		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
 		r.Post("/cases/{caseId}/decision-report/file", s.attachDecisionReport) // the finished report, uploaded
 		r.Get("/letter-settings", s.getLetterSettings)                         // letterhead, Agency addressee, invoice terms, remit-to

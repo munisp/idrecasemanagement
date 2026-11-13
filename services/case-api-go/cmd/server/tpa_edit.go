@@ -214,17 +214,23 @@ func (s *server) tpaEditDispute(w http.ResponseWriter, r *http.Request) {
 		"tpa_id": org.ID, "by": p.Subject, "case_number": caseNumber, "changes": changed})
 	s.logActivity(r.Context(), tenant, caseID, "TPA_EDIT",
 		fmt.Sprintf("%s corrected the filing before payment (%s)", org.Name, strings.Join(fields, ", ")))
-	// A corrected amount can cross the program's escalation trigger. Intake
-	// only checked the original figure, so check the new one -- once.
-	if newAmount > oldAmount {
-		var already bool
-		_ = s.db.QueryRow(r.Context(), `
-			SELECT EXISTS(SELECT 1 FROM public.escalations
-			WHERE tenant=$1 AND case_id=$2 AND clock='PROGRAM_TRIGGER')`, tenant, caseID).Scan(&already)
-		if !already {
-			s.escalationTrigger(r, tenant, caseID, newAmount)
-		}
+	// The dispute's change history (tpa_filing.go) shows every change with what it was and what it became.
+	hist := []fieldChange{}
+	if c, ok := changed["initiating_party"].(map[string]string); ok {
+		hist = append(hist, fieldChange{"initiating_party", c["from"], c["to"]})
 	}
+	if c, ok := changed["contact_name"].(map[string]string); ok {
+		hist = append(hist, fieldChange{"contact_name", c["from"], c["to"]})
+	}
+	if _, ok := changed["notes"]; ok && in.Notes != nil {
+		hist = append(hist, fieldChange{"filing_notes", oldNotes, *in.Notes})
+	}
+	if _, ok := changed["disputed_amount_cents"]; ok {
+		o, n := oldAmount, newAmount
+		hist = append(hist, fieldChange{"disputed_amount", centsText(&o), centsText(&n)})
+	}
+	s.recordChange(r.Context(), tenant, caseID, "EDITED", p.Subject, displayName(p), "FILER", hist, "", "")
+	s.amountRaised(r, tenant, caseID, oldAmount, newAmount)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"case_id": caseID, "case_number": caseNumber, "status": status, "changed": fields,
 		"initiating_party": party, "initiating_party_type": partyType, "disputed_amount_cents": newAmount,

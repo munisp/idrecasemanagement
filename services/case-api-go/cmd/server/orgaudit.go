@@ -49,6 +49,8 @@ var orgActionLabels = map[string]string{
 	"POST /tpa/clients/{clientId}/packages": "Started a document package", "POST /tpa/packages/{packageId}/docs": "Uploaded a package document", "DELETE /tpa/packages/{packageId}/docs/{slot}": "Removed a package document",
 	"POST /tpa/packages/{packageId}/merged": "Uploaded a merged package PDF", "POST /tpa/packages/bulk": "Uploaded packages in bulk",
 	"POST /tpa/intake": "Filed a dispute", "PATCH /tpa/disputes/{caseId}": "Corrected a dispute",
+	"GET /tpa/disputes/{caseId}/filing": "Opened a dispute's filing", "PUT /tpa/disputes/{caseId}/filing": "Edited a dispute's filing",
+	"POST /tpa/disputes/{caseId}/change-requests": "Asked to change a dispute", "DELETE /tpa/disputes/{caseId}/change-requests/{requestId}": "Withdrew a change request",
 	"POST /tpa/disputes/bulk": "Uploaded a bulk filing", "POST /tpa/disputes/bulk/{batchId}/checkout": "Started payment for a bulk filing",
 	"POST /tpa/fees/checkout": "Started payment for all unpaid fees",
 	"GET /hp/me":              "Opened the health plan page", "GET /hp/onboarding": "Viewed party onboarding",

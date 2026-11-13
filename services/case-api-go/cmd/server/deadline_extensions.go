@@ -62,7 +62,10 @@ func (s *server) extendDeadline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), code)
 		return
 	}
-	id, signalled, err := s.applyExtension(r, tenant, caseID, caseNumber, rule, in.Days, in.Reason, displayName(p), p.Subject)
+	if s.refusePastContractLimit(w, r, tenant, caseID, rule, in.Days, in.AgencyApproval) {
+		return
+	}
+	id, signalled, err := s.applyExtension(r, tenant, caseID, caseNumber, rule, in.Days, in.Reason, displayName(p), p.Subject, in.AgencyApproval)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -78,6 +81,9 @@ type extensionIn struct {
 	Reason  string `json:"reason"`
 	Side    string `json:"side"`     // a request: PROVIDER | HEALTH_PLAN (default: the side that filed)
 	DueDays int    `json:"due_days"` // a request: days the side has to answer (default 5)
+	// AgencyApproval: AHCA's approval (a reference: who approved, when, how) -- required for an extension that takes the
+	// deadline past the clock's contract limit (max_days), and kept with the extension and on the audit chain.
+	AgencyApproval string `json:"agency_approval"`
 }
 
 func readExtension(w http.ResponseWriter, r *http.Request) (extensionIn, bool) {
@@ -88,6 +94,11 @@ func readExtension(w http.ResponseWriter, r *http.Request) (extensionIn, bool) {
 		return in, false
 	}
 	in.Reason = strings.TrimSpace(in.Reason)
+	in.AgencyApproval = strings.TrimSpace(in.AgencyApproval)
+	if len([]rune(in.AgencyApproval)) > 500 {
+		http.Error(w, `{"error":"the AHCA approval reference is too long (500 characters at most)"}`, http.StatusBadRequest)
+		return in, false
+	}
 	if in.Days < 1 || in.Days > maxExtensionDays {
 		http.Error(w, fmt.Sprintf(`{"error":"an extension is 1 to %d days"}`, maxExtensionDays), http.StatusBadRequest)
 		return in, false
@@ -131,14 +142,14 @@ func (s *server) extensionTarget(r *http.Request, tenant, caseID, clock string) 
 }
 
 // applyExtension records an extension and tells the case's workflow, the case record and the Reviewers.
-func (s *server) applyExtension(r *http.Request, tenant, caseID, caseNumber string, rule *ClockRule, days int, reason, by, bySub string) (string, bool, error) {
+func (s *server) applyExtension(r *http.Request, tenant, caseID, caseNumber string, rule *ClockRule, days int, reason, by, bySub, agencyApproval string) (string, bool, error) {
 	clock := rule.Name
 	// Record first, then tell the workflow: a failed insert must never leave the workflow extended with no record.
 	var id string
 	if err := s.db.QueryRow(r.Context(), `
-		INSERT INTO public.case_deadline_extensions (tenant, case_id, clock, days, reason, granted_by)
-		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		tenant, caseID, clock, days, reason, by).Scan(&id); err != nil {
+		INSERT INTO public.case_deadline_extensions (tenant, case_id, clock, days, reason, granted_by, agency_approval)
+		VALUES ($1,$2,$3,$4,$5,$6,nullif($7,'')) RETURNING id`,
+		tenant, caseID, clock, days, reason, by, agencyApproval).Scan(&id); err != nil {
 		return "", false, err
 	}
 	signalled := false
@@ -151,11 +162,36 @@ func (s *server) applyExtension(r *http.Request, tenant, caseID, caseNumber stri
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.case_deadline_extensions SET workflow_signalled=true WHERE id=$1`, id)
 	}
 	msg := fmt.Sprintf("%s deadline extended by %d day%s by %s — %s", clockLabel(rule), days, map[bool]string{true: "", false: "s"}[days == 1], by, reason)
+	if agencyApproval != "" {
+		msg += " (past the contract limit, approved by AHCA: " + agencyApproval + ")"
+	}
 	s.logActivity(r.Context(), tenant, caseID, "DEADLINE_EXTENDED", msg)
 	s.logAudit(r.Context(), tenant, caseID, "DEADLINE_EXTENDED", map[string]any{
-		"by": bySub, "clock": clock, "days": days, "reason": reason, "extension_id": id, "workflow_signalled": signalled})
+		"by": bySub, "clock": clock, "days": days, "reason": reason, "extension_id": id, "workflow_signalled": signalled,
+		"agency_approval": agencyApproval})
 	s.notify(r, tenant, "role:CASE_MANAGER", "DEADLINE_EXTENDED", fmt.Sprintf("Case %s: %s", caseNumber, msg), "#/cases/"+caseID)
 	return id, signalled, nil
+}
+
+// refusePastContractLimit answers 422 when an extension would take the deadline past the clock's contract limit
+// (max_days, counted with the extensions already granted) without AHCA's approval. Decided 2026-11-13: an extension
+// past the limit is allowed only with AHCA's approval, recorded. Returns true when it answered.
+func (s *server) refusePastContractLimit(w http.ResponseWriter, r *http.Request, tenant, caseID string, rule *ClockRule, days int, agencyApproval string) bool {
+	if rule.MaxDays <= 0 {
+		return false
+	}
+	var granted int
+	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(sum(days),0) FROM public.case_deadline_extensions WHERE tenant=$1 AND case_id=$2 AND clock=$3`,
+		tenant, caseID, rule.Name).Scan(&granted)
+	total := rule.Days + granted + days
+	if total <= rule.MaxDays || len([]rune(agencyApproval)) >= 4 {
+		return false
+	}
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"error": fmt.Sprintf("this would put the %s deadline at day %d, past the contract's limit of %d days: an extension past it needs AHCA's approval — enter AHCA's approval reference",
+			clockLabel(rule), total, rule.MaxDays),
+		"needs_agency_approval": true, "contract_limit_days": rule.MaxDays, "would_be_day": total})
+	return true
 }
 
 func clockLabel(rule *ClockRule) string {
@@ -184,6 +220,9 @@ func (s *server) requestExtension(w http.ResponseWriter, r *http.Request) {
 	rule, _, code, msg := s.extensionTarget(r, tenant, caseID, clock)
 	if code != 0 {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, msg), code)
+		return
+	}
+	if s.refusePastContractLimit(w, r, tenant, caseID, rule, in.Days, in.AgencyApproval) {
 		return
 	}
 	side := strings.ToUpper(strings.TrimSpace(in.Side))
@@ -235,7 +274,8 @@ func (s *server) requestExtension(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
-	meta, _ := json.Marshal(map[string]any{"clock": clock, "label": clockLabel(rule), "days": in.Days, "reason": in.Reason, "due": due, "new_due": newDue})
+	meta, _ := json.Marshal(map[string]any{"clock": clock, "label": clockLabel(rule), "days": in.Days, "reason": in.Reason, "due": due, "new_due": newDue,
+		"agency_approval": in.AgencyApproval})
 	_, _ = s.db.Exec(r.Context(), `UPDATE public.document_requests SET meta=$2::jsonb WHERE id::text=$1`, id, string(meta))
 	s.logActivity(r.Context(), tenant, caseID, "EXTENSION_REQUESTED", fmt.Sprintf("%s asked %s for %d more day%s on the %s deadline — %s",
 		displayName(p), pc.name, in.Days, map[bool]string{true: "", false: "s"}[in.Days == 1], clockLabel(rule), in.Reason))
@@ -247,8 +287,9 @@ func (s *server) extensionAnswered(r *http.Request, tenant, caseID, caseNumber, 
 	var metaRaw []byte
 	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(meta,'{}'::jsonb)::text FROM public.document_requests WHERE id::text=$1`, reqID).Scan(&metaRaw)
 	var m struct {
-		Clock, Reason string
-		Days          int
+		Clock, Reason  string
+		Days           int
+		AgencyApproval string `json:"agency_approval"`
 	}
 	_ = json.Unmarshal(metaRaw, &m)
 	if !agreed || m.Clock == "" {
@@ -261,7 +302,7 @@ func (s *server) extensionAnswered(r *http.Request, tenant, caseID, caseNumber, 
 	for i := range cfg.Clocks {
 		if cfg.Clocks[i].Name == m.Clock {
 			_, signalled, err := s.applyExtension(r, tenant, caseID, caseNumber, &cfg.Clocks[i], m.Days,
-				m.Reason+" — agreed by "+orgName+" in its portal", orgName, "")
+				m.Reason+" — agreed by "+orgName+" in its portal", orgName, "", m.AgencyApproval)
 			return signalled, err
 		}
 	}

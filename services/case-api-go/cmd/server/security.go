@@ -292,10 +292,7 @@ func (s *server) rateLimit(key string, limit int64, windowSec int) bool {
 // shareThrottle guards every anonymous ShareBox request: per-IP and per-token
 // ceilings keep link spraying / upload floods from becoming a DoS.
 func (s *server) shareThrottle(w http.ResponseWriter, r *http.Request, token string) bool {
-	ip := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = strings.Split(fwd, ",")[0]
-	}
+	ip := clientIP(r)
 	if !s.rateLimit("ip:"+ip, 60, 60) { // 60 req/min per IP
 		http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
 		return false

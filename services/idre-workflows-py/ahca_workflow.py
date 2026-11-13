@@ -739,7 +739,17 @@ class AhcaDisputeWorkflow:
         # days 13 (Medicaid AHCA-notify), 14 (call+email), 15 (call again).
         # Up to 15 calendar days, with one reminder to the plan of its due date on day 13; no response by day 15 is
         # a default determination. (Older runs keep their day 13/14/15 follow-ups.)
-        if workflow.patched("plan-reminder-day13"):
+        if workflow.patched("plan-followups-sop-20261113"):
+            # Confirmed 2026-11-13 (audit F-04): the Workflow's steps stand -- day 13 remind the plan of its due date
+            # and, for a Medicaid plan, notify AHCA (record_followup_action skips other lines of business); day 14
+            # call and email; day 15 call again, then the default determination.
+            plan_followups = [
+                (13, "plan_due_date_reminder", "Day 13 — remind the Health Plan its response is due on day 15"),
+                (13, "medicaid_ahca_notify", "Day 13 — Medicaid health plan, notify AHCA for follow-up"),
+                (14, "call_and_email", "Day 14 — response due tomorrow (day 15); call and email the plan"),
+                (15, "call_again", "Day 15 — final attempt to reach the plan before default determination"),
+            ]
+        elif workflow.patched("plan-reminder-day13"):
             plan_followups = [
                 (13, "plan_due_date_reminder", "Day 13 — remind the Health Plan its response is due on day 15"),
                 (15, "plan_response_lapsed", "Day 15 — no response from the Health Plan: default determination"),
@@ -758,9 +768,10 @@ class AhcaDisputeWorkflow:
         withdrawn = lambda: wd and self.provider_withdrawn
         prev_day = 0
         for day, action, detail in plan_followups:
-            reached = await self._deadline(
-                lambda: self.plan_response_received or self.plan_opted_out is not None or self.rfi_lapsed or withdrawn(),
-                day - prev_day, f"plan-day{day}", "PLAN_RESPONSE")
+            if day > prev_day:
+                reached = await self._deadline(
+                    lambda: self.plan_response_received or self.plan_opted_out is not None or self.rfi_lapsed or withdrawn(),
+                    day - prev_day, f"plan-day{day}", "PLAN_RESPONSE")
             prev_day = day
             if reached:
                 break

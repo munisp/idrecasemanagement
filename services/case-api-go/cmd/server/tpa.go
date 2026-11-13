@@ -131,10 +131,7 @@ func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
 
 	// Public and it sends email: same per-address throttle as the public
 	// dispute form, so it cannot be used to flood a mailbox or mint accounts.
-	ip := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
+	ip := clientIP(r)
 	if !s.rateLimit("tpa-register:"+ip, 10, 3600) {
 		http.Error(w, `{"error":"too many registrations from this address — try again later"}`, http.StatusTooManyRequests)
 		return

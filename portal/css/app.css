@@ -1640,3 +1640,10 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 
 .drafts-table td{vertical-align:top}
 .drafts-table td div{font-size:13px;margin-top:2px}
+.change-tbl{width:100%;border-collapse:collapse;margin:6px 0 4px;font-size:13px}
+.change-tbl th,.change-tbl td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line,#e6e5e1);vertical-align:top}
+.change-hist{padding-left:18px}
+.change-hist li{margin:0 0 12px}
+.change-req{margin:8px 0 12px;padding:12px}
+.tpa-filing-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:10px 0 16px}
+.tpa-filing-actions .mfield{flex:1 1 100%}
