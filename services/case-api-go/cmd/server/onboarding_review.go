@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 // onboardingKind is one of the two onboarding rails.
@@ -164,7 +163,7 @@ func (s *server) onboardingReviewFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"document not found"}`, http.StatusNotFound)
 		return
 	}
-	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 	if err != nil {
 		http.Error(w, `{"error":"object missing"}`, http.StatusNotFound)
 		return

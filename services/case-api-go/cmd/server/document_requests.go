@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 var docRequestReasons = map[string]string{
@@ -491,8 +490,8 @@ func (s *server) storeCaseUpload(w http.ResponseWriter, r *http.Request, tenant,
 	if err != nil {
 		return "", "", http.StatusBadGateway, "seal failed"
 	}
-	if _, err := s.docs.mc.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
-		minio.PutObjectOptions{UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
+	if err := s.docs.api.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
+		putOpts{UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
 		return "", "", http.StatusBadGateway, "store failed"
 	}
 	ctype := hdr.Header.Get("Content-Type")
