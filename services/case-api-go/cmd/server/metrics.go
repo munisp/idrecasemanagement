@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -81,13 +82,23 @@ func instrument(next http.Handler) http.Handler {
 // statusWriter is declared in actionlog.go (same shape: captures the
 // status code, passes Flush/Unwrap through for streaming handlers).
 
-// metricsHandler exposes /metrics. Registered OUTSIDE the authenticated
-// router group; restrict it at the network layer (compose binds it on the
-// internal network only; k8s NetworkPolicy allows only the Prometheus
-// namespace). It carries no tenant labels, so scraping leaks nothing beyond
-// route names and rates.
-func metricsHandler() http.Handler {
-	return promhttp.Handler()
+// serveMetrics runs the dedicated metrics listener (started as a goroutine
+// from main). Kept off the API port deliberately: the API port is published
+// in compose and routed at the edge in k8s, while this listener is bound
+// internally only — not published in compose, Cilium-locked to the
+// observability namespace in k8s. Carries no tenant labels, so scraping
+// leaks nothing beyond route names and rates.
+func serveMetrics(port string) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("metrics listener failed: %v", err)
+	}
 }
 
 // pollOutboxBacklog refreshes the outbox gauge every 15s. Runs for the life

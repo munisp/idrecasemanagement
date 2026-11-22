@@ -495,9 +495,18 @@ func (s *server) submitDocFeedback(w http.ResponseWriter, r *http.Request) {
 
 // ---- vault helpers ---------------------------------------------------------
 
+// vaultHTTP is a dedicated client: http.DefaultClient has NO timeout, so a
+// hung vault would pin request goroutines forever. 15s bounds the worst
+// case; the vault stays fail-closed (no breaker — it is internal, and
+// degraded crypto must surface, not be masked).
+var vaultHTTP = &http.Client{Timeout: 15 * time.Second}
+
 // vaultPost calls the vault with the incoming request's context, so the call
 // is cancelled with the request and its span joins the request's trace
 // (http.Post used context.Background and started a detached trace).
+// Every call is counted in idre_vault_call_total: transport failures and
+// 5xx count as errors (vault unhealthy); 4xx counts ok (vault answered —
+// the refusal is a data problem, not an outage).
 func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Response, error) {
 	ctx := context.Background()
 	if r != nil {
@@ -511,7 +520,17 @@ func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Res
 	if tok := os.Getenv("VAULT_INTERNAL_TOKEN"); tok != "" {
 		req.Header.Set("X-Internal-Auth", tok)
 	}
-	return http.DefaultClient.Do(req)
+	resp, err := vaultHTTP.Do(req)
+	if err != nil {
+		vaultRequests.WithLabelValues("error").Inc()
+		return nil, err
+	}
+	if resp.StatusCode >= 500 {
+		vaultRequests.WithLabelValues("error").Inc()
+	} else {
+		vaultRequests.WithLabelValues("ok").Inc()
+	}
+	return resp, nil
 }
 
 func (s *server) vaultSealDoc(r *http.Request, tenant, key string, pt []byte) ([]byte, error) {
