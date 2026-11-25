@@ -828,6 +828,10 @@ func (s *server) fileTPADisputeOpt(r *http.Request, tenant string, org *tpaOrg, 
 		s.attachPackageDocsToCase(r, tenant, onboardingKinds["tpa"], packageID, caseID, "tpa:"+org.Name)
 	}
 	s.attachClientLetter(r, tenant, clientID, caseID, "tpa:"+org.Name)
+	s.attachStaffLetter(r, tenant, org.ID, caseID, "tpa:"+org.Name) // who at the TPA may act for it
+	// The person at the TPA who filed it, for the AOR check against the letter's named staff (aorCheck).
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('filed_by_person', $2::text, 'filed_by_org', $3::text) WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID, uploaderName(r), org.Name)
 	// Attribute the intake-fee payment row: paid by the TPA on behalf of the party.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,

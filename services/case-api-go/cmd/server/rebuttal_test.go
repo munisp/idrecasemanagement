@@ -6,11 +6,11 @@ import "testing"
 func TestRebuttalProblems(t *testing.T) {
 	sig := map[string]any{"printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25"}
 	full := map[string]any{
-		"party":            map[string]any{"legal_name": "Acme Health", "contact_person": "Pat", "email": "pat@acme.test"},
-		"smmc":             false, "participate": "yes", "challenge_eligibility": "no",
+		"party": map[string]any{"legal_name": "Acme Health", "contact_person": "Pat", "email": "pat@acme.test"},
+		"smmc":  false, "participate": "yes", "challenge_eligibility": "no",
 		"attest_signature": sig, "position": map[string]any{"basis": "Paid per contract."},
-		"certification":    map[string]any{"agreed": true, "printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25"},
-		"documents":        []any{"claim_forms", "contract"},
+		"certification": map[string]any{"agreed": true, "printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25"},
+		"documents":     []any{"claim_forms", "contract"},
 	}
 	if p := rebuttalProblems("HEALTH_PLAN", full); len(p) != 0 {
 		t.Fatalf("a complete form refused: %v", p)

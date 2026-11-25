@@ -1654,3 +1654,4 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .pv-table{width:100%;border-collapse:collapse;font-size:13.5px;margin:4px 0}
 .pv-table td{padding:4px 8px;border-bottom:1px solid var(--border,#e5e7eb)}
 .pv-table td:first-child{color:var(--text-secondary,#4a5160);width:38%}
+.ok-box{padding:8px 10px;border-radius:8px;background:#e6f4ea;border:1px solid #b7dfc2;margin:6px 0}.aor-check p{margin:4px 0}
