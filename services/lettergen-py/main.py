@@ -283,18 +283,28 @@ def docx_preview(docx_bytes: bytes) -> str:
     return out[:20000]
 
 
+# Records kept on the case, not letters to anyone: no program template entry, no QA review, never mailed.
+INTERNAL_RECORDS = {
+    "filing_record": {"key": "filing_record", "folder": "INTAKE", "filename": "Filing packet as filed {case_number}.pdf",
+                      "subject": "Filing packet as filed"},
+    "rebuttal_record": {"key": "rebuttal_record", "folder": "CORRESPONDENCE",
+                        "filename": "Responding party rebuttal as submitted {case_number}.pdf", "subject": "Rebuttal form as submitted"},
+}
+
+
 def handle(evt: dict) -> None:
     tenant, case_id, key = evt["tenant"], evt["case_id"], evt["template"]
     requested_by = evt.get("requested_by", "system")
-    tpl = template_config(tenant, key)
+    internal = key in INTERNAL_RECORDS
+    tpl = INTERNAL_RECORDS[key] if internal else template_config(tenant, key)
     fields = load_case(tenant, case_id)
     if key == "determination_letter" and features_for(tenant).get("letter_citation", True):
         fields.update(load_citations(tenant, case_id))
 
     # An uploaded template wins (replaceable without a deploy); then the office's own Word letter, filled from the
     # case (office_letters); then the letter built in code (builtin_letters).
-    template = uploaded_template(tenant, key)
-    office = office_letters.build(DSN, tenant, case_id, key) if template is None and office_letters.has_template(key) else None
+    template = None if internal else uploaded_template(tenant, key)
+    office = office_letters.build(DSN, tenant, case_id, key) if template is None and not internal and office_letters.has_template(key) else None
     if template is not None:
         merged = merge_docx(template, fields)
     elif office is not None:
@@ -325,6 +335,14 @@ def handle(evt: dict) -> None:
             (case_id, object_key, len(pdf), f"lettergen:{requested_by}", filename,
              tpl.get("folder", "CORRESPONDENCE")),
         )
+        if internal:
+            c.execute(
+                f"""INSERT INTO public.case_activities (tenant, case_id, type, body)
+                    VALUES (%s,%s,'RECORD_GENERATED',%s)""",
+                (tenant, case_id, f"{filename} kept on the case (Intake)"),
+            )
+            print(f"[lettergen] {tenant}/{case_id}: {key} -> {filename} (record)", flush=True)
+            return
         # Every letter goes through QA before it is mailed (G4).
         body_preview = docx_preview(merged) if merged is not None else "The office's FL Plan Packet (PDF form) for the health plan to complete."
         c.execute(

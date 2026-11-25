@@ -1273,6 +1273,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		OtherPartyNPI       string        `json:"other_party_npi"`
 		Packet              *filingPacket `json:"packet"` // the filing packet form (filing_packet.go)
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxFilingBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": decodeProblem(err)})
 		return
@@ -1285,7 +1286,7 @@ func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
-	if packetRejected(w, in.Packet) {
+	if filerPacketRejected(w, in.Packet) {
 		return
 	}
 	// The packet form's provider name, email and NPI fill what the short form left blank.

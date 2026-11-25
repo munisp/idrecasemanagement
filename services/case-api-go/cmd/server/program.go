@@ -386,14 +386,13 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 		if err != nil {
 			continue
 		}
-		var due time.Time
 		var remaining int
 		extra := extended[rl.Name]
+		// Weekends and Florida's legal holidays (program_days.go, change log 2026-11-25 #23).
+		due, moved := programDue(basis, rl.Days+extra, rl.DayType)
 		if rl.DayType == "business" {
-			due = addBusinessDays(basis, rl.Days+extra)
-			remaining = businessDaysBetween(today, due)
+			remaining = programBusinessDaysBetween(today, due)
 		} else {
-			due = basis.AddDate(0, 0, rl.Days+extra)
 			remaining = int(due.Sub(today).Hours() / 24)
 		}
 		cv := ClockView{
@@ -403,6 +402,9 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 			ExtendedDays: extra, Extendable: !nonExtendableClocks[rl.Name],
 			Cite:      rl.Cite,
 			BasisNote: fmt.Sprintf("from %s %s", rl.Basis, raw[:minI(10, len(raw))]),
+		}
+		if moved != "" {
+			cv.BasisNote += "; " + moved
 		}
 		// Met: the step's own date is set. Its clock stops, saying whether it was on time.
 		for _, k := range rl.StopOn {
@@ -431,10 +433,7 @@ func projectProgramClocks(rules []ClockRule, dates map[string]string, today time
 		// Past the target but inside the contract's hard limit is "late",
 		// not yet a breach.
 		if rl.MaxDays > rl.Days {
-			hard := basis.AddDate(0, 0, rl.MaxDays+extra)
-			if rl.DayType == "business" {
-				hard = addBusinessDays(basis, rl.MaxDays+extra)
-			}
+			hard, _ := programDue(basis, rl.MaxDays+extra, rl.DayType)
 			cv.HardDue = hard.Format("2006-01-02")
 			if remaining < 0 && !today.After(hard) {
 				cv.State = "late"
@@ -824,12 +823,15 @@ func (s *server) nextCaseNumber(r *http.Request, tenant string, cfg *ProgramConf
 	// query in a load test -- so it only runs when the year has no counter yet.)
 	if err := s.db.QueryRow(r.Context(), `UPDATE public.case_sequences SET last = last + 1 WHERE tenant=$1 AND yy=$2 RETURNING last`,
 		tenant, yy).Scan(&n); err != nil {
+		// Numbering restarts every year (change log 2026-11-25 #21): a new year's counter starts above that year's
+		// own numbers only -- it used to count every case of every year, so 2027 would have opened at FL27-001264.
+		prefix := strings.ReplaceAll(strings.SplitN(cfg.CaseNumber.Pattern, "{seq}", 2)[0], "{yy}", yy)
 		err = s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO public.case_sequences (tenant, yy, last)
-		SELECT $1::text, $2::text, greatest(count(*), coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0)) + 1
-		FROM tenant_%s.cases
+		SELECT $1::text, $2::text, coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0) + 1
+		FROM tenant_%s.cases WHERE $3 <> '' AND starts_with(case_number, $3)
 		ON CONFLICT (tenant, yy) DO UPDATE SET last = public.case_sequences.last + 1
-		RETURNING last`, sanitizeTenant(tenant)), tenant, yy).Scan(&n)
+		RETURNING last`, sanitizeTenant(tenant)), tenant, yy, prefix).Scan(&n)
 		if err != nil {
 			// No counter table yet (older database): fall back to the count.
 			_ = s.db.QueryRow(r.Context(),

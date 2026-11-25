@@ -12,9 +12,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -52,9 +55,11 @@ var (
 		"plan_position_basis": 20000, "plan_position_references": 20000, "plan_position_rebuttal": 20000,
 	}
 	packetDates = []string{"attested_on", "aor_signed_on", "certified_on"}
-	packetBools = []string{"contracted", "fee_estimate_requested", "attestation_certified", "certification_agreed"}
-	isoDate     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-	tenDigits   = regexp.MustCompile(`^\d{10}$`)
+	// Signatures drawn on the form (change log 2026-11-25 #7): PNG data URLs from the signature pads.
+	packetSignatures = []string{"attested_signature", "aor_signature", "certified_signature"}
+	packetBools      = []string{"contracted", "fee_estimate_requested", "attestation_certified", "certification_agreed"}
+	isoDate          = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	tenDigits        = regexp.MustCompile(`^\d{10}$`)
 )
 
 // filingPacket is the form as the portal posts it: details by their case-field names, the aggregated amount in
@@ -64,6 +69,124 @@ type filingPacket struct {
 	DisputedAmountCents *int64         `json:"disputed_amount_cents"`
 	Claims              []packetClaim  `json:"claims"`
 	RemoveClaims        []string       `json:"remove_claims"` // staff corrections only
+	// Files the filer attaches on the form (change log 2026-11-25 #6, #8): the packet PDF they filled in and read into
+	// the form, and the appointment of representative letter on their letterhead. PDFs, base64, kept on the case.
+	Attachments []filingAttachment `json:"attachments,omitempty"`
+}
+
+type filingAttachment struct {
+	Kind     string `json:"kind"` // filing_packet | aor_letter
+	Filename string `json:"filename"`
+	DataB64  string `json:"data_b64"`
+	raw      []byte
+}
+
+const maxFilingAttachmentBytes = 10 << 20
+
+// filingAttachmentNames: what each kind is filed as on the case (folder INTAKE).
+var filingAttachmentNames = map[string]string{
+	"filing_packet": "Filing packet (as uploaded by the filer).pdf",
+	"aor_letter":    "Appointment of representative letter.pdf",
+}
+
+// attachmentProblems decodes and checks the attachments: known kinds, one of each, PDFs within the size limit.
+func (pk *filingPacket) attachmentProblems() []string {
+	if pk == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for i := range pk.Attachments {
+		a := &pk.Attachments[i]
+		name := filingAttachmentNames[a.Kind]
+		if name == "" {
+			out = append(out, fmt.Sprintf("attachment %d: unknown kind %q", i+1, a.Kind))
+			continue
+		}
+		if seen[a.Kind] {
+			out = append(out, "attach one "+strings.TrimSuffix(name, ".pdf")+" only")
+			continue
+		}
+		seen[a.Kind] = true
+		raw, err := base64.StdEncoding.DecodeString(a.DataB64)
+		switch {
+		case err != nil || len(raw) == 0:
+			out = append(out, strings.TrimSuffix(name, ".pdf")+": the file could not be read")
+		case len(raw) > maxFilingAttachmentBytes:
+			out = append(out, strings.TrimSuffix(name, ".pdf")+": the file is over 10 MB")
+		case !bytes.HasPrefix(raw, []byte("%PDF")):
+			out = append(out, strings.TrimSuffix(name, ".pdf")+": must be a PDF")
+		default:
+			a.raw = raw
+		}
+	}
+	return out
+}
+
+// packetRequired are the change log's required fields (2026-11-25 #2): a filer cannot send the form without them.
+var packetRequiredDocs = []string{"claim_forms", "denials_eobs", "florida_license", "final_determination_letter"}
+
+func (pk *filingPacket) requiredProblems() []string {
+	if pk == nil {
+		return nil
+	}
+	d := pk.Details
+	str := func(k string) string { v, _ := d[k].(string); return strings.TrimSpace(v) }
+	var out []string
+	need := func(ok bool, msg string) {
+		if !ok {
+			out = append(out, msg)
+		}
+	}
+	need(str("packet_provider_type") != "" && (str("packet_provider_type") != "Other" || str("provider_type_other") != ""), "Provider type is required")
+	need(str("health_plan") != "", "Health plan name is required")
+	need(str("plan_type") != "" && (str("plan_type") != "Other" || str("plan_type_other") != ""), "Health plan type is required")
+	need(str("type_of_service") != "" && (str("type_of_service") != "Other" || str("type_of_service_other") != ""), "Type of service is required")
+	n, _ := toFloat(d["claims_submitted"])
+	need(n >= 1, "Number of claims is required")
+	need(pk.DisputedAmountCents != nil && *pk.DisputedAmountCents > 0, "Aggregated disputed amount is required")
+	claims := 0
+	for _, c := range pk.Claims {
+		if strings.TrimSpace(c.ClaimNumber) != "" {
+			claims++
+		}
+	}
+	need(claims > 0, "Claim(s) information: enter at least one claim")
+	docs := map[string]bool{}
+	if list, ok := d["packet_documents_submitted"].([]any); ok {
+		for _, x := range list {
+			if v, ok := x.(string); ok {
+				docs[v] = true
+			}
+		}
+	}
+	for _, k := range packetRequiredDocs {
+		if !docs[k] {
+			out = append(out, "Supporting documents: tick every required document (*) you are submitting")
+			break
+		}
+	}
+	agreed, _ := d["certification_agreed"].(bool)
+	need(agreed && str("certified_by_name") != "" && str("certified_by_title") != "" && str("certified_on") != "",
+		"Certification: tick it and enter your name, title and the date")
+	need(str("certified_signature") != "", "Certification: sign in the signature box")
+	return out
+}
+
+// filerPacketRejected: a filer's packet (public, TPA, health plan) must check out, carry the required fields and
+// attach only readable PDFs. A filing with no packet at all (an API client) is not refused here.
+func filerPacketRejected(w http.ResponseWriter, pk *filingPacket) bool {
+	if pk == nil {
+		return false
+	}
+	_, _, _, problems := pk.normalize()
+	problems = append(problems, pk.requiredProblems()...)
+	problems = append(problems, pk.attachmentProblems()...)
+	if len(problems) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the filing packet is not complete", "problems": problems})
+		return true
+	}
+	return false
 }
 
 type packetClaim struct {
@@ -138,6 +261,17 @@ func (pk *filingPacket) normalize() (map[string]any, *int64, []packetClaim, []st
 		}
 		if len([]rune(v)) > max {
 			problems = append(problems, fmt.Sprintf("%s: at most %d characters", k, max))
+			continue
+		}
+		out[k] = v
+	}
+	for _, k := range packetSignatures {
+		v := str(k)
+		if v == "" {
+			continue
+		}
+		if msg := signatureProblem(v); msg != "" {
+			problems = append(problems, k+": "+msg)
 			continue
 		}
 		out[k] = v
@@ -462,6 +596,8 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 	if len(problems) > 0 {
 		s.logActivity(r.Context(), tenant, caseID, "FILING_PACKET_INCOMPLETE",
 			"The filing form was submitted with problems, so it was not saved: "+strings.Join(problems, "; "))
+		s.notifyRoles(r, tenant, caseID, "FILING_INCOMPLETE", fmt.Sprintf("Case %s: the filing packet came in incomplete — %s",
+			s.caseNumberOf(r.Context(), tenant, caseID), strings.Join(problems, "; ")), "PM") // change log #14
 		return
 	}
 	keys, err := s.applyFilingPacket(r.Context(), tenant, caseID, details, disputed, claims, nil, false)
@@ -472,6 +608,42 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 	s.logActivity(r.Context(), tenant, caseID, "FILING_PACKET_SAVED",
 		fmt.Sprintf("Filing packet entered by %s: %d field(s), %d claim(s)", by, len(keys), len(claims)))
 	s.logAudit(r.Context(), tenant, caseID, "FILING_PACKET_SAVED", map[string]any{"by": by, "fields": keys, "claims": len(claims)})
+	s.keepFilingCopies(r, tenant, caseID, pk, by)
+}
+
+// keepFilingCopies (change log #6, #8, #12): the attachments are filed on the case under Intake; the filer's own
+// packet PDF when they uploaded one, otherwise a PDF of what they typed is generated (lettergen filing_record).
+// details.packet_source says which, for the intake list.
+func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *filingPacket, by string) {
+	ctx := r.Context()
+	_ = pk.attachmentProblems() // decodes; filers were checked already
+	source := "form"
+	for _, a := range pk.Attachments {
+		if a.raw == nil {
+			continue
+		}
+		name := filingAttachmentNames[a.Kind]
+		orig := a.Filename
+		if !strings.HasSuffix(strings.ToLower(orig), ".pdf") {
+			orig = name
+		}
+		if _, code, msg := s.storeCaseFile(ctx, tenant, caseID, "filer:"+by, orig, name, "application/pdf", a.raw, "INTAKE"); code != 0 {
+			s.logActivity(ctx, tenant, caseID, "FILING_ATTACHMENT_NOT_STORED", fmt.Sprintf("%s could not be kept: %s", name, msg))
+			continue
+		}
+		if a.Kind == "filing_packet" {
+			source = "pdf"
+		}
+	}
+	_, _ = s.db.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('packet_source', $2::text) WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID, source)
+	if source == "form" {
+		var caseNumber string
+		_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+		if err := s.enqueueLetter(r, tenant, caseID, caseNumber, "filing_record", by); err != nil {
+			slog.Error("filing record", "case", caseID, "err", err)
+		}
+	}
 }
 
 // putFilingPacket: PUT /v1/tenants/{tenant}/cases/{caseId}/filing-packet — staff save the case's filing packet
@@ -520,4 +692,17 @@ func (s *server) putFilingPacket(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, caseID, "FILING_PACKET_UPDATED", map[string]any{
 		"by": p.Subject, "fields": keys, "claims": len(claims), "removed": pk.RemoveClaims, "changes": changes})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "fields": keys, "claims": len(claims)})
+}
+
+// signatureProblem: a drawn signature is a PNG image (data URL), at most 200 KB; "" when it is one.
+func signatureProblem(v string) string {
+	const prefix = "data:image/png;base64,"
+	if !strings.HasPrefix(v, prefix) || len(v) > 270_000 {
+		return "the signature must be drawn in the signature box"
+	}
+	raw, err := base64.StdEncoding.DecodeString(v[len(prefix):])
+	if err != nil || !bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) {
+		return "the signature could not be read — sign again"
+	}
+	return ""
 }

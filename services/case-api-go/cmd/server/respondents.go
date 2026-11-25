@@ -63,7 +63,8 @@ func normalizeNAIC(v string) string {
 	return strings.Repeat("0", 5-len(d)) + d
 }
 
-// check: who the other side is, and where its notices go, are required.
+// check: who the other side is is required, and where its notices go -- except a health plan's: the plan's contact
+// for dispute notices is not asked of a provider at filing (change log 2026-11-25 #1); staff add it on the case.
 func (rsp *respondent) check() string {
 	rsp.Name, rsp.Email = strings.TrimSpace(rsp.Name), strings.TrimSpace(rsp.Email)
 	rsp.NAIC, rsp.NPI = normalizeNAIC(rsp.NAIC), strings.TrimSpace(rsp.NPI)
@@ -76,6 +77,7 @@ func (rsp *respondent) check() string {
 		return "name the " + other + " the dispute is against (other_party_name)"
 	case len(rsp.Name) > 200:
 		return "the other party's name is too long"
+	case rsp.Side == "HEALTH_PLAN" && rsp.Email == "":
 	case !validMailbox(rsp.Email):
 		return "give the " + other + "'s email for dispute notices (other_party_email)"
 	case rsp.NPI != "" && !npiValid(rsp.NPI):
@@ -111,7 +113,7 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 		var has int
 		_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.contacts WHERE tenant=$1 AND account_id::text=$2 AND lower(email)=lower($3)`,
 			tenant, accountID, rsp.Email).Scan(&has)
-		if has == 0 {
+		if has == 0 && rsp.Email != "" { // no notice address yet: staff add it on the case (setRespondentContact)
 			_, _ = s.db.Exec(ctx, `INSERT INTO public.contacts (tenant, account_id, name, role_title, email)
 				VALUES ($1,$2::uuid,$3,'Dispute notices',$4)`, tenant, accountID, rsp.Name, rsp.Email)
 		}
@@ -158,8 +160,12 @@ func (s *server) recordRespondent(r *http.Request, tenant, caseID string, rsp re
 		slog.Error("record respondent", "case", caseID, "err", err)
 		return
 	}
+	noticeTo := rsp.Email
+	if noticeTo == "" {
+		noticeTo = "no address yet — add the plan's contact on the case"
+	}
 	s.logActivity(ctx, tenant, caseID, "RESPONDENT_NAMED", fmt.Sprintf("Responding party: %s (%s, notices to %s)%s",
-		rsp.Name, map[string]string{"HEALTH_PLAN": "health plan", "PROVIDER": "provider"}[rsp.Side], rsp.Email,
+		rsp.Name, map[string]string{"HEALTH_PLAN": "health plan", "PROVIDER": "provider"}[rsp.Side], noticeTo,
 		map[bool]string{true: " — on the platform; the dispute is on its dashboard", false: ""}[planID != nil || tpaID != nil]))
 	s.tellRespondentOpened(ctx, tenant, caseID) // now, if no fee holds the dispute back; else when it is paid
 }
@@ -417,13 +423,22 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 			return
 		}
 		var in struct {
-			Note string `json:"note"`
+			Note     string         `json:"note"`
+			Rebuttal map[string]any `json:"rebuttal"` // the Responding Party Claim Rebuttal Form (rebuttal.go)
 		}
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in)
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&in)
 		var docs int
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT count(*) FROM tenant_%s.documents WHERE case_id::text=$1 AND folder='PARTY_UPLOADS' AND uploaded_by LIKE 'respondent:%%'`,
 			sanitizeTenant(tenant)), caseID).Scan(&docs)
-		if docs == 0 && strings.TrimSpace(in.Note) == "" {
+		if in.Rebuttal != nil {
+			var side string
+			_ = s.db.QueryRow(r.Context(), `SELECT side FROM public.case_respondents WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&side)
+			if problems := rebuttalProblems(side, in.Rebuttal); len(problems) > 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the rebuttal form is not complete", "problems": problems})
+				return
+			}
+		}
+		if docs == 0 && strings.TrimSpace(in.Note) == "" && in.Rebuttal == nil {
 			http.Error(w, `{"error":"add your response documents (or at least a written response) before submitting"}`, http.StatusBadRequest)
 			return
 		}
@@ -436,10 +451,25 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 		}
 		var caseNumber string
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+		if in.Rebuttal != nil { // kept on the case, and as a PDF of what they filled in (no QA, never mailed)
+			in.Rebuttal["submitted_by"], in.Rebuttal["submitted_at"] = sc.label, time.Now().UTC().Format(time.RFC3339)
+			if raw, err := json.Marshal(in.Rebuttal); err == nil {
+				_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('responding_rebuttal', $2::jsonb) WHERE id::text=$1`,
+					sanitizeTenant(tenant)), caseID, string(raw))
+			}
+			_ = s.enqueueLetter(r, tenant, caseID, caseNumber, "rebuttal_record", sc.label)
+			if p, _ := in.Rebuttal["participate"].(string); p == "no" {
+				s.notifyRoles(r, tenant, caseID, "PLAN_DECLINES", fmt.Sprintf("Case %s: %s says on its rebuttal form it does not wish to participate (non-SMMC plan) — the Attorney decides", caseNumber, sc.label), "ATTORNEY", "PM")
+			}
+			if c, _ := in.Rebuttal["challenge_eligibility"].(string); c == "yes" {
+				s.notifyRoles(r, tenant, caseID, "ELIGIBILITY_CHALLENGED", fmt.Sprintf("Case %s: %s challenges the claim's eligibility on its rebuttal form", caseNumber, sc.label), "CASE_MANAGER", "ATTORNEY", "PM")
+			}
+		}
 		wfID := fmt.Sprintf("IDR-%s-%s", strings.ToUpper(tenant), caseNumber)
 		if s.loadProgram(r, tenant) != nil {
 			wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 		}
+		s.notifyOnSignal(r, tenant, caseID, "PLAN_RESPONSE_RECEIVED", nil) // the Coder: the case is ready for coding review
 		signalled := s.sigCase(r.Context(), tenant, caseID, wfID, "PLAN_RESPONSE_RECEIVED",
 			map[string]any{"source": "respondent dashboard", "by": sc.label, "documents": docs}) == nil
 		detail, _ := json.Marshal(map[string]any{"by": sc.label, "documents": docs, "note": strings.TrimSpace(in.Note), "source": "respondent dashboard"})
@@ -525,11 +555,8 @@ func (s *server) fillResponseDue(r *http.Request, tenant string, rows []map[stri
 			}
 			if started != "" {
 				if basis, err := time.Parse("2006-01-02", started); err == nil {
-					if rule.DayType == "business" {
-						due = addBusinessDays(basis, rule.Days).Format("2006-01-02")
-					} else {
-						due = basis.AddDate(0, 0, rule.Days).Format("2006-01-02")
-					}
+					d, _ := programDue(basis, rule.Days, rule.DayType)
+					due = d.Format("2006-01-02")
 				}
 			}
 		}
@@ -550,4 +577,96 @@ func programZone(tenant string) *time.Location {
 		return loc
 	}
 	return time.FixedZone("ET", -5*3600)
+}
+
+// respondentStaff: who keeps the other side's contact on a case.
+var respondentStaff = []string{"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+
+// getRespondentContact: GET /cases/{caseId}/respondent -- the other side as filed: name, notice email, NAIC/NPI,
+// and the contact person and telephone staff added.
+func (s *server) getRespondentContact(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, append(respondentStaff, "CODER", "ATTORNEY", "NURSE_PHYSICIAN", "FINANCE")...) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	var side, name, email, naic, npi, contact, phone string
+	var emailedAt *time.Time
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT rs.side, rs.name, coalesce(rs.email,''), coalesce(rs.naic,''), coalesce(rs.npi,''), rs.emailed_at,
+		       coalesce(c.details->>'health_plan_contact',''), coalesce(c.details->>'health_plan_phone','')
+		FROM public.case_respondents rs JOIN tenant_%s.cases c ON c.id::text = rs.case_id
+		WHERE rs.tenant=$1 AND rs.case_id=$2`, sanitizeTenant(tenant)), tenant, caseID).
+		Scan(&side, &name, &email, &naic, &npi, &emailedAt, &contact, &phone)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"respondent": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"respondent": map[string]any{
+		"side": side, "name": name, "email": email, "naic": naic, "npi": npi, "emailed_at": emailedAt,
+		"contact_name": contact, "phone": phone}})
+}
+
+// setRespondentContact: PUT /cases/{caseId}/respondent {name?, email, contact_name?, phone?, naic?} -- staff add or
+// correct the other side's contact for dispute notices (a provider is not asked for the plan's at filing). It is
+// recorded like a filer's: the account's contact, the plan's portal link, and the eligibility email if it is due.
+func (s *server) setRespondentContact(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, respondentStaff...) {
+		http.Error(w, `{"error":"forbidden: the Reviewer, the PM or an admin keeps the other side's contact"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var in struct {
+		Name        string `json:"name"`
+		Email       string `json:"email"`
+		ContactName string `json:"contact_name"`
+		Phone       string `json:"phone"`
+		NAIC        string `json:"naic"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	rsp := respondent{}
+	var filer string
+	err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT coalesce(rs.side,''), coalesce(rs.name,''), coalesce(rs.email,''), coalesce(rs.naic,''), coalesce(rs.npi,''),
+		       upper(coalesce(c.details->>'filing_party_type','PROVIDER'))
+		FROM tenant_%s.cases c LEFT JOIN public.case_respondents rs ON rs.tenant=$1 AND rs.case_id=c.id::text
+		WHERE c.id::text=$2`, sanitizeTenant(tenant)), tenant, caseID).Scan(&rsp.Side, &rsp.Name, &rsp.Email, &rsp.NAIC, &rsp.NPI, &filer)
+	if err != nil {
+		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)
+		return
+	}
+	if rsp.Side == "" {
+		rsp.Side = otherSide(filer)
+	}
+	if v := strings.TrimSpace(in.Name); v != "" {
+		rsp.Name = v
+	}
+	if v := strings.TrimSpace(in.NAIC); v != "" {
+		rsp.NAIC = v
+	}
+	rsp.Email = strings.TrimSpace(in.Email)
+	if !validMailbox(rsp.Email) {
+		http.Error(w, `{"error":"enter the e-mail address dispute notices go to"}`, http.StatusBadRequest)
+		return
+	}
+	if msg := rsp.check(); msg != "" {
+		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
+		return
+	}
+	if rsp.Side == "HEALTH_PLAN" {
+		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) ||
+			jsonb_strip_nulls(jsonb_build_object('health_plan_email', $2::text, 'health_plan_contact', NULLIF($3,''), 'health_plan_phone', NULLIF($4,'')))
+			WHERE id::text=$1`, sanitizeTenant(tenant)), caseID, rsp.Email, strings.TrimSpace(in.ContactName), strings.TrimSpace(in.Phone))
+	}
+	s.recordRespondent(r, tenant, caseID, rsp)
+	s.logAudit(r.Context(), tenant, caseID, "RESPONDENT_CONTACT_SET", map[string]any{"by": p.Subject, "side": rsp.Side, "email": rsp.Email})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

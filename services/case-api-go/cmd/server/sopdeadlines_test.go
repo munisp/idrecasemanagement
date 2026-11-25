@@ -27,14 +27,15 @@ func TestClockDueAndTimeliness(t *testing.T) {
 		t.Fatalf("60/90-day clock from Jan 1: got target %s hard %s ok=%v", target.Format("2006-01-02"), hard.Format("2006-01-02"), ok)
 	}
 	target, hard, _ = clockDue(rules, dates, "INITIAL_REVIEW")
-	if target != d("2026-01-15") || hard != d("2026-01-18") {
+	// Jan 18 is a Sunday and Jan 19 Martin Luther King Jr. Day: the hard limit runs to Tuesday (change log #23).
+	if target != d("2026-01-15") || hard != d("2026-01-20") {
 		t.Fatalf("10(+3)-day clock from Jan 5: got %s / %s", target.Format("2006-01-02"), hard.Format("2006-01-02"))
 	}
 	if _, _, ok := clockDue(rules, dates, "PLAN_RESPONSE"); ok {
 		t.Error("a clock whose basis date is not recorded has not started")
 	}
 	for on, want := range map[string]string{
-		"2026-01-15": "ON_TIME", "2026-01-16": "LATE_WITHIN_LIMIT", "2026-01-18": "LATE_WITHIN_LIMIT", "2026-01-19": "BREACH",
+		"2026-01-15": "ON_TIME", "2026-01-16": "LATE_WITHIN_LIMIT", "2026-01-18": "LATE_WITHIN_LIMIT", "2026-01-20": "LATE_WITHIN_LIMIT", "2026-01-21": "BREACH",
 	} {
 		if got := timeliness(d(on).Add(15*time.Hour), target, hard); got != want {
 			t.Errorf("acceptance letter sent %s: got %s, want %s", on, got, want)

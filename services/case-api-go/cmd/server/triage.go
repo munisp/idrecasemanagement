@@ -317,6 +317,66 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	return in, nil
 }
 
+// packetProviderType maps the filing packet's provider type (and, for a hospital, its type of service) to the
+// program's eligibility provider types.
+func packetProviderType(d map[string]any) string {
+	pt, _ := d["packet_provider_type"].(string)
+	svc, _ := d["type_of_service"].(string)
+	switch pt {
+	case "Rural Hospital":
+		return "rural_hospital"
+	case "Hospital":
+		switch svc {
+		case "Hospital Inpatient":
+			return "hospital_inpatient"
+		case "Hospital Outpatient":
+			return "hospital_outpatient"
+		}
+		return ""
+	case "Physician/Medical Group", "Dentist":
+		return "physician_dentist"
+	case "":
+		return ""
+	}
+	return "other"
+}
+
+// eligibilityInputs: GET /cases/{caseId}/eligibility/inputs -- what the case, its filing packet and its documents
+// say for each eligibility input, without deciding (change log #9: the review form opens prefilled to verify).
+func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	in, err := s.deriveEligibilityInput(r, tenant, caseID)
+	if err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	// For the form only -- never for an automatic decision: what the filer stated on the packet, to verify.
+	from := map[string]string{}
+	var raw []byte
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(details,'{}'::jsonb) FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&raw)
+	var d map[string]any
+	_ = json.Unmarshal(raw, &d)
+	if in.ProviderType == "" {
+		if v := packetProviderType(d); v != "" {
+			in.ProviderType, from["provider_type"] = v, "filing packet"
+		}
+	}
+	if in.ServiceDate == "" {
+		_ = s.db.QueryRow(r.Context(), `SELECT coalesce(MIN(date_of_service)::text, '') FROM public.case_claims
+			WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&in.ServiceDate)
+		if in.ServiceDate != "" {
+			from["service_date"] = "filing packet"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"inputs": in, "from_packet": from})
+}
+
 // persistEligibilityOutcome records the review and applies the same side
 // effects as the manual endpoint (status moves, AOR notify, workflow signal,
 // activity + audit). One helper, both callers.
@@ -329,6 +389,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
 		tenant, caseID, result, reason, ev, decidedBy,
 		opts.ruleVersion, opts.borderline, opts.override, opts.overrideReason).Scan(&reviewID)
+	s.notifyEligibilityIssue(r, tenant, caseID, result, reason) // the PM hears of eligibility problems (change log #14)
 	if opts.borderline {
 		s.notify(r, tenant, "role:PM", "ELIGIBILITY_BORDERLINE",
 			fmt.Sprintf("Case %s: borderline eligibility decision (%s) — PM second review required: %s",

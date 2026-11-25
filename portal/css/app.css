@@ -1647,3 +1647,11 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .change-req{margin:8px 0 12px;padding:12px}
 .tpa-filing-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:10px 0 16px}
 .tpa-filing-actions .mfield{flex:1 1 100%}
+.chip-pdf{background:#e6f4ea;color:#1e6b34}
+.chip-form{background:#eef2ff;color:#3730a3}
+.warn-chip{background:#fff4e5;color:#8a4b00}
+.elig-prefill{margin:0 0 8px;padding:6px 10px;border-left:3px solid var(--accent,#2f6f4f);background:var(--surface-2,#f5f7f6);font-size:13.5px}
+.pv-table{width:100%;border-collapse:collapse;font-size:13.5px;margin:4px 0}
+.pv-table td{padding:4px 8px;border-bottom:1px solid var(--border,#e5e7eb)}
+.pv-table td:first-child{color:var(--text-secondary,#4a5160);width:38%}
+.ok-box{padding:8px 10px;border-radius:8px;background:#e6f4ea;border:1px solid #b7dfc2;margin:6px 0}.aor-check p{margin:4px 0}

@@ -123,6 +123,9 @@ TYPE_SIGNALS: dict[str, dict[str, list[str]]] = {
 # The office's own letters (decision report, cover letter, review invoice, IRO decision): letter_docs.py.
 import letter_docs as _letter_docs  # noqa: E402
 TYPE_SIGNALS.update(_letter_docs.TYPE_SIGNALS)
+# Appointment of representative letters (who may act for the filer): aor_docs.py.
+import aor_docs as _aor_docs  # noqa: E402
+TYPE_SIGNALS.update(_aor_docs.TYPE_SIGNALS)
 # The program's filing packet (Capitol Bridge): packet_docs.py.
 import packet_docs as _packet_docs  # noqa: E402
 TYPE_SIGNALS.update(_packet_docs.TYPE_SIGNALS)
@@ -1242,6 +1245,10 @@ def stage_fields(ctx: dict, cfg: dict) -> dict:
     if letter:
         ex["letter"] = letter
         issues = issues + letter_issues
+    aor, aor_issues = _aor_docs.extract(ctx.get("doc_type") or "", text)
+    if aor:
+        ex["aor"] = aor
+        issues = issues + aor_issues
     remit_key, remit, remit_issues = _remit_docs.extract(ctx.get("doc_type") or "", text, ctx.get("raw_bytes"))
     if remit_key:
         ex[remit_key] = remit
@@ -1468,7 +1475,11 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     layout_read = any((ctx.get("extracted_fields") or {}).get(k) for k in ("remit", "ub04", "packet"))
     # A clinical record named by its own headings is evidence too, though it holds no billing field to extract.
     clinical = ctx.get("doc_type") == "medical_records" and ctx.get("classify_score", 0) >= WEIGHT["strong"]
-    if layout_read or clinical:
+    # So is one of the office's own letters recognised by its wording (several of its phrases): a cover letter to
+    # the Agency holds only names and addresses, and the model votes it "not medical billing".
+    office_letter = (ctx.get("doc_type") in _letter_docs.LETTER_TYPES or ctx.get("doc_type") == "aor_letter") \
+        and ctx.get("classify_score", 0) >= 2 * WEIGHT["strong"]
+    if layout_read or clinical or office_letter:
         pass
     elif unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
         # The model saw too little legible text to recognise the page. That is

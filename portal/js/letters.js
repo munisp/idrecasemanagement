@@ -72,7 +72,12 @@ const Letters = (() => {
     return `<details class="prog-sec" id="p-dr-details" data-tab="review"><summary>Decision report</summary>
       <p class="muted">The decision (outcome, amounts, who reviewed it), which the cover letter and the invoices print, and
         the Review Rationale and Letter itself: pasted here, or uploaded as the finished document. Both go to the QA queue.</p>
-      <div id="dr-body"><p class="muted">Loading…</p></div></details>
+      <div id="dr-body"><p class="muted">Loading…</p></div>
+      ${can("ATTORNEY", "PM") ? `<form class="inline-form dr-revise" onsubmit="event.preventDefault(); Letters.askRevisions('${esc(id)}', this)">
+        <label>Ask for revisions from <select name="to"><option value="CODER">the Coder</option><option value="NURSE_PHYSICIAN">the Nurse / Physician</option>
+          <option value="BOTH">both</option></select></label>
+        <label class="wide">What to change <input name="note" required maxlength="4000" placeholder="e.g. the coding table misses the 99285 line" /></label>
+        <button class="mini">Send back for revisions</button></form>` : ""}</details>
       ${tpls.length ? `<details class="prog-sec" id="p-letters-details" data-tab="mail"><summary>Generate a letter <span class="muted">— most are drafted by their step; use this for anything else</span></summary>
       <p class="muted">Each letter is built from the case in the program’s layout (unless your office uploaded its own
         template for it), filed under Documents and sent to the QA queue before it goes anywhere.</p>
@@ -306,7 +311,7 @@ const Letters = (() => {
   // ---- letterhead & invoice details (Billing and Templates pages) --------------------------------------------
   const LS_LABELS = {
     letterhead: ["Letterhead — also fills {org_name}, {org_short}, {program_name}, {contact_email} and {contact_phone} in every email template", { org_name: "Organization name", org_short: "Short name (signature)", program_name: "Program name in emails", program_title: "Program line on reports", contractor_line: "Line under the logo on invoices", state: "State", contact_email: "Contact email", contact_phone: "Contact phone" }],
-    agency: ["The Agency's contacts", { email_salutation: "How emails to the Agency open — {agency_salutation}", salutation: "Cover letter salutation", line1: "Cover letter address line 1", line2: "Address line 2", line3: "Address line 3", line4: "Address line 4" }],
+    agency: ["The Agency's contacts", { email_salutation: "How emails to the Agency open — {agency_salutation}", salutation: "Cover letter salutation", line1: "Cover letter address line 1", line2: "Address line 2", line3: "Address line 3", line4: "Address line 4", emails: "AHCA members' e-mail addresses (comma-separated) — prefilled when a letter goes to the Agency" }],
     invoice: ["Invoice notes", { payment_note: "Payment note (bold)", bank_changed_notice: "Bank change notice (red)", account_use_note: "Account use note (red)" }],
     remit: ["Remit to (bank details)", { payee: "Payee", bank: "Bank", routing: "Routing number", account: "Account number", remittance_email: "Remittance advice email" }],
   };
@@ -415,5 +420,12 @@ const Letters = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
   }
 
-  return { caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
+  // Change log 2026-11-25 #24c: the Attorney (or QA) sends the decision letter back to the Coder / Nurse.
+  async function askRevisions(id, form) {
+    try {
+      await Api.cases.revisionRequest(id, { to: form.to.value, note: form.note.value });
+      UI.toast("Sent back for revisions — they have been notified"); form.note.value = "";
+    } catch (e) { UI.toast(e.message, { kind: "warn" }); }
+  }
+  return { askRevisions, caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
 })();

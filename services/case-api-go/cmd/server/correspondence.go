@@ -127,6 +127,10 @@ func (s *server) resolveRecipients(r *http.Request, tenant, caseID string, roles
 			_ = json.Unmarshal(raw, &agencyRecipients)
 		}
 	}
+	// The AHCA members' addresses the office keeps in Letter settings (change log 2026-11-25 #18).
+	var agencyEmails string
+	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(settings->'agency'->>'emails','') FROM public.letter_settings WHERE tenant=$1`, tenant).Scan(&agencyEmails)
+	agencyRecipients = append(agencyRecipients, splitEmails(agencyEmails)...)
 
 	seen := map[string]bool{}
 	var out []string
@@ -335,15 +339,10 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 	// subject/qa_role; address resolution was silently left to the caller
 	// every time, with no fallback for roles that have no account contact.
 	if len(in.To) == 0 {
-		toRoles := tpl.To
-		// An RFI goes to whichever side it was addressed to.
-		if tpl.Key == "rfi" {
-			toRoles = []string{"provider"}
-			if in.RfiTo == "plan" {
-				toRoles = []string{"health_plan"}
-			}
+		in.To = s.resolveRecipients(r, tenant, caseID, toRolesFor(tpl.Key, tpl.To, in.RfiTo))
+		if len(in.To) == 0 && tpl.Key != "rfi" { // the template's own parties have no address: the side chosen on the form
+			in.To = s.resolveRecipients(r, tenant, caseID, toRolesFor("rfi", nil, in.RfiTo))
 		}
-		in.To = s.resolveRecipients(r, tenant, caseID, toRoles)
 	}
 	if len(in.CC) == 0 {
 		in.CC = s.resolveRecipients(r, tenant, caseID, tpl.CC)
@@ -474,6 +473,7 @@ func (s *server) draftCorrespondence(w http.ResponseWriter, r *http.Request) {
 		}
 		s.notify(r, tenant, "role:"+tpl.QARole, "QA_REVIEW",
 			fmt.Sprintf("%s draft on case %s awaiting %s QA approval", tpl.Key, caseID, tpl.QARole), "#/qa")
+		s.notifyOnDraft(r, tenant, caseID, tpl.Key, tpl.QARole) // the PM sees it too (change log #24a)
 	} else {
 		// No QA gate on this template — deliver immediately via SMTP. Mail the provider queued for later
 		// (mailqueue.go) is sent: it goes out automatically, so the letter counts as sent.
@@ -990,6 +990,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			s.notify(r, tenant, requestedBySub, "DRAFT_APPROVED",
 				fmt.Sprintf("The letter %q passed QA.", subject), "#/cases/"+caseID)
 		}
+		s.notifyOnQA(r, tenant, caseID, artifact, in.Decision, in.Note) // change log #24d
 		writeJSON(w, http.StatusOK, map[string]any{"status": newStatus, "letter": true})
 		return
 	}
@@ -1052,7 +1053,31 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "email_delivery_error": msg})
 			return
 		}
-		deliveryError = s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub, to, cc)
+		// Change log 2026-11-25 #13: with a cost estimate requested, the Cost Estimate and the acceptance go out
+		// together, the estimate first, once both have passed QA. The first approved waits for the second.
+		if partner, ok := s.estimatePartner(r, tenant, caseID, artifact); ok && partner.status != "SENT" {
+			if partner.status != "APPROVED" {
+				s.logActivity(r.Context(), tenant, caseID, "QA_APPROVED_HELD",
+					fmt.Sprintf("QA-approved by %s: %s — held until the %s passes QA; both go out together", displayName(p), subject, partner.label))
+				s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", withQA(map[string]any{
+					"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note, "sent": false, "held_for": partner.artifact}))
+				writeJSON(w, http.StatusOK, map[string]any{"status": "APPROVED", "held": true,
+					"next": "held until the " + partner.label + " passes QA; both go out together"})
+				return
+			}
+			first, second := partner, qaPairItem{qid: qid, artifact: artifact, subject: subject, body: body, rfiTo: rfiTo, requestedBySub: requestedBySub, to: to, cc: cc}
+			if artifact == "estimate_cost" {
+				first, second = second, first
+			}
+			deliveryError = s.deliverApproved(r, p, tenant, first.qid, caseID, first.artifact, first.subject, first.body, first.rfiTo, first.requestedBySub, first.to, first.cc)
+			if deliveryError == "" {
+				deliveryError = s.deliverApproved(r, p, tenant, second.qid, caseID, second.artifact, second.subject, second.body, second.rfiTo, second.requestedBySub, second.to, second.cc)
+			} else {
+				deliveryError = "the Cost Estimate could not be sent, so the acceptance was held too: " + deliveryError
+			}
+		} else {
+			deliveryError = s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, requestedBySub, to, cc)
+		}
 	} else {
 		s.releaseCaseFromQA(r, tenant, caseID, qid)
 		s.settleHeldMail(r, tenant, qid, "REJECTED", "rejected in QA"+orDash(": "+in.Note), body, to, cc)
@@ -1067,6 +1092,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 		"by": p.Subject, "decision": in.Decision, "subject": subject, "note": in.Note,
 		"email_delivery_error": deliveryError,
 	}))
+	s.notifyOnQA(r, tenant, caseID, artifact, in.Decision, in.Note) // change log #24d
 	out := map[string]any{"status": newStatus}
 	if deliveryError != "" {
 		out["email_delivery_error"] = deliveryError
@@ -1415,6 +1441,11 @@ func (s *server) qaSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": msg})
 		return
 	}
+	// Change log 2026-11-25 #13: the Cost Estimate goes before the acceptance.
+	if partner, ok := s.estimatePartner(r, tenant, caseID, artifact); ok && artifact == "acceptance" && partner.status != "SENT" {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "Send the Cost Estimate first — the acceptance goes right after it."})
+		return
+	}
 	deliveryError := s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, "", to, cc)
 	s.logAudit(r.Context(), tenant, caseID, "QA_SENT", map[string]any{
 		"by": p.Subject, "qa_id": qid, "subject": subject, "to": to, "cc": cc, "email_delivery_error": deliveryError,
@@ -1527,4 +1558,59 @@ func dropEstimateParagraphs(body string) string {
 // systemDraft: a QA draft the system made itself ("system: invoice email for letter …"), not a person.
 func systemDraft(draftedBy string) bool {
 	return strings.HasPrefix(draftedBy, "system:") || draftedBy == "system"
+}
+
+// splitEmails: a typed list of addresses ("a@x.gov, b@x.gov; c@x.gov") as its addresses.
+func splitEmails(v string) []string {
+	var out []string
+	for _, e := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' || r == ' ' || r == '\n' }) {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// toRolesFor: who a letter goes to. An RFI goes to the side picked on the form -- the Agency (the form's default since
+// change log 2026-11-25 #18), the provider or the health plan; any other template to its own parties.
+func toRolesFor(key string, tplTo []string, goesTo string) []string {
+	if key != "rfi" {
+		return tplTo
+	}
+	switch goesTo {
+	case "plan":
+		return []string{"health_plan"}
+	case "agency":
+		return []string{"agency"}
+	}
+	return []string{"provider"} // blank: the provider, as before (older RFIs on file carry no choice)
+}
+
+// qaPairItem: one email of the Cost Estimate / acceptance pair, as its QA row holds it.
+type qaPairItem struct {
+	qid, artifact, label, status, subject, body, rfiTo, requestedBySub string
+	to, cc                                                             []string
+}
+
+// estimatePartner (change log 2026-11-25 #13): for the Cost Estimate or the acceptance on a case whose filer asked
+// for a cost estimate, the other one's latest QA row. ok is false for anything else (or when the other has no draft).
+func (s *server) estimatePartner(r *http.Request, tenant, caseID, artifact string) (qaPairItem, bool) {
+	other := map[string]string{"estimate_cost": "acceptance", "acceptance": "estimate_cost"}[artifact]
+	if other == "" || !s.estimateRequested(r, tenant, caseID) {
+		return qaPairItem{}, false
+	}
+	it := qaPairItem{artifact: other, label: map[string]string{"estimate_cost": "Cost Estimate", "acceptance": "acceptance"}[other]}
+	var toJ, ccJ []byte
+	if s.db.QueryRow(r.Context(), `
+		SELECT id::text, status, coalesce(subject,''), coalesce(body,''), coalesce(rfi_to,''), coalesce(requested_by_sub,''),
+		       coalesce(to_recipients,'[]'::jsonb), coalesce(cc_recipients,'[]'::jsonb)
+		FROM public.qa_reviews WHERE tenant=$1 AND case_id::text=$2 AND artifact=$3 AND coalesce(channel,'email') = 'email'
+		ORDER BY created_at DESC LIMIT 1`, tenant, caseID, other).
+		Scan(&it.qid, &it.status, &it.subject, &it.body, &it.rfiTo, &it.requestedBySub, &toJ, &ccJ) != nil {
+		it.status = "" // not drafted yet: this one waits for it
+		return it, true
+	}
+	_ = json.Unmarshal(toJ, &it.to)
+	_ = json.Unmarshal(ccJ, &it.cc)
+	return it, true
 }

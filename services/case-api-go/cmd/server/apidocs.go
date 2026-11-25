@@ -443,5 +443,8 @@ func apiIntro(aud apiAudience, base, tokenURL string) string {
 		"- Requests and answers are JSON unless an endpoint says it takes a file (`multipart/form-data`).\n" +
 		"- Errors are `{\"error\": \"…\"}` with a plain-language message, and the usual status codes.\n" +
 		"- `404` also means \"not yours\": you never learn whether another organization's record exists.\n" +
+		"- Each API key may make 120 requests a minute. Every answer says where you stand in `X-RateLimit-Limit`, `X-RateLimit-Remaining` " +
+		"and `X-RateLimit-Reset` (when the minute ends, Unix seconds). Past the limit the answer is `429` with `Retry-After` (seconds): " +
+		"wait that long and send it again. Need more for a bulk job? Ask us to raise it for your key.\n" +
 		"- Endpoints marked `x-documented: false` are listed from the live service and work today, but have no worked example yet.\n"
 }

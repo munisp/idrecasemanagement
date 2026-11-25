@@ -63,11 +63,10 @@ func (s *server) previewCorrespondence(w http.ResponseWriter, r *http.Request) {
 	}
 	to, cc := nonNil(in.To), nonNil(in.CC)
 	if len(to) == 0 {
-		roles := tpl.To
-		if tpl.Key == "rfi" {
-			roles = []string{map[bool]string{true: "health_plan", false: "provider"}[in.RfiTo == "plan"]}
+		to = nonNil(s.resolveRecipients(r, tenant, caseID, toRolesFor(tpl.Key, tpl.To, in.RfiTo)))
+		if len(to) == 0 && tpl.Key != "rfi" {
+			to = nonNil(s.resolveRecipients(r, tenant, caseID, toRolesFor("rfi", nil, in.RfiTo)))
 		}
-		to = nonNil(s.resolveRecipients(r, tenant, caseID, roles))
 	}
 	if len(cc) == 0 {
 		cc = nonNil(s.resolveRecipients(r, tenant, caseID, tpl.CC))

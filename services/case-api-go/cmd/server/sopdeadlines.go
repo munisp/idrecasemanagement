@@ -61,12 +61,7 @@ func clockDue(rules []ClockRule, dates map[string]string, clock string) (target,
 		if err != nil {
 			return target, hard, false
 		}
-		add := func(n int) time.Time {
-			if rl.DayType == "business" {
-				return addBusinessDays(basis, n)
-			}
-			return basis.AddDate(0, 0, n)
-		}
+		add := func(n int) time.Time { due, _ := programDue(basis, n, rl.DayType); return due }
 		target, hard = add(rl.Days), add(rl.Days)
 		if rl.MaxDays > rl.Days {
 			hard = add(rl.MaxDays)

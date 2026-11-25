@@ -97,6 +97,10 @@ func caseActionAllowed(lock, action string) bool {
 	// log of calls and inquiries exchanged with them.
 	case "correspondence", "lettergen", "letters", "calls", "inquiries":
 		return true
+	// Who the parties' notices go to: the plan's contact is not asked of a provider at filing, so staff add it
+	// (change log 2026-11-25 #1) -- correspondence needs an address, whatever the case's state.
+	case "respondent":
+		return true
 	case "eligibility", "document-requests": // a re-check needs the documents it asks for
 		return lock == lockIneligible
 	}

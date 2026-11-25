@@ -31,3 +31,19 @@
 .pf-problems{color:var(--danger-fg,#b42318);font-size:13px;margin:8px 0}
 .pf input[type=radio],.pf input[type=checkbox]{width:auto;min-width:0;padding:0}
 .pf-wrap,.pf,.pf-sec{min-width:0;max-width:100%}
+.pf-csv{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;font-size:14px;margin:4px 0 10px}
+.pf-csv-msg{flex-basis:100%;color:var(--text-secondary,#4a5160);font-size:13px}
+.pf-csv-msg:empty{display:none}
+.pf-csv[hidden]{display:none}
+.pf-req{color:var(--danger,#b42318);margin-left:2px;font-weight:600}
+.pf-req-hint{margin-bottom:4px}
+.pf[data-filer="1"][data-party="PROVIDER"] .pf-plan-contact{display:none}
+.pf-note{margin:8px 0 4px;padding:8px 10px;border-radius:8px;background:var(--warn-bg,#fff7e6);border:1px solid var(--warn-border,#f3d19e);font-size:13.5px}
+.pf-note[hidden]{display:none}
+.pf-file{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0;font-size:14px}
+.rb-optional{opacity:.6}.rb .pf-claims input{min-width:90px}.rb-spec{max-width:220px;margin-left:6px}
+.sig-pad{margin:10px 0 4px;display:flex;flex-direction:column;gap:6px;max-width:560px}
+.sig-pad canvas{width:100%;max-width:560px;height:auto;aspect-ratio:4/1;border:1px dashed var(--border-strong,#9aa3ad);border-radius:8px;background:#fff;touch-action:none;cursor:crosshair}
+.sig-pad .sig-clear{align-self:flex-start}
+.sig-label{font-size:14px}
+.sig-ro canvas{pointer-events:none;border-style:solid}.sig-ro .sig-clear{display:none}

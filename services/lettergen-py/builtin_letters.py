@@ -1082,6 +1082,182 @@ def build_plan_packet(ctx, logo):
 
 
 # key -> (builder, needs extra filename fields)
+# The filing packet as the filer entered it on the filing form (change log 2026-11-25 #8): a record kept on the case
+# under Intake, so the team can verify against exactly what was filed. Not a letter to anyone: no QA, never mailed.
+_ATTESTATION = [("interest_only", "This claim is not related to an interest payment."),
+                ("late_payment_only", "This claim is not related solely to an issue of prompt payment."),
+                ("medicare_grievance", "Not part of a Medicare MCO internal grievance or a Medicare reconsideration appeal."),
+                ("medicaid_fair_hearing", "Not part of a Medicaid fair hearing (42 CFR §431.220 et seq.)."),
+                ("pending_court_action", "Not the basis for an action pending in state or federal court."),
+                ("pre_2000_binding_process", "Not subject to a binding dispute process by a contract before October 1, 2000."),
+                ("internal_process_not_exhausted", "Not subject to a contractual internal dispute process, or that process is exhausted."),
+                ("over_12_months", "No more than 12 months since the final determination."),
+                ("rural_hospital", "Filed by a Rural Hospital (s. 395.602(2), F.S.).")]
+_DOCS = {"claim_forms": "Claim form(s)", "denials_eobs": "Denial(s) / EOBs", "florida_license": "Florida license",
+         "final_determination_letter": "Final determination letter", "contract": "Contract", "waiver_of_payment": "Waiver of payment form",
+         "notice_of_overpayment": "Notice of overpayment", "overpayment_response": "Response to notice of overpayment",
+         "medical_records": "Medical records", "coding_rules": "Coding rules / policies", "other": "Other"}
+
+
+def _signature(d, data_url: str, label: str = "Signature") -> None:
+    """A signature drawn on the portal (change log #7), printed where it was given."""
+    import base64 as _b64
+    if not data_url or not data_url.startswith("data:image/png;base64,"):
+        return
+    try:
+        png = _b64.b64decode(data_url.split(",", 1)[1])
+    except Exception:  # noqa: BLE001 -- a damaged image is left out, never a failed record
+        return
+    d.para(label + ":", size=9, space_after=0)
+    d.doc.add_picture(io.BytesIO(png), width=Inches(2.4))
+
+
+def build_filing_record(ctx, logo):
+    d0 = ctx["details"]
+    v = lambda k: "" if d0.get(k) in (None, "") else ("Yes" if d0.get(k) is True else "No" if d0.get(k) is False else str(d0.get(k)))
+    d = Letter(ctx, header_line=ctx["case_number"], logo=logo)
+    d.heading("FILING PACKET — AS FILED", center=True, space_after=2)
+    d.para(f"What the filing party entered on the online filing form for case {ctx['case_number']}"
+           f"{' on ' + long_date(ctx['opened_at']) if ctx.get('opened_at') else ''}. Kept for verification; not sent to anyone.",
+           align=WD_ALIGN_PARAGRAPH.CENTER)
+    party = "Health plan" if str(d0.get("filing_party_type", "")).upper() == "HEALTH_PLAN" else "Provider"
+    d.heading("Filing party and provider")
+    d.grid(["", ""], [[k, x] for k, x in [
+        ["Filing party", party], ["Provider", v("provider_org")], ["Legal entity", v("provider_legal_entity")],
+        ["Trade name", v("provider_trade_name")], ["Tax ID", v("provider_tin")], ["NPI", v("provider_npi")],
+        ["License no.", v("provider_license")],
+        ["Address", ", ".join(x for x in [v("provider_street"), v("provider_city"), v("provider_state"), v("provider_postal")] if x)],
+        ["Contact", v("provider_contact")], ["Telephone", v("provider_phone")], ["E-mail", v("provider_email")],
+        ["Provider type", v("packet_provider_type") + (f" — {v('provider_type_other')}" if v("provider_type_other") else "")]] if x],
+        widths=[2.0, 4.5], size=9)
+    d.heading("Health plan and the dispute")
+    d.grid(["", ""], [[k, x] for k, x in [
+        ["Health plan", v("health_plan")], ["Trade name", v("health_plan_trade_name")],
+        ["Health plan type", v("plan_type") + (f" — {v('plan_type_other')}" if v("plan_type_other") else "")],
+        ["Contracted with the plan", v("contracted")], ["Internal dispute process exhausted", v("internal_dispute_exhausted")],
+        ["Type of service", v("type_of_service") + (f" — {v('type_of_service_other')}" if v("type_of_service_other") else "")],
+        ["Number of claims", v("claims_submitted")],
+        ["Aggregated disputed amount", money(ctx["disputed_cents"]) if ctx.get("disputed_cents") else ""],
+        ["Full review fee estimate requested", v("fee_estimate_requested")]] if x],
+        widths=[2.4, 4.1], size=9)
+    with psycopg.connect(ctx["_dsn"]) as c:
+        rows = c.execute(
+            """SELECT claim_number, coalesce(nullif(trim(coalesce(patient_first_name,'')||' '||coalesce(patient_last_name,'')),''),''),
+                      coalesce(type_of_service,''), date_of_service, billed_cents, paid_cents, disputed_cents,
+                      date_claim_submitted, date_of_denial, date_of_final_determination
+               FROM public.case_claims WHERE tenant=%s AND case_id=%s ORDER BY claim_number LIMIT 500""",
+            (ctx["tenant"], ctx["case_id"])).fetchall()
+    ds = lambda x: x.strftime("%m/%d/%Y") if hasattr(x, "strftime") else (str(x) if x else "")
+    if rows:
+        d.heading(f"Claim(s) information — {len(rows)}")
+        d.grid(["Claim #", "Patient", "Service", "DOS", "Billed", "Paid", "In dispute", "Submitted", "Denied", "Final det."],
+               [[r[0], r[1], r[2], ds(r[3]), money(r[4]) if r[4] is not None else "", money(r[5]) if r[5] is not None else "",
+                 money(r[6]) if r[6] is not None else "", ds(r[7]), ds(r[8]), ds(r[9])] for r in rows], size=7)
+    for side, keys in (("Provider's position", ("provider_position_basis", "provider_position_references", "provider_position_rebuttal")),
+                       ("Health plan's position", ("plan_position_basis", "plan_position_references", "plan_position_rebuttal"))):
+        texts = [v(k) for k in keys if v(k)]
+        if texts:
+            d.heading(side)
+            for i, t in enumerate(texts, 1):
+                d.para(t, lead=f"{i}. ")
+    docs = d0.get("packet_documents_submitted") or []
+    if docs or v("documents_other"):
+        d.heading("Supporting documentation being submitted")
+        d.bullets([_DOCS.get(k, k) for k in docs] + ([f"Other: {v('documents_other')}"] if v("documents_other") else []))
+    att = d0.get("packet_attestation") or {}
+    if att:
+        d.heading("Eligibility attestation")
+        d.bullets([("☑ " if att.get(k) else "☐ ") + label for k, label in _ATTESTATION])
+        d.para(f"Certified: {v('attestation_certified') or 'No'} — {v('attested_by_name')}, {v('attested_by_title')}, {v('attested_on')}")
+        _signature(d, d0.get("attested_signature") or "")
+    if v("aor_representative"):
+        d.heading("Appointment of representative")
+        d.para(f"{v('aor_representative')} is appointed to act as the representative of the provider ({v('aor_provider')}) "
+               f"against {v('aor_health_plan')}. Signed: {v('aor_signed_by_name')}, {v('aor_signed_by_title')}, {v('aor_signed_on')}.")
+        _signature(d, d0.get("aor_signature") or "")
+    d.heading("Certification")
+    d.para(f"Agreed: {v('certification_agreed') or 'No'} — {v('certified_by_name')}, {v('certified_by_title')}, {v('certified_on')}")
+    _signature(d, d0.get("certified_signature") or "")
+    return d
+
+
+# The Responding Party Claim Rebuttal Form as the responding party filled it in on the portal (2026-11-25): kept on
+# the case under Correspondence for the team. Not a letter to anyone: no QA, never mailed.
+_REBUTTAL_EXCLUSIONS = [
+    ("interest_payment", "This claim is related to an interest payment."),
+    ("prompt_payment", "This claim is related solely to an issue of prompt payment."),
+    ("medicare_grievance", "Part of an internal grievance in a Medicare MCO or a Medicare reconsideration appeal."),
+    ("medicaid_fair_hearing", "Part of a Medicaid fair hearing (42 CFR §431.220 et seq.)."),
+    ("pending_court_action", "The basis for an action pending in state or federal court."),
+    ("pre_2000_binding", "Subject to a binding dispute process by a contract entered into before October 1, 2000."),
+    ("internal_not_exhausted", "Subject to a contractual internal dispute process (on or after October 1, 2000) not yet exhausted."),
+    ("over_12_months", "More than 12 months since the final determination by the Managed Care Organization."),
+    ("plan_not_fl_regulated", "This Health Plan is not regulated by the State of Florida."),
+]
+_REBUTTAL_DOCS = {"claim_forms": "Claims form(s) submitted to the Managed Care Organization",
+                  "denials_eobs": "Denial(s) / Explanation of Benefits", "final_determination": "Final Determination Letter / Decision",
+                  "contract": "Contract between Provider and Managed Care Organization", "medical_records": "Medical Records",
+                  "coding_rules": "Coding Rules / Policies", "other": "Other"}
+
+
+def build_rebuttal_record(ctx, logo):
+    rb = ctx["details"].get("responding_rebuttal") or {}
+    if not rb:
+        raise LetterDataMissing("no rebuttal form was submitted on this case")
+    g = lambda m, k: str((m or {}).get(k) or "").strip()
+    party, att, cert, pos, info = (rb.get(k) or {} for k in ("party", "attest_signature", "certification", "position", "claim_info"))
+    d = Letter(ctx, header_line=ctx["case_number"], logo=logo)
+    d.heading("RESPONDING PARTY CLAIM REBUTTAL FORM — AS SUBMITTED", center=True, space_after=2)
+    d.para(f"Florida AHCA Case Number {ctx['case_number']}. Submitted on the portal by {g(rb, 'submitted_by')}"
+           f"{' on ' + g(rb, 'submitted_at')[:10] if g(rb, 'submitted_at') else ''}. Kept for the review team; not sent to anyone.",
+           align=WD_ALIGN_PARAGRAPH.CENTER)
+    d.heading("Responding party")
+    rows = [["Legal name", g(party, "legal_name")], ["Trade name (d/b/a)", g(party, "trade_name")],
+            ["Address", ", ".join(x for x in [g(party, "address"), g(party, "city"), g(party, "state"), g(party, "zip")] if x)],
+            ["Product name", g(party, "product_name")], ["Contact person", g(party, "contact_person")],
+            ["Physical address", ", ".join(x for x in [g(party, "physical_address"), g(party, "physical_city"), g(party, "physical_state"), g(party, "physical_zip")] if x)],
+            ["Telephone", g(party, "phone")], ["Fax", g(party, "fax")], ["E-mail", g(party, "email")]]
+    d.grid(["", ""], [r for r in rows if r[1]], widths=[2.0, 4.5], size=9)
+    if rb.get("smmc") is True:
+        d.para("A Statewide Medicaid Managed Care (SMMC) contracted plan: it must participate.")
+    elif g(rb, "participate"):
+        d.para(f"Wishes to participate in the dispute process: {g(rb, 'participate').title()}. "
+               f"Challenges the eligibility of this claim: {g(rb, 'challenge_eligibility').title() or '—'}.")
+    if g(rb, "challenge_eligibility") == "yes":
+        ex = set(rb.get("exclusions") or [])
+        d.heading("Eligibility attestation")
+        d.bullets([("☑ " if k in ex else "☐ ") + label for k, label in _REBUTTAL_EXCLUSIONS])
+    d.para(f"Signed: {g(att, 'signature')} — {g(att, 'printed_name')}, {g(att, 'title')}, {g(att, 'date')}")
+    _signature(d, g(att, "drawn"))
+    if any(g(info, k) for k in ("claims_count", "dates_of_service", "type_of_service", "patient_names")):
+        d.heading("Claim information")
+        d.grid(["", ""], [[k, v] for k, v in [["Number of claims", g(info, "claims_count")], ["Date(s) of service", g(info, "dates_of_service")],
+                                              ["Type of service", g(info, "type_of_service")], ["Patient name(s)", g(info, "patient_names")]] if v],
+               widths=[2.0, 4.5], size=9)
+    texts = [g(pos, k) for k in ("basis", "references", "rebuttal") if g(pos, k)]
+    if texts:
+        d.heading("Position regarding this claim")
+        for i, t in enumerate(texts, 1):
+            d.para(t, lead=f"{i}. ")
+    docs = rb.get("documents") or []
+    if docs:
+        d.heading("Supporting documentation being submitted")
+        d.bullets([_REBUTTAL_DOCS.get(k, k) + (f" — {g(rb, k + '_specify')}" if g(rb, k + "_specify") else "") for k in docs])
+    if cert.get("agreed"):
+        d.heading("Certification")
+        d.para(f"Agreed and signed: {g(cert, 'signature')} — {g(cert, 'printed_name')}, {g(cert, 'title')}, {g(cert, 'date')}")
+        _signature(d, g(cert, "drawn"))
+    ws = rb.get("worksheet") or []
+    if ws:
+        m = lambda c: money(c) if isinstance(c, (int, float)) else ""
+        d.heading(f"Claim information worksheet — {len(ws)}")
+        d.grid(["Claim #", "Patient", "Service", "DOS", "Billed", "Paid", "In dispute", "Submitted", "Denied", "Grievance done"],
+               [[g(w, "claim_number"), g(w, "patient_name"), g(w, "type_of_service"), g(w, "date_of_service"), m(w.get("billed_cents")),
+                 m(w.get("paid_cents")), m(w.get("disputed_cents")), g(w, "date_claim_submitted"), g(w, "date_of_denial"),
+                 g(w, "date_grievance_completed")] for w in ws[:500]], size=7)
+    return d
+
+
 BUILDERS = {
     "final_order_rationale": build_decision_report,
     "cover_letter_final_notice": build_cover_letter,
@@ -1094,6 +1270,8 @@ BUILDERS = {
     "rfi_letter": build_rfi,
     "default_determination": build_default_determination,
     "fl_plan_packet": build_plan_packet,
+    "filing_record": build_filing_record,
+    "rebuttal_record": build_rebuttal_record,
 }
 
 
@@ -1104,6 +1282,7 @@ def has_builder(key: str) -> bool:
 def build(dsn: str, minio, template_bucket: str, tenant: str, case_id: str, key: str) -> tuple[bytes, dict]:
     """DOCX bytes for a built-in letter, and the extra fields its filename and subject use."""
     ctx = load_context(dsn, tenant, case_id)
+    ctx["_dsn"] = dsn
     logo = _logo(minio, template_bucket, tenant)
     if key == "invoice_health_plan":
         d, extra = build_invoice(ctx, "HEALTH_PLAN", logo)

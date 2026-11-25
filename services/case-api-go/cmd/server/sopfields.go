@@ -123,6 +123,8 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 		EstimateCents        *int64 `json:"full_review_estimate_cents"`
 		EstimateBasis        string `json:"estimate_basis"` // the Estimated Cost Matrix row the figure came from
 		CodingReviewRequired *bool  `json:"coding_review_required"`
+		// Which filing-packet facts the Coder checked against the packet itself (change log 2026-11-25 #10).
+		PacketVerified map[string]bool `json:"packet_verified"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
@@ -153,6 +155,9 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.CodingReviewRequired != nil {
 		sum["coding_review_required"] = *in.CodingReviewRequired
+	}
+	if len(in.PacketVerified) > 0 && len(in.PacketVerified) <= 40 {
+		sum["packet_verified"] = in.PacketVerified
 	}
 	if err := s.setDetailsPath(r, tenant, caseID, "dispute_summary", "", sum); err != nil {
 		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)

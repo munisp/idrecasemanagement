@@ -462,6 +462,12 @@ func (s *server) putDecisionReport(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "DECISION_REPORT_UPDATED",
 		"Decision report updated by "+displayName(p)+": "+strings.ReplaceAll(strings.Join(changed, ", "), "_", " "))
 	s.logAudit(r.Context(), tenant, caseID, "DECISION_REPORT_UPDATED", map[string]any{"by": p.Subject, "parts": changed})
+	// An updated version from the Coder or the Nurse / Physician goes to the Attorney (change log #14).
+	if hasAnyRole(p, "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE") && !hasAnyRole(p, "ATTORNEY") {
+		s.notifyRoles(r, tenant, caseID, "DECISION_LETTER_UPDATED",
+			fmt.Sprintf("Case %s: %s submitted an updated decision letter (%s)", s.caseNumberOf(r.Context(), tenant, caseID),
+				displayName(p), strings.ReplaceAll(strings.Join(changed, ", "), "_", " ")), "ATTORNEY")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "parts": changed})
 }
 
@@ -478,7 +484,7 @@ var (
 // lsFields: the settings an office may change, by group. Text only, each short.
 var lsFields = map[string][]string{
 	"letterhead": {"org_name", "org_short", "program_name", "program_title", "contractor_line", "state", "contact_email", "contact_phone"},
-	"agency":     {"email_salutation", "salutation", "line1", "line2", "line3", "line4"},
+	"agency":     {"email_salutation", "salutation", "line1", "line2", "line3", "line4", "emails"}, // emails: the AHCA members' addresses (change log #18)
 	"invoice":    {"payment_note", "bank_changed_notice", "account_use_note"},
 	"remit":      {"payee", "bank", "routing", "account", "remittance_email"},
 }
@@ -586,6 +592,13 @@ func (s *server) putLetterSettings(w http.ResponseWriter, r *http.Request) {
 			case g == "remit" && k == "account" && (!lsDigitsRE.MatchString(v) || len(v) < 4 || len(v) > 17):
 				bad("the account number is 4 to 17 digits")
 				return
+			case g == "agency" && k == "emails":
+				for _, e := range splitEmails(v) {
+					if !validMailbox(e) {
+						bad("agency.emails: " + e + " is not an email address")
+						return
+					}
+				}
 			case k == "remittance_email" || k == "contact_email":
 				if !strings.Contains(v, "@") || strings.ContainsAny(v, " ,;") {
 					bad(g + "." + k + " must be one email address")

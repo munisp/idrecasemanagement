@@ -38,7 +38,7 @@ import (
 // and the whole filing body is capped so an unbounded payload cannot be posted.
 const (
 	maxFilingNoteBytes = 5 << 20  // 5 MB of free-text notes
-	maxFilingBodyBytes = 10 << 20 // 10 MB for the whole filing (note + packet + fields)
+	maxFilingBodyBytes = 30 << 20 // the whole filing: note, packet, fields and the packet's attached PDFs (base64)
 )
 
 type tpaOrg struct {
@@ -541,7 +541,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
-	if packetRejected(w, in.Packet) {
+	if filerPacketRejected(w, in.Packet) {
 		return
 	}
 	answers, msg := s.filerEligibilityAnswers(r, tenant, in.ProviderType, in.InNetwork)
@@ -555,7 +555,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
-	if msg := emailReachMsg(r.Context(), "the health plan's email", rsp.Email); msg != "" {
+	if msg := emailReachMsg(r.Context(), "the health plan's email", rsp.Email); rsp.Email != "" && msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
@@ -828,6 +828,19 @@ func (s *server) fileTPADisputeOpt(r *http.Request, tenant string, org *tpaOrg, 
 		s.attachPackageDocsToCase(r, tenant, onboardingKinds["tpa"], packageID, caseID, "tpa:"+org.Name)
 	}
 	s.attachClientLetter(r, tenant, clientID, caseID, "tpa:"+org.Name)
+	s.attachStaffLetter(r, tenant, org.ID, caseID, "tpa:"+org.Name) // who at the TPA may act for it
+	// The person at the TPA who filed it, by the full name on their team record (a login name never matches the
+	// names on a letter), for the AOR check against the letter's named staff (aorCheck).
+	filer := uploaderName(r)
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok {
+		var full string
+		_ = s.db.QueryRow(r.Context(), `SELECT coalesce(full_name,'') FROM public.tpa_users WHERE tenant=$1 AND tpa_id=$2 AND user_sub=$3`, tenant, org.ID, p.Subject).Scan(&full)
+		if strings.TrimSpace(full) != "" {
+			filer = strings.TrimSpace(full)
+		}
+	}
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('filed_by_person', $2::text, 'filed_by_org', $3::text) WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID, filer, org.Name)
 	// Attribute the intake-fee payment row: paid by the TPA on behalf of the party.
 	_, _ = s.db.Exec(r.Context(), `
 		UPDATE public.payments SET payer_org=$3 WHERE tenant=$1 AND case_id=$2`,

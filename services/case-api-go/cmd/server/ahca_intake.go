@@ -43,7 +43,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // the filing packet form's positions can be long
+	r.Body = http.MaxBytesReader(w, r.Body, 30<<20) // the packet form, plus its attached PDFs (packet, AOR letter) in base64
 	var in struct {
 		Tenant              string        `json:"tenant"`
 		Email               string        `json:"email"`
@@ -69,7 +69,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
-	if packetRejected(w, in.Packet) {
+	if filerPacketRejected(w, in.Packet) {
 		return
 	}
 	fpt := strings.ToUpper(strings.TrimSpace(in.FilingPartyType))
@@ -85,7 +85,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
-	if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); msg != "" {
+	if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); rsp.Email != "" && msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}

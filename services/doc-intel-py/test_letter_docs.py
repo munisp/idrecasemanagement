@@ -28,6 +28,17 @@ Claim Number CPT Code Date of Service Zip Code Amount Billed UCR Pricing
 Based on the foregoing, Capitol Bridge recommends ... Capitol Bridge is awarding $640,000.00 or 92% of the
 disputed charge to the Provider."""
 
+OFFICE_DECISION = """CAPITOL BRIDGE LLC.
+FLORIDA PROVIDER AND HEALTH PLAN CLAIM DISPUTE RESOLUTION PROGRAM
+CASE NO: FL26-001263 CLAIM NO: QA-1001
+Capitol Bridge LLC (Capitol Bridge) recommends that the Health Plan's denial of payment for these services be partially overturned and the amount of $640,000.00 be awarded to the Provider, of which $53,155.54 was already paid to the Provider. Therefore, an additional amount of $586,844.46 be awarded to the Provider.
+Recommended Determination: Rationale: Coding Consultant Review: Independent Physician Review:
+"""
+
+OFFICE_INVOICE = """| External Review of Denied Claims Review costs: $3,220.92 Plan is responsible for 92% of the review cost per the determination in the Final Order (FL Admin Code R 59A-12.030(4)(b)) Capitol Bridge Case Number: FL26-001263 A $50 late charge will be added if payment is not received within 35 days. | $3,220.92 |
+Invoice # FL26-001263H Date prepared 11/25/2026 REMIT TO Total if paid after 35 days: $3,270.92 Total if paid after 65 days: $3,320.92
+"""
+
 OFFICE_COVER = """Florida AHCA Claims Dispute Resolution Contractor
 November 25, 2026
 Elizabeth DeMarco, Esq.
@@ -127,6 +138,16 @@ class Recognition(unittest.TestCase):
     def classify(self, name, text):
         import pipeline  # the classifier with every type's signals
         return pipeline.classify_text(name, text)[0]
+
+    def test_the_office_letters_read_back(self):
+        f, _ = ld.extract("fl_decision_report", OFFICE_DECISION)
+        self.assertEqual(f.get("awarded_cents"), 64_000_000)
+        self.assertEqual(f.get("already_paid_cents"), 5_315_554)
+        self.assertEqual(f.get("balance_cents"), 58_684_446)
+        f, _ = ld.extract("fl_review_invoice", OFFICE_INVOICE)
+        self.assertEqual((f.get("party"), f.get("responsible_pct")), ("HEALTH_PLAN", 92))
+        f, _ = ld.extract("fl_review_invoice", OFFICE_INVOICE.replace("Plan is responsible for 92%", "Provider is responsible for 8%"))
+        self.assertEqual((f.get("party"), f.get("responsible_pct")), ("PROVIDER", 8))
 
     def test_each_letter_classifies_as_itself(self):
         try:

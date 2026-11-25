@@ -64,6 +64,7 @@ type wfFacts struct {
 	OpenInvoices     int
 	ReportSaved      bool            // the decision report has been saved
 	Generated        map[string]bool // generated letter (lettergen template) -> a draft not rejected in QA
+	CopyRequested    bool            // a party asked for the Final Order Rationale Copy (change log 2026-11-25 #19)
 }
 
 var wfOwnerLabels = map[string]string{
@@ -145,6 +146,13 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		}
 	}
 
+	// The Final Order Rationale Copy goes to the parties only when one asks for it (change log 2026-11-25 #19): an
+	// optional last step, listed once requested on the case (details.final_order_copy_requested) or once begun.
+	finalOrderCopy := func() {
+		if f.CopyRequested || f.Letter["final_order_rationale_copy"] != "" {
+			letter("final_order_rationale_copy", "Final Order Rationale Copy (requested)", "CASE_MANAGER", "PM")
+		}
+	}
 	add("fee", "Initial fee paid", "FINANCE", "settle", f.Status != "AWAITING_PAYMENT",
 		"The filer pays by card, or Finance records a check/ACH against the invoice.")
 	add("packet", "Confirm the filing packet is complete", "CASE_MANAGER", "signal:PACKET_COMPLETE",
@@ -187,11 +195,15 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("estimate_confirm", "Confirm if Cost Estimate requested", "CASE_MANAGER", "signal:ESTIMATE_CONFIRMED",
 			has("ESTIMATE_CONFIRMED") || f.Letter["acceptance"] != "", "The filing packet's “estimate requested” box.")
 		steps[len(steps)-1].OwnerRoles = []string{"CASE_MANAGER", "PM"}
-		letter("acceptance", "Acceptance letter", "CASE_MANAGER", "PM")
+		if !estimate {
+			letter("acceptance", "Acceptance letter", "CASE_MANAGER", "PM")
+		}
 		if estimate {
 			add("estimate", "Record the full review cost estimate", "CODER", "summary", f.HasEstimate,
 				"Pick the figure from the Estimated Cost Matrix (Dispute Summary).")
-			letter("estimate_cost", "Full Review Estimated Cost email", "CODER", "PM")
+			// Change log 2026-11-25 #13: the Cost Estimate, then the acceptance -- both drafted, both through QA, and
+			// sent together (estimate first) once the second has passed. Approving the first holds it for the second.
+			estimatePair(f, add)
 			add("permission", "Record the provider's permission to proceed", "CASE_MANAGER", "signal:ESTIMATE_PERMISSION",
 				has("ESTIMATE_PERMISSION"), "15 calendar days; call and reply-all on day 13.")
 			if has("ESTIMATE_PERMISSION") && !flag("ESTIMATE_PERMISSION", "granted") {
@@ -229,22 +241,28 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
-		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
-			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
-		letter("final_order_rationale_copy", "Final Order copy to the parties", "CASE_MANAGER", "PM")
+		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
 			"Default Award, the health plan billed.")
+		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
+			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
 		add("payment", "Review costs paid", "FINANCE", "settle",
 			f.Internal == "Invoice Paid" || f.Internal == "Decided - Invoice Paid" || (f.ReviewInvoice && f.OpenInvoices == 0),
 			"The case closes when the invoices are paid.")
+		finalOrderCopy()
 		closing = true
 	}
 	if !withdrawn && !closing {
 		add("coding_review", "Coding review", "CODER", "signal:CODING_REVIEW_COMPLETE", has("CODING_REVIEW_COMPLETE"),
 			"Decide whether clinical review is needed.")
 		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") {
+			// Change log 2026-11-25 #15: the Coder's call on the scenario says who reviews with the Nurse / Physician.
+			hint := "Medical necessity: review it, and decide whether the external Medical Reviewer (a physician) is needed."
+			if strings.Contains(strings.ReplaceAll(f.Act["CODING_REVIEW_COMPLETE"].Body, " ", ""), `"review_scenario":"med_nec_coding"`) {
+				hint = "Medical necessity and coding: review it with the Coder, and decide whether the external Medical Reviewer (a physician) is needed."
+			}
 			add("clinical_review", "Clinical review", "NURSE_PHYSICIAN", "signal:CLINICAL_REVIEW_COMPLETE",
-				has("CLINICAL_REVIEW_COMPLETE"), "Add Clinical Review notes.")
+				has("CLINICAL_REVIEW_COMPLETE"), hint)
 			// Accounts made before NURSE_PHYSICIAN existed hold DOCTOR or NURSE.
 			steps[len(steps)-1].OwnerRoles = []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE"}
 		}
@@ -267,14 +285,15 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
-		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
-			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
-		letter("final_order_rationale_copy", "Final Order Rationale Copy", "CASE_MANAGER", "PM")
+		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
 			"Case Outcome, Number of Claims Reviewed, Final Amount Awarded, Party Billed.")
+		add("final_order_issued", "Record AHCA's Final Order", "CASE_MANAGER", "signal:FINAL_ORDER_ISSUED",
+			has("FINAL_ORDER_ISSUED") || f.Dates["date_final_order_sent"] != "", "")
 		add("payment", "Review costs paid", "FINANCE", "settle",
 			f.Internal == "Invoice Paid" || f.Internal == "Decided - Invoice Paid" || (f.ReviewInvoice && f.OpenInvoices == 0),
 			"The case closes when the invoices are paid.")
+		finalOrderCopy()
 	}
 	if withdrawn {
 		add("withdrawal_confirm", "Confirm the withdrawal request", "CASE_MANAGER", "signal:WITHDRAWAL_CONFIRMED",
@@ -424,6 +443,9 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 	}
 	if by, _ := details["outcome_recorded_by"].(string); by != "" {
 		f.HasOutcome = true
+	}
+	if v, _ := details["final_order_copy_requested"].(bool); v {
+		f.CopyRequested = true
 	}
 	if ac, ok := details["aor_confirmation"].(map[string]any); ok {
 		f.AORConfirmedAt, _ = time.Parse(time.RFC3339, fmt.Sprint(ac["at"]))
@@ -617,4 +639,30 @@ func (s *server) stepGuard(w http.ResponseWriter, r *http.Request, tenant, caseI
 		}
 	}
 	return true
+}
+
+// estimatePair: the Cost Estimate and the acceptance as one pair (change log 2026-11-25 #13): the Coder drafts the
+// estimate, the Reviewer the acceptance; the PM passes each in QA -- the first approval holds it -- and the second
+// approval sends both, the estimate first. Where the drafter sends (ReviewerSends), the estimate goes before the
+// acceptance.
+func estimatePair(f wfFacts, add func(key, label, owner, action string, done bool, hint string)) {
+	est, acc := f.Letter["estimate_cost"], f.Letter["acceptance"]
+	drafted := func(st string) bool { return st == "SENT" || st == "PENDING" || st == "APPROVED" }
+	passed := func(st string) bool { return st == "SENT" || st == "APPROVED" }
+	add("letter:estimate_cost", "Draft the Full Review Estimated Cost email", "CODER", "letter:estimate_cost", drafted(est),
+		"Compose it in Correspondence; it is held for QA and goes out with the acceptance.")
+	add("letter:acceptance", "Draft the Acceptance letter", "CASE_MANAGER", "letter:acceptance", drafted(acc),
+		"Compose it in Correspondence; it goes out right after the Cost Estimate.")
+	if f.ReviewerSends {
+		add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "PM", "qa:estimate_cost", passed(est), "")
+		add("qa:acceptance", "QA the Acceptance letter", "PM", "qa:acceptance", passed(acc), "")
+		add("send:estimate_cost", "Send the Full Review Estimated Cost email", "CODER", "send:estimate_cost", est == "SENT",
+			"The Cost Estimate goes first, then the acceptance.")
+		add("send:acceptance", "Send the Acceptance letter", "CASE_MANAGER", "send:acceptance", acc == "SENT", "")
+		return
+	}
+	add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "PM", "qa:estimate_cost", passed(est),
+		"Approving it holds it until the acceptance has passed QA too.")
+	add("qa:acceptance", "QA the Acceptance letter — both go out together", "PM", "qa:acceptance", acc == "SENT",
+		"Approving it sends the Cost Estimate, then the acceptance.")
 }

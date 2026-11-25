@@ -88,7 +88,7 @@ func buildDocSteps(f wfFacts, steps []wfStep) wfDoc {
 		add(conf)
 		if estimate {
 			add(wfDocStep{Title: "Acceptance and Cost Estimate issued", Detail: "On or before day 13",
-				Keys: keys(letter("acceptance"), []string{"estimate"}, letter("estimate_cost")), Clock: "INITIAL_REVIEW"})
+				Keys: keys([]string{"estimate"}, letter("estimate_cost"), letter("acceptance")), Clock: "INITIAL_REVIEW"})
 			add(wfDocStep{Title: "Provider submits authorization/permission", Detail: "Within 15 calendar days", Keys: []string{"permission"}, Clock: "PROVIDER_PERMISSION"})
 			if dismissed && !withdrawn {
 				workflow = "6. Dismissal Workflow"
@@ -123,10 +123,12 @@ func buildDocSteps(f wfFacts, steps []wfStep) wfDoc {
 			add(wfDocStep{Title: "No response received from Health Plan", done: true})
 			add(wfDocStep{Title: "Default Determination issued",
 				Keys: keys([]string{"coding_review", "clinical_review", "attorney_review", "invoice", "report_save", "report_generate",
-					"report_cover_letter", "report_plan_invoice"}, letter("final_order")), Clock: "AGENCY_RECOMMENDATION"})
+					"report_cover_letter", "report_plan_invoice"}, letter("final_order"), []string{"outcome"}), Clock: "AGENCY_RECOMMENDATION"})
 			add(wfDocStep{Phase: phase4, Title: "Await Final Order from AHCA", Detail: "Typically issued within 30 days",
-				Keys: keys([]string{"final_order_issued"}, letter("final_order_rationale_copy"), []string{"outcome"}), Clock: "FINAL_ORDER"})
+				Keys: []string{"final_order_issued"}, Clock: "FINAL_ORDER"})
 			add(wfDocStep{Title: "Invoice cycle begins", Detail: "35-day payment timeframe", Keys: []string{"payment"}})
+			add(wfDocStep{Title: "Final Order Rationale Copy", Detail: "Only if a party requests it", State: "optional",
+				Keys: letter("final_order_rationale_copy")})
 		default:
 			workflow = map[bool]string{true: "1. Acceptance Workflow (Cost Estimate Requested)", false: "2. Acceptance Workflow (No Cost Estimate Requested)"}[estimate]
 			if responded {
@@ -150,11 +152,15 @@ func buildDocSteps(f wfFacts, steps []wfStep) wfDoc {
 				Keys: []string{"attorney_review"}, Clock: attorneyClock})
 			add(wfDocStep{Title: "Program Manager (PM) review", Detail: "Target review period: 5 days",
 				Keys: []string{"invoice", "report_save", "report_generate", "report_cover_letter", "report_plan_invoice"}, Clock: "PM_REVIEW"})
+			// Change log 2026-11-25 #20: the outcome and party billed are the last task of submitting the determination.
 			add(wfDocStep{Phase: phase4, Title: "Determination submitted to AHCA", Detail: "Issued on or before the 60-day turnaround time requirement",
-				Keys: letter("final_order"), Clock: "AGENCY_RECOMMENDATION"})
+				Keys: keys(letter("final_order"), []string{"outcome"}), Clock: "AGENCY_RECOMMENDATION"})
 			add(wfDocStep{Title: "Await Final Order from AHCA", Detail: "Typically issued within 30 days",
-				Keys: keys([]string{"final_order_issued"}, letter("final_order_rationale_copy"), []string{"outcome"}), Clock: "FINAL_ORDER"})
+				Keys: []string{"final_order_issued"}, Clock: "FINAL_ORDER"})
 			add(wfDocStep{Title: "Invoice cycle begins", Detail: "35-day payment timeframe", Keys: []string{"payment"}})
+			// #19: the copy to the parties only when one asks for it -- an optional step at the end.
+			add(wfDocStep{Title: "Final Order Rationale Copy", Detail: "Only if a party requests it", State: "optional",
+				Keys: letter("final_order_rationale_copy")})
 		}
 	}
 	if workflow == "" {

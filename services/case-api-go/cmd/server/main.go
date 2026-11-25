@@ -404,6 +404,7 @@ type server struct {
 	tb        tb.Client
 	docs      *docStore
 	rds       *redisClient // cache + idempotency (fail-open)
+	limits    apiLimits    // per-caller API rate limits (ratelimit.go)
 	permify   string       // Permify base URL ("" = ReBAC check disabled, dev mode)
 	// graphBackends: the Entity 360 relationship-graph provider chain
 	// (GRAPH_BACKENDS — sql | age | falkordb; sql always last). See
@@ -562,11 +563,11 @@ func main() {
 	must(err)
 
 	s := &server{cfg: cfg, db: pool, tc: tc, tb: tbc, docs: docs, rds: rds,
-		permify: envOr("PERMIFY_URL", "")}
+		permify: envOr("PERMIFY_URL", ""), limits: loadAPILimits()}
 	s.graphBackends = buildGraphBackends(pool, s)
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer, rejectMalformed, instrument)
+	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer, rejectMalformed, instrument, s.publicRateLimit)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	// Metrics run on a DEDICATED listener (default :9091), never on the API
@@ -579,7 +580,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, noteActor, tenancy, s.apiKeyGuard, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
+		r.Use(a.middleware, noteActor, tenancy, s.apiKeyGuard, s.apiRateLimit, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases/prefill", s.casePrefill)      // prefill suggestions for the initiation form
 		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
@@ -611,7 +612,11 @@ func main() {
 
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
-		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket)                        // the filing packet form (filing_packet.go)
+		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket) // the filing packet form (filing_packet.go)
+		r.Get("/cases/{caseId}/aor-check", s.aorCheck)
+		r.Post("/cases/{caseId}/archive", s.archiveCase)            // archive the case documentation (case_archive.go)              // the AOR letters' named people vs who filed (tpa_staff_letter.go)
+		r.Get("/cases/{caseId}/respondent", s.getRespondentContact) // the other side's notice contact (respondents.go)
+		r.Put("/cases/{caseId}/respondent", s.setRespondentContact)
 		r.Get("/cases/{caseId}/change-requests", s.caseChangeRequests)                   // the filer's change requests + history (tpa_filing.go)
 		r.Post("/cases/{caseId}/change-requests/{requestId}/decide", s.caseChangeDecide) // approve (applied) or reject
 		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)
@@ -857,6 +862,7 @@ func main() {
 		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Reviewer: outcome, claims reviewed, award, party billed
 		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                              // the written decision: sections, amounts, claims tables
 		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
+		r.Post("/cases/{caseId}/revision-request", s.requestRevisions)         // the Attorney (or QA) asks the Coder / Nurse for revisions (role_notify.go)
 		r.Post("/cases/{caseId}/decision-report/file", s.attachDecisionReport) // the finished report, uploaded
 		r.Get("/letter-settings", s.getLetterSettings)                         // letterhead, Agency addressee, invoice terms, remit-to
 		r.Put("/letter-settings", s.putLetterSettings)
@@ -885,6 +891,9 @@ func main() {
 		r.Post("/tpa/clients/{clientId}/authorization-letter", s.tpaLetterUpload) // the client's letter of authorization (tpa_client_letter.go)
 		r.Get("/tpa/clients/{clientId}/authorization-letter", s.tpaLetterGet)
 		r.Delete("/tpa/clients/{clientId}/authorization-letter", s.tpaLetterRemove)
+		r.Post("/tpa/staff-letter", s.tpaStaffLetterUpload) // the TPA's own staff authorization letter (tpa_staff_letter.go)
+		r.Get("/tpa/staff-letter", s.tpaStaffLetterGet)
+		r.Delete("/tpa/staff-letter", s.tpaStaffLetterRemove)
 		r.Post("/tpa/clients/{clientId}/payments", s.tpaAddPayment) // CARD/ACH rail
 		r.Get("/tpa/clients/{clientId}/payments", s.tpaListPayments)
 		r.Post("/tpa/clients/{clientId}/packages", s.tpaCreatePackage)
@@ -984,11 +993,12 @@ func main() {
 		r.Post("/hp/intake", s.hpIntake)
 		r.Get("/admin/healthplans", s.adminListHealthPlans)
 		r.Post("/admin/healthplans/{planId}/status", s.adminSetHealthPlanStatus)
-		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
-		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)       // grounded advisory brief (Phase 1 copilot)
-		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)  // latest persisted brief
-		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
-		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)   // Assistant thread (conversational surface, private per worker)
+		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility)    // auto-adjudicate from case+doc data (Lever 1)
+		r.Get("/cases/{caseId}/eligibility/inputs", s.eligibilityInputs) // the derived inputs, no decision (form prefill)
+		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)          // grounded advisory brief (Phase 1 copilot)
+		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)     // latest persisted brief
+		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)          // Phase 2: QA-gated determination/correspondence drafts
+		r.Get("/cases/{caseId}/copilot/chat", s.copilotChatHistory)      // Assistant thread (conversational surface, private per worker)
 		r.Post("/cases/{caseId}/copilot/chat", s.copilotChat)
 		r.Post("/cases/{caseId}/copilot/chat/log", s.copilotChatLog) // fast-path intents: persist without calling the model
 		r.Get("/cases/{caseId}/copilot/chat/shares", s.copilotListThreadShares)
@@ -1110,7 +1120,7 @@ func main() {
 	// /tenant/<st> group membership, which is exactly what this creates) --
 	// auth only, then an inline FEDERAL_ADMIN/PLATFORM_ADMIN role check.
 	r.Route("/v1/admin", func(r chi.Router) {
-		r.Use(a.middleware, noteActor)
+		r.Use(a.middleware, noteActor, s.apiRateLimit)
 		r.Post("/tenants", s.createTenant)
 		r.Put("/tenants/{tenant}/features", s.setTenantFeatures)
 		r.Get("/mail-setup", s.mailSetup) // is mail set up: Resend domain, DNS, webhook, Outlook app (mailsetup.go)
@@ -1825,6 +1835,17 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
+	// Change log 2026-11-25 #15: a clinical review that needed the external Medical Reviewer names them and their findings.
+	if body.Signal == "CLINICAL_REVIEW_COMPLETE" {
+		if v, _ := body.Data["medical_reviewer_required"].(bool); v {
+			name, _ := body.Data["medical_reviewer"].(string)
+			found, _ := body.Data["medical_reviewer_findings"].(string)
+			if strings.TrimSpace(name) == "" || strings.TrimSpace(found) == "" {
+				http.Error(w, `{"error":"the Medical Reviewer was needed: name them and record their findings"}`, http.StatusBadRequest)
+				return
+			}
+		}
+	}
 	// Unmapped signals (PACKET_COMPLETE, OUTREACH_DONE, PROVIDER_WITHDRAW,
 	// AOR_REVISED, ESTIMATE_PERMISSION, PLAN_RESPONSE_RECEIVED, RFI_SENT,
 	// RFI_RESPONSE_RECEIVED, FINAL_ORDER_ISSUED) default to the broad
@@ -1947,6 +1968,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return false
 	}
+	s.notifyOnSignal(r, tenant, id, signal, data) // change log 2026-11-25 #14/#24 (role_notify.go)
 	// The Reviewer tells the Coder and the Attorney the packet is in: the
 	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
 	if signal == "PACKET_COMPLETE" {
