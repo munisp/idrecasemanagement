@@ -31,3 +31,6 @@
 .pf-problems{color:var(--danger-fg,#b42318);font-size:13px;margin:8px 0}
 .pf input[type=radio],.pf input[type=checkbox]{width:auto;min-width:0;padding:0}
 .pf-wrap,.pf,.pf-sec{min-width:0;max-width:100%}
+.pf-csv{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;font-size:14px;margin:4px 0 10px}
+.pf-csv-msg{flex-basis:100%;color:var(--text-secondary,#4a5160);font-size:13px}
+.pf-csv-msg:empty{display:none}

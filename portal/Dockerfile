@@ -12,5 +12,5 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # step.
 RUN v=$(date -u +%Y%m%d%H%M%S) && \
     sed -i "s/__BUILD_VERSION__/$v/" /usr/share/nginx/html/sw.js && \
-    sed -i "s/__BUILD_VERSION__/$v/g" /usr/share/nginx/html/app.html
+    sed -i "s/__BUILD_VERSION__/$v/g" /usr/share/nginx/html/app.html /usr/share/nginx/html/dispute.html
 EXPOSE 80

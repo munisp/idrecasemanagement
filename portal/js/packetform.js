@@ -144,7 +144,11 @@ window.PacketForm = (() => {
         <div class="pf-grid">${text(d, "claims_submitted", "Number of claims included", 'type="number" min="0" step="1"')}
           <label>Aggregated disputed amount ($) <input name="disputed_amount" inputmode="decimal" placeholder="0.00" value="${esc(money(values.disputed_amount_cents))}" /></label></div></fieldset>
       <fieldset class="pf-sec"><legend>Claim(s) information</legend>
-        <p class="pf-hint">One row per claim. More than a few dozen claims? Attach them as a spreadsheet with the documents instead.</p>
+        <p class="pf-hint">One row per claim. Many claims? Upload them from a CSV file (up to ${MAX_CLAIMS}), then check the rows below — you can still add or remove claims by hand.</p>
+        <div class="pf-csv"><label>Upload claims from a CSV file <input type="file" accept=".csv,text/csv"
+          onchange="PacketForm.claimsFromCsv(this)" /></label>
+          <a href="#" class="pf-csv-template" onclick="PacketForm.csvTemplate(event)">Download the CSV template</a>
+          <span class="pf-csv-msg" aria-live="polite"></span></div>
         <div class="pf-scroll"><table class="pf-claims"><thead><tr>${CLAIM_COLS.map(([, l]) => `<th>${esc(l)}</th>`).join("")}<th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>
         <button type="button" class="pf-add" onclick="PacketForm.addRow(this)">Add a claim</button></fieldset>
@@ -211,6 +215,142 @@ window.PacketForm = (() => {
     const tr = btn.closest("tr"), pf = btn.closest(".pf");
     if (tr.dataset.orig) pf.dataset.removed = [...(pf.dataset.removed ? pf.dataset.removed.split("\n") : []), tr.dataset.orig].join("\n");
     tr.remove();
+  }
+
+  // Claims from a CSV file, read in the browser (nothing is uploaded): the rows land in the claims table, where the
+  // filer checks them and can still add or remove claims by hand. The first row names the columns -- the template's
+  // headings, or common variants of them (Claim Number, DOS, Billed, ...).
+  const MAX_CLAIMS = 500; // filing_packet.go refuses more rows than this
+  const CSV_HEADINGS = {
+    claim_number: ["claim", "claimno", "claimnumber", "claimid"],
+    patient_name: ["patient", "patientname", "member", "membername"],
+    patient_first_name: ["patientfirstname", "firstname", "memberfirstname"],
+    patient_last_name: ["patientlastname", "lastname", "memberlastname"],
+    type_of_service: ["typeofservice", "service", "servicetype"],
+    date_of_service: ["dateofservice", "dos", "servicedate"],
+    billed: ["amountbilled", "billed", "billedamount", "charges", "totalcharges"],
+    paid: ["amountpaid", "paid", "paidamount"],
+    disputed: ["amountindispute", "disputed", "disputedamount", "amountdisputed", "indispute"],
+    date_claim_submitted: ["dateclaimsubmitted", "submitted", "datesubmitted", "submitteddate", "submissiondate"],
+    date_of_denial: ["dateofdenial", "denialdate", "denied", "datedenied"],
+    date_of_final_determination: ["dateoffinaldetermination", "finaldeterminationdate", "finaldetermination"],
+  };
+  const headingKey = (h) => {
+    const n = String(h).toLowerCase().replace(/#/g, "no").replace(/[^a-z0-9]/g, "");
+    return Object.keys(CSV_HEADINGS).find((k) => CSV_HEADINGS[k].includes(n)) || null;
+  };
+  // RFC 4180: quoted fields, doubled quotes, line breaks inside quotes; comma, semicolon or tab separated.
+  function parseCsv(text) {
+    const t = String(text).replace(/^﻿/, "");
+    const first = t.split(/\r?\n/).find((l) => l.trim()) || "";
+    const sep = [",", ";", "\t"].reduce((a, b) => (first.split(b).length > first.split(a).length ? b : a), ",");
+    const rows = []; let row = [], cell = "", q = false;
+    for (let i = 0; i < t.length; i++) {
+      const ch = t[i];
+      if (q) {
+        if (ch === '"' && t[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch;
+      } else if (ch === '"' && cell === "") q = true;
+      else if (ch === sep) { row.push(cell); cell = ""; }
+      else if (ch === "\n" || ch === "\r") {
+        if (ch === "\r" && t[i + 1] === "\n") i++;
+        row.push(cell); rows.push(row); row = []; cell = "";
+      } else cell += ch;
+    }
+    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+    return rows.map((r) => r.map((c) => c.trim())); // blank lines kept, so messages can name the file's own line numbers
+  }
+  const realDate = (iso) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ""), d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    return d && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3] ? iso : "";
+  };
+  // "1,250.00", "$1250", "(40.00)" (negative), and "12,50" (a decimal comma, as European spreadsheets save it).
+  const csvCents = (s) => {
+    let v = String(s).trim().replace(/^\((.*)\)$/, "-$1");
+    if (/^-?[$€£]?\s*\d{1,3}(\.\d{3})*,\d{2}$|^-?[$€£]?\s*\d+,\d{2}$/.test(v)) v = v.replace(/\./g, "").replace(",", ".");
+    return toCents(v.replace(/[€£]/g, ""));
+  };
+  // {claims, problems} from the CSV's text. Dates are MM/DD/YYYY or YYYY-MM-DD; amounts like 1,250.00 or $1250.
+  function claimsFromCsvText(text) {
+    const rows = parseCsv(text), problems = [], claims = [];
+    const h = rows.findIndex((r) => r.some(Boolean));
+    if (h < 0) return { claims, problems: ["The file is empty."] };
+    const keys = rows[h].map(headingKey);
+    if (!keys.includes("claim_number")) {
+      return { claims, problems: ["The first row must name the columns, with a Claim # column — download the CSV template to see them."] };
+    }
+    rows.forEach((r, i) => {
+      if (i <= h) return;
+      const line = i + 1, v = {};
+      keys.forEach((k, j) => { if (k && r[j] != null && r[j] !== "") v[k] = r[j]; });
+      if (!Object.keys(v).length) return;
+      if (!v.claim_number) { problems.push(`Row ${line}: no claim #, skipped`); return; }
+      const c = { claim_number: v.claim_number.slice(0, 60), type_of_service: v.type_of_service || "",
+        patient_name: v.patient_name || [v.patient_first_name, v.patient_last_name].filter(Boolean).join(" ") };
+      for (const k of ["date_of_service", "date_claim_submitted", "date_of_denial", "date_of_final_determination"]) {
+        if (!v[k]) continue;
+        c[k] = realDate(isoDate(v[k]));
+        if (!c[k]) problems.push(`Row ${line} (claim ${c.claim_number}): "${v[k]}" is not a date — left blank`);
+      }
+      for (const [k, col] of [["billed_cents", "billed"], ["paid_cents", "paid"], ["disputed_cents", "disputed"]]) {
+        if (!v[col]) continue;
+        const cents = csvCents(v[col]);
+        if (Number.isNaN(cents)) problems.push(`Row ${line} (claim ${c.claim_number}): "${v[col]}" is not an amount — left blank`);
+        else c[k] = cents;
+      }
+      claims.push(c);
+    });
+    return { claims, problems };
+  }
+  async function claimsFromCsv(input) {
+    const sec = input.closest(".pf-sec"), pf = input.closest(".pf"), msg = sec.querySelector(".pf-csv-msg"), file = input.files[0];
+    if (!file) return;
+    msg.textContent = "Reading the file…";
+    try {
+      if (file.size > 2 << 20) throw new Error("That file is too large — a CSV of up to 500 claims is well under 2 MB.");
+      const { claims, problems } = claimsFromCsvText(await file.text());
+      const tb = sec.querySelector("tbody");
+      const filled = (tr) => [...tr.querySelectorAll("input[data-col]")].some((x) => x.value.trim());
+      tb.querySelectorAll("tr.pf-claim").forEach((tr) => { if (!filled(tr)) tr.remove(); });
+      const have = new Set([...tb.querySelectorAll('input[data-col="claim_number"]')].map((x) => x.value.trim()).filter(Boolean));
+      let added = 0, dup = 0, over = 0;
+      for (const c of claims) {
+        if (have.has(c.claim_number)) { dup++; continue; }
+        if (have.size >= MAX_CLAIMS) { over++; continue; }
+        tb.insertAdjacentHTML("beforeend", claimRow(c));
+        tb.lastElementChild.dataset.orig = ""; // a new row, not a saved claim being edited
+        have.add(c.claim_number); added++;
+      }
+      // Fill the totals the filer hasn't typed themselves.
+      const count = pf.querySelector('[name="d.claims_submitted"]'), amount = pf.querySelector('[name="disputed_amount"]');
+      if (count && (!count.value || count.dataset.fromCsv === count.value)) { count.value = String(have.size); count.dataset.fromCsv = count.value; }
+      if (amount && (!amount.value || amount.dataset.fromCsv === amount.value)) {
+        let sum = 0, any = false;
+        tb.querySelectorAll('input[data-col="disputed"]').forEach((x) => { const c = toCents(x.value); if (c != null && !Number.isNaN(c)) { sum += c; any = true; } });
+        if (any) { amount.value = money(sum); amount.dataset.fromCsv = amount.value; }
+      }
+      pf.dataset.touched = "1";
+      const notes = [`Added ${added} claim${added === 1 ? "" : "s"} from ${file.name}.`];
+      if (dup) notes.push(`${dup} already in the table, skipped.`);
+      if (over) notes.push(`${over} over the ${MAX_CLAIMS}-claim limit, not added — file the rest as a separate dispute or attach them as a spreadsheet.`);
+      if (problems.length) notes.push(problems.slice(0, 5).join("; ") + (problems.length > 5 ? `; and ${problems.length - 5} more` : "") + ".");
+      if (added) notes.push("Check the rows below before you send.");
+      msg.textContent = notes.join(" ");
+    } catch (e) {
+      msg.textContent = e.message || "Could not read that file.";
+    } finally {
+      input.value = ""; // picking the same file again re-reads it
+    }
+  }
+  function csvTemplate(ev) {
+    ev.preventDefault();
+    const head = CLAIM_COLS.map(([, label]) => label);
+    const example = ["ABC123456", "Jane Doe", "Emergency room visit", "01/15/2026", "1250.00", "300.00", "950.00", "02/01/2026", "03/01/2026", "04/15/2026"];
+    const csv = [head, example].map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(",")).join("\r\n") + "\r\n";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = "claims-template.csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   function splitTinNpi(v) {
@@ -356,5 +496,6 @@ window.PacketForm = (() => {
     } catch (e) { msg.textContent = e.message; }
   }
 
-  return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS };
+  return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS,
+    claimsFromCsv, claimsFromCsvText, csvTemplate };
 })();
