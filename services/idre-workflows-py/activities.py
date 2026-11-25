@@ -10,6 +10,9 @@ import os
 import httpx
 import psycopg
 from temporalio import activity
+
+from case_guard import ensure_case
+
 # Same switch as case-api/doc-intel/lettergen: two deployments on one Kafka
 # broker need different prefixes or they read each other's events.
 TOPIC_PREFIX = os.environ.get("TOPIC_PREFIX", "idre")
@@ -34,6 +37,7 @@ def _conn():
 
 @activity.defn
 async def set_case_status(tenant: str, case_id: str, status: str, reason: str = "") -> None:
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         c.execute(f"SET search_path TO tenant_{tenant}, public")
         c.execute(
@@ -78,6 +82,7 @@ async def request_lawful_reveal(tenant: str, case_id: str) -> None:
     call target never existed and every reveal-stage workflow would have
     retried a 404 forever.)
     """
+    await ensure_case(DSN, tenant, case_id)
     # reveal-check is gated on the vault's internal token (X-Internal-Auth),
     # which compose wires to this worker for exactly this call.
     headers = {"X-Internal-Auth": os.environ.get("VAULT_INTERNAL_TOKEN", "")}
@@ -112,6 +117,7 @@ async def flag_cms_breach(tenant: str, case_id: str, clock: str, detail: str) ->
     """Statutory breach → CMS report + ESCALATION (supervisor notification chain).
     Also emits a tenant-outbox event so the breach reaches the lakehouse
     (bronze -> silver/sla_breaches feeds the CMS monthly report job)."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         c.execute(
             "INSERT INTO public.sla_breaches (tenant, case_id, clock, detail) VALUES (%s,%s,%s,%s)",

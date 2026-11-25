@@ -94,7 +94,7 @@ func (s *server) inviteParty(w http.ResponseWriter, r *http.Request) {
 		"%s,\n\nYou have been given access to IDR case %s as the %s party.\nSign in at %s with username %s.\n\n"+
 			"Federal IDR process: 45 CFR Part 149. Your offer, once submitted, is cryptographically sealed until both parties have submitted or the window closes.\n",
 		in.Name, caseNumber, in.PartyID, s.cfg.PortalBaseURL, username)
-	_ = s.sendMail([]string{in.Email}, nil, "IDR case access: "+caseNumber, mailBody)
+	_ = s.sendMail(tenant, []string{in.Email}, nil, "IDR case access: "+caseNumber, mailBody)
 	s.logActivity(r.Context(), tenant, caseID, "PARTY_INVITED",
 		fmt.Sprintf("Party account %s invited as %s by %s", in.Email, in.PartyID, p.Subject))
 	s.logAudit(r.Context(), tenant, caseID, "PARTY_INVITED", map[string]any{
@@ -171,7 +171,7 @@ func (s *server) partyCaseDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	invoices, _ := s.queryRows(r, `
 		SELECT id, invoice_no, party, kind, amount_cents, status, due_date, paid_at
-		FROM public.invoices WHERE tenant=$1 AND case_id=$2 ORDER BY created_at`, tenant, caseID)
+		FROM public.invoices WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC`, tenant, caseID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"case": detail, "your_party": partyID,
 		"determination": det, "invoices": invoices,
@@ -192,7 +192,7 @@ func (s *server) listPartyAccounts(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	rows, err := s.queryRows(r, `
 		SELECT id, party_id, email, invited_by, created_at
-		FROM public.party_accounts WHERE tenant=$1 AND case_id=$2 ORDER BY created_at`,
+		FROM public.party_accounts WHERE tenant=$1 AND case_id=$2 ORDER BY created_at DESC`,
 		tenant, chi.URLParam(r, "caseId"))
 	if err != nil {
 		slog.Error("query failed", "handler", "party.go", "err", err)

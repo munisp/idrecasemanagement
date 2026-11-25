@@ -28,12 +28,16 @@ import (
 // nobody did anything.
 var orgAuditQuiet = map[string]bool{
 	"POST /presence/ping": true, "GET /notifications": true, "GET /program": true, "GET /prefs": true, "PUT /prefs": true,
+	"GET /drafts/{form}": true, "PUT /drafts/{form}": true, "DELETE /drafts/{form}": true,
+	"GET /drafts": true, "POST /drafts/{form}": true, "GET /drafts/{form}/{draftId}": true, "PUT /drafts/{form}/{draftId}": true, "DELETE /drafts/{form}/{draftId}": true,
 	// A resumable upload's chunks: the upload is recorded once, where it is used.
 	"PATCH /uploads/{uploadId}": true, "GET /uploads/{uploadId}": true, "HEAD /uploads/{uploadId}": true, "GET /upload-policy": true,
 }
 
 // orgActionLabels say in words what an action was, for the organization's log.
 var orgActionLabels = map[string]string{
+	"GET /tpa/api-keys": "Viewed API keys", "POST /tpa/api-keys": "API key created", "DELETE /tpa/api-keys/{keyId}": "API key revoked",
+	"GET /hp/api-keys": "Viewed API keys", "POST /hp/api-keys": "API key created", "DELETE /hp/api-keys/{keyId}": "API key revoked",
 	"GET /tpa/me": "Opened the TPA page", "GET /tpa/dashboard": "Viewed the disputes list", "GET /tpa/clients": "Viewed the clients",
 	"GET /tpa/onboarding": "Viewed client onboarding", "GET /tpa/fees": "Viewed fees owed",
 	"GET /tpa/disputes/bulk": "Viewed bulk filings", "GET /tpa/disputes/bulk/{batchId}": "Opened a bulk filing",
@@ -42,9 +46,11 @@ var orgActionLabels = map[string]string{
 	"POST /tpa/invite-code": "Generated a teammate invite code", "POST /tpa/clients": "Added a client",
 	"POST /tpa/clients/import": "Imported clients from CSV", "PUT /tpa/clients/{clientId}/profile": "Updated a client's profile",
 	"POST /tpa/clients/{clientId}/payments": "Added a client payment method", "POST /tpa/clients/{clientId}/status": "Changed a client's status",
-	"POST /tpa/clients/{clientId}/packages": "Started a document package", "POST /tpa/packages/{packageId}/docs": "Uploaded a package document",
+	"POST /tpa/clients/{clientId}/packages": "Started a document package", "POST /tpa/packages/{packageId}/docs": "Uploaded a package document", "DELETE /tpa/packages/{packageId}/docs/{slot}": "Removed a package document",
 	"POST /tpa/packages/{packageId}/merged": "Uploaded a merged package PDF", "POST /tpa/packages/bulk": "Uploaded packages in bulk",
 	"POST /tpa/intake": "Filed a dispute", "PATCH /tpa/disputes/{caseId}": "Corrected a dispute",
+	"GET /tpa/disputes/{caseId}/filing": "Opened a dispute's filing", "PUT /tpa/disputes/{caseId}/filing": "Edited a dispute's filing",
+	"POST /tpa/disputes/{caseId}/change-requests": "Asked to change a dispute", "DELETE /tpa/disputes/{caseId}/change-requests/{requestId}": "Withdrew a change request",
 	"POST /tpa/disputes/bulk": "Uploaded a bulk filing", "POST /tpa/disputes/bulk/{batchId}/checkout": "Started payment for a bulk filing",
 	"POST /tpa/fees/checkout": "Started payment for all unpaid fees",
 	"GET /hp/me":              "Opened the health plan page", "GET /hp/onboarding": "Viewed party onboarding",
@@ -90,6 +96,7 @@ var orgEventLabels = map[string]string{
 	"DOCUMENTS_REQUESTED": "Office requested documents", "DOCUMENT_REQUEST_CANCELLED": "Office withdrew a document request",
 	"DOCUMENT_REQUEST_COMPLETE": "Office marked a document request complete", "DOCUMENTS_SUBMITTED": "Requested documents sent",
 	"FEE_CHECKOUT": "Payment page opened", "FEE_CHECKOUT_CANCELLED": "Payment cancelled", "DUPLICATE_PAYMENT_REFUNDED": "Fee paid twice — refunded",
+	"PACKAGE_DOC_UPLOADED": "Document uploaded", "PACKAGE_DOC_REPLACED": "Document replaced", "PACKAGE_DOC_REMOVED": "Document removed",
 	"TPA_FEE_CHECKOUT": "Payment page opened", "BATCH_FILED": "Notice: bulk filing filed", "PACKAGE_STATUS": "Package checked",
 }
 
@@ -195,7 +202,7 @@ func (s *server) callerOrgs(ctx context.Context, tenant, sub string) map[string]
 func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tenant := r.Context().Value(ctxTenant{}).(string)
-		var orgID string
+		var orgID, clientCond string
 		if kind == "tpa" {
 			org, err := s.tpaForPrincipal(r, tenant)
 			if err != nil {
@@ -203,6 +210,14 @@ func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 				return
 			}
 			orgID = org.ID
+			clientID, ok := s.tpaClientFilter(r, tenant, org)
+			if !ok {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			if clientID != "" { // entries on the client's disputes, or naming it; the id comes from the database
+				clientCond = " AND (a.payload LIKE '%" + clientID + "%'" + " OR a.case_id IN (SELECT co.case_id FROM public.case_origin co WHERE co.client_id::text='" + clientID + "'))"
+			}
 		} else {
 			org, err := s.healthPlanForPrincipal(r, tenant)
 			if err != nil {
@@ -215,7 +230,7 @@ func (s *server) orgAuditLog(kind string) http.HandlerFunc {
 		if kind == "hp" {
 			prefix = "plan" // entries name the organization as "plan:<id>" (auditOrg, payer.org)
 		}
-		s.auditEntries(w, r, tenant, "a.org=$2", prefix+":"+orgID)
+		s.auditEntries(w, r, tenant, "a.org=$2"+clientCond, prefix+":"+orgID)
 	}
 }
 
@@ -301,6 +316,15 @@ func (s *server) auditEntries(w http.ResponseWriter, r *http.Request, tenant, co
 				}
 				if st := str("status"); action == "PACKAGE_STATUS" && st != "" {
 					e.Detail = str("party") + ": " + strings.ToLower(st)
+				}
+				if strings.HasPrefix(action, "PACKAGE_DOC_") {
+					e.Detail = strings.TrimPrefix(str("client")+" · ", " · ") + str("slot") + ": " + str("filename")
+					if old := str("replaced_filename"); old != "" {
+						e.Detail += " (replacing " + old + ", " + strings.ToLower(str("replaced_status")) + ")"
+					}
+					if st := str("status_when_removed"); st != "" {
+						e.Detail += " (was " + strings.ToLower(st) + ")"
+					}
 				}
 				switch by := str("by"); {
 				case by == "" || strings.HasPrefix(by, "system") || strings.HasPrefix(by, "stripe"):

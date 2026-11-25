@@ -114,7 +114,31 @@ func (s *server) kcAdminToken(ctx context.Context) (string, error) {
 	return out.AccessToken, nil
 }
 
+// kcRealm is the realm this deployment's users live in: the last segment of KEYCLOAK_ISSUER (".../realms/<realm>"),
+// "idre" when the issuer doesn't say. idre-prod runs on its own realm, idre-prod.
+func (s *server) kcRealm() string {
+	iss := strings.TrimRight(s.cfg.KeycloakIssuer, "/")
+	if i := strings.LastIndex(iss, "/realms/"); i >= 0 && i+len("/realms/") < len(iss) {
+		return iss[i+len("/realms/"):]
+	}
+	return "idre"
+}
+
+// kcRealmPath points an admin path written for the idre realm ("/admin/realms/idre/...") at this deployment's realm.
+func (s *server) kcRealmPath(path string) string {
+	const base = "/admin/realms/idre"
+	realm := s.kcRealm()
+	if realm == "idre" || !strings.HasPrefix(path, base) {
+		return path
+	}
+	if rest := path[len(base):]; rest == "" || rest[0] == '/' || rest[0] == '?' {
+		return "/admin/realms/" + url.PathEscape(realm) + rest
+	}
+	return path // e.g. "/admin/realms/idre-prod/..." already names a realm
+}
+
 func (s *server) kcDo(ctx context.Context, method, path string, token string, body []byte) (*http.Response, error) {
+	path = s.kcRealmPath(path)
 	req, err := http.NewRequestWithContext(ctx, method, s.cfg.KeycloakURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -502,6 +526,15 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, result)
 		return
 	}
+	// Every new staff member gets their own email address (mailboxes.go). An account is never refused over it: the
+	// address is also provisioned on the person's first visit to their inbox.
+	if uid, _ := result["user_id"].(string); uid != "" && s.mailboxesOn() {
+		if mb, err := s.provisionMailbox(r.Context(), in.Tenant, uid, in.Username, displayName(p)); err == nil {
+			result["mailbox"] = mb.Address
+		} else {
+			slog.Warn("mailbox not provisioned", "user", in.Username, "err", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, result)
 }
 
@@ -748,6 +781,7 @@ func (s *server) updateTenantStaffStatus(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak status update failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, in.Enabled, p.Subject)
 	action := "TENANT_STAFF_SUSPENDED"
 	if in.Enabled {
 		action = "TENANT_STAFF_REACTIVATED"
@@ -793,6 +827,7 @@ func (s *server) deleteTenantStaff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak delete failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, false, p.Subject) // their mail history is kept; the address takes no more
 	s.logAudit(r.Context(), tenant, "", "TENANT_STAFF_DELETED", map[string]any{
 		"by": p.Subject, "username": username,
 	})
@@ -824,6 +859,7 @@ func (s *server) updateFederalAdminStatus(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak status update failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, in.Enabled, p.Subject)
 	action := "FEDERAL_ADMIN_SUSPENDED"
 	if in.Enabled {
 		action = "FEDERAL_ADMIN_REACTIVATED"
@@ -851,6 +887,7 @@ func (s *server) deleteFederalAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak delete failed: " + err.Error()})
 		return
 	}
+	s.setMailboxActive(r.Context(), userID, false, p.Subject)
 	s.logAudit(r.Context(), "", "", "FEDERAL_ADMIN_DELETED", map[string]any{
 		"by": p.Subject, "username": username,
 	})

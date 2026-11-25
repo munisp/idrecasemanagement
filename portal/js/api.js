@@ -35,8 +35,12 @@ const Api = (() => {
       const msg = typeof data === "object" && data.error ? data.error : `HTTP ${resp.status}`;
       const err = new Error(msg); err.status = resp.status; err.data = data;
       if (typeof data === "object" && data.details) err.details = data.details;
+      if (typeof data === "object" && Array.isArray(data.problems)) err.problems = data.problems;
+      if (typeof data === "object" && data.workflow_ended) err.workflowEnded = true;
       throw err;
     }
+    // A change was saved: a case page that is open re-reads its steps (views.js, wfRefresh).
+    if (method !== "GET") window.dispatchEvent(new CustomEvent("idre:changed", { detail: { method, path } }));
     return data;
   }
 
@@ -65,6 +69,21 @@ const Api = (() => {
     if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
     if (!resp.ok) throw new Error(`fetch failed (HTTP ${resp.status})`);
     return URL.createObjectURL(await resp.blob());
+  }
+
+  // A file as a Blob, with the name the server gives it (the document viewer).
+  async function fetchBlob(path) {
+    const tok = await Auth.token();
+    if (!tok) throw new Error("unauthenticated");
+    const resp = await fetch(window.IDRE_CONFIG.apiBase + path, { headers: { Authorization: `Bearer ${tok}` } });
+    if (resp.status === 401) { Auth.login(); throw new Error("redirecting"); }
+    if (!resp.ok) {
+      let why = `HTTP ${resp.status}`;
+      try { const j = JSON.parse(await resp.text()); if (j.error) why = j.error; } catch { /* keep the status */ }
+      throw new Error(`the document could not be opened — ${why}`);
+    }
+    const cd = resp.headers.get("content-disposition") || "";
+    return { blob: await resp.blob(), name: (cd.match(/filename="?([^"]+)"?/) || [])[1] || "" };
   }
 
   async function download(path, fallbackName) {
@@ -195,12 +214,24 @@ const Api = (() => {
     return { prepare, policy };
   })();
   // query-string builder: drops empty values, returns "" or "?a=1&b=2"
+  // The client a whole-TPA login chose on the TPA page: every list of the TPA's follows it until changed. The server
+  // decides what a login may see; a login limited to one client gets that client whatever is sent here.
+  let tpaSel = { id: "", name: "" };
+  try { tpaSel = JSON.parse(sessionStorage.getItem("idre.tpaClient") || "") || tpaSel; } catch { /* none, or a private window */ }
+  const tpaCq = () => (tpaSel.id ? `?client_id=${encodeURIComponent(tpaSel.id)}` : "");
   const qs = (params) => {
     const s = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v != null)).toString();
     return s ? `?${s}` : "";
   };
   return {
-    setTenant, getTenant, download,
+    setTenant, getTenant, download, fetchBlob,
+    // Partner API keys (api_keys.go): kind "tpa" | "hp" for an organization's own keys, "staff" for every key in the tenant.
+    apiKeys: {
+      list: (kind) => req("GET", `${t()}/${kind === "staff" ? "" : kind + "/"}api-keys`),
+      create: (kind, body) => req("POST", `${t()}/${kind}/api-keys`, body),
+      revoke: (kind, id) => req("DELETE", `${t()}/${kind === "staff" ? "" : kind + "/"}api-keys/${encodeURIComponent(id)}`),
+      internalSpec: () => req("GET", `${t()}/api-docs/internal.json`),
+    },
     analytics: {
       payers: () => req("GET", `${t()}/analytics/payers`),
       fraudSignals: () => req("GET", `${t()}/analytics/fraud-signals`),
@@ -231,6 +262,7 @@ const Api = (() => {
       // needs to be reachable at all. FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createTenant: (payload) => req("POST", "/v1/admin/tenants", payload),
       setFeatures: (tenant, features) => req("PUT", `/v1/admin/tenants/${tenant}/features`, { features }),
+      mailSetup: () => req("GET", "/v1/admin/mail-setup"),
       // Cross-tenant: creates a FEDERAL_ADMIN/PLATFORM_ADMIN account.
       // FEDERAL_ADMIN/PLATFORM_ADMIN only.
       createFederalAdmin: (payload) => req("POST", "/v1/admin/federal-admins", payload),
@@ -243,6 +275,9 @@ const Api = (() => {
       listStaffNames: (tenant) => req("GET", `/v1/admin/tenant-staff?tenant=${encodeURIComponent(tenant)}&brief=1`),
       setTenantStaffEnabled: (tenant, username, enabled) =>
         req("PATCH", `/v1/admin/tenant-staff/${encodeURIComponent(username)}`, { tenant, enabled }),
+      // A staff member's full set of staff roles (PM / Tenant Admin, own tenant).
+      setTenantStaffRoles: (tenant, username, roles) =>
+        req("PUT", `/v1/admin/tenant-staff/${encodeURIComponent(username)}/roles`, { tenant, roles }),
       deleteTenantStaff: (tenant, username) =>
         req("DELETE", `/v1/admin/tenant-staff/${encodeURIComponent(username)}?tenant=${encodeURIComponent(tenant)}`),
       setFederalAdminEnabled: (username, enabled) =>
@@ -259,12 +294,14 @@ const Api = (() => {
     cases: {
       // Keyset-paginated: {cases, next_cursor, total}. Legacy bare-array
       // responses are normalized so older backends still work.
+      pipelineCounts: (by, opts = {}) => req("GET", `${t()}/cases/pipeline/counts?${new URLSearchParams({ by: by || "internal_status", ...opts })}`),
       list: (params = {}) => {
         const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();
         return req("GET", `${t()}/cases${qs ? "?" + qs : ""}`)
           .then((r) => (Array.isArray(r) ? { cases: r, next_cursor: "", total: r.length } : r));
       },
       get: (id) => req("GET", `${t()}/cases/${id}`),
+      summary: (id) => req("GET", `${t()}/cases/${id}/summary`),
       prefill: (docId) => req("GET", `${t()}/cases/prefill${docId ? `?doc_id=${encodeURIComponent(docId)}` : ""}`),
       nextAction: (id) => req("GET", `${t()}/cases/${id}/next-action`),
       attention: () => req("GET", `${t()}/cases/attention`),
@@ -290,7 +327,17 @@ const Api = (() => {
       },
       moveDoc: (id, docId, folder) => req("PATCH", `${t()}/cases/${id}/documents/${docId}`, { folder }),
       zipUrl: (id) => `${t()}/cases/${id}/documents.zip`,
+      // How a letter will read before it is sent (mail_preview.go); body as for a draft.
+      mailTracker: (id) => req("GET", `${t()}/cases/${id}/mail-tracker`),
+      // De-identification and clinical terms (deid.go): what each letter's scan found, the clinical terms of the
+      // documents, and other disputes sharing them.
+      deidReports: (id) => req("GET", `${t()}/cases/${id}/deid-reports`),
+      clinical: (id) => req("GET", `${t()}/cases/${id}/clinical`),
+      clinicalOverlaps: (id) => req("GET", `${t()}/cases/${id}/clinical/overlaps`),
+      qaDraftQuality: (days = 90) => req("GET", `${t()}/qa/draft-quality?days=${days}`),
+      corrPreview: (id, body) => req("POST", `${t()}/cases/${id}/correspondence/preview`, body),
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
+      filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       timeAdd: (id, p) => req("POST", `${t()}/cases/${id}/time`, p),
@@ -302,17 +349,53 @@ const Api = (() => {
       activities: (id) => req("GET", `${t()}/cases/${id}/activities`),
     },
     // Personal timesheet: daily entry screen with day/week/month totals.
+    // The program's company mailbox (e.g. where replies to case letters arrive), connected by a tenant admin.
+    // Who may email in on one dispute, and its reply code (case page).
+    caseSenders: {
+      get: (id) => req("GET", `${t()}/cases/${id}/mail-senders`),
+      add: (id, email) => req("POST", `${t()}/cases/${id}/mail-senders`, { email }),
+      remove: (id, email) => req("DELETE", `${t()}/cases/${id}/mail-senders`, { email }),
+      rotate: (id) => req("POST", `${t()}/cases/${id}/reply-code/rotate`),
+    },
+    // Every authorized address in the program (Mail log).
+    programSenders: {
+      list: (q) => req("GET", `${t()}/mail/authorized-senders` + qs({ q })),
+      add: (b) => req("POST", `${t()}/mail/authorized-senders`, b),
+      remove: (b) => req("DELETE", `${t()}/mail/authorized-senders`, b),
+    },
+    // The addresses that email and answer for a TPA or a health plan (kind "tpa" | "hp").
+    orgSenders: {
+      list: (kind) => req("GET", `${t()}/${kind}/authorized-senders`),
+      add: (kind, email) => req("POST", `${t()}/${kind}/authorized-senders`, { email }),
+      remove: (kind, email) => req("DELETE", `${t()}/${kind}/authorized-senders`, { email }),
+    },
+    systemMail: {
+      get: () => req("GET", `${t()}/program/system-mail`),
+      set: (body) => req("PUT", `${t()}/program/system-mail`, body),
+    },
+    companyOutlook: {
+      status: () => req("GET", `${t()}/company-outlook`),
+      connect: (mailbox) => req("GET", `${t()}/company-outlook/connect` + qs({ mailbox })),
+      sync: () => req("POST", `${t()}/company-outlook/sync`),
+      disconnect: () => req("DELETE", `${t()}/company-outlook`),
+    },
+    // The person's own email: their platform address and, when connected, their Outlook account.
+    myMail: {
+      mailbox: () => req("GET", `${t()}/me/mailbox`),
+      list: (opts) => req("GET", `${t()}/me/mail` + qs(opts || {})),
+      get: (id) => req("GET", `${t()}/me/mail/${id}`),
+      attachment: (id, aid) => fetchBlob(`${t()}/me/mail/${id}/attachments/${aid}`),
+      send: (body) => req("POST", `${t()}/me/mail/send`, body),
+      outlookConnect: () => req("GET", `${t()}/me/outlook/connect`),
+      outlookSync: () => req("POST", `${t()}/me/outlook/sync`),
+      outlookDisconnect: () => req("DELETE", `${t()}/me/outlook`),
+    },
     time: {
       mine: (from, to) => req("GET", `${t()}/time/mine${from||to ? `?from=${from||""}&to=${to||""}` : ""}`),
       summary: () => req("GET", `${t()}/time/summary`),
       prompts: () => req("GET", `${t()}/time/prompts`),
       update: (id, p) => req("PUT", `${t()}/time/${id}`, p),
       remove: (id) => req("DELETE", `${t()}/time/${id}`),
-    },
-    onboarding: {
-      submit: (payload) => req("POST", `${t()}/onboarding/applications`, payload),
-      list: (params) => req("GET", `${t()}/onboarding/applications${qs(params || {})}`),
-      decide: (id, decision, reason) => req("POST", `${t()}/onboarding/applications/${id}/decision`, { decision, reason }),
     },
     voice: {
       intake: () => req("GET", `${t()}/voice/intake`),
@@ -364,19 +447,37 @@ const Api = (() => {
       search: (q) => req("GET", `${t()}/search?q=${encodeURIComponent(q)}`),
     },
     cm: {
-      assign: (caseId, role, assignee) => req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee }),
+      // expected: the assignee the page showed ("" = unassigned); if it changed meanwhile the server answers 409.
+      assign: (caseId, role, assignee, reason = "", action = "", expected) =>
+        req("POST", `${t()}/cases/${caseId}/assign`, { role, assignee, reason, action, ...(expected !== undefined ? { expected } : {}) }),
+      // The next person in the role's rotation (Team page → Automatic assignment).
+      assignNext: (caseId, role, reason = "", expected) =>
+        req("POST", `${t()}/cases/${caseId}/assign`, { role, next: true, reason, ...(expected !== undefined ? { expected } : {}) }),
+      claim: (caseId, reason = "") => req("POST", `${t()}/cases/${caseId}/assign`, { action: "claim", reason }),
+      assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
+      assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
+      // A role's rotation (Reviewer when none): { role, role_label, new_cases, enabled, people: [{id, username, open_cases, in_rotation}], next }.
+      autoAssign: (role = "CASE_MANAGER") => req("GET", `${t()}/assignment/auto?role=${encodeURIComponent(role)}`),
+      setAutoAssign: (body) => req("PUT", `${t()}/assignment/auto`, body),
+      // The open cases nobody holds, to the Reviewers in turn (500 a call): { assigned, people: [{username, cases}], remaining }.
+      assignOpen: () => req("POST", `${t()}/assignment/auto/assign-open`),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
       relate: (p) => req("POST", `${t()}/cases/relate`, p),
       relationships: (caseId) => req("GET", `${t()}/cases/${caseId}/relationships`),
       checklist: (caseId) => req("GET", `${t()}/cases/${caseId}/checklist`),
       checkItem: (itemId) => req("POST", `${t()}/checklists/${itemId}/check`),
-      calendar: () => req("GET", `${t()}/calendar`),
-      notifications: () => req("GET", `${t()}/notifications`),
+      calendar: () => req("GET", `${t()}/calendar${tpaCq()}`),
+      notifications: (opts) => req("GET", `${t()}/notifications` + qs(opts || {})),
+      notifCount: () => req("GET", `${t()}/notifications/count`),
       readNotif: (id) => req("POST", `${t()}/notifications/${id}/read`),
       readAllNotifs: () => req("POST", `${t()}/notifications/read-all`),
       views: () => req("GET", `${t()}/views`),
       saveView: (p) => req("POST", `${t()}/views`, p),
       clocks: (id) => req("GET", `${t()}/cases/${id}/clocks`),
+      extendClock: (id, clock, days, reason, agencyApproval) => req("POST", `${t()}/cases/${id}/clocks/${encodeURIComponent(clock)}/extend`,
+        { days, reason, ...(agencyApproval ? { agency_approval: agencyApproval } : {}) }),
+      // Ask the TPA / health plan to agree to more time (body: {days, reason, side, due_days}).
+      requestExtension: (id, clock, body) => req("POST", `${t()}/cases/${id}/clocks/${encodeURIComponent(clock)}/extension-request`, body),
       allClocks: () => req("GET", `${t()}/cases/clocks`),
       bulk: (p) => req("POST", `${t()}/cases/bulk`, p),
       grabNext: () => req("POST", `${t()}/queues/grab-next`),
@@ -389,6 +490,7 @@ const Api = (() => {
       related: (caseId) => req("GET", `${t()}/cases/${caseId}/related`),
       neighbors: (caseId) => req("GET", `${t()}/cases/${caseId}/graph-neighbors`),
       sync: () => req("POST", `${t()}/graph/sync`),
+      syncStatus: () => req("GET", `${t()}/graph/sync`),
       train: (epochs) => req("POST", `${t()}/graph/train`, epochs ? { epochs } : {}),
     },
     prefs: {
@@ -397,6 +499,9 @@ const Api = (() => {
     },
     program: {
       get: () => req("GET", `${t()}/program`),
+      configuration: () => req("GET", `${t()}/program/configuration`),
+      configurationSave: (section, body) => req("PUT", `${t()}/program/configuration/${section}`, body),
+      setFeatures: (features) => req("PUT", `${t()}/features`, { features }), // a tenant admin's own tenant
       setLabel: (label) => req("PUT", `${t()}/program/label`, { label }),
       setBrand: (brand_name) => req("PUT", `${t()}/program/brand`, { brand_name }),
       tenantLabels: () => req("GET", `${t()}/admin/tenant-labels`),
@@ -424,8 +529,10 @@ const Api = (() => {
       copilotUnshareThread: (caseId, userId) => req("DELETE", `${t()}/cases/${caseId}/copilot/chat/shares/${userId}`),
       briefing: () => req("GET", `${t()}/assistant/briefing`),
       eligibilityHistory: (caseId) => req("GET", `${t()}/cases/${caseId}/eligibility`),
+      eligibilityNote: (caseId, reviewId, body) => req("POST", `${t()}/cases/${caseId}/eligibility/${reviewId}/notes`, { body }),
       workflow: (caseId) => req("GET", `${t()}/cases/${caseId}/workflow`),
       eligibilityChecklist: (caseId) => download(`${t()}/cases/${caseId}/eligibility/checklist`, "Eligibility Checklist.html"),
+      tpaBulkSample: (layout) => download(`${t()}/tpa/disputes/bulk/sample.zip?layout=${layout === "merged" ? "merged" : "separate"}`, `sample-disputes-${layout === "merged" ? "merged" : "separate"}.zip`),
       setReviewNote: (caseId, field, text) => req("PUT", `${t()}/cases/${caseId}/review-notes`, { field, text }),
       setDisputeSummary: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/dispute-summary`, body),
       confirmAor: (caseId, valid, reason) => req("POST", `${t()}/cases/${caseId}/aor-confirmation`, { valid, reason }),
@@ -435,13 +542,16 @@ const Api = (() => {
       shareLink: (caseId, kind, days) => req("POST", `${t()}/cases/${caseId}/share-links`, { kind, days_ttl: days }),
       invoices: (caseId) => req("GET", `${t()}/cases/${caseId}/invoices`),
       issueInvoice: (caseId, p) => req("POST", `${t()}/cases/${caseId}/invoices`, p),
-      settleInvoice: (invId, action, ref) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref }),
+      settleInvoice: (invId, action, ref, refundMethod) => req("POST", `${t()}/invoices/${invId}/settle`, { action, remittance_ref: ref, refund_method: refundMethod || "" }),
       receivables: () => req("GET", `${t()}/reports/receivables`),
       financial: () => req("GET", `${t()}/reports/financial`),
+      unapplied: () => req("GET", `${t()}/reports/unapplied`),
+      resolveUnapplied: (id, body) => req("POST", `${t()}/finance/unapplied/${id}/resolve`, body),
+      refundsDue: () => req("GET", `${t()}/reports/refunds-due`),
       timeReport: (opts) => req("GET", `${t()}/reports/time${qs(opts || {})}`),
       timeReportSend: (p) => req("POST", `${t()}/time/report/send`, p),
       timeRates: () => req("GET", `${t()}/reports/time/rates`),
-      timeRateSet: (role, rate_cents_per_hour) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour }),
+      timeRateSet: (role, rate_cents_per_hour, effective_from) => req("PUT", `${t()}/reports/time/rates`, { role, rate_cents_per_hour, effective_from }),
       opsDashboard: () => req("GET", `${t()}/ops/dashboard`),
       caseFinancials: (caseId) => req("GET", `${t()}/cases/${caseId}/financials`),
       // Service-fee invoicing engine
@@ -485,15 +595,51 @@ const Api = (() => {
       tpaUnlink: () => req("POST", `${t()}/tpa/unlink`, {}),
       tpaInviteCode: () => req("POST", `${t()}/tpa/invite-code`, {}),
       tpaMe: () => req("GET", `${t()}/tpa/me`),
-      tpaClients: () => req("GET", `${t()}/tpa/clients`),
+      tpaClients: () => req("GET", `${t()}/tpa/clients${tpaCq()}`),
+      tpaClientsAll: () => req("GET", `${t()}/tpa/clients`),
+      tpaSelected: () => tpaSel,
+      tpaSelect: (id, name) => {
+        tpaSel = { id: id || "", name: name || "" };
+        try { if (id) sessionStorage.setItem("idre.tpaClient", JSON.stringify(tpaSel)); else sessionStorage.removeItem("idre.tpaClient"); } catch { /* private window */ }
+      },
+      tpaLetterAdd: (clientId, file) => {
+        const fd = new FormData(); fd.append("file", file);
+        return req("POST", `${t()}/tpa/clients/${clientId}/authorization-letter`, fd, true);
+      },
+      tpaLetterGet: (clientId, name) => download(`${t()}/tpa/clients/${clientId}/authorization-letter`, name || "authorization-letter"),
+      tpaLetterRemove: (clientId) => req("DELETE", `${t()}/tpa/clients/${clientId}/authorization-letter`),
+      draftGet: (form) => req("GET", `${t()}/drafts/${form}`),
+      draftPut: (form, data) => req("PUT", `${t()}/drafts/${form}`, data),
+      draftDelete: (form) => req("DELETE", `${t()}/drafts/${form}`),
+      tpaFiling: (caseId) => req("GET", `${t()}/tpa/disputes/${caseId}/filing`),
+      tpaFilingSave: (caseId, packet) => req("PUT", `${t()}/tpa/disputes/${caseId}/filing`, packet),
+      tpaChangeRequest: (caseId, packet, reason) => req("POST", `${t()}/tpa/disputes/${caseId}/change-requests`, { packet, reason }),
+      tpaChangeWithdraw: (caseId, reqId) => req("DELETE", `${t()}/tpa/disputes/${caseId}/change-requests/${reqId}`),
+      caseChangeRequests: (caseId) => req("GET", `${t()}/cases/${caseId}/change-requests`),
+      caseChangeDecide: (caseId, reqId, approve, note) => req("POST", `${t()}/cases/${caseId}/change-requests/${reqId}/decide`, { approve, note }),
+      draftList: (form) => req("GET", `${t()}/drafts${form ? `?form=${encodeURIComponent(form)}` : ""}`),
+      draftNew: (form, body) => req("POST", `${t()}/drafts/${form}`, body),
+      draftOne: (form, id) => req("GET", `${t()}/drafts/${form}/${id}`),
+      draftSave: (form, id, body) => req("PUT", `${t()}/drafts/${form}/${id}`, body),
+      draftRemove: (form, id) => req("DELETE", `${t()}/drafts/${form}/${id}`),
+      tpaFinance: () => req("GET", `${t()}/tpa/finance${tpaCq()}`),
+      tpaFinanceCsv: () => download(`${t()}/tpa/finance${tpaCq() ? tpaCq() + "&" : "?"}format=csv`, "tpa-finance.csv"),
       tpaAddClient: (body) => req("POST", `${t()}/tpa/clients`, body),
+      tpaTeam: () => req("GET", `${t()}/tpa/team`),
+      tpaTeamAdd: (body) => req("POST", `${t()}/tpa/team`, body),
+      tpaTeamRole: (sub, role, clientId) => req("PATCH", `${t()}/tpa/team/${encodeURIComponent(sub)}`, clientId === undefined ? { team_role: role } : { team_role: role, client_id: clientId }),
+      tpaTeamRemove: (sub) => req("DELETE", `${t()}/tpa/team/${encodeURIComponent(sub)}`),
+      tpaGroups: () => req("GET", `${t()}/tpa/groups`),
+      tpaGroupAdd: (body) => req("POST", `${t()}/tpa/groups`, body),
+      tpaGroupUpdate: (id, body) => req("PATCH", `${t()}/tpa/groups/${id}`, body),
+      tpaClientGroup: (clientId, groupId) => req("PUT", `${t()}/tpa/clients/${clientId}/group`, { group_id: groupId }),
       tpaClientStatus: (id, status) => req("POST", `${t()}/tpa/clients/${id}/status`, { status }),
       tpaIntake: (body) => req("POST", `${t()}/tpa/intake`, body),
       tpaEditDispute: (caseId, body) => req("PATCH", `${t()}/tpa/disputes/${caseId}`, body),
-      tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${qs(tpaId ? { tpa_id: tpaId } : {})}`),
+      tpaDashboard: (tpaId) => req("GET", `${t()}/tpa/dashboard${tpaId ? qs({ tpa_id: tpaId }) : tpaCq()}`),
       adminTpas: () => req("GET", `${t()}/admin/tpas`),
       adminTpaStatus: (id, status) => req("POST", `${t()}/admin/tpas/${id}/status`, { status }),
-      tpaOnboarding: () => req("GET", `${t()}/tpa/onboarding`),
+      tpaOnboarding: () => req("GET", `${t()}/tpa/onboarding${tpaCq()}`),
       tpaClientProfile: (clientId, body) => req("PUT", `${t()}/tpa/clients/${clientId}/profile`, body),
       tpaImportClients: (file) => {
         const fd = new FormData();
@@ -510,6 +656,7 @@ const Api = (() => {
         fd.append("file", file);
         return req("POST", `${t()}/tpa/packages/${packageId}/docs`, fd, true);
       },
+      tpaRemoveDoc: (packageId, slot) => req("DELETE", `${t()}/tpa/packages/${packageId}/docs/${slot}`),
       tpaUploadMerged: (packageId, file) => {
         const fd = new FormData();
         fd.append("file", file);
@@ -528,9 +675,13 @@ const Api = (() => {
       tpaBulkDisputeBatches: () => req("GET", `${t()}/tpa/disputes/bulk`),
       tpaBulkDisputeBatch: (id) => req("GET", `${t()}/tpa/disputes/bulk/${id}`),
       tpaBulkCheckout: (id, body) => req("POST", `${t()}/tpa/disputes/bulk/${id}/checkout`, body || {}),
-      tpaFees: () => req("GET", `${t()}/tpa/fees`),
+      tpaFees: () => req("GET", `${t()}/tpa/fees${tpaCq()}`),
       // Fee payments: the server works out what is owed; these only name the scope.
       payDispute: (kind, caseId, from, body) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/pay${from ? "?from=" + from : ""}`, body),
+      disputeDocAdd: (kind, caseId, file) => {
+        const fd = new FormData(); fd.append("file", file);
+        return req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/documents`, fd, true);
+      },
       disputeFee: (kind, caseId) => req("GET", `${t()}/${kind === "hp" ? "hp" : "tpa"}/disputes/${caseId}/fee`),
       payClient: (clientId, body) => req("POST", `${t()}/tpa/clients/${clientId}/fees/checkout`, body),
       // Saved cards and bank accounts (ACH): the TPA's own (no client_id) or a client's.
@@ -545,27 +696,35 @@ const Api = (() => {
       checkoutConfirm: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/confirm`),
       checkoutCancel: (kind, g) => req("POST", `${t()}/${kind === "hp" ? "hp" : "tpa"}/fees/checkout/${g}/cancel`),
       hpFees: () => req("GET", `${t()}/hp/fees`),
-      hpFeesCheckout: () => req("POST", `${t()}/hp/fees/checkout`),
+      hpFeesCheckout: (body) => req("POST", `${t()}/hp/fees/checkout`, body || {}),
       // An organization's own disputes' documents in one ZIP: {case_id:[..]} | {client_id} | {batch_id} | {party_id} | {} (all).
       orgDocsZip: (kind, params) => {
         const q = new URLSearchParams();
+        if (kind !== "hp" && tpaSel.id && !(params || {}).client_id && !(params || {}).case_id && !(params || {}).batch_id) q.append("client_id", tpaSel.id);
         for (const [k, v] of Object.entries(params || {})) (Array.isArray(v) ? v : [v]).forEach((x) => x && q.append(k, x));
         return download(`${t()}/${kind === "hp" ? "hp" : "tpa"}/documents.zip${q.toString() ? "?" + q : ""}`, "documents.zip");
       },
       uploadPolicy: () => Uploads.policy(),
-      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "mine" ? "audit/mine" : kind === "hp" ? "hp/audit" : "tpa/audit"}?` + new URLSearchParams(params || {})),
+      orgAudit: (kind, params) => req("GET", `${t()}/${kind === "mine" ? "audit/mine" : kind === "hp" ? "hp/audit" : "tpa/audit"}?` + new URLSearchParams({ ...(kind === "tpa" && tpaSel.id ? { client_id: tpaSel.id } : {}), ...(params || {}) })),
       // The other side of a dispute answers it (respondents.go). k: hp | tpa | party.
       respondList: (k) => req("GET", `${t()}/${k}/responding`),
       // Document requests: asked on the case by the review team, answered in the portal.
       caseDocRequests: (caseId) => req("GET", `${t()}/cases/${caseId}/document-requests`),
       createDocRequest: (caseId, body) => req("POST", `${t()}/cases/${caseId}/document-requests`, body),
       closeDocRequest: (caseId, reqId, action) => req("POST", `${t()}/cases/${caseId}/document-requests/${reqId}/close`, { action }),
-      orgDocRequests: (k) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests`),
+      // The letters sent to the organization and the documents they carried (party_documents.go).
+      sentRecord: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
+      // File a dispute filled in from its own document set (org_prefill.go). k: tpa | hp.
+      orgPrefill: (k, packageId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/prefill?package_id=${encodeURIComponent(packageId)}`),
+      sentDocPath: (k, docId) => `${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`,
+      disputeSummary: (k, caseId) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/disputes/${caseId}/summary`),
+      sentDocGet: (k, docId, name) => download(`${t()}/${k === "hp" ? "hp" : "tpa"}/sent-documents/${docId}`, name || "document"),
+      orgDocRequests: (k) => req("GET", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests${k === "hp" ? "" : tpaCq()}`),
       orgDocRequestUpload: (k, reqId, file) => {
         const fd = new FormData(); fd.append("file", file);
         return req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/files`, fd, true);
       },
-      orgDocRequestSubmit: (k, reqId, note) => req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/submit`, { note }),
+      orgDocRequestSubmit: (k, reqId, note, decision) => req("POST", `${t()}/${k === "hp" ? "hp" : "tpa"}/document-requests/${reqId}/submit`, { note, decision }),
       respondGet: (k, id) => req("GET", k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`),
       respondFile: (k, id, doc) => blobURL((k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + `/documents/${doc}/file`),
       respondUpload: (k, id, file) => {
@@ -582,6 +741,8 @@ const Api = (() => {
       onboardingReviewFile: (kind, docId) => blobURL(`${t()}/onboarding/reviews/${kind}/${docId}/file`),
       onboardingReviewDecide: (kind, docId, decision, note) => req("POST", `${t()}/onboarding/reviews/${kind}/${docId}`, { decision, note }),
       npiReviews: () => req("GET", `${t()}/onboarding/npi-reviews`),
+      verificationReviews: () => req("GET", `${t()}/onboarding/verification-reviews`),
+      verificationReviewDecide: (id, decision, note) => req("POST", `${t()}/onboarding/verification-reviews/${id}`, { decision, note }),
       npiReviewDecide: (kind, id, decision, note) => req("POST", `${t()}/onboarding/npi-reviews/${kind}/${id}`, { decision, note }),
       hpMe: () => req("GET", `${t()}/hp/me`),
       hpOnboarding: () => req("GET", `${t()}/hp/onboarding`),
@@ -629,6 +790,7 @@ const Api = (() => {
       payments: (caseId, opts) => req("GET", (caseId ? `${t()}/cases/${caseId}/payments` : `${t()}/payments`) + qs(opts || {})),
       checkout: (invId) => req("POST", `${t()}/invoices/${invId}/checkout`),
       claims: (caseId) => req("GET", `${t()}/cases/${caseId}/claims`),
+      claimEligibility: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/claims/eligibility`, body),
       importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
       qaQueue: (caseId) => req("GET", `${t()}/qa${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
@@ -636,6 +798,10 @@ const Api = (() => {
       qaTemplateHealth: (days = 90) => req("GET", `${t()}/qa/template-health?days=${days}`),
       qaDecision: (id, decision, note, editedBody, to, cc) => req("POST", `${t()}/qa/${id}/decision`, { decision, note, edited_body: editedBody || undefined, to, cc }),
       mailJournal: (opts) => req("GET", `${t()}/correspondence${qs(opts || {})}`),
+      fileMail: (id, caseNumber) => req("POST", `${t()}/correspondence/${id}/file`, { case_number: caseNumber }),
+      rejectMail: (id) => req("POST", `${t()}/correspondence/${id}/reject`),
+      mailAttachments: (id) => req("GET", `${t()}/correspondence/${id}/attachments`),
+      mailAttachment: (id, aid) => fetchBlob(`${t()}/correspondence/${id}/attachments/${aid}`),
       // Payment rails (moov-io): vault-sealed accounts, ACH/wire/ICL/Metro2 files, OFAC screening
       railAccounts: () => req("GET", `${t()}/payments/accounts`),
       allInvoices: () => req("GET", `${t()}/invoices?limit=500`),
@@ -685,6 +851,15 @@ const Api = (() => {
     },
     fees: {
       transfer: (p) => req("POST", `${t()}/fees/transfer`, p),
+    },
+    letters: {
+      report: (caseId) => req("GET", `${t()}/cases/${caseId}/decision-report`),
+      saveReport: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/decision-report`, body),
+      attachReport: (caseId, docId) => req("POST", `${t()}/cases/${caseId}/decision-report/file`, { doc_id: docId }),
+      settings: () => req("GET", `${t()}/letter-settings`),
+      saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
+      variables: () => req("GET", `${t()}/template-variables`),
+      saveVariables: (body) => req("PUT", `${t()}/template-variables`, body),
     },
     geo: {
       mapUrl: () => `${config.caseApiBase}/geo/map`,

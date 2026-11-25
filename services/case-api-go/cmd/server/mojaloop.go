@@ -180,9 +180,23 @@ func (s *server) mojaloopWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if evt.State == "COMMITTED" {
-		s.db.Exec(r.Context(),
-			`UPDATE public.invoices SET status='PAID', paid_at=now(), remittance_ref=$2 WHERE id=$1`,
-			invID, "mojaloop:"+evt.TransferID)
+		// Paid once: only an open fee of this tenant is claimed. A transfer for a fee already paid (another way, or
+		// this same notice delivered again) is money received that pays no fee -- held, never counted twice.
+		var claimed string
+		if s.db.QueryRow(r.Context(),
+			`UPDATE public.invoices SET status='PAID', paid_at=now(), remittance_ref=$3 WHERE tenant=$1 AND id::text=$2 AND status='OPEN' RETURNING id::text`,
+			tenant, invID, "mojaloop:"+evt.TransferID).Scan(&claimed) != nil {
+			var seen bool
+			_ = s.db.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM public.financial_events WHERE tenant=$1 AND ref=$2 AND kind IN ('PAYMENT_PAID','PAYMENT_UNAPPLIED'))`,
+				tenant, evt.TransferID).Scan(&seen)
+			if !seen { // a replay of a notice already handled changes nothing
+				s.finEvent(r, tenant, caseID, invID, "PAYMENT_UNAPPLIED", "IN", amount, "", evt.TransferID, "mojaloop")
+				s.notify(r, tenant, "role:FINANCE", "PAYMENT_NEEDS_ATTENTION",
+					fmt.Sprintf("A Mojaloop transfer of %s arrived for a fee that was already paid — refund or apply it", usd(amount)), "#/finance")
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "unapplied"})
+			return
+		}
 		s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, "", evt.TransferID, "mojaloop")
 		s.logActivity(r.Context(), tenant, caseID, "PAYMENT", "Mojaloop transfer fulfilled ("+evt.TransferID+")")
 		// Same money-movement event settleInvoice's UI-triggered PAY action

@@ -26,7 +26,7 @@ a { color: var(--pine-2); }
 .eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 13px; color: #BFD8CC; margin-bottom: 14px; }
 .hero h1 { font-size: 44px; line-height: 1.15; margin-bottom: 18px; }
 .lede { max-width: 720px; color: #DCE7E0; font-size: 17px; margin-bottom: 28px; }
-.hero-cta { display: flex; gap: 14px; margin-bottom: 44px; }
+.hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 44px; }
 .hero .btn.ghost { border-color: #fff; color: #fff; }
 .hero-stats { display: flex; gap: 48px; }
 .hero-stats dt { font-size: 26px; font-weight: 700; }
@@ -60,10 +60,10 @@ a { color: var(--pine-2); }
 /* apply */
 .apply-wrap { max-width: 680px; padding: 48px 24px 72px; }
 .apply-wrap h1 { color: var(--pine); margin-bottom: 12px; }
-.apply-form { display: grid; gap: 16px; margin-top: 24px; }
-.apply-form label { display: grid; gap: 6px; font-size: 14px; font-weight: 600; }
+.apply-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-top: 24px; }
+.apply-form label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: 14px; font-weight: 600; }
 .apply-form input, .apply-form select, .apply-form textarea {
-  font: inherit; font-weight: 400; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  font: inherit; font-weight: 400; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; min-width: 0;
 }
 .apply-form input:focus, .apply-form select:focus, .apply-form textarea:focus { outline: 2px solid var(--pine-2); outline-offset: 1px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -75,7 +75,7 @@ a { color: var(--pine-2); }
   .hero h1 { font-size: 30px; }
   .hero-stats { flex-direction: column; gap: 16px; }
   .nav-links a:not(.btn) { display: none; }
-  .grid2 { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* dispute.html: two tasks, one visible at a time */
@@ -92,3 +92,12 @@ a { color: var(--pine-2); }
 .email-hint.ok { color: var(--pine-2); }
 .email-hint.bad { color: #A33327; }
 .email-hint button { font: inherit; background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; }
+
+/* Phones: the header's buttons wrap onto a second line instead of pushing the page wider than the screen. */
+@media (max-width: 520px) {
+  .nav-row { flex-wrap: wrap; row-gap: 8px; height: auto; padding: 10px 0; }
+  .nav-links { flex-wrap: wrap; gap: 8px; width: 100%; }
+  .nav-links .btn { padding: 6px 10px; font-size: 13px; }
+  .hero-cta .btn.lg { padding: 10px 18px; font-size: 15px; }
+  .tab-bar [role="tab"] { flex: 1 1 0; min-width: 0; white-space: normal; padding-left: 6px; padding-right: 6px; }
+}

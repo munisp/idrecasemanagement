@@ -59,6 +59,7 @@ var templateEventLabels = map[string]string{
 	"documentation_not_received": "Documents not received by the deadline",
 	"final_order":                "Final Order package to the Agency",
 	"final_order_rationale_copy": "Rationale copy to both parties",
+	"invoice":                    "Invoice to the party billed (drafted when it passes QA)",
 	"payment_reminder":           "Invoice coming due (drafted automatically)",
 	"past_due_reminder":          "Invoice past due (drafted automatically)",
 	"refund":                     "Case closed and fee refunded",
@@ -73,6 +74,12 @@ var templatePlaceholders = []map[string]string{
 	{"token": "{payer_name}", "meaning": "The health plan named on the dispute"},
 	{"token": "{disputed_amount}", "meaning": "The amount in dispute"},
 	{"token": "{today}", "meaning": "Today's date"},
+	{"token": "{org_name}", "meaning": "Your organization's name (Letterhead & invoice), e.g. Capitol Bridge LLC"},
+	{"token": "{org_short}", "meaning": "Its short name, e.g. Capitol Bridge"},
+	{"token": "{contact_email}", "meaning": "The contact email (Letterhead & invoice)"},
+	{"token": "{contact_phone}", "meaning": "The contact phone (Letterhead & invoice)"},
+	{"token": "{program_name}", "meaning": "The program's name, e.g. Florida AHCA"},
+	{"token": "{agency_salutation}", "meaning": "How emails to the Agency open, e.g. Dear Mr. Hoeler and Ms. Rooks,"},
 	{"token": "{share_link}", "meaning": "A secure upload link, created when the message is sent"},
 	{"token": "{download_link}", "meaning": "A secure download link, created when the message is sent"},
 }
@@ -318,7 +325,7 @@ func (s *server) listTemplates(w http.ResponseWriter, r *http.Request) {
 		lobs = cfg.FieldSchema["line_of_business"]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"templates": templates, "events": events, "placeholders": templatePlaceholders,
+		"templates": templates, "events": events, "placeholders": s.templateTokens(r, tenant),
 		"recipient_roles": templateRecipientRoles, "lines_of_business": lobs,
 		"qa_role": defaultQARole(base), "can_edit": hasAnyRole(p, templateEditRoles...),
 	})
@@ -332,12 +339,14 @@ func templateEventLabel(key string) string {
 }
 
 type templateIn struct {
-	Name    string   `json:"name"`
-	Subject string   `json:"subject"`
-	Body    string   `json:"body"`
-	To      []string `json:"to"`
-	CC      []string `json:"cc"`
-	Active  *bool    `json:"active"`
+	// extraTokens: the tenant's own {variables}, accepted alongside the built-in placeholders.
+	extraTokens map[string]bool
+	Name        string   `json:"name"`
+	Subject     string   `json:"subject"`
+	Body        string   `json:"body"`
+	To          []string `json:"to"`
+	CC          []string `json:"cc"`
+	Active      *bool    `json:"active"`
 }
 
 // validate trims the fields and reports the first problem, or "".
@@ -372,6 +381,9 @@ func (in *templateIn) validate() string {
 	for _, ph := range templatePlaceholders {
 		known[ph["token"]] = true
 	}
+	for t := range in.extraTokens {
+		known[t] = true
+	}
 	for _, tok := range regexp.MustCompile(`\{[a-z_]+\}`).FindAllString(in.Subject+" "+in.Body, -1) {
 		if !known[tok] {
 			return fmt.Sprintf("%s is not a placeholder the system fills in", tok)
@@ -399,6 +411,10 @@ func (s *server) putTemplate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
+	}
+	in.extraTokens = map[string]bool{}
+	for _, ph := range s.templateTokens(r, tenant) {
+		in.extraTokens[ph["token"]] = true
 	}
 	if msg := in.validate(); msg != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})

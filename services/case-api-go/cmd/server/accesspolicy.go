@@ -59,13 +59,16 @@ var hpOpenPaths = []*regexp.Regexp{
 
 // outsideShellPaths are what every signed-in page needs, for any outside account.
 var outsideShellPaths = []*regexp.Regexp{
-	regexp.MustCompile(`^/program$`),           // the portal reads the program's settings to draw itself
-	regexp.MustCompile(`^/prefs$`),             // the caller's own preferences
-	regexp.MustCompile(`^/notifications(/|$)`), // the caller's own notifications
-	regexp.MustCompile(`^/audit/mine$`),        // the caller's own audit trail
-	regexp.MustCompile(`^/upload-policy$`),     // what may be uploaded, and how big
-	regexp.MustCompile(`^/uploads(/|$)`),       // the caller's own resumable uploads
+	regexp.MustCompile(`^/program$`),                            // the portal reads the program's settings to draw itself
+	regexp.MustCompile(`^/prefs$`),                              // the caller's own preferences
+	regexp.MustCompile(`^/drafts(/[a-z-]+(/[0-9a-f-]{36})?)?$`), // the caller's own unfinished dispute forms: the list, a form, one draft
+	regexp.MustCompile(`^/program/system-mail$`),                // the address the program's letters come from (outside callers see only that)
+	regexp.MustCompile(`^/notifications(/|$)`),                  // the caller's own notifications
+	regexp.MustCompile(`^/audit/mine$`),                         // the caller's own audit trail
+	regexp.MustCompile(`^/upload-policy$`),                      // what may be uploaded, and how big
+	regexp.MustCompile(`^/uploads(/|$)`),                        // the caller's own resumable uploads
 	regexp.MustCompile(`^/presence/ping$`),
+	regexp.MustCompile(`^/telemetry/events$`), // the caller's own portal-use counts (telemetry.go; never what is typed)
 }
 
 // partyOpenPaths: an invited party's own workspace, and the sealed offers of a
@@ -94,6 +97,13 @@ func outsideOpenPaths(p principal) []*regexp.Regexp {
 // its deadlines and the documents. Nothing internal — no timeline, review
 // notes, eligibility evidence, QA drafts or correspondence log.
 var tpaOwnCasePaths = regexp.MustCompile(`^/cases/([0-9a-fA-F-]{36})(|/clocks|/documents|/documents/[0-9a-fA-F-]{36}/download)$`)
+
+// The routes that name one case, a QA item or an invoice: a Reviewer reaches them only for a case they may see.
+var (
+	reviewerCasePath    = regexp.MustCompile(`^/cases/([0-9a-fA-F-]{36})(/|$)`)
+	reviewerQAPath      = regexp.MustCompile(`^/qa/([0-9a-fA-F-]{36})(/|$)`)
+	reviewerInvoicePath = regexp.MustCompile(`^/invoices/([0-9a-fA-F-]{36})(/|$)`)
+)
 
 // pagePolicy is a read endpoint that belongs to one page of the portal, and
 // the roles that page is for. The same sets drive the menu (portal/js/app.js
@@ -140,6 +150,10 @@ func filingDetails(details map[string]any) map[string]any {
 //
 //	"allow"      carry on to the handler (which applies its own checks)
 //	"own-case"   allow only if the caller filed the case named in caseID
+//	"assigned-case" a Reviewer: allow only if the case named in caseID is
+//	             assigned to them (casescope.go)
+//	"qa-case" / "invoice-case"  the same, for the case a QA item or an
+//	             invoice belongs to (caseID then holds that item's id)
 //	"deny"       refuse, with reason
 //
 // Pure, so every rule above is tested without a database.
@@ -158,6 +172,22 @@ func accessDecision(p principal, method, rel string) (decision, caseID, reason s
 			return "own-case", m[1], ""
 		}
 		return "deny", "", "this account can only use its own filing area"
+	}
+	if reviewerScoped(p) {
+		if m := reviewerCasePath.FindStringSubmatch(rel); m != nil {
+			return "assigned-case", m[1], ""
+		}
+		if m := reviewerQAPath.FindStringSubmatch(rel); m != nil {
+			return "qa-case", m[1], ""
+		}
+		if m := reviewerInvoicePath.FindStringSubmatch(rel); m != nil {
+			return "invoice-case", m[1], ""
+		}
+		// One question can draw on every case at once, and its answer is model-written text: it cannot be
+		// filtered to the cases a Reviewer may see. The assistant and each case's own copilot stay available.
+		if rel == "/graph/ask" || rel == "/graph/hints" {
+			return "deny", "", "Ask the graph covers every case in the tenant; a Reviewer works only the cases assigned to them"
+		}
 	}
 	if method == http.MethodGet {
 		for _, pol := range pagePolicies {
@@ -184,9 +214,17 @@ func (s *server) accessGuard(next http.Handler) http.Handler {
 				rel = ""
 			}
 		}
+		// A TPA login limited to one client or to payments passes its own, deny-by-default rules first (tpa_client_scope.go).
+		if hasRole(p, "TPA") && !s.tpaScopeGuard(w, r, p, tenant, strings.TrimRight(rel, "/")) {
+			return
+		}
 		decision, caseID, reason := accessDecision(p, r.Method, strings.TrimRight(rel, "/"))
 		switch decision {
 		case "allow":
+			if reviewerScoped(p) && r.Method == http.MethodGet {
+				s.serveScoped(next, w, r, p, tenant)
+				return
+			}
 			next.ServeHTTP(w, r)
 		case "own-case":
 			var mine bool
@@ -203,6 +241,30 @@ func (s *server) accessGuard(next http.Handler) http.Handler {
 			if !mine {
 				// Not found, not forbidden: an outside account must not learn which case ids exist.
 				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			next.ServeHTTP(w, r)
+		case "assigned-case", "qa-case", "invoice-case":
+			target := caseID
+			switch decision {
+			case "qa-case":
+				target = ""
+				_ = s.db.QueryRow(r.Context(), `SELECT coalesce(case_id::text,'') FROM public.qa_reviews WHERE tenant=$1 AND id::text=$2`,
+					tenant, caseID).Scan(&target)
+			case "invoice-case":
+				target = ""
+				_ = s.db.QueryRow(r.Context(), `SELECT coalesce(case_id::text,'') FROM public.invoices WHERE tenant=$1 AND id::text=$2`,
+					tenant, caseID).Scan(&target)
+			}
+			if target != "" && !s.caseVisible(r.Context(), p, tenant, target) {
+				s.logAudit(r.Context(), tenant, target, "ACCESS_DENIED", map[string]any{
+					"by": p.Subject, "method": r.Method, "path": rel, "reason": "case assigned to another reviewer"})
+				// Not found, not forbidden: a reviewer must not learn which cases belong to others.
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			if r.Method == http.MethodGet {
+				s.serveScoped(next, w, r, p, tenant)
 				return
 			}
 			next.ServeHTTP(w, r)

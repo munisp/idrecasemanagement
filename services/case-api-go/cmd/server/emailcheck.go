@@ -121,6 +121,11 @@ func emailReachMsg(ctx context.Context, who, addr string) string {
 }
 
 func (s *server) emailCheck(w http.ResponseWriter, r *http.Request) {
+	// Public and each call looks up DNS and mail servers: per address, enough for anyone filling in a form.
+	if !s.rateLimit("email-check:"+clientIP(r), 30, 60) {
+		http.Error(w, `{"error":"too many checks from this address — try again in a minute"}`, http.StatusTooManyRequests)
+		return
+	}
 	addr := strings.TrimSpace(r.URL.Query().Get("email"))
 	if addr == "" || len(addr) > 320 {
 		http.Error(w, `{"error":"email required"}`, http.StatusBadRequest)

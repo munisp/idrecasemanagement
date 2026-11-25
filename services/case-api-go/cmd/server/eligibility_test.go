@@ -227,3 +227,97 @@ func TestEligibilityProviderTypesAndConflicts(t *testing.T) {
 		t.Error("no conflicts should yield nothing")
 	}
 }
+
+// Network status is asked for only where it picks the threshold.
+func TestMissingInputsAsksNetworkStatusOnlyWhereItMatters(t *testing.T) {
+	cfg := flTestConfig()
+	has := func(m []string, k string) bool { return strings.Contains(","+strings.Join(m, ",")+",", ","+k+",") }
+	physician := missingEligibilityInputs(cfg, eligibilityInput{ProviderType: "physician_dentist", FinalDeterminationAt: "2026-09-18"})
+	if len(physician) != 0 {
+		t.Fatalf("a physician's dispute needs nothing more, got %v", physician)
+	}
+	hospital := missingEligibilityInputs(cfg, eligibilityInput{ProviderType: "hospital_outpatient", FinalDeterminationAt: "2026-09-18"})
+	if !has(hospital, "contracted") {
+		t.Fatalf("a hospital's threshold depends on its network status, got %v", hospital)
+	}
+	unknown := missingEligibilityInputs(cfg, eligibilityInput{})
+	for _, k := range []string{"provider_type", "contracted", "final_determination_at"} {
+		if !has(unknown, k) {
+			t.Fatalf("with nothing known %s is missing, got %v", k, unknown)
+		}
+	}
+}
+
+// A filed document set's facts: a stated provider type beats an inferred
+// one, the EOB is read first, and the network status sets out-of-network.
+func TestPackageCaseFacts(t *testing.T) {
+	got := packageCaseFacts([]packageSlotFacts{
+		{Slot: "ITEMIZED_BILL", Fields: []byte(`{"provider_type":"physician_dentist","provider_type_basis":"provider is a professional practice (X Physicians)"}`)},
+		{Slot: "OFFER_SUBSTANTIATION", Fields: []byte(`{"provider_type":"hospital_outpatient"}`)},
+		{Slot: "EOB", Fields: []byte(`{"contracted":false,"service_date":"2026-08-14"}`)},
+		{Slot: "PROOF_OF_COVERAGE", Fields: []byte(`{"contracted":true}`)},
+	})
+	if got["provider_type"] != "hospital_outpatient" || got["provider_type_basis"] != nil {
+		t.Fatalf("a stated type beats an inferred one: %v", got)
+	}
+	if got["contracted"] != false || got["out_of_network"] != "Yes" {
+		t.Fatalf("the EOB's network status is read first: %v", got)
+	}
+	if _, ok := got["service_date"]; ok {
+		t.Fatalf("dates stay with each document's analysis: %v", got)
+	}
+	inferred := packageCaseFacts([]packageSlotFacts{
+		{Slot: "ITEMIZED_BILL", Fields: []byte(`{"provider_type":"physician_dentist","provider_type_basis":"provider is a professional practice (X Physicians)"}`)},
+	})
+	if inferred["provider_type"] != "physician_dentist" || !strings.HasPrefix(inferred["provider_type_basis"].(string), "inferred: ") {
+		t.Fatalf("an inferred type is kept with its basis: %v", inferred)
+	}
+	if len(packageCaseFacts([]packageSlotFacts{{Slot: "EOB", Fields: []byte(`{}`)}})) != 0 {
+		t.Fatal("nothing read, nothing set")
+	}
+}
+
+// The filing window is about the day the dispute was filed, not the day it is reviewed: filed in time and
+// reviewed after the deadline is still in time; filed after the deadline is late however soon it is reviewed.
+func TestFilingWindowUsesFilingDate(t *testing.T) {
+	cfg := &ProgramConfig{}
+	cfg.Eligibility.FilingWindowMonths = 12
+	in := eligibilityInput{FinalDeterminationAt: "2025-05-09", FiledOn: "2026-04-30"} // filed 9 days before the deadline
+	if res, reason, ev := evalEligibility(cfg, in); res != "ELIGIBLE" {
+		t.Errorf("filed in time, reviewed later: got %s %s %v", res, reason, ev)
+	}
+	in.FiledOn = "2026-10-21" // filed five months after the deadline
+	res, reason, ev := evalEligibility(cfg, in)
+	if res != "INELIGIBLE" || reason != "over_filing_window" {
+		t.Errorf("filed late: got %s %s", res, reason)
+	}
+	if ev["filing_deadline"] != "2026-05-09" || ev["filed_on"] != "2026-10-21" || ev["final_determination_at"] != "2025-05-09" {
+		t.Errorf("evidence should carry the determination date, deadline and filing date: %v", ev)
+	}
+}
+
+// Black-box findings (2026-10-25): dates that can't be true are refused rather than measured.
+func TestEligibilityDatesThatCantBeTrue(t *testing.T) {
+	tomorrow := time.Now().UTC().AddDate(0, 0, 2).Format("2006-01-02")
+	for name, in := range map[string]eligibilityInput{
+		"a service in the future":             {ServiceDate: tomorrow},
+		"a final determination in the future": {FinalDeterminationAt: tomorrow},
+		"the plan decided before the service": {ServiceDate: "2026-05-01", FinalDeterminationAt: "2026-04-01"},
+	} {
+		if invalidEligibilityInput(in) == "" {
+			t.Errorf("%s is refused", name)
+		}
+	}
+	if msg := invalidEligibilityInput(eligibilityInput{ServiceDate: "2026-04-01", FinalDeterminationAt: "2026-04-01"}); msg != "" {
+		t.Errorf("a same-day determination is fine: %s", msg)
+	}
+}
+
+// Every reason evalEligibility returns is one GET /program publishes.
+func TestComputedReasonsArePublished(t *testing.T) {
+	for _, r := range []string{"below_threshold", "over_filing_window", "service_before_program_start", "not_an_eligible_dispute_type", "unrecognized_provider_type"} {
+		if !contains(computedIneligibilityReasons, r) {
+			t.Errorf("%s isn't published", r)
+		}
+	}
+}

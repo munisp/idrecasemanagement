@@ -125,6 +125,8 @@ BEGIN
         CREATE INDEX IF NOT EXISTS cases_payer ON %I.cases (payer_id, opened_at DESC) WHERE payer_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS cases_batch ON %I.cases (batch_id) WHERE batch_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS cases_details_gin ON %I.cases USING gin (details jsonb_path_ops);
+        -- case-api looks cases up as WHERE id::text=$1 (~90 call sites); the uuid primary key can't serve that.
+        CREATE INDEX IF NOT EXISTS cases_id_text_idx ON %I.cases ((id::text));
         ALTER TABLE %I.cases SET (fillfactor = 90);
         CREATE TABLE IF NOT EXISTS %I.sealed_offers (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -163,7 +165,8 @@ BEGIN
             autovacuum_analyze_scale_factor = 0.005);
     $ddl$, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant,
            'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant,
-           'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant);
+           'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant, 'tenant_'||p_tenant,
+           'tenant_'||p_tenant);
 END;
 $$ LANGUAGE plpgsql;
 

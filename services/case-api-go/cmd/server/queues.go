@@ -108,11 +108,13 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 		       c.disputed_amount_cents, v.discipline, v.status AS review_status,
 		       v.note, v.requested_by, v.requested_at, v.reviewer, v.claimed_at, v.completed_at,
 		       coalesce(c.details->>'diagnosis_codes','[]') AS diagnosis_codes,
-		       coalesce(c.details->>'bundling_suspected','') AS bundling_suspected
+		       coalesce(c.details->>'bundling_suspected','') AS bundling_suspected,
+		       h.user_id AS assigned_to, (h.user_id = $3) AS mine
 		FROM public.specialty_reviews v
 		JOIN tenant_%s.cases c ON c.id::text = v.case_id
+		LEFT JOIN public.case_helpers h ON h.tenant = v.tenant AND h.case_id = v.case_id AND h.role = $4
 		WHERE v.tenant=$1 AND v.discipline=$2`, sanitizeTenant(tenant))
-	args := []any{tenant, discipline}
+	args := []any{tenant, discipline, p.Subject, disciplineRole[discipline]} // the specialist named on each case (helpers.go)
 	if !showAll {
 		q += ` AND v.status <> 'COMPLETE'`
 	}
@@ -125,7 +127,7 @@ func (s *server) reviewQueue(w http.ResponseWriter, r *http.Request) {
 		            OR c.details->>'disputed_issue' ILIKE '%bundl%'
 		            OR c.details->>'issue' ILIKE '%bundl%')`
 	}
-	q += ` ORDER BY v.requested_at LIMIT 500`
+	q += ` ORDER BY (h.user_id = $3) IS TRUE DESC, v.requested_at DESC LIMIT 500` // your own cases first, newest first
 	rows, err := s.queryRows(r, q, args...)
 	if err != nil {
 		slog.Error("query failed", "handler", "queues.go", "err", err)
@@ -208,6 +210,10 @@ func (s *server) transitionReview(w http.ResponseWriter, r *http.Request, target
 	if err != nil || res.RowsAffected() == 0 {
 		http.Error(w, `{"error":"transition not allowed"}`, http.StatusConflict)
 		return
+	}
+	// Claiming a review is when it starts: the review's working target counts from here.
+	if k := reviewStartedKey[discipline]; k != "" && target == "IN_REVIEW" {
+		s.markProgramDate(r.Context(), tenant, caseID, k)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"review_id": reviewID, "status": target})
 }
@@ -307,3 +313,7 @@ func (s *server) openReview(r *http.Request, tenant, caseID, caseNumber, discipl
 			fmt.Sprintf("Case %s needs a %s review.", caseNumber, strings.ToLower(discipline)), "#/queues/"+discipline)
 	}
 }
+
+// reviewStartedKey / reviewDoneKey: the program dates a specialty review's start and end are recorded under.
+var reviewStartedKey = map[string]string{"CODING": "coding_review_started_at", "CLINICAL": "clinical_review_started_at", "LEGAL": "attorney_review_started_at"}
+var reviewDoneKey = map[string]string{"CODING": "coding_review_completed_at", "CLINICAL": "clinical_review_completed_at", "LEGAL": "attorney_review_completed_at"}

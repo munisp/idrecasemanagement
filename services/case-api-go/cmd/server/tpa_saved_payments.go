@@ -200,6 +200,9 @@ func (s *server) tpaPaymentSetup(w http.ResponseWriter, r *http.Request) {
 		Label    string `json:"label"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&in)
+	if org.ClientScope != "" { // a client's login saves methods for that client, never for the TPA
+		in.ClientID = org.ClientScope
+	}
 	ownerKind, ownerID, name, email := "tpa", org.ID, org.Name, org.ContactEmail
 	if in.ClientID != "" {
 		if s.db.QueryRow(r.Context(), `SELECT party_name, coalesce(contact_email,'') FROM public.tpa_clients WHERE tenant=$1 AND tpa_id::text=$2 AND id::text=$3`,
@@ -350,9 +353,9 @@ func (s *server) tpaPaymentSetupConfirm(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusBadRequest)
 		return
 	}
-	var owner string
-	_ = s.db.QueryRow(r.Context(), `SELECT tpa_id::text FROM public.tpa_payment_methods WHERE id::text=$1`, m.ID).Scan(&owner)
-	if owner != org.ID {
+	var owner, ownerClient string
+	_ = s.db.QueryRow(r.Context(), `SELECT tpa_id::text, coalesce(client_id::text,'') FROM public.tpa_payment_methods WHERE id::text=$1`, m.ID).Scan(&owner, &ownerClient)
+	if owner != org.ID || (org.ClientScope != "" && ownerClient != org.ClientScope) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
@@ -367,7 +370,11 @@ func (s *server) tpaSavedMethodsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"payment_methods": s.savedMethods(r.Context(), tenant, org.ID, r.URL.Query().Get("client_id"))})
+	clientID := r.URL.Query().Get("client_id")
+	if org.ClientScope != "" { // never the TPA's own methods, nor another client's
+		clientID = org.ClientScope
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payment_methods": s.savedMethods(r.Context(), tenant, org.ID, clientID)})
 }
 
 // tpaSavedMethodRemove: DELETE /tpa/payment-methods/{methodId} -- detached at
@@ -405,6 +412,7 @@ type feeByClient struct {
 	Name       string        `json:"name"`
 	Disputes   int           `json:"disputes"`
 	Amount     int64         `json:"amount_cents"`
+	CardFee    int64         `json:"card_fee_cents"` // added when the share is paid by card
 	Methods    []savedMethod `json:"methods"`
 	invoiceIDs []string
 	caseIDs    []string
@@ -467,32 +475,49 @@ func (s *server) tpaFeeOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		CaseID   string `json:"case_id"`
-		ClientID string `json:"client_id"`
-		BatchID  string `json:"batch_id"`
+		CaseID   string   `json:"case_id"`
+		ClientID string   `json:"client_id"`
+		BatchID  string   `json:"batch_id"`
+		CaseIDs  []string `json:"case_ids"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&in)
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in)
 	if in.CaseID != "" && !s.payerOwnsCase(r.Context(), tenant, py, in.CaseID) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{caseID: in.CaseID, clientID: in.ClientID, batchID: in.BatchID})
+	fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{caseID: in.CaseID, clientID: in.ClientID, batchID: in.BatchID, caseIDs: in.CaseIDs})
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
 	}
 	var total int64
+	ids := make([]string, 0, len(fees))
 	for _, f := range fees {
 		total += f.amount
+		ids = append(ids, f.invoiceID)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"disputes": len(fees), "amount_cents": total,
-		"clients": s.feesByClient(r.Context(), tenant, py, fees), "tpa_methods": s.savedMethods(r.Context(), tenant, py.id, "")})
+	// What paying by card adds (card_fee.go), in all and for each client's share.
+	perCard, cardFee := s.cardFees(r.Context(), tenant, ids)
+	clients := s.feesByClient(r.Context(), tenant, py, fees)
+	for _, g := range clients {
+		for _, id := range g.invoiceIDs {
+			g.CardFee += perCard[id]
+		}
+	}
+	tpaMethods := []savedMethod{}
+	if py.clientID == "" { // a client's login is not offered the TPA's own card
+		tpaMethods = s.savedMethods(r.Context(), tenant, py.id, "")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"disputes": len(fees), "amount_cents": total, "card_fee_cents": cardFee,
+		"clients": clients, "tpa_methods": tpaMethods})
 }
 
 type savedPayRequest struct {
 	Source          string            `json:"source"`            // CLIENT | TPA | CHECKOUT
 	PaymentMethodID string            `json:"payment_method_id"` // TPA: which of its methods
 	ClientMethods   map[string]string `json:"client_methods"`    // CLIENT: client_id -> method (default: its newest chargeable)
+	Method          string            `json:"method"`            // CHECKOUT: card (default; adds the card fee) | bank
+	CaseIDs         []string          `json:"case_ids"`          // pay only these disputes (the ones ticked)
 }
 
 // feeChargeSaved charges the fees in scope to saved methods and hands the
@@ -513,7 +538,9 @@ func (s *server) feeChargeSaved(w http.ResponseWriter, r *http.Request, tenant s
 		method          savedMethod
 		invoiceIDs      []string
 		caseIDs         []string
-		amount          int64
+		amount          int64            // the fees, and for a card their card fees
+		cardFees        map[string]int64 // invoice -> its card fee (a card only)
+		cardFee         int64
 	}
 	var charges []charge
 	var skipped []map[string]any
@@ -527,6 +554,10 @@ func (s *server) feeChargeSaved(w http.ResponseWriter, r *http.Request, tenant s
 	}
 	switch in.Source {
 	case "TPA":
+		if py.clientID != "" { // only the TPA's own logins charge the TPA's own card
+			http.Error(w, `{"error":"forbidden: this login cannot charge your organization's own payment methods"}`, http.StatusForbidden)
+			return
+		}
 		m, ok := pick(s.savedMethods(r.Context(), tenant, py.id, ""), in.PaymentMethodID)
 		if !ok {
 			http.Error(w, `{"error":"add a card or bank account for your organization first (Payment methods), or pick one that is ready"}`, http.StatusConflict)
@@ -556,8 +587,13 @@ func (s *server) feeChargeSaved(w http.ResponseWriter, r *http.Request, tenant s
 		return
 	}
 	var all []string
-	for _, c := range charges {
+	for i, c := range charges {
 		all = append(all, c.invoiceIDs...)
+		// A card pays each fee's card fee too (card_fee.go); a bank account does not.
+		if c.method.Method == "CARD" {
+			charges[i].cardFees, charges[i].cardFee = s.cardFees(r.Context(), tenant, c.invoiceIDs)
+			charges[i].amount += charges[i].cardFee
+		}
 	}
 	if !s.expireOverlapping(r.Context(), tenant, all) {
 		http.Error(w, `{"error":"an earlier payment for some of these disputes is being completed — check again in a minute"}`, http.StatusConflict)
@@ -584,9 +620,10 @@ func (s *server) feeChargeSaved(w http.ResponseWriter, r *http.Request, tenant s
 		var gid string
 		if err := s.db.QueryRow(r.Context(), `
 			INSERT INTO public.payment_groups (tenant, batch_id, tpa_id, client_id, case_id, scope, invoice_ids, amount_cents, created_by,
-			                                   status, source, payment_method_id, run_id, workflow_id)
-			VALUES ($1,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7::uuid[],$8,$9,'PROCESSING',$10,$11::uuid,$12::uuid,$13) RETURNING id::text`,
-			tenant, batchArg, py.id, clientArg, caseArg, c.label, c.invoiceIDs, c.amount, p.Subject, source, c.method.ID, runID, wfID).Scan(&gid); err != nil {
+			                                   status, source, payment_method_id, run_id, workflow_id, card_fee_cents, pay_by)
+			VALUES ($1,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7::uuid[],$8,$9,'PROCESSING',$10,$11::uuid,$12::uuid,$13,$14,$15) RETURNING id::text`,
+			tenant, batchArg, py.id, clientArg, caseArg, c.label, c.invoiceIDs, c.amount, p.Subject, source, c.method.ID, runID, wfID,
+			c.cardFee, map[bool]string{true: payByCard, false: payByBank}[c.method.Method == "CARD"]).Scan(&gid); err != nil {
 			slog.Error("saved payment group", "err", err)
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
@@ -596,13 +633,13 @@ func (s *server) feeChargeSaved(w http.ResponseWriter, r *http.Request, tenant s
 			var amount int64
 			_ = s.db.QueryRow(r.Context(), `SELECT amount_cents FROM public.invoices WHERE id::text=$1`, inv).Scan(&amount)
 			_, _ = s.db.Exec(r.Context(), `
-				INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, payer_org, raw)
-				VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb) ON CONFLICT (session_id) DO NOTHING`,
-				tenant, c.caseIDs[i], inv, "pg_"+gid+"#"+inv, amount, py.name)
+				INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, payer_org, raw, card_fee_cents)
+				VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb,$7) ON CONFLICT (session_id) DO NOTHING`,
+				tenant, c.caseIDs[i], inv, "pg_"+gid+"#"+inv, amount, py.name, c.cardFees[inv])
 			s.finEvent(r, tenant, c.caseIDs[i], inv, "PAYMENT_INITIATED", "NONE", amount, "PROVIDER", "pg_"+gid, "saved-"+strings.ToLower(c.method.Method))
 		}
 		groups = append(groups, gid)
-		out = append(out, map[string]any{"payment_group_id": gid, "for": c.label, "disputes": len(c.invoiceIDs), "amount_cents": c.amount,
+		out = append(out, map[string]any{"payment_group_id": gid, "for": c.label, "disputes": len(c.invoiceIDs), "amount_cents": c.amount, "card_fee_cents": c.cardFee,
 			"method": c.method.words(), "rail": c.method.Method})
 	}
 	if _, err := s.tc.ExecuteWorkflow(r.Context(), temporalclient.StartWorkflowOptions{ID: wfID, TaskQueue: feePayQueue},

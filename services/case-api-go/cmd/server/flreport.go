@@ -8,7 +8,7 @@ package main
 // core columns on tenant_fl.cases, workflow dates in program_dates (set via
 // POST /cases/{id}/program-date) and free-form attributes in details.
 // Reports NEVER invent a value: a date nobody recorded renders "N/A", an
-// outcome not yet determined renders "TBD – case in process", exactly as the
+// outcome not yet determined renders "TBD - In Process", exactly as the
 // field criteria require. Internal-only fields (review notes, rationale,
 // RFI details, payment contact) are never emitted.
 
@@ -275,7 +275,7 @@ func (c *flCaseRow) outcome() string {
 	if v := dget(c.Details, "case_outcome", "outcome"); v != "" {
 		return v
 	}
-	return "TBD – case in process"
+	return "TBD - In Process"
 }
 
 var flWeeklyHeaders = []string{

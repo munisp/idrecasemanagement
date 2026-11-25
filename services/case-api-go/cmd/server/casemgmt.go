@@ -7,11 +7,10 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -121,31 +120,10 @@ func (s *server) logAudit(ctx context.Context, tenant, caseID, action string, pa
 	if err != nil {
 		return
 	}
-	// One writer at a time per tenant: two entries written at once both read
-	// the same last hash, and the chain forked. Every outside organization's
-	// action is audited now (orgaudit.go), so "at once" is common.
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		slog.Error("audit", "action", action, "err", err)
-		return
-	}
-	defer tx.Rollback(ctx)
-	_, _ = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('audit_log:' || $1))`, tenant)
-	var prevHash string
-	if err := tx.QueryRow(ctx,
-		`SELECT hash FROM public.audit_log WHERE tenant=$1 ORDER BY id DESC LIMIT 1`, tenant).
-		Scan(&prevHash); err != nil {
-		prevHash = "GENESIS"
-	}
-	sum := sha256.Sum256([]byte(prevHash + string(body)))
-	hash := hex.EncodeToString(sum[:])
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO public.audit_log (tenant, case_id, action, payload, prev_hash, hash, org, actor)
-		VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($8,''))`, tenant, caseID, action, string(body), prevHash, hash, auditOrg(payload), auditActor(payload)); err != nil {
-		slog.Error("audit", "action", action, "err", err)
-		return
-	}
-	_ = tx.Commit(ctx)
+	// Written by the group writer (audit_group.go): one locked transaction per group of entries waiting at the
+	// same moment, same chain, same order. This call still returns only once its entry is committed.
+	s.appendAudit(&auditEntry{tenant: tenant, caseID: caseID, action: action, body: string(body),
+		org: auditOrg(payload), actor: auditActor(payload)})
 }
 
 // auditActor: the person an entry records ("by"), for their own trail
@@ -300,6 +278,22 @@ func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// countNotifications: GET /notifications/count — the caller's unread total, for the bell's badge. The list is paged
+// (50 at most per call), so counting its rows capped the badge at 50 and it never moved while more were unread.
+func (s *server) countNotifications(w http.ResponseWriter, r *http.Request) {
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	var n int
+	if err := s.db.QueryRow(r.Context(), `
+		SELECT count(*) FROM public.notifications
+		WHERE tenant=$1 AND user_sub = ANY($2) AND read_at IS NULL`,
+		tenant, s.notifTargetsFor(r.Context(), tenant, p)).Scan(&n); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"unread": n})
+}
+
 func (s *server) readNotification(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -329,60 +323,6 @@ func (s *server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 // ---- Assignment & routing ------------------------------------------------------
 // Workload-balanced: the case manager (or arbitrator) of this tenant with the
 // fewest open assignments wins. Manual override via {"assignee": "<sub>"}.
-
-func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
-	// The PM assigns reviewers (SOP). A Reviewer still takes work with
-	// "Grab next"; it cannot route cases to other people.
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: requires PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
-		return
-	}
-	tenant := r.Context().Value(ctxTenant{}).(string)
-	caseID := chi.URLParam(r, "caseId")
-	var in struct {
-		Role     string `json:"role"`     // CASE_MANAGER | ARBITRATOR
-		Assignee string `json:"assignee"` // optional manual override
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	if in.Role == "" {
-		in.Role = "CASE_MANAGER"
-	}
-	assignee := in.Assignee
-	if assignee == "" {
-		// workload-balanced auto-assignment among eligible users (Keycloak group
-		// members are mirrored in accounts/contacts; here: least open cases)
-		err := s.db.QueryRow(r.Context(), fmt.Sprintf(`
-			SELECT assigned_to FROM tenant_%s.cases
-			WHERE assigned_role=$1 AND assigned_to IS NOT NULL
-			  AND status NOT LIKE 'CLOSED%%'
-			GROUP BY assigned_to ORDER BY COUNT(*) ASC LIMIT 1`, sanitizeTenant(tenant)),
-			in.Role).Scan(&assignee)
-		if err != nil || assignee == "" {
-			assignee = "unassigned-pool" // first assignment starts the pool
-		}
-	}
-	_, err := s.db.Exec(r.Context(), fmt.Sprintf(`
-		UPDATE tenant_%s.cases SET assigned_to=$1, assigned_role=$2, updated_at=now()
-		WHERE id=$3`, sanitizeTenant(tenant)), assignee, in.Role, caseID)
-	if err != nil {
-		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
-		return
-	}
-	var cn string
-	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-		`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&cn)
-	s.notify(r, tenant, assignee, "ASSIGNMENT",
-		fmt.Sprintf("You were assigned %s as %s", cn, in.Role), "#/cases/"+caseID)
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.case_activities (tenant, case_id, type, body)
-		VALUES ($1,$2,'MILESTONE',$3)`, tenant, caseID,
-		fmt.Sprintf("Assigned to %s (%s)", assignee, in.Role))
-	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
-		"by": r.Context().Value(ctxPrincipal{}).(principal).Subject, "assigned_to": assignee,
-		"role": in.Role, "manual": in.Assignee != "",
-	})
-	writeJSON(w, http.StatusOK, map[string]string{"assigned_to": assignee, "role": in.Role})
-}
 
 // ---- Escalations (SLA breach -> supervisor chain) --------------------------------
 
@@ -479,7 +419,7 @@ func (s *server) relateCases(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, id := range []string{in.CaseID, in.RelatedID} {
 		if lock := s.caseLockedForRequest(r, tenant, id); lock != "" {
-			writeJSON(w, http.StatusLocked, map[string]string{"error": caseLockMessage(lock), "lock": lock})
+			writeLockRefusal(w, lock)
 			return
 		}
 	}
@@ -588,7 +528,7 @@ func (s *server) maybeAdvanceStatus(r *http.Request, tenant, caseID string) {
 	// All case invoices PAID while awaiting payment => funds settled.
 	res, err := s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET status='CLOSED_PAID', updated_at=now()
-		WHERE id=$1 AND status='PAYMENT_PENDING'
+		WHERE id::text=$1 AND status='PAYMENT_PENDING'
 		  AND EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$2 AND case_id=$1)
 		  AND NOT EXISTS(SELECT 1 FROM public.invoices WHERE tenant=$2 AND case_id=$1 AND status='OPEN')`, t),
 		caseID, tenant)
@@ -692,7 +632,12 @@ func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// The deadlines on its own disputes and its own tasks (tpa_calendar.go).
-		writeJSON(w, http.StatusOK, s.tpaCalendarItems(r, tenant, org.ID))
+		clientID, ok := s.tpaClientFilter(r, tenant, org)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.tpaCalendarItems(r, tenant, org.ID, clientID))
 		return
 	}
 	deadlines, _ := s.queryRows(r, fmt.Sprintf(`
@@ -703,10 +648,14 @@ func (s *server) calendar(w http.ResponseWriter, r *http.Request) {
 	// case_id travels alongside the task id now so the calendar can link a
 	// task straight to its case -- previously only OFFER_WINDOW rows linked
 	// anywhere; every TASK row was plain, unclickable text.
+	// Done tasks stay on the calendar, ticked, for a while (the system's own ones tick themselves: step_tasks.go).
 	tasks, _ := s.queryRows(r, `
 		SELECT id::text AS ref, 'TASK' AS kind, subject AS label,
-		       to_char(due_date,'YYYY-MM-DD') AS due, coalesce(case_id,'') AS case_id
-		FROM public.tasks WHERE tenant=$1 AND status='OPEN' AND due_date IS NOT NULL`, tenant)
+		       to_char(due_date,'YYYY-MM-DD') AS due, coalesce(case_id,'') AS case_id,
+		       status='DONE' AS done, to_char(completed_at,'YYYY-MM-DD"T"HH24:MI') AS done_at,
+		       created_by IN ('system','system:deadlines') AS automatic
+		FROM public.tasks WHERE tenant=$1 AND due_date IS NOT NULL
+		  AND (status='OPEN' OR (status='DONE' AND completed_at > now() - interval '45 days'))`, tenant)
 	writeJSON(w, http.StatusOK, append(deadlines, tasks...))
 }
 
@@ -846,47 +795,37 @@ func (s *server) generateLetter(w http.ResponseWriter, r *http.Request) {
 
 // ---- Email channel: inbound email -> lead/activity (email-to-case) ------------------------
 
-// emailInbound receives provider webhooks (Mailgun/SES-style), token-authenticated.
+// emailInbound receives provider webhooks (Mailgun/SES-style), authenticated by the shared EMAIL_INBOUND_TOKEN.
+// Unset, the endpoint is closed. The mail is filed like every other inbound mail (mailfiling.go): under its dispute
+// when it names one, otherwise in the mail log's inbound section, and as a lead.
 func (s *server) emailInbound(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Email-Token") == "" {
+	if s.cfg.EmailInboundToken == "" {
+		http.Error(w, `{"error":"inbound email is not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Email-Token")), []byte(s.cfg.EmailInboundToken)) != 1 {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 	var in struct {
-		Tenant  string `json:"tenant"`
-		From    string `json:"from"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-		CaseRef string `json:"case_number"` // optional: "Re: CMS-TX-2026-00001"
+		Tenant    string `json:"tenant"`
+		From      string `json:"from"`
+		Subject   string `json:"subject"`
+		Body      string `json:"body"`
+		CaseRef   string `json:"case_number"` // optional: "Re: CMS-TX-2026-00001"
+		MessageID string `json:"message_id"`
+		InReplyTo string `json:"in_reply_to"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&in)
 	tenant := strings.ToLower(in.Tenant)
 	if len(tenant) != 2 {
 		http.Error(w, `{"error":"tenant required"}`, http.StatusBadRequest)
 		return
 	}
-	// The mail journal is written FIRST and unconditionally: every inbound
-	// mail is referable from correspondence_log whether or not it matches a
-	// case, with the full subject and body (truncated at 20k, not 400 — the
-	// journal is the record, the timeline is the summary).
-	caseID := ""
-	if in.CaseRef != "" {
-		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(
-			`SELECT id FROM tenant_%s.cases WHERE case_number=$1`, sanitizeTenant(tenant)),
-			in.CaseRef).Scan(&caseID)
-	}
-	rcpts, _ := json.Marshal(map[string]any{"from": in.From})
-	_, _ = s.db.Exec(r.Context(), `
-		INSERT INTO public.correspondence_log (tenant, case_id, direction, template, subject, body, recipients, sent_by)
-		VALUES ($1,$2,'IN','inbound',$3,$4,$5,$6)`,
-		tenant, caseID, truncate(in.Subject, 500), truncate(in.Body, 20000), rcpts, in.From)
-	if caseID != "" {
-		// email-to-case: append to the case timeline
-		_, _ = s.db.Exec(r.Context(), `
-			INSERT INTO public.case_activities (tenant, case_id, type, body)
-			VALUES ($1,$2,'EMAIL',$3)`, tenant, caseID,
-			fmt.Sprintf("From %s — %s\n%s", in.From, in.Subject, truncate(in.Body, 400)))
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "attached", "case_id": caseID})
+	m := s.fileInbound(r.Context(), inboundMail{Tenant: tenant, From: in.From, Subject: in.Subject, Body: in.Body, MessageID: in.MessageID,
+		Refs: messageIDsIn(in.InReplyTo), CaseHint: in.CaseRef, By: "email-inbound", NotifyUnmatched: true}, true)
+	if m.CaseID != "" {
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "attached", "case_id": m.CaseID, "case_number": m.CaseNumber, "reason": m.Reason})
 		return
 	}
 	// otherwise: lead capture (email-to-lead)
@@ -894,7 +833,7 @@ func (s *server) emailInbound(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO public.leads (tenant, source, name, email, summary)
 		VALUES ($1,'EMAIL',$2,$3,$4)`, tenant, in.From, in.From,
 		fmt.Sprintf("%s\n%s", in.Subject, truncate(in.Body, 400)))
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "lead_created"})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "lead_created", "reason": m.Reason})
 }
 
 func truncate(s string, n int) string {

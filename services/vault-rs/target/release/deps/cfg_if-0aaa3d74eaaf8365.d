@@ -1,0 +1,7 @@
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/cfg_if-0aaa3d74eaaf8365.d: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/cfg-if-1.0.5/src/lib.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/libcfg_if-0aaa3d74eaaf8365.rlib: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/cfg-if-1.0.5/src/lib.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/libcfg_if-0aaa3d74eaaf8365.rmeta: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/cfg-if-1.0.5/src/lib.rs
+
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/cfg-if-1.0.5/src/lib.rs:

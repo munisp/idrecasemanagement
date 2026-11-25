@@ -43,25 +43,46 @@ type eligibilityInput struct {
 	FinalDeterminationAt string   `json:"final_determination_at"` // YYYY-MM-DD
 	Flags                []string `json:"flags"`
 	AORValid             *bool    `json:"aor_valid"`
-	AORReason            string   `json:"aor_reason"` // why the Reviewer found the AOR valid or not
+	AORReason            string   `json:"aor_reason"`   // why the Reviewer found the AOR valid or not
 	ServiceDate          string   `json:"service_date"` // YYYY-MM-DD, earliest date of service in dispute
 	DisputeType          string   `json:"dispute_type"` // denied_in_full | denied_in_part | underpaid | overpaid
+	// FiledOn is when the dispute was filed (YYYY-MM-DD): the filing window is about that day, not the day the
+	// review happens to run. Empty = today (a check before filing).
+	FiledOn string `json:"filed_on,omitempty"`
+	// DeterminationFrom says where FinalDeterminationAt came from ("the case" | "the documents"), for the evidence.
+	DeterminationFrom string `json:"determination_from,omitempty"`
 }
+
+// computedIneligibilityReasons: the reasons evalEligibility itself can give (beside the program's own
+// eligibility.ineligibility_reasons, which a Reviewer ticks). GET /program publishes them, so every reason a review
+// can carry is one the program lists.
+var computedIneligibilityReasons = []string{"below_threshold", "over_filing_window", "service_before_program_start",
+	"not_an_eligible_dispute_type", "unrecognized_provider_type", "aor_invalid_pending_attorney"}
 
 // noOverrideReasons are computed INELIGIBLE results a reviewer may not set
 // aside: the filing window is statutory and not extendable.
 var noOverrideReasons = map[string]bool{"over_filing_window": true, "over_12_months": true}
 
-// invalidEligibilityInput returns a message when a supplied date is not a
-// YYYY-MM-DD calendar date, "" otherwise.
+// invalidEligibilityInput returns a message when a supplied date is not a YYYY-MM-DD calendar date, is in the
+// future, or has the plan deciding the claim before the service was rendered; "" otherwise. Each is a date entered
+// (or read) wrong, and each would have been measured as if it were true -- a determination dated next month is
+// always inside the filing window.
 func invalidEligibilityInput(in eligibilityInput) string {
-	for name, v := range map[string]string{"final_determination_at": in.FinalDeterminationAt, "service_date": in.ServiceDate} {
-		if v == "" {
+	today := time.Now().UTC().Format("2006-01-02") // UTC is a few hours ahead of the program's day: never too strict
+	for _, d := range []struct{ name, v string }{{"final_determination_at", in.FinalDeterminationAt}, {"service_date", in.ServiceDate}} {
+		if d.v == "" {
 			continue
 		}
-		if _, err := time.Parse("2006-01-02", v); err != nil {
-			return name + " must be a date in YYYY-MM-DD form"
+		if _, err := time.Parse("2006-01-02", d.v); err != nil {
+			return d.name + " must be a date in YYYY-MM-DD form"
 		}
+		if d.v > today {
+			return d.name + " is in the future (" + d.v + ")"
+		}
+	}
+	if in.ServiceDate != "" && in.FinalDeterminationAt != "" && in.FinalDeterminationAt < in.ServiceDate {
+		return "final_determination_at (" + in.FinalDeterminationAt + ") is before the service_date (" + in.ServiceDate +
+			"): the plan decides a claim after the service"
 	}
 	return ""
 }
@@ -105,12 +126,24 @@ func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason st
 			}
 		}
 	}
-	// filing window (12-month style)
+	// filing window (12-month style): measured on the day the dispute was FILED. Using the day the review runs
+	// would turn a dispute filed in time into a late one just because its review came after the deadline.
 	if cfg.Eligibility.FilingWindowMonths > 0 && in.FinalDeterminationAt != "" {
 		if fd, err := time.Parse("2006-01-02", in.FinalDeterminationAt); err == nil {
 			deadline := fd.AddDate(0, cfg.Eligibility.FilingWindowMonths, 0)
+			filed := time.Now()
+			if in.FiledOn != "" {
+				if f, err := time.Parse("2006-01-02", in.FiledOn); err == nil {
+					filed = f
+				}
+			}
+			evidence["final_determination_at"] = in.FinalDeterminationAt
+			if in.DeterminationFrom != "" {
+				evidence["determination_from"] = in.DeterminationFrom
+			}
 			evidence["filing_deadline"] = deadline.Format("2006-01-02")
-			if time.Now().After(deadline) {
+			evidence["filed_on"] = filed.Format("2006-01-02")
+			if filed.After(deadline) {
 				return "INELIGIBLE", "over_filing_window", evidence
 			}
 		}
@@ -133,6 +166,7 @@ func evalEligibility(cfg *ProgramConfig, in eligibilityInput) (result, reason st
 			continue
 		}
 		evidence["threshold_min_cents"] = th.MinCents
+		evidence["disputed_amount_cents"] = in.DisputedAmountCents
 		if in.DisputedAmountCents < th.MinCents {
 			return "INELIGIBLE", "below_threshold", evidence
 		}
@@ -173,8 +207,15 @@ func missingEligibilityInputs(cfg *ProgramConfig, in eligibilityInput) []string 
 			missing = append(missing, "provider_type")
 		}
 	}
+	// Network status only matters where it picks the threshold: FL's
+	// physician/dentist threshold is the same either way, so a physician's
+	// dispute is not held for it. With the provider type unknown, any
+	// network-dependent threshold may be the one.
 	needsContracted := false
 	for _, th := range cfg.Eligibility.Thresholds {
+		if in.ProviderType != "" && th.ProviderType != in.ProviderType {
+			continue
+		}
 		if th.Contracted != nil {
 			needsContracted = true
 			break
@@ -198,8 +239,8 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	var in eligibilityInput
 	var details []byte
 	err := s.db.QueryRow(r.Context(), fmt.Sprintf(
-		`SELECT coalesce(disputed_amount_cents,0), coalesce(details,'{}'::jsonb)
-		 FROM tenant_%s.cases WHERE id=$1`, tbl), caseID).Scan(&in.DisputedAmountCents, &details)
+		`SELECT coalesce(disputed_amount_cents,0), coalesce(details,'{}'::jsonb), coalesce(opened_at::date::text,'')
+		 FROM tenant_%s.cases WHERE id=$1`, tbl), caseID).Scan(&in.DisputedAmountCents, &details, &in.FiledOn)
 	if err != nil {
 		return in, err
 	}
@@ -212,7 +253,7 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 		in.Contracted = &v
 	}
 	if v, _ := d["final_determination_at"].(string); v != "" {
-		in.FinalDeterminationAt = v
+		in.FinalDeterminationAt, in.DeterminationFrom = v, "the case"
 	}
 	if v, ok := d["aor_valid"].(bool); ok {
 		in.AORValid = &v
@@ -234,21 +275,34 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	// dispute (the common case — a claim bundle), the filing window runs from
 	// the LAST EOB/determination date ("proof of timeliness: last_eob_date"
 	// in program rules), not from whichever document happened to be analyzed
-	// most recently. Take the max date across every analyzed EOB and
-	// determination letter; ISO dates order lexicographically.
+	// most recently. Take the max determination date across every analyzed EOB
+	// and determination letter; ISO dates order lexicographically. Only a
+	// determination date counts: a date of service is not one (it comes before
+	// the plan decides, often by months), and using it made disputes filed in
+	// time look late. The filing packet's claim table states the same dates (final determination, else denial),
+	// so the latest of those and the documents' counts too. No determination date anywhere = the Reviewer enters it.
 	if in.FinalDeterminationAt == "" {
+		var fromDocs, fromClaims string
+		// Any analyzed document's labelled decision date counts, whatever type it was read as: a final
+		// determination letter read as "unrelated", or a filed set's "denials_eobs" / "final_determination_letter",
+		// still states it, and only a date printed under a decision label is ever read as one (fields.py).
 		_ = s.db.QueryRow(r.Context(), `
-			SELECT coalesce(MAX(v), '') FROM (
-				SELECT NULLIF(result->'normalized'->>'determination_date','') AS v
-				FROM public.doc_analysis
-				WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
-				  AND doc_type IN ('eob','determination_letter')
-				UNION ALL
-				SELECT NULLIF(result->'normalized'->>'service_date','')
-				FROM public.doc_analysis
-				WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
-				  AND doc_type IN ('eob','determination_letter')
-			) dates WHERE v IS NOT NULL`, tenant, caseID).Scan(&in.FinalDeterminationAt)
+			SELECT coalesce(MAX(dt), '') FROM (
+			  SELECT NULLIF(result->'normalized'->>'determination_date','') AS dt FROM public.doc_analysis
+			  WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
+			  UNION ALL
+			  SELECT NULLIF(result->'extracted'->>'determination_date','') FROM public.doc_analysis
+			  WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%') x
+			WHERE dt ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'`, tenant, caseID).Scan(&fromDocs)
+		_ = s.db.QueryRow(r.Context(), `
+			SELECT coalesce(MAX(coalesce(date_of_final_determination, date_of_denial))::text, '')
+			FROM public.case_claims WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&fromClaims)
+		switch {
+		case fromClaims != "" && fromClaims > fromDocs:
+			in.FinalDeterminationAt, in.DeterminationFrom = fromClaims, "the filing packet's claims (latest final determination / denial)"
+		case fromDocs != "":
+			in.FinalDeterminationAt, in.DeterminationFrom = fromDocs, "the documents (the latest decision date they state)"
+		}
 	}
 	// Earliest analyzed date of service, for the program-start floor. The
 	// earliest is the conservative one: a single pre-program service line
@@ -309,7 +363,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 	if err := s.db.QueryRow(r.Context(),
 		fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber); err == nil {
 		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
-		_ = s.tc.SignalWorkflow(r.Context(), wfID, "", "ELIGIBILITY_RESULT", map[string]any{"result": result, "reason": reason})
+		_ = s.sigCase(r.Context(), tenant, caseID, wfID, "ELIGIBILITY_RESULT", map[string]any{"result": result, "reason": reason})
 	}
 	// The SOP has the Reviewer tell the PM and the Coder the result.
 	reasonSuffix := ""
@@ -365,19 +419,36 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	// question for a person, not a pass.
 	if msg := invalidEligibilityInput(in); msg != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"result": "NEEDS_HUMAN", "missing": []string{strings.SplitN(msg, " ", 2)[0]},
+			"result": "NEEDS_HUMAN", "missing": []string{strings.SplitN(msg, " ", 2)[0]}, "inputs": in,
 			"detail": "a date read from the documents is not a valid calendar date (" + msg + "): enter it by hand",
 		})
 		return
 	}
 	if missing := missingEligibilityInputs(cfg, in); len(missing) > 0 {
+		// What was found goes back too, so the form can be filled with it
+		// and only the blanks are left to the Reviewer.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"result": "NEEDS_HUMAN", "missing": missing,
+			"result": "NEEDS_HUMAN", "missing": missing, "inputs": in,
 			"detail": "rule-required inputs are not derivable from the case record or analyzed documents",
 		})
 		return
 	}
 	result, reason, evidence := evalEligibility(cfg, in)
+	// The same inputs give the same decision: running it again returns the review already on file instead of
+	// recording a duplicate and repeating its side effects (notices, the ineligible letter task, the workflow signal).
+	if inJSON, err := json.Marshal(in); err == nil {
+		var prevID string
+		if s.db.QueryRow(r.Context(), `
+			SELECT id::text FROM (SELECT id, result, reason, decided_by, evidence FROM public.eligibility_reviews
+			                      WHERE tenant=$1 AND case_id::text=$2 ORDER BY created_at DESC LIMIT 1) last
+			WHERE decided_by = 'auto: case+document data' AND result=$3 AND coalesce(reason,'')=$4
+			  AND evidence->'auto_inputs' = $5::jsonb`, tenant, id, result, reason, string(inJSON)).Scan(&prevID) == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"review_id": prevID, "result": result, "reason": reason, "evidence": evidence, "auto": true, "unchanged": true,
+			})
+			return
+		}
+	}
 	evidence["auto_inputs"] = in
 	bl := eligibilityBorderline(cfg, in, evidence)
 	if conflicts := s.eligibilityConflicts(r, tenant, id); len(conflicts) > 0 {

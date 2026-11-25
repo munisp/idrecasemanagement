@@ -89,8 +89,8 @@ func TestValidateRules(t *testing.T) {
 		t.Errorf("valid rules rejected: %v", err)
 	}
 	bad := [][]Rule{
-		{{Event: "intake.advance"}},                                     // no name
-		{{Name: "x", Event: "nope"}},                                    // bad event
+		{{Event: "intake.advance"}},  // no name
+		{{Name: "x", Event: "nope"}}, // bad event
 		{{Name: "x", Event: "intake.advance", Conditions: []ruleCond{{Field: "f", Op: "regex"}}}}, // bad op
 		{{Name: "x", Event: "intake.advance", Actions: []ruleAction{{Type: "delete_db"}}}},        // bad action
 		{{Name: "dup", Event: "intake.advance"}, {Name: "dup", Event: "intake.advance"}},          // duplicate

@@ -1,0 +1,10 @@
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/lock_api-3a5d11e29211ac20.d: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/mutex.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/remutex.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/rwlock.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/liblock_api-3a5d11e29211ac20.rlib: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/mutex.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/remutex.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/rwlock.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/liblock_api-3a5d11e29211ac20.rmeta: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/mutex.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/remutex.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/rwlock.rs
+
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/lib.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/mutex.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/remutex.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/lock_api-0.4.14/src/rwlock.rs:

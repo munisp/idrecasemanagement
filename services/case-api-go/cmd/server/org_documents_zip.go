@@ -43,7 +43,11 @@ func (s *server) orgDocumentsZip(kind string) http.HandlerFunc {
 			args = append(args, ids)
 			where += fmt.Sprintf(" AND o.case_id = ANY($%d)", len(args))
 		}
-		if c := q.Get("client_id"); c != "" && kind == "tpa" {
+		c := q.Get("client_id")
+		if py.clientID != "" { // a client's login: that client's documents, whatever it asks for
+			c = py.clientID
+		}
+		if c != "" && kind == "tpa" {
 			args = append(args, c)
 			where += fmt.Sprintf(" AND o.client_id::text=$%d", len(args))
 		}
@@ -55,6 +59,9 @@ func (s *server) orgDocumentsZip(kind string) http.HandlerFunc {
 			args = append(args, b)
 			where += fmt.Sprintf(" AND o.case_id IN (SELECT case_id FROM public.tpa_dispute_batch_items WHERE batch_id::text=$%d)", len(args))
 		}
+		// The office's own documents only once they were sent to this organization (outsideDocFilter).
+		args = append(args, py.org())
+		where += fmt.Sprintf(" AND (NOT "+officeDocSQL+" OR d.id IN (SELECT pd.doc_id FROM public.party_documents pd WHERE pd.tenant=o.tenant AND pd.org=$%d))", len(args))
 		t := sanitizeTenant(tenant)
 		rows, err := s.db.Query(r.Context(), fmt.Sprintf(`
 			SELECT c.case_number, coalesce(o.initiating_party_name,''), d.object_key, coalesce(d.filename, d.id::text),
@@ -62,7 +69,7 @@ func (s *server) orgDocumentsZip(kind string) http.HandlerFunc {
 			FROM public.case_origin o
 			JOIN tenant_%s.cases c ON c.id::text = o.case_id
 			JOIN tenant_%s.documents d ON d.case_id::text = o.case_id
-			WHERE %s AND d.scan_status='CLEAN' AND NOT d.sealed
+			WHERE %s AND d.scan_status='CLEAN' AND NOT d.sealed AND NOT `+internalDocSQL+`
 			ORDER BY c.case_number, d.folder, d.created_at`, t, t, where), args...)
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)

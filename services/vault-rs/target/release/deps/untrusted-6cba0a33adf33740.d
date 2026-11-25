@@ -1,0 +1,10 @@
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/untrusted-6cba0a33adf33740.d: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/input.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/no_panic.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/reader.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/libuntrusted-6cba0a33adf33740.rlib: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/input.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/no_panic.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/reader.rs
+
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/deps/libuntrusted-6cba0a33adf33740.rmeta: /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/lib.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/input.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/no_panic.rs /Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/reader.rs
+
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/lib.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/input.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/no_panic.rs:
+/Users/tanitoluwaifegbesan/.cargo/registry/src/rsproxy.cn-e3de039b2554c837/untrusted-0.9.0/src/reader.rs:

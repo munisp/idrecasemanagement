@@ -1,0 +1,220 @@
+<!-- image -->
+
+## CAPITOL BRIDGE
+
+## THE FLORIDA STATEWIDE PROVIDER AND HEALTH PLAN CLAIM DISPUTE RESOLUTION PROGRAM FILING PACKET
+
+Filing Party
+
+- [ ] Provider
+
+- [ ] Health Plan
+
+Provider
+
+Legal Entity
+
+Trade Name
+
+Tax ID/NPI No
+
+License No
+
+Street Address
+
+City
+
+State
+
+Zip Code
+
+Contact Person
+
+Address (if different from above)
+
+Telephone Number
+
+Fax Number
+
+E-mail Address
+
+Provider Type
+
+Health Plan
+
+Trade Name
+
+Heath Plan Type
+
+- [ ] Commercial Health Maintenance Organization (HMO)
+
+- [ ] Medicaid Health Maintenance Organization (HMO)
+
+- [ ] Prepaid Health Plan
+
+- [ ] Exclusive Provider Organization (EPO)
+
+- [ ] Major Medical Expense Health Insurance Policy (Including Preferred Provider Organization)
+
+- [ ] Medicaid
+
+- [ ] Other
+
+- [ ] Hospital
+
+- [ ] Other Inpatient Facility
+
+- [ ] DME/Medical Supplier
+
+- [ ] Chiropractor
+
+- [ ] Podiatrist
+
+- [ ] Physical/Occupational/ Speech Therapy
+
+- [ ] Rural Hospital
+
+- [ ] Physician/Medical Group
+
+- [ ] Laboratory/Imaging
+
+- [ ] Dentist
+
+- [ ] Home Health Agency
+
+- [ ] Transportation
+
+- [ ] Pharmacy
+
+- [ ] Other:
+
+Is the Provider contracted with the Health Plan?
+
+- [ ] Yes O
+
+- [ ] No
+
+Has the Provider fully exhausted an internal dispute resolution process?
+
+- [ ] Yes
+
+- [ ] No
+
+- [ ] Unknown
+
+- [ ] Hospital Inpatient Services
+
+- [ ] Hospital Outpatient Services
+
+- [ ] Professional Services
+
+- [ ] Other
+
+Number of claims included
+
+Type of Service
+
+Aggregated Disputed Amount
+
+Claim(s) Information (a separate excel file can be provided)
+
+| Claim #   | Patient Name   | Type of Service   | Date(s) of Service   | Amount Billed   | Amount Paid   | Amount in Dispute   | Date Claim Submitted   | Date of Denial   | Date of Final Determination   |
+|-----------|----------------|-------------------|----------------------|-----------------|---------------|---------------------|------------------------|------------------|-------------------------------|
+
+Do you want an estimate of the Full Review Fee for this case?
+
+- [ ] Yes (if the case is eligible based on the Preliminary Review, Capitol Bridge will provide an estimate before accepting the case for review)
+
+- [ ] No (if the case is eligible based on the Preliminary Review, Capitol Bridge will accept the case, issue a recommendation and include an invoice for the cost of a Full Review)
+
+## IF THE FILING PARTY IS A PROVIDER: Set forth your position regarding the claim(s)
+
+1. Describe with all appropriate technical detail the basis for and amount of payment you believe you should have received for these services.
+2. Provide specific references to the contract, provider manual and other supporting documentation to support your position. Provide all referenced materials.
+3. State your understanding of the basis for the claim calculation and payment made by the Health Plan. Provide your rebuttal argument against the Health Plan's calculation.
+
+## IF THE FILING PARTY IS A HEALTH PLAN: Set forth your position regarding the claim(s)
+
+1. Describe with all the appropriate technical detail the basis for the determination that an overpayment was made for these services and the amount of that overpayment.
+2. Provide specific references to the contract, provider manual and other supporting documentation to support your position. Provide all referenced materials.
+3. State your understanding of the basis for the claim calculation made by the Provider in denying that an overpayment was made. Provide your rebuttal argument against the Provider's calculation.
+
+Supporting Documentation being submitted: (* Indicates required documentation for all disputes) Please note, if any of the required documentation cannot be filed, please submit an explanation in lieu thereof as to why such documentation could not be provided
+
+*ALL Claim form(s) submitted to the Health Plan
+
+*ALL Denial(s) /Explanation of the Benefits received from the Health Plan
+
+*Documentation that Provider is licensed in the state of Florida
+
+*Final Determination Letter/Decision with documentation of the Health Plan appeal process and related information.
+
+Contract between the Provider and Health Plan
+
+Waiver of Payment Form
+
+Notice of Overpayment from the Health Plan
+
+Response to Notice of Overpayment from Provider
+
+Medical Records
+
+Coding Rules/Policies
+
+Other:
+
+## Eligibility Attestation:
+
+To be completed by the owner, officer director, or other legally authorized representative of the Filing Party. (Please check all that apply to this claim)
+
+I certify that I am legally authorized to complete this attestation on behalf of the Filing Party. I further certify that this Claim meets all of the following criteria that have been checked:
+
+This claim is not related to an interest payment.
+
+This claim is not related solely to an issue of prompt payment.
+
+This claim is not a part of an internal grievance in a Medicare Managed Care Organization or a reconsideration appeal through the Medicare reconsideration process.
+
+This claim is not a part of a Medicaid fair hearing pursued under 42 CFR §431.220 et seq.
+
+This claim is not the basis for an action pending in state or federal court.
+
+This claim is not subject to a binding claim dispute resolution process provided by contract entered into prior to October 1, 2000.
+
+This claim is not subject to an internal dispute resolution process provided by contract entered into or renewed on or after October 1, 2000 or this claim is subject to such a process, which has been exhausted.
+
+No more than 12 months have elapsed since the final determination was made on this claim.
+
+Claim is being filed by a Rural Hospital, attach documentation demonstrating that the hospital meets the definition of a Rural Hospital under Chapter 395.602(2)(3), Florida Statutes.
+
+Name
+
+Electronic/Digital Signature Title &amp; Organization Name Date:
+
+## FLORIDA STATEWIDE PROVIDER AND HEALTH PLAN CLAIM DISPUTE RESOLUTION PROGRAM APPOINTMENT OF REPRESENTATIVE STATEMENT
+
+Provider:
+
+Health Plan:
+
+I do hereby swear that I am the above-mentioned individual provider or that I have the legal authority to complete this Appointment of Representation Statement on behalf of the above named corporate provider. is hereby appointed to act as the representative of the above mentioned provider with respect to a case that is being brought under the Florida Statewide Provider and Health Plan Claim Dispute Resolution Program involving the dates of services and Health Plan set forth above. I understand that this appointed representative will receive all correspondence, including requests for information, the final order and invoice, regarding this matter. \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
+
+Name Title &amp; Organization Name
+
+Electronic/Digital Signature:
+
+Date
+
+*Open in Adobe Acrobat or other PDF application to sign electronically
+
+Certification: (to be completed by the owner, officer, director, or other legally authorized representative of the Filing Party)
+
+I certify that I am legally authorized to complete this certification on behalf of the Filing Party. I further certify that I understand and agree that if the Filing Party does not prevail it will be responsible for the full or apportioned review costs of this case; that is those costs are not paid within 35 days after the Agency's final order, it will be subject to a fine; and that if this case is settled prior to the time a decision is rendered, the parties will be responsible for the review costs for this case incurred prior to the settlement. I also certify that I understand and agree that the Filing Party will be responsible for the initial review fee.
+
+NOTE: When adding your signature below, you may choose to lock this form so no further changes can be made. Please ensure all information is filled in before adding your signature below.
+
+Name Title &amp; Organization Name
+
+Electronic/Digital Signature Date
+
+*Open in Adobe Acrobat or other PDF application to sign electronically

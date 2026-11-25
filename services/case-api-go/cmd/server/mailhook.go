@@ -122,15 +122,22 @@ func mailStatusMayReplace(current, next string) bool {
 type mailEvent struct {
 	Type string `json:"type"`
 	Data struct {
-		EmailID   string   `json:"email_id"`
-		To        []string `json:"to"`
-		Subject   string   `json:"subject"`
-		CreatedAt string   `json:"created_at"`
+		EmailID string   `json:"email_id"`
+		From    string   `json:"from"`
+		To      []string `json:"to"`
+		// The Message-ID the mail finally carried: the provider replaces ours with its own (Amazon SES's), so replies
+		// quote this one. Kept on the row (provider_internet_id) so a reply is filed under its case.
+		MessageID string `json:"message_id"`
+		Subject   string `json:"subject"`
+		CreatedAt string `json:"created_at"`
 		Bounce    struct {
 			Message string `json:"message"`
 			Type    string `json:"type"`
 			SubType string `json:"subType"`
 		} `json:"bounce"`
+		Failed struct {
+			Reason string `json:"reason"` // e.g. reached_daily_quota
+		} `json:"failed"`
 	} `json:"data"`
 }
 
@@ -164,18 +171,38 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
+	// Mail received on a staff member's own address (mailboxes.go). A failure answers 502 so Resend retries; a retry
+	// files nothing twice.
+	if ev.Type == "email.received" {
+		n, err := s.enqueueReceivedEmail(r.Context(), body) // processed by InboundMailWorkflow (mail_jobs.go)
+		if err != nil {
+			slog.Warn("received email not filed", "err", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "not filed yet: " + err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "filed", "filed": n})
+		return
+	}
 	status := mailEventStatus(ev.Type)
-	if status == "" || len(ev.Data.To) == 0 {
+	if (status == "" && ev.Data.MessageID == "") || len(ev.Data.To) == 0 {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "type": ev.Type})
 		return
 	}
 	detail := ""
+	if status == "FAILED" && ev.Data.Failed.Reason != "" {
+		detail = "the mail service refused it: " + strings.ReplaceAll(ev.Data.Failed.Reason, "_", " ")
+	}
 	if status == "BOUNCED" {
 		detail = strings.TrimSpace(fmt.Sprintf("%s %s: %s", ev.Data.Bounce.Type, ev.Data.Bounce.SubType, ev.Data.Bounce.Message))
 		detail = strings.Trim(detail, " :")
 		if detail == "" {
 			detail = "returned by the recipient's mail server"
 		}
+	}
+	// A message a staff member sent from their own address: its own history, not the case mail log.
+	if s.applyMailboxDelivery(r.Context(), ev.Data.EmailID, ev.Type, detail, ev.Data.From, ev.Data.To, ev.Data.Subject, ev.Data.MessageID) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded", "type": ev.Type})
+		return
 	}
 	updated := 0
 	for _, addr := range ev.Data.To {
@@ -202,6 +229,14 @@ func (s *server) mailWebhook(w http.ResponseWriter, r *http.Request) {
 		var tenant, caseID, current, sentBy string
 		if err := s.db.QueryRow(r.Context(), q, args...).Scan(&id, &tenant, &caseID, &current, &sentBy); err != nil {
 			slog.Warn("mail delivery report matched no mail-log row", "type", ev.Type, "to", addr, "subject", ev.Data.Subject, "email_id", ev.Data.EmailID)
+			continue
+		}
+		if ev.Data.MessageID != "" {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.correspondence_log SET provider_internet_id=$2, provider_message_id=coalesce(provider_message_id, nullif($3,''))
+				WHERE id=$1 AND provider_internet_id=''`, id, ev.Data.MessageID, ev.Data.EmailID)
+		}
+		if status == "" { // a report that says nothing about delivery (sent, delayed...): only its ids were wanted
+			updated++
 			continue
 		}
 		if !mailStatusMayReplace(current, status) {

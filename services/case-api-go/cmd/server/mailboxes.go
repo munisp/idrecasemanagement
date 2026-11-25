@@ -1,0 +1,759 @@
+// mailboxes.go — every staff member's own email address (Resend receiving on MAILBOX_DOMAIN), the central history of
+// their mail, and sending from it.
+//
+//	address   provisioned when a staff account is created (createTenantStaff), or on the person's first visit
+//	inbound   Resend's email.received webhook (on the same Svix-signed /api/webhooks/mail endpoint) names the
+//	          message; its content and attachments are fetched from Resend's receiving API and filed under the
+//	          mailbox it was addressed to
+//	outbound  POST /me/mail/send through Resend's API, from the person's own address; its delivery reports update
+//	          the message as they arrive
+//	Outlook   outlook.go: the person's connected account, synchronised into the same history
+//
+// Every read is scoped to the signed-in person (user_sub = the JWT sub): nobody, an administrator included, can open
+// another person's mail through these routes.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/mail"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+)
+
+const resendAPI = "https://api.resend.com"
+
+// maxMailAttachment: an attachment larger than this is listed but not stored.
+const maxMailAttachment = 25 << 20
+
+var mailboxLocalUnsafe = regexp.MustCompile(`[^a-z0-9._-]+`)
+
+// mailboxLocalPart: the address's local part from a username: lower case, letters, digits, dot, dash and underscore;
+// anything else becomes a dot. "" when nothing usable is left.
+func mailboxLocalPart(username string) string {
+	l := mailboxLocalUnsafe.ReplaceAllString(strings.ToLower(strings.TrimSpace(username)), ".")
+	l = strings.Trim(regexp.MustCompile(`\.{2,}`).ReplaceAllString(l, "."), ".-_")
+	if len(l) > 60 {
+		l = strings.TrimRight(l[:60], ".-_")
+	}
+	return l
+}
+
+// resendKey: the key for Resend's API. RESEND_API_KEY, or the SMTP password when the SMTP host is Resend's (Resend's
+// SMTP password is an API key).
+func (s *server) resendKey() string {
+	if s.cfg.ResendAPIKey != "" {
+		return s.cfg.ResendAPIKey
+	}
+	if strings.Contains(strings.ToLower(s.cfg.SMTPHost), "resend.com") {
+		return s.cfg.SMTPPass
+	}
+	return ""
+}
+
+func (s *server) mailboxesOn() bool { return s.cfg.MailboxDomain != "" }
+
+// isStaff: an account that works cases, not a TPA, health plan or party.
+func isStaff(p principal) bool {
+	return !isExternalOnly(p) && !hasAnyRole(p, "PARTY") && p.Subject != "" && p.Username != ""
+}
+
+type mailbox struct {
+	ID       string `json:"id"`
+	Tenant   string `json:"tenant"`
+	UserSub  string `json:"-"`
+	Username string `json:"username"`
+	Address  string `json:"address"`
+	Status   string `json:"status"`
+}
+
+// provisionMailbox gives a person their address on the inbound domain, once. A taken local part gets -2, -3 ...
+func (s *server) provisionMailbox(ctx context.Context, tenant, userSub, username, by string) (mailbox, error) {
+	var m mailbox
+	if !s.mailboxesOn() {
+		return m, errors.New("mailboxes are not configured (MAILBOX_DOMAIN)")
+	}
+	if err := s.db.QueryRow(ctx, `SELECT id, tenant, user_sub, username, address, status FROM public.user_mailboxes WHERE tenant=$1 AND user_sub=$2`,
+		tenant, userSub).Scan(&m.ID, &m.Tenant, &m.UserSub, &m.Username, &m.Address, &m.Status); err == nil {
+		return m, nil
+	}
+	local := mailboxLocalPart(username)
+	if local == "" {
+		local = "staff." + strings.ReplaceAll(userSub, "-", "")[:8]
+	}
+	for n := 1; n <= 50; n++ {
+		addr := local
+		if n > 1 {
+			addr = fmt.Sprintf("%s-%d", local, n)
+		}
+		addr += "@" + s.cfg.MailboxDomain
+		err := s.db.QueryRow(ctx, `
+			INSERT INTO public.user_mailboxes (tenant, user_sub, username, address, created_by) VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT DO NOTHING RETURNING id, tenant, user_sub, username, address, status`,
+			tenant, userSub, username, addr, by).Scan(&m.ID, &m.Tenant, &m.UserSub, &m.Username, &m.Address, &m.Status)
+		if err == nil {
+			s.logAudit(ctx, tenant, "", "MAILBOX_PROVISIONED", map[string]any{"by": by, "user": username, "address": addr})
+			return m, nil
+		}
+		// a concurrent request may have just provisioned this person
+		if e2 := s.db.QueryRow(ctx, `SELECT id, tenant, user_sub, username, address, status FROM public.user_mailboxes WHERE tenant=$1 AND user_sub=$2`,
+			tenant, userSub).Scan(&m.ID, &m.Tenant, &m.UserSub, &m.Username, &m.Address, &m.Status); e2 == nil {
+			return m, nil
+		}
+	}
+	return m, errors.New("no free address for " + local)
+}
+
+// myMailbox: the signed-in staff member's mailbox, provisioned on first use.
+func (s *server) myMailbox(r *http.Request) (mailbox, principal, error) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	if !isStaff(p) {
+		return mailbox{}, p, errForbidden
+	}
+	m, err := s.provisionMailbox(r.Context(), tenant, p.Subject, p.Username, p.Username)
+	return m, p, err
+}
+
+var errForbidden = errors.New("forbidden")
+
+// setMailboxActive follows a staff account being suspended, reactivated or deleted: a suspended person's address stops
+// taking mail and their Outlook is disconnected (its tokens dropped, so nothing is read on their behalf any more).
+// Reactivating opens the address again; Outlook stays disconnected until they connect it themselves.
+func (s *server) setMailboxActive(ctx context.Context, userSub string, active bool, by string) {
+	status := "DISABLED"
+	if active {
+		status = "ACTIVE"
+	}
+	tag, _ := s.db.Exec(ctx, `UPDATE public.user_mailboxes SET status=$2 WHERE user_sub=$1 AND status<>$2`, userSub, status)
+	if !active {
+		_, _ = s.db.Exec(ctx, `UPDATE public.outlook_connections SET status='DISCONNECTED', access_token_sealed=NULL, refresh_token_sealed=NULL,
+			last_error='account suspended', updated_at=now() WHERE user_sub=$1 AND status<>'DISCONNECTED'`, userSub)
+	}
+	if tag.RowsAffected() > 0 {
+		s.logAudit(ctx, "", "", "MAILBOX_"+status, map[string]any{"by": by, "user_sub": userSub})
+	}
+}
+
+func mailErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errForbidden) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: personal email is for staff accounts"})
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+}
+
+func (s *server) mailEvent(ctx context.Context, messageID, event, detail, actor string) {
+	_, _ = s.db.Exec(ctx, `INSERT INTO public.mail_message_events (message_id, event, detail, actor) VALUES ($1,$2,$3,$4)`,
+		messageID, event, truncate(detail, 1000), actor)
+}
+
+// ---- the person's own routes ----------------------------------------------------------------------------------------
+
+// getMyMailbox: GET /me/mailbox -- the address, the Outlook connection and the unread count.
+func (s *server) getMyMailbox(w http.ResponseWriter, r *http.Request) {
+	m, p, err := s.myMailbox(r)
+	if err != nil {
+		mailErr(w, err)
+		return
+	}
+	var unread int
+	_ = s.db.QueryRow(r.Context(), `SELECT count(*) FROM public.mail_messages WHERE tenant=$1 AND user_sub=$2 AND folder='inbox' AND NOT is_read`,
+		m.Tenant, p.Subject).Scan(&unread)
+	out := map[string]any{"mailbox": m, "unread": unread, "can_send": s.cfg.SMTPHost != "",
+		"outlook_available": s.outlookOn(), "outlook": s.outlookStatus(r.Context(), m.Tenant, p.Subject),
+		"outlook_admin_consent_url": s.outlookAdminConsentURL()}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type mailListItem struct {
+	ID          string    `json:"id"`
+	Source      string    `json:"source"`
+	Direction   string    `json:"direction"`
+	Folder      string    `json:"folder"`
+	From        string    `json:"from"`
+	FromName    string    `json:"from_name"`
+	To          []string  `json:"to"`
+	Subject     string    `json:"subject"`
+	Preview     string    `json:"preview"`
+	Status      string    `json:"status"`
+	IsRead      bool      `json:"is_read"`
+	Attachments bool      `json:"has_attachments"`
+	At          time.Time `json:"at"`
+}
+
+// listMyMail: GET /me/mail?folder=inbox|sent|all&source=RESEND|OUTLOOK&q=&before=<RFC3339>&limit=
+func (s *server) listMyMail(w http.ResponseWriter, r *http.Request) {
+	m, p, err := s.myMailbox(r)
+	if err != nil {
+		mailErr(w, err)
+		return
+	}
+	q := r.URL.Query()
+	args := []any{m.Tenant, p.Subject}
+	where := `tenant=$1 AND user_sub=$2`
+	if f := q.Get("folder"); f == "inbox" || f == "sent" {
+		args = append(args, f)
+		where += fmt.Sprintf(" AND folder=$%d", len(args))
+	}
+	if src := strings.ToUpper(q.Get("source")); src == "RESEND" || src == "OUTLOOK" {
+		args = append(args, src)
+		where += fmt.Sprintf(" AND source=$%d", len(args))
+	}
+	if like := searchLike(q.Get("q")); like != "" {
+		args = append(args, like)
+		n := len(args)
+		where += fmt.Sprintf(" AND (subject ILIKE $%d OR from_addr ILIKE $%d OR from_name ILIKE $%d OR to_addrs::text ILIKE $%d OR body_text ILIKE $%d)", n, n, n, n, n)
+	}
+	if b, err := time.Parse(time.RFC3339Nano, q.Get("before")); err == nil {
+		args = append(args, b)
+		where += fmt.Sprintf(" AND occurred_at < $%d", len(args))
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.Query(r.Context(), `SELECT id, source, direction, folder, from_addr, from_name, to_addrs, subject,
+		left(regexp_replace(body_text, '\s+', ' ', 'g'), 160), status, is_read, has_attachments, occurred_at
+		FROM public.mail_messages WHERE `+where+fmt.Sprintf(` ORDER BY occurred_at DESC LIMIT %d`, limit), args...)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	out := []mailListItem{}
+	for rows.Next() {
+		var it mailListItem
+		var to []byte
+		if rows.Scan(&it.ID, &it.Source, &it.Direction, &it.Folder, &it.From, &it.FromName, &to, &it.Subject, &it.Preview,
+			&it.Status, &it.IsRead, &it.Attachments, &it.At) == nil {
+			_ = json.Unmarshal(to, &it.To)
+			out = append(out, it)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": out, "address": m.Address})
+}
+
+// getMyMail: GET /me/mail/{id} -- the message, its attachments and its history. Opening it marks it read.
+func (s *server) getMyMail(w http.ResponseWriter, r *http.Request) {
+	m, p, err := s.myMailbox(r)
+	if err != nil {
+		mailErr(w, err)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var msg struct {
+		mailListItem
+		CC         []string        `json:"cc"`
+		BodyText   string          `json:"body_text"`
+		BodyHTML   string          `json:"body_html"`
+		Detail     string          `json:"status_detail"`
+		Auth       json.RawMessage `json:"auth_results"`
+		InternetID string          `json:"internet_message_id"`
+		CaseID     string          `json:"case_id"`
+		CaseNumber string          `json:"case_number"`
+	}
+	var to, cc, auth []byte
+	err = s.db.QueryRow(r.Context(), `SELECT id, source, direction, folder, from_addr, from_name, to_addrs, cc_addrs, subject, body_text, body_html,
+		status, status_detail, auth_results, is_read, has_attachments, occurred_at, internet_message_id, case_id
+		FROM public.mail_messages WHERE id::text=$1 AND tenant=$2 AND user_sub=$3`, id, m.Tenant, p.Subject).
+		Scan(&msg.ID, &msg.Source, &msg.Direction, &msg.Folder, &msg.From, &msg.FromName, &to, &cc, &msg.Subject, &msg.BodyText, &msg.BodyHTML,
+			&msg.Status, &msg.Detail, &auth, &msg.IsRead, &msg.Attachments, &msg.At, &msg.InternetID, &msg.CaseID)
+	if err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound) // also another person's message: indistinguishable on purpose
+		return
+	}
+	_ = json.Unmarshal(to, &msg.To)
+	_ = json.Unmarshal(cc, &msg.CC)
+	msg.Auth = auth
+	if msg.CaseID != "" {
+		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(m.Tenant)), msg.CaseID).Scan(&msg.CaseNumber)
+	}
+	if !msg.IsRead {
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET is_read=true, updated_at=now() WHERE id=$1`, msg.ID)
+		s.mailEvent(r.Context(), msg.ID, "READ", "", p.Username)
+	}
+	type att struct {
+		ID          string `json:"id"`
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type"`
+		Size        int64  `json:"size"`
+		Status      string `json:"status"`
+	}
+	atts := []att{}
+	if rows, err := s.db.Query(r.Context(), `SELECT id, filename, content_type, size_bytes, status FROM public.mail_attachments WHERE message_id=$1 ORDER BY created_at`, msg.ID); err == nil {
+		for rows.Next() {
+			var a att
+			if rows.Scan(&a.ID, &a.Filename, &a.ContentType, &a.Size, &a.Status) == nil {
+				atts = append(atts, a)
+			}
+		}
+		rows.Close()
+	}
+	type ev struct {
+		Event  string    `json:"event"`
+		Detail string    `json:"detail"`
+		Actor  string    `json:"actor"`
+		At     time.Time `json:"at"`
+	}
+	evs := []ev{}
+	if rows, err := s.db.Query(r.Context(), `SELECT event, detail, actor, at FROM public.mail_message_events WHERE message_id=$1 ORDER BY at, id`, msg.ID); err == nil {
+		for rows.Next() {
+			var e ev
+			if rows.Scan(&e.Event, &e.Detail, &e.Actor, &e.At) == nil {
+				evs = append(evs, e)
+			}
+		}
+		rows.Close()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"message": msg, "attachments": atts, "events": evs})
+}
+
+// getMyMailAttachment: GET /me/mail/{id}/attachments/{aid} -- the file, unsealed.
+func (s *server) getMyMailAttachment(w http.ResponseWriter, r *http.Request) {
+	m, p, err := s.myMailbox(r)
+	if err != nil {
+		mailErr(w, err)
+		return
+	}
+	var key, name, ctype string
+	err = s.db.QueryRow(r.Context(), `SELECT a.object_key, a.filename, a.content_type FROM public.mail_attachments a
+		JOIN public.mail_messages mm ON mm.id = a.message_id
+		WHERE a.id::text=$1 AND mm.id::text=$2 AND mm.tenant=$3 AND mm.user_sub=$4 AND a.status='STORED'`,
+		chi.URLParam(r, "aid"), chi.URLParam(r, "id"), m.Tenant, p.Subject).Scan(&key, &name, &ctype)
+	if err != nil || key == "" {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	s.serveMailAttachment(w, r, m.Tenant, key, name, ctype)
+}
+
+// serveMailAttachment streams one stored attachment, unsealed.
+func (s *server) serveMailAttachment(w http.ResponseWriter, r *http.Request, tenant, key, name, ctype string) {
+	obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
+	if err != nil {
+		http.Error(w, `{"error":"store"}`, http.StatusBadGateway)
+		return
+	}
+	defer obj.Close()
+	ct, err := io.ReadAll(obj)
+	if err != nil {
+		http.Error(w, `{"error":"store"}`, http.StatusBadGateway)
+		return
+	}
+	pt, err := s.vaultOpenDoc(r, tenant, key, ct)
+	if err != nil {
+		http.Error(w, `{"error":"unseal failed"}`, http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, strings.ReplaceAll(name, `"`, "")))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(pt)
+}
+
+type sendMailRequest struct {
+	Via       string   `json:"via"` // platform (the person's own address, through Resend) | outlook
+	To        []string `json:"to"`
+	CC        []string `json:"cc"`
+	Subject   string   `json:"subject"`
+	Text      string   `json:"text"`
+	InReplyTo string   `json:"in_reply_to"` // a message id from this person's history, when replying
+	// Files to attach, as the browser read them: name, type, and the bytes in base64.
+	Attachments []struct {
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type"`
+		Data        string `json:"data"`
+	} `json:"attachments"`
+}
+
+const (
+	maxSendFiles        = 10
+	maxSendBytes        = 10 << 20 // all files of one message
+	maxOutlookFileBytes = 3 << 20  // Graph takes attachments this size inline (larger needs an upload session)
+)
+
+// sendMyMail: POST /me/mail/send -- from the person's own address (Resend) or their connected Outlook.
+func (s *server) sendMyMail(w http.ResponseWriter, r *http.Request) {
+	m, p, err := s.myMailbox(r)
+	if err != nil {
+		mailErr(w, err)
+		return
+	}
+	var in sendMailRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&in); err != nil { // up to 10 MB of attachments, in base64
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	to, err1 := cleanAddrs(in.To)
+	cc, err2 := cleanAddrs(in.CC)
+	if err1 != nil || err2 != nil || len(to) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "give at least one valid recipient address"})
+		return
+	}
+	in.Subject = strings.TrimSpace(in.Subject)
+	if in.Subject == "" || strings.TrimSpace(in.Text) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a subject and a message are required"})
+		return
+	}
+	// The attachments: decoded, within the limits, and scanned -- the platform never sends malware on someone's behalf.
+	atts := []outAttachment{}
+	total := 0
+	if len(in.Attachments) > maxSendFiles {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("attach up to %d files", maxSendFiles)})
+		return
+	}
+	for _, a := range in.Attachments {
+		data, err := base64.StdEncoding.DecodeString(a.Data)
+		name := strings.TrimSpace(filepath.Base(a.Filename))
+		if err != nil || name == "" || name == "." || len(data) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "an attachment could not be read: " + orWord(a.Filename, "(no name)")})
+			return
+		}
+		total += len(data)
+		if total > maxSendBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "attachments may total up to 10 MB"})
+			return
+		}
+		sig, err := s.clamScan(bytes.NewReader(data))
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the malware scanner is unavailable — try again shortly"})
+			return
+		}
+		if sig != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": name + " was refused by the malware scan (" + sig + ")"})
+			return
+		}
+		atts = append(atts, outAttachment{Name: name, ContentType: orWord(a.ContentType, "application/octet-stream"), Content: data})
+	}
+	var inReplyTo, conv string
+	if in.InReplyTo != "" {
+		_ = s.db.QueryRow(r.Context(), `SELECT internet_message_id, conversation_id FROM public.mail_messages WHERE id::text=$1 AND tenant=$2 AND user_sub=$3`,
+			in.InReplyTo, m.Tenant, p.Subject).Scan(&inReplyTo, &conv)
+	}
+	source := "RESEND"
+	if strings.EqualFold(in.Via, "outlook") {
+		source = "OUTLOOK"
+	}
+	var id string
+	from := m.Address
+	if source == "OUTLOOK" {
+		from = s.outlookStatus(r.Context(), m.Tenant, p.Subject).Email
+		if from == "" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "connect your Outlook account first"})
+			return
+		}
+		for _, a := range atts {
+			if len(a.Content) > maxOutlookFileBytes {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": a.Name + " is over 3 MB: send it from your platform address, or share it as a link"})
+				return
+			}
+		}
+	}
+	toJ, _ := json.Marshal(to)
+	ccJ, _ := json.Marshal(cc)
+	if err := s.db.QueryRow(r.Context(), `INSERT INTO public.mail_messages
+		(tenant, user_sub, mailbox_id, source, direction, folder, from_addr, from_name, to_addrs, cc_addrs, subject, body_text, status, is_read, occurred_at, conversation_id)
+		VALUES ($1,$2,$3,$4,'OUT','sent',$5,$6,$7,$8,$9,$10,'SENDING',true,now(),$11) RETURNING id`,
+		m.Tenant, p.Subject, m.ID, source, from, p.Username, toJ, ccJ, in.Subject, in.Text, conv).Scan(&id); err != nil {
+		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
+		return
+	}
+	// What was attached is kept with the message (sealed), as received mail's attachments are.
+	for i, a := range atts {
+		key, kerr := s.sealMailAttachment(r.Context(), m.Tenant, p.Subject, id, fmt.Sprintf("sent-%d", i+1), a.Content)
+		st := "STORED"
+		if kerr != nil {
+			st, key = "FAILED", ""
+		}
+		_, _ = s.db.Exec(r.Context(), `INSERT INTO public.mail_attachments (message_id, filename, content_type, size_bytes, object_key, status) VALUES ($1,$2,$3,$4,$5,$6)`,
+			id, a.Name, a.ContentType, len(a.Content), key, st)
+	}
+	if len(atts) > 0 {
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET has_attachments=true WHERE id=$1`, id)
+	}
+	s.mailEvent(r.Context(), id, "SENDING", "via "+strings.ToLower(source)+attachNote(atts), p.Username)
+	var msgID string
+	if source == "RESEND" {
+		msgID, err = s.sendFromMailbox(p.Username, m.Address, to, cc, in.Subject, in.Text, inReplyTo, atts)
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET internet_message_id=$2 WHERE id=$1`, id, msgID)
+	} else {
+		msgID, err = s.outlookSendFrom(r.Context(), m.Tenant, p.Subject, to, cc, in.Subject, in.Text, atts)
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET internet_message_id=$2 WHERE id=$1`, id, msgID)
+	}
+	if errors.Is(err, errMailQueued) {
+		// The provider turned it away for now (its rate or daily limit): the platform's mail queue sends it again.
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET status='QUEUED', status_detail=$2, updated_at=now() WHERE id=$1`, id, truncate(err.Error(), 500))
+		s.mailEvent(r.Context(), id, "QUEUED", err.Error(), p.Username)
+		s.logAudit(r.Context(), m.Tenant, "", "MAIL_QUEUED", map[string]any{"by": p.Username, "via": source, "to": to, "subject": truncate(in.Subject, 200), "message": id})
+		writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "status": "QUEUED", "detail": err.Error()})
+		return
+	}
+	if err != nil {
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET status='FAILED', status_detail=$2, updated_at=now() WHERE id=$1`, id, truncate(err.Error(), 500))
+		s.mailEvent(r.Context(), id, "FAILED", err.Error(), p.Username)
+		s.logAudit(r.Context(), m.Tenant, "", "MAIL_SEND_FAILED", map[string]any{"by": p.Username, "via": source, "to": to, "subject": truncate(in.Subject, 200), "message": id, "error": truncate(err.Error(), 300)})
+		writeJSON(w, http.StatusFailedDependency, map[string]string{"error": "not sent: " + err.Error(), "id": id})
+		return
+	}
+	_, _ = s.db.Exec(r.Context(), `UPDATE public.mail_messages SET status='SENT', updated_at=now() WHERE id=$1`, id)
+	s.mailEvent(r.Context(), id, "SENT", "via "+strings.ToLower(source)+" to "+strings.Join(append(append([]string{}, to...), cc...), ", "), p.Username)
+	s.logAudit(r.Context(), m.Tenant, "", "MAIL_SENT", map[string]any{"by": p.Username, "via": source, "to": to, "cc": cc, "subject": truncate(in.Subject, 200), "message": id})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "SENT"})
+}
+
+// sendFromMailbox sends from a person's own address through the platform's mail relay -- paced, and queued when the
+// provider turns it away for now, like every other platform mail (mailqueue.go). Returns the Message-ID it carries,
+// so a reply can be threaded back to it.
+func (s *server) sendFromMailbox(name, addr string, to, cc []string, subject, text, inReplyTo string, atts []outAttachment) (string, error) {
+	if s.cfg.SMTPHost == "" {
+		return "", errors.New("sending is not configured (SMTP_HOST)")
+	}
+	from := fmt.Sprintf("%s <%s>", headerText(name), addr)
+	msgID := messageID(addr)
+	var b strings.Builder
+	fmt.Fprintf(&b, "From: %s\r\n", from)
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
+	if len(cc) > 0 {
+		fmt.Fprintf(&b, "Cc: %s\r\n", strings.Join(cc, ", "))
+	}
+	fmt.Fprintf(&b, "Subject: %s\r\n", headerText(subject))
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	fmt.Fprintf(&b, "Message-ID: %s\r\n", msgID)
+	if inReplyTo != "" {
+		fmt.Fprintf(&b, "In-Reply-To: %s\r\nReferences: %s\r\n", inReplyTo, inReplyTo)
+	}
+	b.WriteString("MIME-Version: 1.0\r\n")
+	if len(atts) == 0 {
+		writeAlternative(&b, text)
+	} else {
+		writeMixed(&b, text, atts)
+	}
+	return msgID, s.deliver(addr, to, cc, []byte(b.String()))
+}
+
+// resendGet: a GET on Resend's API into out.
+func (s *server) resendGet(ctx context.Context, path string, out any) error {
+	key := s.resendKey()
+	if key == "" {
+		return errors.New("Resend API key not configured")
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, resendAPI+path, nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("Resend %s: HTTP %d %s", path, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(out)
+}
+
+// ---- inbound: Resend's email.received ---------------------------------------------------------------------------------
+
+type receivedEvent struct {
+	Type string `json:"type"`
+	Data struct {
+		EmailID     string   `json:"email_id"`
+		From        string   `json:"from"`
+		To          []string `json:"to"`
+		CC          []string `json:"cc"`
+		BCC         []string `json:"bcc"`
+		ReceivedFor []string `json:"received_for"`
+		Subject     string   `json:"subject"`
+		MessageID   string   `json:"message_id"`
+		CreatedAt   string   `json:"created_at"`
+	} `json:"data"`
+}
+
+type receivedEmail struct {
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	To          []string          `json:"to"`
+	CC          []string          `json:"cc"`
+	ReplyTo     []string          `json:"reply_to"`
+	Subject     string            `json:"subject"`
+	HTML        *string           `json:"html"`
+	Text        *string           `json:"text"`
+	CreatedAt   string            `json:"created_at"`
+	MessageID   string            `json:"message_id"`
+	Headers     map[string]string `json:"headers"`
+	Auth        json.RawMessage   `json:"authentication"`
+	Attachments []struct {
+		ID          string `json:"id"`
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type"`
+		Size        int64  `json:"size"`
+	} `json:"attachments"`
+}
+
+// splitAddress: "Jane Doe <jane@x.com>" -> ("Jane Doe", "jane@x.com"); a bare address -> ("", address).
+func splitAddress(v string) (name, addr string) {
+	if a, err := mail.ParseAddress(strings.TrimSpace(v)); err == nil {
+		return a.Name, strings.ToLower(a.Address)
+	}
+	return "", strings.ToLower(strings.Trim(strings.TrimSpace(v), "<>"))
+}
+
+// recipientsOnDomain: the distinct lower-case addresses among lists that are on the inbound domain.
+func recipientsOnDomain(domain string, lists ...[]string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, l := range lists {
+		for _, v := range l {
+			_, a := splitAddress(v)
+			if strings.HasSuffix(a, "@"+domain) && !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// sealMailAttachment seals bytes with the vault and stores them in the documents bucket; returns the object key.
+func (s *server) sealMailAttachment(ctx context.Context, tenant, sub, messageID, attID string, data []byte) (string, error) {
+	key := fmt.Sprintf("%s/mailbox/%s/%s/%s.enc", tenant, sub, messageID, mailboxLocalPart(attID))
+	ct, err := s.vaultSealDoc(nil, tenant, key, data)
+	if err != nil {
+		return "", err
+	}
+	err = s.docs.api.PutObject(ctx, docBucket, key, bytes.NewReader(ct), int64(len(ct)), putOpts{ContentType: "application/octet-stream"})
+	return key, err
+}
+
+func fetchLimited(ctx context.Context, url string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if int64(len(b)) > limit {
+		return nil, errors.New("too large")
+	}
+	return b, err
+}
+
+// applyMailboxDelivery: a Resend delivery report about a message sent from a personal address.
+// Mail sent over SMTP carries no Resend id at first: the first report is matched on sender, recipient and subject
+// (recent, newest first), and the id is kept so later reports match it directly.
+func (s *server) applyMailboxDelivery(ctx context.Context, emailID, eventType, detail, from string, to []string, subject, sentMsgID string) bool {
+	status := mailEventStatus(eventType)
+	if emailID == "" || (status == "" && sentMsgID == "") {
+		return false
+	}
+	if _, addr := splitAddress(from); s.mailboxesOn() && strings.HasSuffix(addr, "@"+s.cfg.MailboxDomain) && len(to) > 0 {
+		toJ, _ := json.Marshal(lowerAddrs(to)[:1])
+		_, _ = s.db.Exec(ctx, `UPDATE public.mail_messages SET provider_message_id=$1 WHERE id = (
+			SELECT id FROM public.mail_messages WHERE source='RESEND' AND direction='OUT' AND provider_message_id='' AND from_addr=$2
+			   AND subject=$3 AND (to_addrs @> $4::jsonb OR cc_addrs @> $4::jsonb) AND occurred_at > now() - interval '4 days'
+			 ORDER BY occurred_at DESC LIMIT 1)
+			AND NOT EXISTS (SELECT 1 FROM public.mail_messages WHERE source='RESEND' AND provider_message_id=$1)`, emailID, addr, subject, string(toJ))
+	}
+	if sentMsgID != "" {
+		tag, _ := s.db.Exec(ctx, `UPDATE public.mail_messages SET provider_internet_id=$2 WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1 AND provider_internet_id=''`, emailID, sentMsgID)
+		if status == "" {
+			var n int
+			_ = s.db.QueryRow(ctx, `SELECT count(*) FROM public.mail_messages WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1`, emailID).Scan(&n)
+			return n > 0 || tag.RowsAffected() > 0
+		}
+	}
+	rows, err := s.db.Query(ctx, `SELECT id, status, tenant, user_sub, subject FROM public.mail_messages WHERE source='RESEND' AND direction='OUT' AND provider_message_id=$1`, emailID)
+	if err != nil {
+		return false
+	}
+	type hit struct{ id, cur, tenant, sub, subject string }
+	hits := []hit{}
+	for rows.Next() {
+		var h hit
+		if rows.Scan(&h.id, &h.cur, &h.tenant, &h.sub, &h.subject) == nil {
+			hits = append(hits, h)
+		}
+	}
+	rows.Close()
+	for _, h := range hits {
+		s.mailEvent(ctx, h.id, status, detail, "resend")
+		if mailStatusMayReplace(h.cur, status) {
+			_, _ = s.db.Exec(ctx, `UPDATE public.mail_messages SET status=$2, status_detail=$3, updated_at=now() WHERE id=$1`, h.id, status, detail)
+			if (status == "BOUNCED" || status == "FAILED" || status == "COMPLAINED") && h.sub != systemSub {
+				what := map[string]string{"BOUNCED": "bounced", "FAILED": "wasn't delivered", "COMPLAINED": "was marked as spam by its recipient"}[status]
+				s.notifyCtx(ctx, h.tenant, h.sub, "MAIL_"+status, fmt.Sprintf("Your email %q %s%s", orWord(h.subject, "(no subject)"), what, orDash(" — "+detail)),
+					"#/inbox?open="+h.id)
+			}
+		}
+	}
+	return len(hits) > 0
+}
+
+// ---- small helpers --------------------------------------------------------------------------------------------------
+
+var (
+	htmlTag   = regexp.MustCompile(`(?s)<(script|style)[^>]*>.*?</(script|style)>|<[^>]+>`)
+	htmlSpace = regexp.MustCompile(`[ \t]+`)
+	htmlLines = regexp.MustCompile(`\n{3,}`)
+)
+
+// htmlToText: a readable plain-text version of an HTML body, for previews and search.
+func htmlToText(h string) string {
+	h = regexp.MustCompile(`(?i)<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>`).ReplaceAllString(h, "\n")
+	t := htmlTag.ReplaceAllString(h, "")
+	for k, v := range map[string]string{"&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": `"`, "&#39;": "'"} {
+		t = strings.ReplaceAll(t, k, v)
+	}
+	t = htmlSpace.ReplaceAllString(t, " ")
+	return strings.TrimSpace(htmlLines.ReplaceAllString(t, "\n\n"))
+}
+
+func lowerAddrs(l []string) []string {
+	out := make([]string, 0, len(l))
+	for _, v := range l {
+		if _, a := splitAddress(v); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func orList(a, b []string) []string {
+	if len(a) > 0 {
+		return a
+	}
+	return b
+}
+
+func authSummary(raw json.RawMessage) string {
+	var a map[string]string
+	if json.Unmarshal(raw, &a) != nil || len(a) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (spf %s, dkim %s, dmarc %s)", orWord(a["spf"], "-"), orWord(a["dkim"], "-"), orWord(a["dmarc"], "-"))
+}
+
+func attachNote(atts []outAttachment) string {
+	if len(atts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d attachment%s", len(atts), plural(len(atts)))
+}

@@ -85,3 +85,27 @@ func TestClamScanUnreachable(t *testing.T) {
 		t.Fatal("expected an error when the scanner is unreachable")
 	}
 }
+
+// Regression for B5: the double-extension check must match blocked extensions
+// as real dot-delimited segments, not arbitrary substrings — so legitimate
+// documents that merely CONTAIN a blocked string are accepted, while genuine
+// double-extension payloads are still rejected.
+func TestContentPolicyDoubleExtensionSegments(t *testing.T) {
+	pdf := []byte("%PDF-1.7\n")
+	ok := []string{"balance.sheet.pdf", "claims.json.pdf", "Q3.company.financials.pdf", "patient.application.pdf", "eob.scratch.pdf", "determination.docx"}
+	for _, name := range ok {
+		head := pdf
+		if strings.HasSuffix(name, ".docx") {
+			head = []byte("PK\x03\x04")
+		}
+		if err := contentPolicy(name, head); err != nil {
+			t.Errorf("contentPolicy(%q) = %v, want accepted", name, err)
+		}
+	}
+	bad := []string{"bill.pdf.exe", "report.sh.pdf", "malware.exe", "a.bat.pdf"}
+	for _, name := range bad {
+		if err := contentPolicy(name, pdf); err == nil {
+			t.Errorf("contentPolicy(%q) = nil, want rejected", name)
+		}
+	}
+}

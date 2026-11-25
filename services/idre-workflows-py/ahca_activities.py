@@ -11,6 +11,8 @@ import httpx
 import psycopg
 from temporalio import activity
 
+from case_guard import ensure_case
+
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
 
@@ -25,6 +27,7 @@ def _auth_headers() -> dict:
 
 @activity.defn
 async def set_dual_status(tenant: str, case_id: str, internal_status: str, agency_status: str = "") -> None:
+    await ensure_case(DSN, tenant, case_id)
     async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/cases/{case_id}/status",
@@ -36,6 +39,7 @@ async def set_dual_status(tenant: str, case_id: str, internal_status: str, agenc
 
 @activity.defn
 async def set_program_date(tenant: str, case_id: str, key: str, value: str) -> None:
+    await ensure_case(DSN, tenant, case_id)
     async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/cases/{case_id}/program-date",
@@ -48,14 +52,24 @@ async def set_program_date(tenant: str, case_id: str, key: str, value: str) -> N
 @activity.defn
 async def recommendation_days_left(tenant: str, case_id: str) -> int:
     """Days until the recommendation is due to the agency: Date Received + 60
-    calendar days, counted from today. 0 or less means the date has passed.
-    A case with no Date Received on record has no days left (the caller's own
-    60-day timer has already run)."""
+    calendar days, plus any extension the PM granted on AGENCY_RECOMMENDATION,
+    counted from today. 0 or less means the date has passed. A case with no
+    Date Received on record has no days left (the caller's own 60-day timer has
+    already run) -- unless it is still awaiting its initial fee: then it has not
+    been received at all, its clock has not started, and the full 60 days are
+    reported so the caller waits instead of flagging a breach."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
+        st = c.execute(f"SELECT status FROM tenant_{tenant}.cases WHERE id=%s", (case_id,)).fetchone()
+        if st and st[0] == "AWAITING_PAYMENT":
+            return 60
         row = c.execute(
-            f"SELECT (program_dates->>'received_at')::date + 60 - current_date FROM tenant_{tenant}.cases "
+            f"SELECT (program_dates->>'received_at')::date + 60 - current_date"
+            f" + coalesce((SELECT sum(days) FROM public.case_deadline_extensions e"
+            f"             WHERE e.tenant=%s AND e.case_id=%s::text AND e.clock='AGENCY_RECOMMENDATION'), 0)"
+            f" FROM tenant_{tenant}.cases "
             f"WHERE id=%s AND coalesce(program_dates->>'received_at','') ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}'",
-            (case_id,),
+            (tenant, case_id, case_id),
         ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
 
@@ -65,15 +79,18 @@ async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, bo
     """Tell the people who must act, not the whole tenant: one notification
     per role (user_sub 'role:<ROLE>', which case-api shows to holders of that
     role), plus a line on the case timeline."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         c.execute(
             "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,%s,%s)",
             (tenant, case_id, typ, body),
         )
         for role in roles:
+            # Finance acts on a due refund from Financials' "Refunds due" list, not from the case page.
+            link = "#/finance" if typ == "REFUND_DUE" and role == "FINANCE" else f"#/cases/{case_id}"
             c.execute(
                 "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,%s,%s,%s,%s)",
-                (tenant, f"role:{role}", typ, f"Case {case_id}: {body}", f"#/cases/{case_id}"),
+                (tenant, f"role:{role}", typ, f"Case {case_id}: {body}", link),
             )
 
 
@@ -86,6 +103,7 @@ async def send_correspondence(tenant: str, case_id: str, template: str, body: st
     that omits them. Used for the RFI day-15 lapse notice, which the source
     narrative lists as its own named email template, not just a logged
     reminder."""
+    await ensure_case(DSN, tenant, case_id)
     async with httpx.AsyncClient(base_url=CASE_API, timeout=15) as client:
         resp = await client.post(
             f"/v1/tenants/{tenant}/cases/{case_id}/correspondence",
@@ -106,6 +124,7 @@ async def set_case_outcome(
     review, instead of leaving them as a separate step someone has to
     remember -- fields are only sent when provided, via the same
     setCaseDetails route (and field_schema validation) the portal uses."""
+    await ensure_case(DSN, tenant, case_id)
     fields: dict = {}
     if case_outcome:
         fields["case_outcome"] = case_outcome
@@ -138,6 +157,7 @@ async def record_followup_action(tenant: str, case_id: str, action: str, detail:
 
     The "tell AHCA at day 13" follow-up applies to Medicaid plans only: for a
     case recorded as another line of business it is skipped."""
+    await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
         row = c.execute(
             f"SELECT case_number, coalesce(assigned_to,''), coalesce(details->>'line_of_business','') "

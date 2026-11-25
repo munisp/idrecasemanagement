@@ -58,6 +58,9 @@ BEGIN
             ON %I.cases USING gin (case_number gin_trgm_ops)', sch);
         -- HOT updates: updated_at bumps on every touch; leave room so updates
         -- stay on-page and indexes don't bloat.
+        -- Lookups by WHERE id::text=$1 (~90 case-api call sites): the uuid primary key can't serve them.
+        EXECUTE format('CREATE INDEX IF NOT EXISTS cases_id_text_idx
+            ON %I.cases ((id::text))', sch);
         EXECUTE format('ALTER TABLE %I.cases SET (fillfactor = 90)', sch);
 
         -- ---- documents ---------------------------------------------------------
@@ -121,11 +124,18 @@ CREATE INDEX IF NOT EXISTS invoices_tenant_created
 -- checks.go memo match: invoice_no ILIKE '%'||memo||'%' → trigram GIN.
 CREATE INDEX IF NOT EXISTS invoices_invoice_no_trgm
     ON public.invoices USING gin (invoice_no gin_trgm_ops);
+-- Lookups by WHERE id::text=$2 (payments, checks, refunds): the uuid primary key can't serve them.
+CREATE INDEX IF NOT EXISTS invoices_id_text_idx
+    ON public.invoices ((id::text));
 
 -- payments — Stripe/Mojaloop webhook completion looks up by payment_intent
 -- (payments.go:317); session_id already UNIQUE.
 CREATE INDEX IF NOT EXISTS payments_intent
     ON public.payments (payment_intent) WHERE payment_intent IS NOT NULL;
+-- payments.invoice_id references invoices: without this, every invoice delete or void scans all payments
+-- (the 1M load test's cleanup: 395k invoice deletes stalled until it existed).
+CREATE INDEX IF NOT EXISTS payments_invoice
+    ON public.payments (invoice_id);
 
 -- checks — double-scan duplicate lookup (same physical check re-photographed).
 -- Non-unique by design: null MICR fields are common pre-OCR.

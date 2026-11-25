@@ -42,6 +42,27 @@ import (
 // payer is the organization paying: a TPA or a health plan.
 type payer struct {
 	kind, id, name, email string // kind: tpa | plan
+	clientID              string // a TPA login limited to one client: it pays for, and sees, that client only (tpa_client_scope.go)
+}
+
+// payerClientFilter is the client a payer's list is narrowed to: its login's own, or the ?client_id= a whole-TPA login
+// chose. The id comes back from the database, so it is safe to put in a query. ok=false: not this TPA's client.
+func (s *server) payerClientFilter(r *http.Request, tenant string, py payer) (string, bool) {
+	if py.clientID != "" {
+		return py.clientID, true
+	}
+	if py.kind != "tpa" {
+		return "", true
+	}
+	return s.tpaClientParam(r, tenant, py.id)
+}
+
+// inClientSQL narrows a query on a case id column to one client's disputes; id from payerClientFilter or tpaClientFilter.
+func inClientSQL(col, clientID string) string {
+	if clientID == "" {
+		return ""
+	}
+	return " AND " + col + " IN (SELECT co.case_id FROM public.case_origin co WHERE co.client_id::text='" + clientID + "')"
 }
 
 func (py payer) originCol() string {
@@ -67,20 +88,21 @@ func (s *server) payerFor(r *http.Request, tenant, kind string) (payer, error) {
 		if err != nil {
 			return payer{}, err
 		}
-		return payer{"plan", o.ID, o.Name, o.ContactEmail}, nil
+		return payer{kind: "plan", id: o.ID, name: o.Name, email: o.ContactEmail}, nil
 	}
 	o, err := s.tpaForPrincipal(r, tenant)
 	if err != nil {
 		return payer{}, err
 	}
-	return payer{"tpa", o.ID, o.Name, o.ContactEmail}, nil
+	return payer{kind: "tpa", id: o.ID, name: o.Name, email: o.ContactEmail, clientID: o.ClientScope}, nil
 }
 
 // feeScope narrows what a checkout pays for.
 type feeScope struct {
 	label                     string // on the Stripe line item
 	batchID, clientID, caseID string
-	back                      string // portal page to come back to; "" = the payer's own page
+	caseIDs                   []string // the disputes a filer ticked: only its own unpaid ones among them are charged
+	back                      string   // portal page to come back to; "" = the payer's own page
 }
 
 type unpaidFee struct {
@@ -99,6 +121,10 @@ func (s *server) unpaidFees(ctx context.Context, tenant string, py payer, sc fee
 		                      AND f.status='OPEN' AND f.amount_cents > 0
 		WHERE o.tenant=$1 AND o.%s::text=$2`, sanitizeTenant(tenant), py.originCol())
 	args := []any{tenant, py.id}
+	if py.clientID != "" {
+		args = append(args, py.clientID)
+		q += fmt.Sprintf(` AND o.client_id::text=$%d`, len(args))
+	}
 	if sc.batchID != "" {
 		args = append(args, sc.batchID)
 		q += fmt.Sprintf(` AND o.case_id IN (SELECT case_id FROM public.tpa_dispute_batch_items WHERE batch_id::text=$%d AND status='FILED')`, len(args))
@@ -110,6 +136,10 @@ func (s *server) unpaidFees(ctx context.Context, tenant string, py payer, sc fee
 	if sc.caseID != "" {
 		args = append(args, sc.caseID)
 		q += fmt.Sprintf(` AND o.case_id=$%d`, len(args))
+	}
+	if len(sc.caseIDs) > 0 {
+		args = append(args, sc.caseIDs)
+		q += fmt.Sprintf(` AND o.case_id = ANY($%d)`, len(args))
 	}
 	rows, err := s.db.Query(ctx, q+` ORDER BY c.case_number`, args...)
 	if err != nil {
@@ -135,16 +165,24 @@ func (s *server) orgFees(kind string) http.HandlerFunc {
 			http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusNotFound)
 			return
 		}
-		fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{})
+		clientID, ok := s.payerClientFilter(r, tenant, py)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		fees, err := s.unpaidFees(r.Context(), tenant, py, feeScope{clientID: clientID})
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 			return
 		}
 		var total int64
+		ids := make([]string, 0, len(fees))
 		for _, f := range fees {
 			total += f.amount
+			ids = append(ids, f.invoiceID)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"unpaid": len(fees), "amount_cents": total})
+		_, cardFee := s.cardFees(r.Context(), tenant, ids)
+		writeJSON(w, http.StatusOK, map[string]any{"unpaid": len(fees), "amount_cents": total, "card_fee_cents": cardFee})
 	}
 }
 
@@ -204,8 +242,8 @@ func (s *server) disputePay(kind string) http.HandlerFunc {
 
 func (s *server) payerOwnsCase(ctx context.Context, tenant string, py payer, caseID string) bool {
 	var ok bool
-	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM public.case_origin WHERE tenant=$1 AND case_id=$2 AND %s::text=$3)`,
-		py.originCol()), tenant, caseID, py.id).Scan(&ok)
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM public.case_origin WHERE tenant=$1 AND case_id=$2 AND %s::text=$3
+		AND ($4::text='' OR client_id::text=$4))`, py.originCol()), tenant, caseID, py.id, py.clientID).Scan(&ok)
 	return ok
 }
 
@@ -225,15 +263,20 @@ func (s *server) scopedCheckout(w http.ResponseWriter, r *http.Request, kind str
 	// saved card or bank account, or the TPA's (tpa_saved_payments.go).
 	var in savedPayRequest
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in)
+	if kind == "tpa" && len(in.CaseIDs) > 0 {
+		sc.caseIDs = in.CaseIDs
+		sc.label = fmt.Sprintf("%d selected disputes", len(in.CaseIDs))
+	}
 	if kind == "tpa" && (in.Source == "CLIENT" || in.Source == "TPA") {
 		s.feeChargeSaved(w, r, tenant, py, sc, in)
 		return
 	}
-	s.feeCheckout(w, r, tenant, py, sc)
+	s.feeCheckout(w, r, tenant, py, sc, payMethodOf(in.Method))
 }
 
-// feeCheckout opens (or reuses) one Stripe checkout for the unpaid fees in scope.
-func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant string, py payer, sc feeScope) {
+// feeCheckout opens (or reuses) one Stripe checkout for the unpaid fees in scope, paid one way (card_fee.go): by
+// card, the fees plus their card fees; from a bank account, the fees alone.
+func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant string, py payer, sc feeScope, method string) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	fees, err := s.unpaidFees(r.Context(), tenant, py, sc)
 	if err != nil {
@@ -252,16 +295,21 @@ func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant stri
 		total += f.amount
 		byAmount[f.amount]++
 	}
+	perCard, cardFee := map[string]int64{}, int64(0)
+	if method == payByCard {
+		perCard, cardFee = s.cardFees(r.Context(), tenant, ids)
+	}
+	charge := total + cardFee
 	// A second click (or a second tab) for exactly the same fees gets the
 	// checkout already open, not a new one that would expire it.
 	var reuseID, reuseURL string
 	if s.db.QueryRow(r.Context(), `
 		SELECT id::text, checkout_url FROM public.payment_groups
 		WHERE tenant=$1 AND status='OPEN' AND checkout_url IS NOT NULL AND created_at > now() - interval '30 minutes'
-		  AND invoice_ids @> $2::uuid[] AND invoice_ids <@ $2::uuid[] AND amount_cents=$3
-		ORDER BY created_at DESC LIMIT 1`, tenant, ids, total).Scan(&reuseID, &reuseURL) == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"checkout_url": reuseURL, "disputes": len(fees), "amount_cents": total,
-			"payment_group_id": reuseID, "reused": true})
+		  AND invoice_ids @> $2::uuid[] AND invoice_ids <@ $2::uuid[] AND amount_cents=$3 AND coalesce(pay_by,'card')=$4
+		ORDER BY created_at DESC LIMIT 1`, tenant, ids, charge, method).Scan(&reuseID, &reuseURL) == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"checkout_url": reuseURL, "disputes": len(fees), "amount_cents": charge,
+			"card_fee_cents": cardFee, "payment_group_id": reuseID, "reused": true})
 		return
 	}
 	if !s.expireOverlapping(r.Context(), tenant, ids) {
@@ -285,9 +333,10 @@ func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant stri
 	}
 	var groupID string
 	if err := s.db.QueryRow(r.Context(), `
-		INSERT INTO public.payment_groups (tenant, batch_id, tpa_id, plan_id, client_id, case_id, scope, invoice_ids, amount_cents, created_by)
-		VALUES ($1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,$8::uuid[],$9,$10) RETURNING id::text`,
-		tenant, batchArg, tpaArg, planArg, clientArg, caseArg, sc.label, ids, total, p.Subject).Scan(&groupID); err != nil {
+		INSERT INTO public.payment_groups (tenant, batch_id, tpa_id, plan_id, client_id, case_id, scope, invoice_ids, amount_cents, created_by,
+		                                   card_fee_cents, pay_by)
+		VALUES ($1,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,$8::uuid[],$9,$10,$11,$12) RETURNING id::text`,
+		tenant, batchArg, tpaArg, planArg, clientArg, caseArg, sc.label, ids, charge, p.Subject, cardFee, method).Scan(&groupID); err != nil {
 		slog.Error("payment group", "err", err)
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -316,14 +365,19 @@ func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant stri
 		form.Set(fmt.Sprintf("line_items[%d][price_data][product_data][name]", n), name)
 		n++
 	}
+	if err := s.checkoutFor(form, method, cardFee, n); err != nil {
+		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.payment_groups WHERE id::text=$1`, groupID)
+		http.Error(w, `{"error":"`+jsonSafe(err.Error())+`"}`, http.StatusFailedDependency)
+		return
+	}
 	form.Set("metadata[tenant]", tenant)
 	form.Set("metadata[payment_group_id]", groupID)
 	form.Set("metadata[payer_org]", py.name)
 	form.Set("payment_intent_data[metadata][payment_group_id]", groupID)
 	form.Set("payment_intent_data[metadata][tenant]", tenant)
-	// Which methods Stripe's page offers (card, US bank account) is set in the
-	// Stripe Dashboard; Checkout no longer takes payment_method_types. A bank
-	// debit settles in days: checkout.session.async_payment_* opens the dispute.
+	// Which methods Stripe's page offers is the payment method configuration
+	// checkoutFor set (card or bank). A bank debit settles in days:
+	// checkout.session.async_payment_* opens the dispute.
 	sess, err := s.stripePost("/v1/checkout/sessions", form)
 	if err != nil {
 		_, _ = s.db.Exec(r.Context(), `DELETE FROM public.payment_groups WHERE id::text=$1`, groupID)
@@ -335,16 +389,16 @@ func (s *server) feeCheckout(w http.ResponseWriter, r *http.Request, tenant stri
 	_, _ = s.db.Exec(r.Context(), `UPDATE public.payment_groups SET session_id=$2, checkout_url=$3, updated_at=now() WHERE id::text=$1`, groupID, sessID, checkoutURL)
 	for _, f := range fees {
 		_, _ = s.db.Exec(r.Context(), `
-			INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, payer_org, raw)
-			VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb) ON CONFLICT (session_id) DO NOTHING`,
-			tenant, f.caseID, f.invoiceID, sessID+"#"+f.invoiceID, f.amount, py.name)
+			INSERT INTO public.payments (tenant, case_id, invoice_id, session_id, amount_cents, payer_org, raw, card_fee_cents)
+			VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb,$7) ON CONFLICT (session_id) DO NOTHING`,
+			tenant, f.caseID, f.invoiceID, sessID+"#"+f.invoiceID, f.amount, py.name, perCard[f.invoiceID])
 		s.finEvent(r, tenant, f.caseID, f.invoiceID, "PAYMENT_INITIATED", "NONE", f.amount, "PROVIDER", sessID, "fee-checkout")
 	}
 	s.logAudit(r.Context(), tenant, sc.caseID, "FEE_CHECKOUT", map[string]any{
 		"org": py.org(), "by": p.Subject, "scope": sc.label, "batch_id": sc.batchID, "client_id": sc.clientID,
-		"payment_group_id": groupID, "disputes": len(fees), "amount_cents": total})
+		"payment_group_id": groupID, "disputes": len(fees), "amount_cents": charge, "card_fee_cents": cardFee, "pay_by": method})
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"checkout_url": checkoutURL, "disputes": len(fees), "amount_cents": total, "payment_group_id": groupID})
+		"checkout_url": checkoutURL, "disputes": len(fees), "amount_cents": charge, "card_fee_cents": cardFee, "payment_group_id": groupID})
 }
 
 // expireOverlapping closes every open checkout that could take money for one
@@ -519,7 +573,18 @@ func (s *server) reconcileGroup(ctx context.Context, tenant, groupID, sid string
 	return status
 }
 
-func usd(c int64) string { return fmt.Sprintf("$%d.%02d", c/100, c%100) }
+// usd: cents as dollars, grouped the way people read them ($1,500.00).
+func usd(c int64) string {
+	sign := ""
+	if c < 0 {
+		sign, c = "-", -c
+	}
+	d := fmt.Sprintf("%d", c/100)
+	for i := len(d) - 3; i > 0; i -= 3 {
+		d = d[:i] + "," + d[i:]
+	}
+	return fmt.Sprintf("%s$%s.%02d", sign, d, c%100)
+}
 
 // flagPayment: something about a payment needs a person (finance).
 func (s *server) flagPayment(ctx context.Context, tenant, groupID, why string) {
@@ -567,10 +632,14 @@ func (s *server) settlePaymentGroup(r *http.Request, tenant, groupID, sessionID,
 			}
 			continue
 		}
-		_, _ = s.db.Exec(r.Context(), `
+		var cardFee int64
+		_ = s.db.QueryRow(r.Context(), `
 			UPDATE public.payments SET status='PAID', payment_intent=$3, payer_email=$4, last_error=NULL, updated_at=now()
-			WHERE tenant=$1 AND session_id=$2`, tenant, sessionID+"#"+invID, paymentIntent, payerEmail)
+			WHERE tenant=$1 AND session_id=$2 RETURNING card_fee_cents`, tenant, sessionID+"#"+invID, paymentIntent, payerEmail).Scan(&cardFee)
 		s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, party, paymentIntent, "stripe")
+		if cardFee > 0 {
+			s.finEvent(r, tenant, caseID, invID, "CARD_FEE_PAID", "IN", cardFee, party, paymentIntent, "stripe")
+		}
 		s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
 			"by": "stripe", "invoice_id": invID, "action": "PAY", "status": "PAID", "amount_cents": amount,
 			"party": party, "remittance_ref": paymentIntent, "payment_group_id": groupID, "org": org})
@@ -579,8 +648,7 @@ func (s *server) settlePaymentGroup(r *http.Request, tenant, groupID, sessionID,
 		s.activatePaidIntakeFor(r, tenant, caseID, false)
 		s.maybeAdvanceStatus(r, tenant, caseID)
 		opened++
-		s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED",
-			fmt.Sprintf("Initial fee %s paid by card (%s)", usd(amount), paymentIntent))
+		s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED", paidWords(amount, cardFee, paymentIntent))
 	}
 	slog.Info("fee checkout settled", "group", groupID, "invoices", len(invoiceIDs), "opened", opened, "refunded", refunded)
 	kind, id, home := "tpa", tpaID, "#/tpa"
@@ -604,9 +672,18 @@ func (s *server) refundDuplicate(r *http.Request, tenant, invID, paymentRow, pay
 	var amount int64
 	if s.db.QueryRow(r.Context(), `
 		UPDATE public.payments SET status='REFUNDING', payment_intent=$3, updated_at=now()
-		WHERE tenant=$1 AND session_id=$2 AND status NOT IN ('PAID','REFUNDED','REFUNDING') RETURNING case_id, amount_cents`,
+		WHERE tenant=$1 AND session_id=$2 AND status NOT IN ('PAID','REFUNDED','REFUNDING') RETURNING case_id, amount_cents + card_fee_cents`,
 		tenant, paymentRow, paymentIntent).Scan(&caseID, &amount) != nil || amount <= 0 || paymentIntent == "" {
 		return false
+	}
+	// Its own refunds row (kind DUPLICATE): Stripe's events for it then never touch the invoice the other payment
+	// pays, and the idempotency key makes a retried settle refund it once.
+	var refundID string
+	if err := s.db.QueryRow(r.Context(), `
+		INSERT INTO public.refunds (tenant, case_id, invoice_id, payment_id, kind, method, amount_cents, status, payment_intent, requested_by)
+		SELECT $1, $2, $3::uuid, id, 'DUPLICATE', 'stripe', $4, 'PENDING', $5, 'system' FROM public.payments WHERE tenant=$1 AND session_id=$6
+		RETURNING id::text`, tenant, caseID, invID, amount, paymentIntent, paymentRow).Scan(&refundID); err != nil {
+		slog.Error("duplicate refund row", "err", err)
 	}
 	form := url.Values{}
 	form.Set("payment_intent", paymentIntent)
@@ -614,11 +691,23 @@ func (s *server) refundDuplicate(r *http.Request, tenant, invID, paymentRow, pay
 	form.Set("reason", "duplicate")
 	form.Set("metadata[invoice_id]", invID)
 	form.Set("metadata[tenant]", tenant)
-	if _, err := s.stripePost("/v1/refunds", form); err != nil {
+	form.Set("metadata[refund_id]", refundID)
+	res, err := s.stripePostIdem("/v1/refunds", form, "idre-dup-refund-"+paymentRow)
+	if err != nil {
+		if refundID != "" {
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.refunds SET status='FAILED', failure=$2, updated_at=now() WHERE id=$1::uuid`, refundID, err.Error())
+		}
 		_, _ = s.db.Exec(r.Context(), `UPDATE public.payments SET status='REFUND_DUE', last_error=$3, updated_at=now() WHERE tenant=$1 AND session_id=$2`, tenant, paymentRow, err.Error())
 		s.notify(r, tenant, "role:FINANCE", "PAYMENT_NEEDS_ATTENTION",
 			fmt.Sprintf("A fee of %s was paid twice and the automatic refund failed (%s) — refund it by hand", usd(amount), paymentIntent), "#/cases/"+caseID)
 		return false
+	}
+	if refundID != "" {
+		sid, _ := res["id"].(string)
+		_, _ = s.db.Exec(r.Context(), `UPDATE public.refunds SET stripe_refund_id=nullif($2,''), updated_at=now() WHERE id=$1::uuid`, refundID, sid)
+		if st, _ := res["status"].(string); stripeRefundOutcome(st) == "succeeded" {
+			s.completeRefund(r.Context(), tenant, refundID, "system")
+		}
 	}
 	_, _ = s.db.Exec(r.Context(), `UPDATE public.payments SET status='REFUNDED', updated_at=now() WHERE tenant=$1 AND session_id=$2`, tenant, paymentRow)
 	s.logAudit(r.Context(), tenant, caseID, "DUPLICATE_PAYMENT_REFUNDED", map[string]any{
@@ -633,17 +722,18 @@ func (s *server) refundDuplicate(r *http.Request, tenant, invID, paymentRow, pay
 // already another way is refunded.
 func (s *server) settleSingleSession(r *http.Request, tenant, sessID, invID, caseID, paymentIntent, email string, amountTotal int64, raw []byte, payerName, payerOrg string) {
 	var payStatus string
-	var rowAmount int64
-	if s.db.QueryRow(r.Context(), `SELECT status, amount_cents FROM public.payments WHERE tenant=$1 AND session_id=$2`, tenant, sessID).Scan(&payStatus, &rowAmount) != nil {
+	var rowAmount, cardFee int64
+	if s.db.QueryRow(r.Context(), `SELECT status, amount_cents, card_fee_cents FROM public.payments WHERE tenant=$1 AND session_id=$2`, tenant, sessID).Scan(&payStatus, &rowAmount, &cardFee) != nil {
 		return
 	}
 	if payStatus == "PAID" || payStatus == "REFUNDED" {
 		return // this event was handled already
 	}
-	if amountTotal > 0 && rowAmount > 0 && amountTotal != rowAmount {
+	// By card, the page took the fee and its card fee.
+	if amountTotal > 0 && rowAmount > 0 && amountTotal != rowAmount+cardFee {
 		r2, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, "/", nil)
 		s.notify(r2, tenant, "role:FINANCE", "PAYMENT_NEEDS_ATTENTION",
-			fmt.Sprintf("Stripe took %s for a %s fee checkout (%s) — not settled, check it", usd(amountTotal), usd(rowAmount), sessID), "#/cases/"+caseID)
+			fmt.Sprintf("Stripe took %s for a %s fee checkout (%s) — not settled, check it", usd(amountTotal), usd(rowAmount+cardFee), sessID), "#/cases/"+caseID)
 		return
 	}
 	if raw == nil {
@@ -672,14 +762,16 @@ func (s *server) settleSingleSession(r *http.Request, tenant, sessID, invID, cas
 		       raw=$5, last_error=NULL, updated_at=now()
 		WHERE session_id=$1 AND tenant=$2`, sessID, tenant, paymentIntent, email, raw, payerName, payerOrg)
 	s.finEvent(r, tenant, caseID, invID, "PAYMENT_PAID", "IN", amount, party, paymentIntent, "stripe")
+	if cardFee > 0 {
+		s.finEvent(r, tenant, caseID, invID, "CARD_FEE_PAID", "IN", cardFee, party, paymentIntent, "stripe")
+	}
 	s.logAudit(r.Context(), tenant, caseID, "INVOICE_SETTLED", map[string]any{
 		"by": "stripe", "invoice_id": invID, "action": "PAY", "status": "PAID",
-		"amount_cents": amount, "party": party, "remittance_ref": paymentIntent,
+		"amount_cents": amount, "card_fee_cents": cardFee, "party": party, "remittance_ref": paymentIntent,
 	})
 	s.postPaymentLedger(tenant, caseID, paymentIntent, party, uint64(amount), false) // clearing → escrow
 	s.activatePaidIntake(r, tenant, caseID)
-	s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED",
-		fmt.Sprintf("Card payment of %s received via Stripe (%s) — invoice settled, ledger posted", usd(amount), paymentIntent))
+	s.logActivity(r.Context(), tenant, caseID, "PAYMENT_RECEIVED", paidWords(amount, cardFee, paymentIntent)+" — invoice settled, ledger posted")
 	s.fireEventRules(r, tenant, "invoice.settled", map[string]any{
 		"case_id": caseID, "invoice_id": invID, "amount_cents": amount,
 		"party": party, "method": "card", "remittance_ref": paymentIntent, "tenant": tenant,

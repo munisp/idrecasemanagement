@@ -882,3 +882,78 @@ def test_a_crooked_page_is_straightened_and_a_straight_one_left_alone():
     assert [p for p, _ in done] == [1] and abs(pl.skew_degrees(fixed[0])) <= 0.5
     ctx = pl.stage_validate({"extracted": {"billed_amount_usd": 1.0}, "pages_straightened": [(1, -5.0)], "text": "1.00"}, {}, None)
     assert any("crooked (5.0°)" in f["issue"] for f in ctx["findings"])
+
+
+def test_package_fields_reads_what_a_filing_document_states():
+    from main import package_fields as f
+    eob = ("EXPLANATION OF BENEFITS\nSunshine Health Plan - Remittance Advice\n"
+           "Claim Number: TPA-TEST-55021   Member ID: TSTMBR-7781\n"
+           "Service Date: 08/14/2026   Procedure: CPT 99285 Emergency dept visit\n"
+           "Determination Date: 09/18/2026\nNetwork Status: Out-of-Network\n")
+    got = f(eob)
+    assert got["service_date"] == "2026-08-14" and got["determination_date"] == "2026-09-18"
+    assert got["contracted"] is False
+    bill = ("ITEMIZED BILL - UB-04 Summary\nProvider: Gulf Coast Emergency Physicians  NPI 1234567893\n"
+            "Patient: TEST PATIENT   Service Date: 08/14/2026\nPlace of Service: 23\n")
+    got = f(bill)
+    assert got["provider_type"] == "physician_dentist" and got["provider_type_basis"].startswith("provider is a professional practice")
+    assert got["provider_npi"] == "1234567893" and "contracted" not in got and "determination_date" not in got
+
+
+def test_package_fields_states_nothing_it_does_not_read():
+    from main import package_fields as f
+    assert f("") == {}
+    assert f("OPEN NEGOTIATION NOTICE\nThe parties negotiated in good faith.") == {}
+
+
+def test_filing_fields_read_what_the_filing_form_asks():
+    from main import package_fields as f
+    eob = ("Sunshine Health Plan - Remittance Advice\nEXPLANATION OF BENEFITS\n"
+           "Claim Number: TPA-TEST-55021   Member ID: TSTMBR-7781\nNAIC: 12345\n"
+           "Total Billed: $2,450.00\nPlan Paid: $600.00\nClaims email: Claims@SunshineHealth.example\n"
+           "Provider: Gulf Coast Emergency Physicians  NPI 1234567893\n")
+    got = f(eob)
+    assert got["payer_name"] == "Sunshine Health Plan"
+    assert got["payer_email"] == "claims@sunshinehealth.example" and got["payer_naic"] == "12345"
+    assert got["billed_cents"] == 245000 and got["paid_cents"] == 60000
+    assert got["provider_name"] == "Gulf Coast Emergency Physicians"
+    form = "Health Plan: Bay Health Plan\nAmount in dispute: $1,850.00\n"
+    got = f(form)
+    assert got["payer_name"] == "Bay Health Plan" and got["disputed_cents"] == 185000
+
+
+def test_filing_fields_never_guess():
+    from main import filing_fields as f
+    # An unlabelled amount and a personal address are not read as the plan's.
+    got = f("We spoke on the phone about $500.00 and wrote to jane.doe@gmail.com.")
+    assert "billed_cents" not in got and "payer_email" not in got and "payer_name" not in got
+
+
+ER_NOTE = ("Emergency department record. Diagnosis: acute appendicitis with peritonitis. CT scan of the abdomen "
+           "performed, laparoscopic appendectomy, treated with piperacillin-tazobactam. History of asthma.")
+
+
+def test_classify_a_clinical_record_as_medical_records():
+    dtype, score, _ = pl.classify_text("upload.pdf", ER_NOTE)
+    assert dtype == "medical_records" and score >= 3
+
+
+def test_an_eob_stays_an_eob_beside_the_clinical_signals():
+    eob = "EXPLANATION OF BENEFITS. Remittance advice. Allowed amount $600. Patient responsibility $50. Diagnosis: sepsis."
+    assert pl.classify_text("eob.pdf", eob)[0] == "eob"
+
+
+def test_validate_keeps_a_clinical_record_the_model_called_off_topic():
+    # The model's relevance vote judged by billing vocabulary: a plain ER note has none, and was flagged
+    # "not related to medical billing — possible mis-upload".
+    ctx = {"extracted": {"claim_number": None, "qpa_usd": None}, "normalized": {}, "in_domain": False,
+           "doc_type": "medical_records", "classify_score": 7}
+    out = pl.stage_validate(ctx, {}, None)
+    assert out["doc_type"] == "medical_records"
+    assert not any("mis-upload" in f["issue"] or "no usable field values" in f["issue"] for f in out["findings"])
+
+
+def test_validate_still_flags_a_weakly_clinical_page_the_model_rejected():
+    ctx = {"extracted": {}, "normalized": {}, "in_domain": False, "doc_type": "medical_records", "classify_score": 2}
+    out = pl.stage_validate(ctx, {}, None)
+    assert out["doc_type"] == "unrelated"

@@ -1,0 +1,1 @@
+/Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/target/release/vault: /Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/src/main.rs /Users/tanitoluwaifegbesan/Documents/idrecasemanagement/services/vault-rs/src/otel.rs

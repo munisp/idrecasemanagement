@@ -791,7 +791,10 @@ func (s *server) createImageCashLetter(w http.ResponseWriter, r *http.Request) {
 	bh.CycleNumber = "01"
 	bundle := imagecashletter.NewBundle(bh)
 
-	type ref struct{ id string; amount int64 }
+	type ref struct {
+		id     string
+		amount int64
+	}
 	var refs []ref
 	var total int64
 	for i, row := range rows {
@@ -913,9 +916,9 @@ func (s *server) createMetro2File(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	var in struct {
-		ThresholdDays      int    `json:"threshold_days"`       // default 60
+		ThresholdDays        int    `json:"threshold_days"`        // default 60
 		IdentificationNumber string `json:"identification_number"` // furnisher code, >=5 chars
-		ReporterName       string `json:"reporter_name"`
+		ReporterName         string `json:"reporter_name"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if in.ThresholdDays <= 0 {
@@ -1012,7 +1015,6 @@ func (s *server) createMetro2File(w http.ResponseWriter, r *http.Request) {
 		"file_id": fileID, "reference": ref, "records": count,
 		"total_cents": total, "filename": ref + ".dat", "file": f.String(false)})
 }
-
 
 // attachPaymentAuthorization: FINANCE seals the signed ACH authorization
 // (NACHA WEB retention) into the vault against an account. Raw body is the

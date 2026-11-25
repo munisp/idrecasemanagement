@@ -4,34 +4,13 @@
   const view = document.getElementById("view");
   const nav = document.getElementById("nav");
 
-  // Service worker (PWA). The default fire-and-forget registration leaves
-  // an already-open tab on its OLD service worker (and its OLD cached
-  // shell) until the browser gets around to its own update check on some
-  // later navigation -- during active deploys that reads as "still the
-  // old UI" no matter how many times the server is confirmed fresh.
-  // reg.update() forces the check now instead of waiting on the browser's
-  // schedule, and a new worker installing while one is already active
-  // means a newer build landed -- reload once to pick it up.
+  // No service worker for now (2026-10-24): the portal is served fresh from the network. A browser that installed
+  // the old one drops it here, with its caches; sw.js itself also unregisters wherever it still runs.
   if ("serviceWorker" in navigator) {
-    // Reload once the new worker has taken over (controllerchange), not when
-    // it has merely installed: a reload at "installed" was still answered by
-    // the old worker from the old cache, so the new build stayed hidden.
-    const hadController = !!navigator.serviceWorker.controller;
-    let reloaded = false;
-    navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (hadController && !reloaded) { reloaded = true; location.reload(); }
-    });
-    navigator.serviceWorker.register("/sw.js").then((reg) => {
-      reg.update();
-      // The check above only ran once, on this page load. A tab left open
-      // across several deploys (exactly how this app gets tested -- SPA
-      // hash routing, no real reload in between) never re-checked, so a
-      // fix already live on the server stayed invisible indefinitely in
-      // that tab. Re-check on every route change instead -- cheap (no-op
-      // network request if nothing changed) and turns "still broken after
-      // you said you fixed it" into "self-heals within one navigation."
-      addEventListener("hashchange", () => reg.update());
-    });
+    navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {});
+  }
+  if (window.caches) {
+    caches.keys().then((keys) => keys.filter((k) => k.startsWith("idre-")).forEach((k) => caches.delete(k))).catch(() => {});
   }
 
   // OIDC callback -- handleCallback() already restores the pre-login route
@@ -140,14 +119,47 @@
   // next reload — the server gate applies immediately.
   let FEATURES = {};
   let BRAND = "Capitol Bridge";
-  try { const pr0 = await Api.program.get(); FEATURES = pr0.features || {}; BRAND = pr0.brand_name || BRAND; } catch { FEATURES = {}; }
+  // The menu is drawn from the program (its switches, and whether the tenant runs a program at all). One slow or
+  // failed read used to draw it as if every switch were on and no program were set -- the wrong pages. The read is
+  // retried, and the last one that worked (per tenant) is used until a fresh one arrives.
+  const programKey = "idre.program." + Api.getTenant();
+  async function readProgram() {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const pr = await Api.program.get();
+        try { localStorage.setItem(programKey, JSON.stringify({ features: pr.features || {}, brand_name: pr.brand_name || "", programmed: !!pr.config })); } catch { /* private window */ }
+        return { features: pr.features || {}, brand_name: pr.brand_name || "", programmed: !!pr.config, fresh: true };
+      } catch { await new Promise((ok) => setTimeout(ok, 800 * (i + 1))); }
+    }
+    try { const c = JSON.parse(localStorage.getItem(programKey) || "null"); if (c) return { ...c, fresh: false }; } catch { /* none */ }
+    return null;
+  }
+  const PROGRAM0 = await readProgram();
+  if (PROGRAM0) { FEATURES = PROGRAM0.features || {}; BRAND = PROGRAM0.brand_name || BRAND; }
   // The portal's name for this tenant (tenant_labels.brand_name; editable on the Rules page).
   const brandMark = BRAND.split(/\s+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "CB";
   document.querySelectorAll(".rail-word").forEach((el) => { el.textContent = BRAND; });
   document.querySelectorAll(".rail-mark").forEach((el) => { el.textContent = brandMark; });
   document.title = BRAND + " Portal";
   window.APP_BRAND = BRAND;
-  const feature = (n) => FEATURES[n] !== false;
+  // Most flags are on until turned off; these are off until turned on (features.go featureDefaultOff).
+  const FEATURE_DEFAULT_OFF = { onboarding_required: true, deid_hold_mail: true };
+  const feature = (n) => (FEATURE_DEFAULT_OFF[n] ? FEATURES[n] === true : FEATURES[n] !== false);
+  // The switches change while people are signed in (a tenant admin's Feature toggles): read them again as
+  // pages open, at most every 15 seconds, and at once after a change (App.featuresChanged()).
+  let featuresAt = Date.now();
+  async function refreshFeatures(force) {
+    if (!force && Date.now() - featuresAt < 15000) return;
+    featuresAt = Date.now();
+    let pr;
+    try { pr = await Api.program.get(); } catch { return; /* keep what we have */ }
+    const next = pr.features || FEATURES, nextProgrammed = !!pr.config;
+    const changed = JSON.stringify(next) !== JSON.stringify(FEATURES) || nextProgrammed !== programmed;
+    FEATURES = next; programmed = nextProgrammed;
+    try { localStorage.setItem(programKey, JSON.stringify({ features: FEATURES, brand_name: BRAND, programmed })); } catch { /* private window */ }
+    // A switch turned on or off changes the menu: draw it again, and what may be opened with it.
+    if (changed) { buildLinks(); paintNav(); }
+  }
 
   // Role-aware rail navigation (mirrors docs/STAKEHOLDERS.md coverage matrix)
   const has = (...rs) => Auth.can(...rs);
@@ -159,8 +171,25 @@
   // uploaded packet, never typed in up front). Showing New dispute to a
   // programmed tenant's case managers was pure confusion: a form whose
   // required fields don't apply to any case they'd ever open.
-  const programmed = !!(await Api.program.get().catch(() => null))?.config;
-  const links = [["#/dashboard", "▤", "Home"]];
+  let programmed = PROGRAM0 ? !!PROGRAM0.programmed : false;
+  // Every money screen is a tab of Financials: one menu item, opening the first tab this account may see.
+  // Each tab keeps its own roles (the same the screen and its API check).
+  const finTabs = [
+    ["finance", "Overview", ["FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"]],
+    ["payments", "Payments", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"]],
+    ["billing", "Billing", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"]],
+    ["arap", "AR / AP", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"]],
+    ["recon", "Reconciliation", ["PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"]],
+  ].filter(([, , roles]) => has(...roles));
+  const finPages = new Set(finTabs.map(([pg]) => pg));
+  // The menu from this account's roles and the program's current switches (buildLinks), drawn into the rail
+  // (paintNav). Both run again whenever the switches change.
+  let links = [];
+  let menu = new Set();
+  const outside = has("TPA") || (has("HEALTH_PLAN", "PARTY") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
+    "NURSE", "ATTORNEY", "ARBITRATOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"));
+  function buildLinks() {
+  links = [["#/dashboard", "▤", "Home"]];
   // TPA deliberately excluded from the generic CRM/case screens -- those
   // show the WHOLE tenant's cases/accounts/leads/tasks with no per-caller
   // scoping, but a TPA only has standing to see the disputes it filed
@@ -169,8 +198,6 @@
   // listTasks TPA exclusion.
   // An outside organization's login (a TPA, or a health plan without a
   // staff role) gets its own page, never the tenant-wide screens.
-  const outside = has("TPA") || (has("HEALTH_PLAN", "PARTY") && !has("CASE_MANAGER", "PM", "FINANCE", "CODER", "NURSE_PHYSICIAN", "DOCTOR",
-    "NURSE", "ATTORNEY", "ARBITRATOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR"));
   if (!outside) {
     links.push(["#/cases", "▦", "Disputes"], ["#/pipeline", "▥", "Pipeline"],
       ["#/crm/accounts", "◈", "Accounts"], ["#/crm/leads", "◎", "Leads"], ["#/crm/tasks", "☑", "Tasks"]);
@@ -179,7 +206,8 @@
   if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
-  if (!outside && !has("PARTY")) links.push(["#/ask", "✦", "Ask the graph"]);
+  // Hidden from a Reviewer who sees only their own cases: it answers from every case in the tenant.
+  if (!outside && !has("PARTY") && !Auth.reviewerScoped()) links.push(["#/ask", "✦", "Ask the graph"]);
   // Party workspace: an invited party's own disputes (party_accounts is the only source of access).
   if (has("PARTY") && feature("party_workspace")) links.push(["#/party", "⚭", "My disputes"]);
   // Specialty review queues: each specialist sees their own, the PM all three
@@ -193,7 +221,7 @@
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
-    if (has("CASE_MANAGER", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/doc-review", "◉", "Doc review"]);
+    if (has("CASE_MANAGER", "PM", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/doc-review", "◉", "Doc review"]);
   }
   if (has("CASE_MANAGER", "ARBITRATOR", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/intake", "⇥", "Intake"]);
@@ -202,18 +230,14 @@
   // CASE_MANAGER deliberately excluded -- Financials is a standalone
   // dashboard, not case-detail info; matches the backend's
   // financialReadRoles (access-control follow-up).
-  if (has("FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/finance", "◍", "Financials"]);
+  if (finTabs.length) links.push(["#/" + finTabs[0][0], "◍", "Financials"]);
   if (has("PM", "ARBITRATOR", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "TENANT_ADMIN")) links.push(["#/ops", "◔", "Ops"]);
-  if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/productivity", "⌁", "Productivity"]);
+  if (has("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/productivity", "⌁", "Productivity"]);
   // TPA excluded -- billable-hours timesheet logging against disputes is a
   // staff-productivity feature, not part of a TPA's own workflow.
+  if (!outside) links.push(["#/inbox", "✉", "My email"]);
   if (!outside) links.push(["#/timesheet", "⏱", "My timesheet"]);
   if (!outside || has("TPA")) links.push(["#/calendar", "▨", "Calendar"]);
-  // TPA excluded -- Onboarding is for registering NEW provider/payer/IDRE
-  // entity/auditor organizations and reviewing those applications; a TPA
-  // registers through its own dedicated flow (dispute.html) and has no
-  // use for this screen.
-  if (!outside) links.push(["#/onboarding", "⚑", "Onboarding"]);
   if (has("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/voice", "☎", "Voice console"]);
   if (has("PM", "FEDERAL_ADMIN", "STATE_AUDITOR", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/reports", "◫", "Reports"]);
   if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/time", "⏱", "Team time"]);
@@ -222,23 +246,18 @@
   // CASE_MANAGER deliberately excluded from all four -- standalone finance
   // screens, not case-detail info; matches billingViewRoles/arapReadRoles/
   // reconReadRoles/financialReadRoles (access-control follow-up).
-  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
-    links.push(["#/billing", "🧾", "Billing"]);
-    links.push(["#/arap", "⚖", "AR / AP"]);
-    links.push(["#/recon", "⇄", "Reconciliation"]);
-    links.push(["#/checks", "◧", "Checks"]);
-  }
   if (has("TPA", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/tpa", "⛁", "TPA"]);
   if (feature("healthplan_onboarding") && has("HEALTH_PLAN", "CASE_MANAGER", "PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/healthplan", "⛃", "Health plan"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", "PM", "FINANCE")) links.push(["#/configuration", "⚒", "Configuration"]);
   if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/rules", "§", "Rules"]);
-  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/features", "⚙", "Feature toggles"]);
+  if (has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/mail-setup", "✉", "Mail setup"]);
   // Permanent CASE_MANAGER access (own tenant only, enforced server-side),
   // not the Rules page -- CASE_MANAGER never has a standing right to edit
   // program rules, so this stays reachable independent of that gate.
   if (has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/team", "⚉", "Team"]);
-  if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
+  if (has("CASE_MANAGER", "PM", "FINANCE", "ARBITRATOR", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR")) links.push(["#/mail", "✉", "Mail log"]);
   // Payment rails and OFAC screening: money screens, so the money roles (the page itself checks too).
-  if (has("PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/payments", "🏦", "Payments"]);
   // Insights (payer analytics, network adequacy): case staff and auditors; flag-gated.
   if ((feature("payer_analytics") || feature("network_adequacy")) && has("CASE_MANAGER", "ARBITRATOR", "ATTORNEY", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", "CODER", "NURSE_PHYSICIAN", "PM")) links.push(["#/insights", "◈", "Insights"]);
   // Audit trails, isolated: the whole program's for admins and the state
@@ -250,8 +269,39 @@
   else if (outside && has("TPA", "HEALTH_PLAN")) links.push(["#/org-audit", "⌘", "Audit log"]);
   else links.push(["#/my-activity", "⌘", "Audit log"]);
   if (outside) links.push(["#/document-requests", "⇪", "Document requests"]);
-  nav.innerHTML = links.map(([h, i, l]) =>
-    `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`).join("");
+  // Partner API keys: an organization's own (TPA admins / plan logins; the page explains who), every key for tenant admins.
+  if ((outside && has("TPA", "HEALTH_PLAN")) || has("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN")) links.push(["#/api-keys", "⌗", outside ? "API keys" : "Partner API keys"]);
+  if (!outside) links.push(["#/api-reference", "⌗", "API reference"]);
+  menu = new Set(links.map(([h]) => h.slice(2)));
+  }
+  buildLinks();
+  // The rail in sections, so a long menu reads at a glance. Only the order and the headings change: the menu
+  // (and so what each account may open) is the same list of links.
+  const NAV_GROUPS = [
+    ["", ["dashboard"]],
+    ["Disputes", ["cases", "new", "pipeline", "intake", "qa", "doc-review", "deliverables", "queues/CODING", "queues/CLINICAL", "queues/LEGAL", "queues/pm", "party", "calendar"]],
+    ["Organizations", ["tpa", "healthplan", "crm/accounts", "crm/leads", "crm/tasks", "crm/360"]],
+    ["Money & reports", ["finance", "payments", "billing", "arap", "recon", "reports", "productivity", "ops", "insights", "time"]],
+    ["Tools", ["assistant", "ask", "voice", "inbox", "mail", "templates", "timesheet", "document-requests"]],
+    ["Admin", ["configuration", "team", "rules", "features", "mail-setup", "audit", "org-audit", "my-activity"]],
+  ];
+  const linkHtml = ([h, i, l]) => `<a href="${h}" data-route="${h.slice(2)}"><span class="ri">${i}</span><span class="rl">${l}</span></a>`;
+  function paintNav() {
+  const placed = new Set();
+  const sections = NAV_GROUPS.map(([label, routes]) => {
+    const mine = links.filter(([h]) => routes.includes(h.slice(2)));
+    mine.forEach(([h]) => placed.add(h));
+    return [label, mine];
+  });
+  const rest = links.filter(([h]) => !placed.has(h)); // anything not yet given a section goes last, never lost
+  if (rest.length) sections.push(["More", rest]);
+  // A short menu (an outside organization's) needs no headings.
+  const grouped = links.length > 8;
+  nav.innerHTML = sections.filter(([, l]) => l.length).map(([label, l]) =>
+    (grouped && label ? `<div class="nav-group" role="presentation">${label}</div>` : "") + l.map(linkHtml).join("")).join("");
+  markActive();
+  }
+  paintNav();
 
   // Floating assistant launcher: lives outside the router's #view swap (a
   // real DOM element appended once to <body>) so it survives every route
@@ -279,28 +329,113 @@
   backdrop.addEventListener("click", closeRail);
   nav.addEventListener("click", (e) => { if (e.target.closest("a")) closeRail(); });
 
-  // Notifications
-  document.getElementById("bell").onclick = async () => {
-    const n = await Api.cm.notifications().catch(() => []);
-    const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
-    w.className = "notif-panel";
-    w.innerHTML = `<h3>Notifications${n.length ?
-        ` <a href="javascript:void(0)" class="notif-markall" onclick="Api.cm.readAllNotifs().then(()=>location.reload())">Mark all as read</a>` : ""
-      }</h3>` + (n.length ? n.map((x) =>
-      `<div class="notif ${x.read_at ? "" : "unread"}" onclick="Api.cm.readNotif('${x.id}').then(()=>{${
-        x.link ? `location.hash='${x.link}';location.reload()` : "location.reload()"
-      }})">
-         <b>${x.type}</b> — ${x.body} <span class="muted">${new Date(x.at).toLocaleString()}</span></div>`).join("")
-      : `<p class="muted">No notifications.</p>`);
-    document.body.appendChild(w);
-    setTimeout(() => document.addEventListener("click", (e) => { if (!w.contains(e.target) && e.target.id !== "bell") w.remove(); }, { once: true }), 0);
+  // Notifications: the bell's badge is the real unread total (GET /notifications/count -- counting the list capped it
+  // at its 50-row page, so it never moved), refreshed on load, every 30s, and after anything is read. The panel pages
+  // the unread list 10 at a time; reading one marks it read and opens its link without reloading the page.
+  const NOTIF_PAGE = 10;
+  // What each kind of notification is, in words (the bell showed the raw type, e.g. MAIL_RECEIVED).
+  const NOTIF_LABELS = {
+    MAIL_RECEIVED: "New email", MAIL_FILED_TO_CASE: "Email on a dispute", MAIL_NOT_MATCHED: "Email to file",
+    MAIL_BOUNCED: "Email bounced", MAIL_FAILED: "Email not delivered", MAIL_COMPLAINED: "Email marked as spam",
+    EMAIL_BOUNCED: "Email bounced", EMAIL_COMPLAINED: "Email marked as spam", OUTLOOK_NEW_MAIL: "Outlook",
+    OUTLOOK_ERROR: "Outlook needs attention", COMPANY_OUTLOOK_ERROR: "Company Outlook needs attention",
+    COMPANY_OUTLOOK_SEND_FAILED: "Company Outlook couldn't send", MAIL_DECISION_TO_CHECK: "Email answer to check",
+    WITHDRAWAL_REQUESTED: "Withdrawal requested", DOCUMENTS_RECEIVED: "Answer received",
+    MAIL_ATTACHMENT_QUARANTINED: "Attachment removed", MAIL_PROCESSING_FAILED: "Email not processed",
+    MAIL_HELD: "Email held: unknown sender", MAIL_FLOOD: "Email arriving too fast",
   };
-  (async () => {
-    const n = await Api.cm.notifications().catch(() => []);
-    const unread = n.filter((x) => !x.read_at).length;
+  const notifLabel = (t) => NOTIF_LABELS[t] || String(t || "").toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  const notifEsc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  let notifUnread = 0, notifPage = 0;
+  async function refreshBell() {
+    const r = await Api.cm.notifCount().catch(() => null);
+    if (!r) return;
+    notifUnread = r.unread || 0;
     const b = document.getElementById("bell-n");
-    if (unread) { b.textContent = unread; b.style.display = "block"; }
-  })();
+    b.textContent = notifUnread > 99 ? "99+" : String(notifUnread);
+    b.style.display = notifUnread ? "block" : "none";
+    document.getElementById("bell").setAttribute("aria-label", `Notifications, ${notifUnread} unread`);
+  }
+  async function drawNotifPanel() {
+    const w = window.__notifPanel;
+    if (!w || !w.isConnected) return;
+    await refreshBell();
+    const pages = Math.max(1, Math.ceil(notifUnread / NOTIF_PAGE));
+    notifPage = Math.max(0, Math.min(notifPage, pages - 1)); // reading the last one on a page moves back a page
+    const list = await Api.cm.notifications({ limit: NOTIF_PAGE, offset: notifPage * NOTIF_PAGE }).catch(() => []);
+    const from = notifPage * NOTIF_PAGE + 1, to = notifPage * NOTIF_PAGE + list.length;
+    w.innerHTML = `<h3>Notifications ${notifUnread ? `<span class="muted notif-n">${notifUnread} unread</span>
+        <a href="javascript:void(0)" class="notif-markall" data-act="all">Mark all as read</a>` : ""}</h3>
+      <div class="notif-list">${list.length ? list.map((x) => `<div class="notif unread" data-id="${notifEsc(x.id)}" data-link="${notifEsc(x.link || "")}" role="button" tabindex="0">
+          <b>${notifEsc(notifLabel(x.type))}</b> — ${notifEsc(x.body)} <span class="muted">${notifEsc(new Date(x.at).toLocaleString())}</span></div>`).join("")
+        : `<p class="muted">No unread notifications.</p>`}</div>
+      ${notifUnread > NOTIF_PAGE ? `<div class="notif-pager"><span class="muted">${from}–${to} of ${notifUnread}</span>
+        <span class="tp-nav"><button type="button" class="mini" data-act="prev" ${notifPage === 0 ? "disabled" : ""}>‹ Previous</button>
+        <span class="muted">Page ${notifPage + 1} of ${pages}</span>
+        <button type="button" class="mini" data-act="next" ${notifPage >= pages - 1 ? "disabled" : ""}>Next ›</button></span></div>` : ""}`;
+  }
+  async function openNotif(el) {
+    await Api.cm.readNotif(el.dataset.id).catch(() => {});
+    const link = el.dataset.link;
+    if (link) { window.__notifPanel.remove(); location.hash = link; refreshBell(); }
+    else drawNotifPanel();
+  }
+  document.getElementById("bell").onclick = async () => {
+    const w = window.__notifPanel || (window.__notifPanel = document.createElement("div"));
+    if (w.isConnected) { w.remove(); return; }
+    w.className = "notif-panel";
+    w.innerHTML = `<p class="muted">Loading…</p>`;
+    notifPage = 0;
+    document.body.appendChild(w);
+    if (!w.dataset.wired) {
+      w.dataset.wired = "1";
+      w.addEventListener("click", async (e) => {
+        const act = e.target.closest("[data-act]")?.dataset.act;
+        if (act === "prev" || act === "next") { notifPage += act === "next" ? 1 : -1; drawNotifPanel(); return; }
+        if (act === "all") { await Api.cm.readAllNotifs().catch(() => {}); notifPage = 0; drawNotifPanel(); return; }
+        const n = e.target.closest(".notif[data-id]");
+        if (n) openNotif(n);
+      });
+      w.addEventListener("keydown", (e) => { const n = e.target.closest(".notif[data-id]"); if (n && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openNotif(n); } });
+      document.addEventListener("click", (e) => { if (w.isConnected && !w.contains(e.target) && !e.target.closest("#bell")) w.remove(); });
+    }
+    drawNotifPanel();
+  };
+  refreshBell();
+  setInterval(refreshBell, 30000);
+
+  // First login: a short welcome to the bell and to email -- once per person (kept on the server, so not again on
+  // another device). Staff learn their own address and Outlook; outside parties learn they can answer by replying.
+  async function welcomeOnce() {
+    const sv = await Api.prefs.all().catch(() => null);
+    if (!sv || sv.welcome_seen) return;
+    const [mb, sys] = await Promise.all([
+      outside ? Promise.resolve(null) : Api.myMail.mailbox().catch(() => null),
+      Api.systemMail.get().catch(() => null)]);
+    const from = !sys ? "" : outside ? sys.address
+      : (sys.send_via === "outlook" ? (sys.company_outlook?.mailbox || sys.company_outlook?.email) : (sys.address || sys.default_from));
+    const e = notifEsc;
+    const bell = `<li><b>The bell</b> (top right) shows what needs you: a new email, an answer from a party, a letter to approve, a deadline.
+      Click one to go straight to it.</li>`;
+    const staff = `<ul class="welcome-list">${bell}
+      ${mb?.mailbox?.address ? `<li><b>Your email address</b> on the platform is <b>${e(mb.mailbox.address)}</b>. Open <b>My email</b> in the menu to read and
+        send mail, with attachments. Only you can read it.</li>` : ""}
+      <li><b>Outlook:</b> in My email you can connect your own Outlook account, so its mail shows here too.</li>
+      <li><b>Mail about a dispute files itself.</b> A message that answers a letter, or names a dispute number, goes onto that dispute's timeline,
+        and its attachments into the dispute's documents. Anything else waits in the Mail log for someone to file.</li>
+      <li><b>Answers by email count.</b> When a TPA replies to a letter with a clear answer — “yes, please proceed” — the dispute moves on as it
+        would from the portal. Unclear answers come to you to check.</li></ul>`;
+    const party = `<ul class="welcome-list">${bell}
+      <li><b>Document requests</b> list what the office needs from you: a permission, more time, or documents. Answer them there.</li>
+      <li><b>Or answer by email.</b> Reply to the letter's email${from ? ` (it comes from <b>${e(from)}</b>)` : ""} with a clear answer —
+        for example “Yes, please proceed with the full review” — and attach any documents. It is recorded on your dispute as if you had answered
+        here.</li>
+      <li><b>Email is accepted from your organization's addresses</b>: the one the letter went to, your team's, and any your admin adds
+        (Team → Authorized email addresses). From another address, include the dispute's <b>reply code</b>, printed on every email we send about it.</li></ul>`;
+    await UI.modal({ title: "Welcome — notifications and email", html: outside ? party : staff, submitLabel: "Got it" });
+    Api.prefs.put("welcome_seen", true).catch(() => {});
+  }
+  setTimeout(welcomeOnce, 1500); // after the first page has drawn
 
   // Identity. The avatar doubles as the sign-out control on narrow
   // viewports, where .who-txt (and the #lo link inside it) is hidden by
@@ -308,7 +443,7 @@
   // on mobile at all.
   const initials = (me.name || "?").split(/[\s._-]+/).map((s) => s[0]).join("").slice(0, 2).toUpperCase();
   document.getElementById("whoami").innerHTML =
-    `<span class="avatar" id="avatar-lo" title="Sign out" role="button" tabindex="0">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo">sign out</a></span>`;
+    `<span class="avatar" id="avatar-lo" title="Sign out" role="button" tabindex="0">${initials}</span><span class="who-txt">${me.name} · <a href="javascript:void(0)" id="lo" style="text-decoration:underline">sign out</a></span>`;
   document.getElementById("avatar-lo").addEventListener("click", Auth.logout);
   document.getElementById("rail-foot").innerHTML =
     `<a href="javascript:void(0)" id="rail-lo" title="Sign out"><span class="ri">⏻</span><span class="rl">Sign out — ${me.name}</span></a>`;
@@ -401,6 +536,8 @@
     [/^#\/cases\/([\w-]+)$/, (m) => Views.caseDetail(m[1])],
     [/^#\/cases\/([\w-]+)\/offers$/, (m) => Views.caseOffers(m[1])],
     [/^#\/features$/, Views.featuresAdmin],
+    [/^#\/mail-setup$/, Views.mailSetup],
+    [/^#\/configuration$/, ConfigViews.page],
     [/^#\/queues\/pm$/, Views.pmQueueView],
     [/^#\/queues\/(CODING|CLINICAL|LEGAL)(\?.*)?$/, (m) => Views.queueView(m[1])],
     [/^#\/insights$/, Views.insightsView],
@@ -426,10 +563,9 @@
     [/^#\/ops$/, Views.opsDashboard],
     [/^#\/productivity$/, Views.productivity],
     [/^#\/calendar$/, CrmViews.calendar],
-    [/^#\/onboarding$/, Views.onboarding],
-    [/^#\/onboarding\/new$/, Views.onboardingNew],
     [/^#\/voice$/, Views.voice],
     [/^#\/reports$/, Views.reports],
+    [/^#\/inbox$/, Views.inbox],
     [/^#\/timesheet$/, Views.myTimesheet],
     [/^#\/time$/, Views.timeReport],
     [/^#\/templates$/, Views.templatesPage],
@@ -447,6 +583,8 @@
     [/^#\/org-audit$/, Views.orgAuditPage],
     [/^#\/my-activity$/, Views.myActivityPage],
     [/^#\/document-requests$/, Views.docReqPage],
+    [/^#\/api-keys$/, ApiKeysViews.page],
+    [/^#\/api-reference$/, ApiKeysViews.reference],
   ];
 
   // One rule for every way of reaching a page -- the rail, a typed or
@@ -454,34 +592,52 @@
   // a page opens only if this account's menu offers it. The menu used to be
   // the only thing that knew, so a hidden page still opened by its address.
   // This is for a clear answer on screen; the API refuses the data itself.
-  const menu = new Set(links.map(([h]) => h.slice(2)));
-  const pageOf = (h) => {
+  function pageOf(h) {
     const parts = h.replace(/^#\//, "").split("?")[0].split("/");
     return parts[0] === "crm" || parts[0] === "queues" ? parts.slice(0, 2).join("/") : parts[0];
-  };
+  }
   function canOpen(h) {
     const page = pageOf(h);
     if (menu.has(page)) return true;
+    // The tabs of Financials (and the old Checks address, now a section of its Overview).
+    if (finPages.has(page)) return true;
+    if (page === "checks") return finPages.has("finance");
     // Pages reached from another page rather than from the menu.
     if (page === "search") return menu.has("cases");
     // Your own actions: always yours to see (bookmarks of the old "My activity").
     if (page === "my-activity") return true;
+    // The Coder drafts the cost estimate email and sends it once QA approves it:
+    // the step's "Send it" opens the QA gate, which shows the Coder its own drafts.
+    if (page === "qa") return has("CODER");
     // A TPA has no Disputes list, but opens the disputes it filed from its own page.
     if (page === "cases" && /^#\/cases\/[\w-]+$/.test(h)) return outside;
     // Entity 360 rides on the Accounts permission and its own flag.
     if (page === "crm/360") return menu.has("crm/accounts") && feature("entity360");
     return false;
   }
+  // The Financials tab strip, on top of each of its screens.
+  function finTabsHtml(h) {
+    const page = pageOf(h);
+    if (!finPages.has(page) || finTabs.length < 2) return "";
+    return `<nav class="fin-tabs" aria-label="Financials">${finTabs.map(([pg, label]) =>
+      `<a href="#/${pg}" class="${pg === page ? "on" : ""}"${pg === page ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
+  }
   const noAccess = () => `<div class="view-head"><h1>No access</h1></div>
     <p class="muted">Your account doesn't include this page. If you think it should, ask your program manager or administrator.</p>
     <p><a href="#/dashboard">Back to Home</a></p>`;
 
-  async function render() {
+  function markActive() {
     const h = location.hash || "#/dashboard";
     nav.querySelectorAll("a").forEach((a) => {
       const r = a.dataset.route;
-      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || h.startsWith("#/" + r + "?") || (r === "cases" && h.startsWith("#/new")));
+      a.classList.toggle("active", h === "#/" + r || h.startsWith("#/" + r + "/") || h.startsWith("#/" + r + "?") || (r === "cases" && h.startsWith("#/new"))
+        || (finPages.has(r) && finPages.has(pageOf(h))));
     });
+  }
+  async function render() {
+    await refreshFeatures();
+    const h = location.hash || "#/dashboard";
+    markActive();
     // A route may carry ?... (Stripe's return to "#/tpa?paid=1"): routes that
     // don't take a query match without it, instead of showing "Not found".
     const hBare = h.split("?")[0];
@@ -496,11 +652,12 @@
         // function itself -- that always runs as an earlier microtask
         // than this assignment (confirmed empirically), so every listener
         // it tried to attach found nothing yet and silently no-op'd.
+        const tabs = finTabsHtml(h);
         if (result && typeof result === "object" && "html" in result) {
-          view.innerHTML = result.html;
+          view.innerHTML = tabs + result.html;
           result.wire?.();
         } else {
-          view.innerHTML = result;
+          view.innerHTML = tabs + result;
         }
         view.classList.remove("view-in");
         void view.offsetWidth; // restart the enter animation on every render
@@ -513,7 +670,7 @@
   }
   // Soft refresh: re-render the current route without a full page reload
   // (no Keycloak round-trip, no shell flash, preserves rail/scroll context).
-  window.App = { rerender: render, canOpen, feature };
+  window.App = { rerender: render, canOpen, feature, featuresChanged: () => refreshFeatures(true) };
   // Last-resort feedback net: any async handler that still throws without its
   // own try/catch surfaces as an error toast instead of failing silently.
   addEventListener("unhandledrejection", (e) => {

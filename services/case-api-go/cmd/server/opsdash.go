@@ -142,7 +142,7 @@ func (s *server) opsDashboard(w http.ResponseWriter, r *http.Request) {
 			return s.queryRows(r, `
 				SELECT sum(amount_cents) FILTER (WHERE kind='PAYMENT_PAID') AS collected_cents,
 				       sum(amount_cents) FILTER (WHERE kind='PAYMENT_PAID' AND created_at > now() - interval '30 days') AS collected_30d_cents,
-				       sum(amount_cents) FILTER (WHERE kind='REFUND_ISSUED') AS refunded_cents
+				       coalesce(sum(amount_cents) FILTER (WHERE kind='REFUND_ISSUED'),0) - coalesce(sum(amount_cents) FILTER (WHERE kind='REFUND_REVERSED'),0) AS refunded_cents
 				FROM public.financial_events WHERE tenant=$1`, tenant)
 		},
 		// Queues needing a human: checks in REVIEW, MATCHED awaiting clearing,
@@ -154,9 +154,7 @@ func (s *server) opsDashboard(w http.ResponseWriter, r *http.Request) {
 				  (SELECT count(*) FROM public.checks WHERE tenant=$1 AND status='MATCHED') AS checks_awaiting_clear,
 				  (SELECT count(*) FROM public.qa_reviews WHERE tenant=$1 AND status='PENDING') AS qa_pending,
 				  (SELECT count(*) FROM public.intake_requests WHERE tenant=$1
-				     AND status NOT IN ('CONVERTED','CLOSED_REFUNDED','INELIGIBLE')) AS intake_open,
-				  (SELECT count(*) FROM public.stakeholder_applications WHERE tenant=$1
-				     AND status IN ('SUBMITTED','PENDING_DOCS')) AS onboarding_pending`, tenant)
+				     AND status NOT IN ('CONVERTED','CLOSED_REFUNDED','INELIGIBLE')) AS intake_open`, tenant)
 		},
 		// Escalations trail (latest 10) — what supervisors needed to see.
 		"escalations": func() (any, error) {
@@ -179,7 +177,7 @@ func (s *server) opsDashboard(w http.ResponseWriter, r *http.Request) {
 			return s.queryRows(r, `
 				SELECT d.day::date AS day,
 				       COALESCE(sum(e.amount_cents) FILTER (WHERE e.kind='PAYMENT_PAID'),0) AS collected_cents,
-				       COALESCE(sum(e.amount_cents) FILTER (WHERE e.kind='REFUND_ISSUED'),0) AS refunded_cents
+				       COALESCE(sum(e.amount_cents) FILTER (WHERE e.kind='REFUND_ISSUED'),0) - COALESCE(sum(e.amount_cents) FILTER (WHERE e.kind='REFUND_REVERSED'),0) AS refunded_cents
 				FROM generate_series(CURRENT_DATE - 29, CURRENT_DATE, interval '1 day') d(day)
 				LEFT JOIN public.financial_events e ON e.tenant=$1 AND e.created_at::date = d.day
 				GROUP BY d.day ORDER BY d.day`, tenant)

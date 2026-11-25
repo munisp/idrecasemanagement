@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS public.payments (
 );
 CREATE INDEX IF NOT EXISTS payments_tenant ON public.payments (tenant, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS payments_case ON public.payments (tenant, case_id);
+-- Backs the invoices foreign key: without it every invoice delete/void scans all payments.
+CREATE INDEX IF NOT EXISTS payments_invoice ON public.payments (invoice_id);
 
 -- Unified financial event stream for the dashboard: one row per money
 -- movement or obligation, regardless of source (invoice lifecycle, card

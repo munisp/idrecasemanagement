@@ -110,10 +110,14 @@ var blockedExtensions = map[string]bool{
 // polyglot tricks (double extensions like bill.pdf.exe).
 func contentPolicy(filename string, head []byte) error {
 	lower := strings.ToLower(filename)
-	// double-extension evasion: anything.exe/.bat/… anywhere in the name
-	for ext := range blockedExtensions {
-		if strings.Contains(lower, ext) {
-			return fmt.Errorf("executable content is not accepted (%s)", ext)
+	// double-extension evasion: a blocked extension among the name's
+	// dot-delimited segments (bill.pdf.exe, report.sh.pdf). Matched as a real
+	// segment, so legitimate names that merely CONTAIN a blocked string —
+	// balance.sheet.pdf, claims.json.pdf, Q3.company.financials.pdf — are not
+	// rejected (the old strings.Contains check refused all of those).
+	for _, part := range strings.Split(lower, ".") {
+		if blockedExtensions["."+part] {
+			return fmt.Errorf("executable content is not accepted (.%s)", part)
 		}
 	}
 	if blockedExtensions[strings.ToLower(filepath.Ext(lower))] {
@@ -273,14 +277,14 @@ func allowedDocType(lowerName string, head []byte) error {
 // Fail-open for authenticated routes would be fine; for anonymous ShareBox
 // routes we fail-closed at the caller's discretion.
 func (s *server) rateLimit(key string, limit int64, windowSec int) bool {
-	res, err := s.rds.cmd("INCR", "idre:rl:"+key)
+	res, err := s.rds.cmd("INCR", s.cfg.RedisPrefix+":rl:"+key)
 	if err != nil {
 		return false // Redis down: treat as limited for public surfaces
 	}
 	var n int64
 	fmt.Sscanf(res, "%d", &n)
 	if n == 1 {
-		_, _ = s.rds.cmd("EXPIRE", "idre:rl:"+key, fmt.Sprintf("%d", windowSec))
+		_, _ = s.rds.cmd("EXPIRE", s.cfg.RedisPrefix+":rl:"+key, fmt.Sprintf("%d", windowSec))
 	}
 	return n <= limit
 }
@@ -288,10 +292,7 @@ func (s *server) rateLimit(key string, limit int64, windowSec int) bool {
 // shareThrottle guards every anonymous ShareBox request: per-IP and per-token
 // ceilings keep link spraying / upload floods from becoming a DoS.
 func (s *server) shareThrottle(w http.ResponseWriter, r *http.Request, token string) bool {
-	ip := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = strings.Split(fwd, ",")[0]
-	}
+	ip := clientIP(r)
 	if !s.rateLimit("ip:"+ip, 60, 60) { // 60 req/min per IP
 		http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
 		return false
