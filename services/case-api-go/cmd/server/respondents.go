@@ -469,6 +469,7 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 		if s.loadProgram(r, tenant) != nil {
 			wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 		}
+		s.notifyOnSignal(r, tenant, caseID, "PLAN_RESPONSE_RECEIVED", nil) // the Coder: the case is ready for coding review
 		signalled := s.sigCase(r.Context(), tenant, caseID, wfID, "PLAN_RESPONSE_RECEIVED",
 			map[string]any{"source": "respondent dashboard", "by": sc.label, "documents": docs}) == nil
 		detail, _ := json.Marshal(map[string]any{"by": sc.label, "documents": docs, "note": strings.TrimSpace(in.Note), "source": "respondent dashboard"})

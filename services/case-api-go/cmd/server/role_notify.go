@@ -85,6 +85,7 @@ func (s *server) notifyOnSignal(r *http.Request, tenant, caseID, signal string, 
 			fmt.Sprintf("Case %s: the Attorney approved the decision letter — ready for final QA review", cn), "PM")
 	case "FINAL_ORDER_ISSUED":
 		s.notifyCaseTeam(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: AHCA's Final Order is recorded — the case moves to invoicing", cn))
+		s.archiveCaseLater(r, tenant, caseID) // #24e.ii: archive the case documentation (case_archive.go)
 	}
 }
 

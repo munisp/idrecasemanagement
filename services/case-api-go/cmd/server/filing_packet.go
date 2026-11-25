@@ -582,6 +582,8 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 	if len(problems) > 0 {
 		s.logActivity(r.Context(), tenant, caseID, "FILING_PACKET_INCOMPLETE",
 			"The filing form was submitted with problems, so it was not saved: "+strings.Join(problems, "; "))
+		s.notifyRoles(r, tenant, caseID, "FILING_INCOMPLETE", fmt.Sprintf("Case %s: the filing packet came in incomplete — %s",
+			s.caseNumberOf(r.Context(), tenant, caseID), strings.Join(problems, "; ")), "PM") // change log #14
 		return
 	}
 	keys, err := s.applyFilingPacket(r.Context(), tenant, caseID, details, disputed, claims, nil, false)

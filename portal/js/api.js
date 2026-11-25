@@ -340,6 +340,7 @@ const Api = (() => {
       filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),
       respondent: (id) => req("GET", `${t()}/cases/${id}/respondent`),
       aorCheck: (id) => req("GET", `${t()}/cases/${id}/aor-check`),
+      archive: (id) => req("POST", `${t()}/cases/${id}/archive`),
       revisionRequest: (id, body) => req("POST", `${t()}/cases/${id}/revision-request`, body),
       setRespondent: (id, body) => req("PUT", `${t()}/cases/${id}/respondent`, body),
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
