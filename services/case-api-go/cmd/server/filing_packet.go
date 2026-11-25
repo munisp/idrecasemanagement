@@ -622,9 +622,9 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 	s.keepFilingCopies(r, tenant, caseID, pk, by)
 }
 
-// keepFilingCopies (change log #6, #8, #12): the attachments are filed on the case under Intake; the filer's own
-// packet PDF when they uploaded one, otherwise a PDF of what they typed is generated (lettergen filing_record).
-// details.packet_source says which, for the intake list.
+// keepFilingCopies (change log #6, #8, #12): the attachments are filed on the case under Intake, the filer's own
+// packet PDF among them when they uploaded one, and a PDF of the form as filled in is always generated (lettergen
+// filing_record). details.packet_source says how it was filed, for the intake list.
 func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *filingPacket, by string) {
 	ctx := r.Context()
 	_ = pk.attachmentProblems() // decodes; filers were checked already
@@ -648,12 +648,12 @@ func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *fi
 	}
 	_, _ = s.db.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('packet_source', $2::text) WHERE id::text=$1`,
 		sanitizeTenant(tenant)), caseID, source)
-	if source == "form" {
-		var caseNumber string
-		_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
-		if err := s.enqueueLetter(r, tenant, caseID, caseNumber, "filing_record", by); err != nil {
-			slog.Error("filing record", "case", caseID, "err", err)
-		}
+	// The form as filled in is always kept as a PDF too (2026-11-25): beside the filer's own packet PDF when they
+	// uploaded one, so the case has both what they sent and what the form recorded.
+	var caseNumber string
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+	if err := s.enqueueLetter(r, tenant, caseID, caseNumber, "filing_record", by); err != nil {
+		slog.Error("filing record", "case", caseID, "err", err)
 	}
 }
 
