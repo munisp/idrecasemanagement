@@ -28,6 +28,32 @@ Claim Number CPT Code Date of Service Zip Code Amount Billed UCR Pricing
 Based on the foregoing, Capitol Bridge recommends ... Capitol Bridge is awarding $640,000.00 or 92% of the
 disputed charge to the Provider."""
 
+OFFICE_COVER = """Florida AHCA Claims Dispute Resolution Contractor
+November 25, 2026
+Elizabeth DeMarco, Esq.
+Senior Attorney
+Agency for Health Care Administration 2727 Mahan Drive, Mail Stop #3, RM 3124
+Tallahassee, FL 32308
+RE: FL26-001263
+Dear Mrs. DeMarco:
+According to the Filing Coversheet submitted by the filing party, the contact for the Filing Party is:
+Jane Doe
+Sunrise Medical Group
+100 Main St
+Miami, FL 33101
+jane@example.com
+The current contact for the Health Plan is:
+Acme Health Plan
+John Roe
+Claims Director
+1 Plan Way
+Tampa, FL 33602
+john@example.com
+Please do not hesitate to contact us should you have any questions.
+Sincerely,
+Capitol Bridge
+"""
+
 COVER = """FL26-000216
 September 1, 2026
 RE: External Review of Denied Claims
@@ -109,6 +135,9 @@ class Recognition(unittest.TestCase):
             self.skipTest(f"pipeline dependencies not installed: {e}")
         self.assertEqual(self.classify("Review Rationale and Letter FL26-000216.pdf", DECISION), "fl_decision_report")
         self.assertEqual(self.classify("Cover Letter FL26-000216.pdf", COVER), "fl_cover_letter")
+        # The office's own cover letter (Capitol Bridge layout) and an upload that lost its name.
+        self.assertEqual(self.classify("upload-Cover Letter.pdf", OFFICE_COVER), "fl_cover_letter")
+        self.assertEqual(self.classify("scan.pdf", OFFICE_COVER), "fl_cover_letter")
         self.assertEqual(self.classify("Invoice FL26-000216H - Health Plan.pdf", INVOICE), "fl_review_invoice")
         self.assertEqual(self.classify("decision.pdf", IRO), "iro_decision")
         # Unnamed uploads still classify by content.

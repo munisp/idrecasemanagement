@@ -24,8 +24,12 @@ TYPE_SIGNALS = {
     "fl_cover_letter": {
         "strong": ["case file summary", "enclosed with this letter is the analysis",
                    "independently review provider and managed care organization claim disputes",
-                   "professional appeals staff", "amount in controversy"],
-        "weak": ["external review of denied claims", "decision:", "sincerely", "initial review of this case"],
+                   "professional appeals staff", "amount in controversy",
+                   # the office's own cover to the Agency's attorney (assets/office/cover_to_rationale.docx, 2026-11-25)
+                   "filing coversheet submitted by the filing party", "the contact for the filing party is",
+                   "the current contact for the health plan is"],
+        "weak": ["external review of denied claims", "decision:", "sincerely", "initial review of this case",
+                 "cover letter"],
     },
     "fl_review_invoice": {
         "strong": ["remit to", "review costs", "total if paid after", "late charge will be added", "date prepared",
