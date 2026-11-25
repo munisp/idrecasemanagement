@@ -20,7 +20,7 @@ TYPE_SIGNALS = {
 
 _WHO = re.compile(r"(?s)\bI,\s*([A-Z][\w.'\- ]{1,60}?),\s*([^,\n]{2,80}?)\s+(?:at|of|for)(?:\s+|(?=[A-Z]))([^,\n]{2,80}?),\s*(?:[Cc]ertify|[Hh]ereby|[Aa]uthori[sz]e|[Aa]ppoint)")  # "Officer atHaloMD": "at" glued to the name
 _LIST_START = re.compile(r"(?is)(?:act on behalf of|appointed to act|authori[sz]ed to act)[^:\n]{0,160}:")
-_NAME = re.compile(r"^[A-Z][a-zA-Z.'\-]+(?:\s+[A-Z][a-zA-Z.'\-]+){1,3}$")
+_NAME = re.compile(r"^[A-Z][a-zA-Z.'\-]+(?:\s+[A-Z][a-zA-Z.'\-]+){1,2}$")  # two or three words
 
 
 def extract(doc_type: str, text: str) -> tuple[dict, list[str]]:
@@ -42,8 +42,9 @@ def extract(doc_type: str, text: str) -> tuple[dict, list[str]]:
             line = re.sub(r"^[\s\-*•·\d.)]+", "", line).strip()
             if not line:
                 continue
-            if _NAME.match(line) and line != out.get("authorized_by"):
-                names.append(line)
+            found = _names_in(line, out.get("authorized_by", ""))
+            if found:
+                names.extend(found)
                 continue
             if names:  # the list has ended (the signature block)
                 break
@@ -54,3 +55,21 @@ def extract(doc_type: str, text: str) -> tuple[dict, list[str]]:
     if not names:
         issues.append("AOR letter: no representatives were read from it — check the names on the letter")
     return out, issues
+
+
+_CAP = re.compile(r"^[A-Z][a-zA-Z.'\-]+$")
+
+
+def _names_in(line: str, signer: str) -> list[str]:
+    """The people on one line of the list: one name, names separated by commas or semicolons, or -- where a reader
+    ran the list's lines together -- a run of capitalised words, taken two at a time ("Casey Filer Kim Lowe")."""
+    parts = [x.strip() for x in re.split(r"[;,]", line) if x.strip()]
+    if len(parts) > 1 and all(_NAME.match(x) for x in parts):
+        return [x for x in parts if x != signer]
+    if _NAME.match(line):
+        return [line] if line != signer else []
+    words = line.split()
+    if len(words) >= 4 and len(words) % 2 == 0 and all(_CAP.match(w) for w in words):
+        pairs = [" ".join(words[i:i + 2]) for i in range(0, len(words), 2)]
+        return [x for x in pairs if x != signer]
+    return []

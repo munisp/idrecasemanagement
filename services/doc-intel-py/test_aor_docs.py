@@ -31,6 +31,12 @@ class AOR(unittest.TestCase):
             self.skipTest(f"pipeline dependencies not installed: {e}")
         self.assertEqual(pipeline.classify_text("Halo_Letter.pdf", LETTER)[0], "aor_letter")
 
+    def test_names_run_together_or_comma_separated(self):
+        f, _ = ad.extract("aor_letter", "I, Robin Officer, COO at Acme TPA, certify that the following individuals can act on behalf of Acme TPA regarding Florida Claim Disputes:\nCasey Filer Kim Lowe\nRobin Officer, COO")
+        self.assertEqual(f["representatives"], ["Casey Filer", "Kim Lowe"])
+        f, _ = ad.extract("aor_letter", "I, Robin Officer, COO at Acme TPA, certify that the following individuals can act on behalf of Acme TPA:\nCasey Filer, Kim Lowe; Ari Patel\n")
+        self.assertEqual(f["representatives"], ["Casey Filer", "Kim Lowe", "Ari Patel"])
+
     def test_other_types_untouched(self):
         self.assertEqual(ad.extract("eob", LETTER), ({}, []))
 
