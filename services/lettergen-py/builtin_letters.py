@@ -1099,6 +1099,19 @@ _DOCS = {"claim_forms": "Claim form(s)", "denials_eobs": "Denial(s) / EOBs", "fl
          "medical_records": "Medical records", "coding_rules": "Coding rules / policies", "other": "Other"}
 
 
+def _signature(d, data_url: str, label: str = "Signature") -> None:
+    """A signature drawn on the portal (change log #7), printed where it was given."""
+    import base64 as _b64
+    if not data_url or not data_url.startswith("data:image/png;base64,"):
+        return
+    try:
+        png = _b64.b64decode(data_url.split(",", 1)[1])
+    except Exception:  # noqa: BLE001 -- a damaged image is left out, never a failed record
+        return
+    d.para(label + ":", size=9, space_after=0)
+    d.doc.add_picture(io.BytesIO(png), width=Inches(2.4))
+
+
 def build_filing_record(ctx, logo):
     d0 = ctx["details"]
     v = lambda k: "" if d0.get(k) in (None, "") else ("Yes" if d0.get(k) is True else "No" if d0.get(k) is False else str(d0.get(k)))
@@ -1156,12 +1169,15 @@ def build_filing_record(ctx, logo):
         d.heading("Eligibility attestation")
         d.bullets([("☑ " if att.get(k) else "☐ ") + label for k, label in _ATTESTATION])
         d.para(f"Certified: {v('attestation_certified') or 'No'} — {v('attested_by_name')}, {v('attested_by_title')}, {v('attested_on')}")
+        _signature(d, d0.get("attested_signature") or "")
     if v("aor_representative"):
         d.heading("Appointment of representative")
         d.para(f"{v('aor_representative')} is appointed to act as the representative of the provider ({v('aor_provider')}) "
                f"against {v('aor_health_plan')}. Signed: {v('aor_signed_by_name')}, {v('aor_signed_by_title')}, {v('aor_signed_on')}.")
+        _signature(d, d0.get("aor_signature") or "")
     d.heading("Certification")
     d.para(f"Agreed: {v('certification_agreed') or 'No'} — {v('certified_by_name')}, {v('certified_by_title')}, {v('certified_on')}")
+    _signature(d, d0.get("certified_signature") or "")
     return d
 
 
@@ -1212,6 +1228,7 @@ def build_rebuttal_record(ctx, logo):
         d.heading("Eligibility attestation")
         d.bullets([("☑ " if k in ex else "☐ ") + label for k, label in _REBUTTAL_EXCLUSIONS])
     d.para(f"Signed: {g(att, 'signature')} — {g(att, 'printed_name')}, {g(att, 'title')}, {g(att, 'date')}")
+    _signature(d, g(att, "drawn"))
     if any(g(info, k) for k in ("claims_count", "dates_of_service", "type_of_service", "patient_names")):
         d.heading("Claim information")
         d.grid(["", ""], [[k, v] for k, v in [["Number of claims", g(info, "claims_count")], ["Date(s) of service", g(info, "dates_of_service")],
@@ -1229,6 +1246,7 @@ def build_rebuttal_record(ctx, logo):
     if cert.get("agreed"):
         d.heading("Certification")
         d.para(f"Agreed and signed: {g(cert, 'signature')} — {g(cert, 'printed_name')}, {g(cert, 'title')}, {g(cert, 'date')}")
+        _signature(d, g(cert, "drawn"))
     ws = rb.get("worksheet") or []
     if ws:
         m = lambda c: money(c) if isinstance(c, (int, float)) else ""

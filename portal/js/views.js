@@ -282,6 +282,7 @@ const Views = (() => {
     if (opts.readOnly) {
       h.querySelectorAll("input,textarea,button").forEach((x) => { x.disabled = true; });
       h.querySelectorAll(".pf-csv").forEach((x) => { x.hidden = true; }); // no claims upload on a form you can't change
+      h.querySelectorAll(".sig-pad").forEach((x) => { x.classList.add("sig-ro"); });
     }
     // A packet PDF read into the form also fills the filing screen's own short fields that are still empty.
     if (h.dataset.shortBound) return;
@@ -392,6 +393,8 @@ const Views = (() => {
     st.pending = null;
     const json = JSON.stringify(snap.data);
     if (json === st.last) return;
+    // A save still on its way when the form is filed (draftClear) must not leave a draft behind.
+    const gen = st.gen || 0, cleared = () => (st.gen || 0) !== gen;
     try {
       if (!snap.any) {
         // Emptied: an unsaved blank form stays unsaved; a saved draft keeps its last content until discarded.
@@ -402,8 +405,10 @@ const Views = (() => {
       const body = { data: snap.data, summary: snap.summary };
       let r = null;
       if (st.id) r = await Api.program.draftSave(st.key, st.id, body).catch((e) => { if (e.status === 404) return null; throw e; });
+      if (cleared()) return;
       if (!r) { // new, or discarded/filed in another tab: a new draft
         r = await Api.program.draftNew(st.key, body);
+        if (cleared()) { Api.program.draftRemove(st.key, r.id).catch(() => {}); return; }
         st.id = r.id; st.ref = r.ref;
         draftPick[st.key] = r.id; // a rerender reopens this one
         draftCountRefresh(st.key);
@@ -411,6 +416,7 @@ const Views = (() => {
       st.last = json; st.summary = snap.summary; st.at = r.updated_at || new Date().toISOString();
       draftShow(st, "");
     } catch (e) {
+      if (cleared()) return;
       // Whatever is on the page stays there; keep trying.
       draftShow(st, e.status === 409 ? e.message : "Couldn't save the draft — retrying. Your entries are still on this page.");
       if (e.status === 409) return;
@@ -430,7 +436,7 @@ const Views = (() => {
   function draftClear(key) {
     const st = draftState[key];
     const id = st && st.id;
-    if (st) { clearTimeout(st.timer); st.timer = null; st.pending = null; st.last = null; st.id = null; st.ref = null; draftShow(st, ""); }
+    if (st) { st.gen = (st.gen || 0) + 1; clearTimeout(st.timer); st.timer = null; st.pending = null; st.last = null; st.id = null; st.ref = null; draftShow(st, ""); }
     draftPick[key] = "new";
     if (id) Api.program.draftRemove(key, id).catch(() => {});
   }

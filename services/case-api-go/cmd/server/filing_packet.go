@@ -55,9 +55,11 @@ var (
 		"plan_position_basis": 20000, "plan_position_references": 20000, "plan_position_rebuttal": 20000,
 	}
 	packetDates = []string{"attested_on", "aor_signed_on", "certified_on"}
-	packetBools = []string{"contracted", "fee_estimate_requested", "attestation_certified", "certification_agreed"}
-	isoDate     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-	tenDigits   = regexp.MustCompile(`^\d{10}$`)
+	// Signatures drawn on the form (change log 2026-11-25 #7): PNG data URLs from the signature pads.
+	packetSignatures = []string{"attested_signature", "aor_signature", "certified_signature"}
+	packetBools      = []string{"contracted", "fee_estimate_requested", "attestation_certified", "certification_agreed"}
+	isoDate          = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	tenDigits        = regexp.MustCompile(`^\d{10}$`)
 )
 
 // filingPacket is the form as the portal posts it: details by their case-field names, the aggregated amount in
@@ -167,6 +169,7 @@ func (pk *filingPacket) requiredProblems() []string {
 	agreed, _ := d["certification_agreed"].(bool)
 	need(agreed && str("certified_by_name") != "" && str("certified_by_title") != "" && str("certified_on") != "",
 		"Certification: tick it and enter your name, title and the date")
+	need(str("certified_signature") != "", "Certification: sign in the signature box")
 	return out
 }
 
@@ -258,6 +261,17 @@ func (pk *filingPacket) normalize() (map[string]any, *int64, []packetClaim, []st
 		}
 		if len([]rune(v)) > max {
 			problems = append(problems, fmt.Sprintf("%s: at most %d characters", k, max))
+			continue
+		}
+		out[k] = v
+	}
+	for _, k := range packetSignatures {
+		v := str(k)
+		if v == "" {
+			continue
+		}
+		if msg := signatureProblem(v); msg != "" {
+			problems = append(problems, k+": "+msg)
 			continue
 		}
 		out[k] = v
@@ -678,4 +692,17 @@ func (s *server) putFilingPacket(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, caseID, "FILING_PACKET_UPDATED", map[string]any{
 		"by": p.Subject, "fields": keys, "claims": len(claims), "removed": pk.RemoveClaims, "changes": changes})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "fields": keys, "claims": len(claims)})
+}
+
+// signatureProblem: a drawn signature is a PNG image (data URL), at most 200 KB; "" when it is one.
+func signatureProblem(v string) string {
+	const prefix = "data:image/png;base64,"
+	if !strings.HasPrefix(v, prefix) || len(v) > 270_000 {
+		return "the signature must be drawn in the signature box"
+	}
+	raw, err := base64.StdEncoding.DecodeString(v[len(prefix):])
+	if err != nil || !bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n")) {
+		return "the signature could not be read — sign again"
+	}
+	return ""
 }

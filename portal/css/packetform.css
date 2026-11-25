@@ -42,3 +42,8 @@
 .pf-note[hidden]{display:none}
 .pf-file{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0;font-size:14px}
 .rb-optional{opacity:.6}.rb .pf-claims input{min-width:90px}.rb-spec{max-width:220px;margin-left:6px}
+.sig-pad{margin:10px 0 4px;display:flex;flex-direction:column;gap:6px;max-width:560px}
+.sig-pad canvas{width:100%;max-width:560px;height:auto;aspect-ratio:4/1;border:1px dashed var(--border-strong,#9aa3ad);border-radius:8px;background:#fff;touch-action:none;cursor:crosshair}
+.sig-pad .sig-clear{align-self:flex-start}
+.sig-label{font-size:14px}
+.sig-ro canvas{pointer-events:none;border-style:solid}.sig-ro .sig-clear{display:none}

@@ -37,8 +37,10 @@ window.RebuttalForm = (() => {
   const money = (c) => (c == null || c === "" ? "" : (Number(c) / 100).toFixed(2));
   const cents = (v) => { const t = String(v ?? "").replace(/[$,\s]/g, ""); if (t === "") return null; const n = Number(t); return Number.isFinite(n) ? Math.round(n * 100) : NaN; };
   const inp = (name, label, v = "", attrs = "", req = false) => `<label>${esc(label)}${req ? R : ""} <input name="${name}" value="${esc(v)}" ${attrs} /></label>`;
+  // The typed name and title, and a place to sign (change log #7): the drawn signature is kept as a PNG in <p>.drawn.
   const sigBlock = (p, v = {}) => `<div class="pf-grid">${inp(`${p}.printed_name`, "Printed name", v.printed_name, "", true)}${inp(`${p}.title`, "Title", v.title, "", true)}
-      ${inp(`${p}.signature`, "Electronic signature (type your full name)", v.signature, "", true)}${inp(`${p}.date`, "Date", v.date, 'type="date"', true)}</div>`;
+      ${inp(`${p}.signature`, "Electronic signature (type your full name)", v.signature, "", true)}${inp(`${p}.date`, "Date", v.date, 'type="date"', true)}</div>
+      ${PacketForm.sigPad({ [`${p}.drawn`]: v.drawn || "" }, `${p}.drawn`, true).replace(`name="d.${p}.drawn"`, `name="${p}.drawn"`)}`;
   const wsRow = (w = {}) => `<tr class="pf-claim">${WS_COLS.map(([k, label, type]) => {
     const v = type === "money" ? money(w[k + "_cents"]) : (w[k] ?? "");
     return `<td><input data-col="${k}" aria-label="${esc(label)}" ${type === "date" ? 'type="date"' : type === "money" ? 'inputmode="decimal" placeholder="0.00"' : ""} value="${esc(v)}" /></td>`;
@@ -95,6 +97,7 @@ window.RebuttalForm = (() => {
   function bind(root) {
     const pf = root.querySelector(".rb");
     if (!pf) return;
+    PacketForm.bindSigPads(pf);
     pf.addEventListener("change", (ev) => {
       const t = ev.target;
       if (t.name === "smmc") pf.querySelector(".rb-nonsmmc").hidden = t.checked;
@@ -113,11 +116,11 @@ window.RebuttalForm = (() => {
     const side = pf.dataset.side, plan = side === "HEALTH_PLAN";
     const rb = {
       party: group("party", ["legal_name", "trade_name", "address", "city", "state", "zip", "product_name", "contact_person", "physical_address", "physical_city", "physical_state", "physical_zip", "phone", "fax", "email"]),
-      attest_signature: group("att", ["printed_name", "title", "signature", "date"]),
+      attest_signature: group("att", ["printed_name", "title", "signature", "date", "drawn"]),
       claim_info: group("info", ["claims_count", "dates_of_service", "type_of_service", "patient_names"]),
       position: group("pos", ["basis", "references", "rebuttal"]),
       documents: [...pf.querySelectorAll('input[name="doc"]:checked')].map((x) => x.value),
-      certification: { agreed: !!pf.querySelector('[name="cert.agreed"]')?.checked, ...group("cert", ["printed_name", "title", "signature", "date"]) },
+      certification: { agreed: !!pf.querySelector('[name="cert.agreed"]')?.checked, ...group("cert", ["printed_name", "title", "signature", "date", "drawn"]) },
     };
     for (const k of ["coding_rules", "other"]) if (val(`spec.${k}`)) rb[k + "_specify"] = val(`spec.${k}`);
     if (plan) {
@@ -158,10 +161,12 @@ window.RebuttalForm = (() => {
     }
     const sig = rb.attest_signature;
     if (!sig.printed_name || !sig.title || !sig.signature || !sig.date) problems.push("Signature: printed name, title, electronic signature and date are required");
+    if (!sig.drawn) problems.push("Signature: sign in the signature box");
     if (rb.participate !== "no") {
       if (!rb.position.basis) problems.push("Your position: describe the basis (question 1)");
       const c = rb.certification;
       if (!c.agreed || !c.printed_name || !c.title || !c.signature || !c.date) problems.push("Certification: tick it and enter your printed name, title, electronic signature and the date");
+      if (!c.drawn) problems.push("Certification: sign in the signature box");
     }
     return { rebuttal: rb, problems };
   }

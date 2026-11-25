@@ -138,6 +138,7 @@ func TestFilerRequiredFields(t *testing.T) {
 		Details: map[string]any{"packet_provider_type": "Hospital", "health_plan": "Acme", "plan_type": "Medicaid",
 			"type_of_service": "Professional", "claims_submitted": float64(1), "certification_agreed": true,
 			"certified_by_name": "Sam", "certified_by_title": "Director", "certified_on": "2026-11-25",
+			"certified_signature":        "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nsig")),
 			"packet_documents_submitted": []any{"claim_forms", "denials_eobs", "florida_license", "final_determination_letter"}},
 		DisputedAmountCents: &amt, Claims: []packetClaim{{ClaimNumber: "C1"}},
 	}
@@ -145,8 +146,8 @@ func TestFilerRequiredFields(t *testing.T) {
 		t.Fatalf("complete packet refused: %v", p)
 	}
 	empty := &filingPacket{Details: map[string]any{"packet_provider_type": "Other"}}
-	if p := empty.requiredProblems(); len(p) != 9 {
-		t.Fatalf("want all 9 required items named, got %d: %v", len(p), p)
+	if p := empty.requiredProblems(); len(p) != 10 {
+		t.Fatalf("want all 10 required items named (9 + the certification signature), got %d: %v", len(p), p)
 	}
 }
 
@@ -161,5 +162,17 @@ func TestFilingAttachments(t *testing.T) {
 		{Kind: "aor_letter", DataB64: pdf}, {Kind: "virus", DataB64: pdf}}}
 	if p := bad.attachmentProblems(); len(p) != 3 {
 		t.Fatalf("want 3 problems (not a PDF, two letters, unknown kind), got %v", p)
+	}
+}
+
+func TestSignatureProblem(t *testing.T) {
+	ok := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nsig"))
+	if signatureProblem(ok) != "" {
+		t.Fatal("a PNG signature refused")
+	}
+	for _, bad := range []string{"Sam", "data:image/jpeg;base64,AAAA", "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("GIF89a"))} {
+		if signatureProblem(bad) == "" {
+			t.Errorf("accepted %q", bad[:min(len(bad), 30)])
+		}
 	}
 }

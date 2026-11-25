@@ -1,15 +1,19 @@
 // Author: Patrick Munis at newwave
 package main
 
-import "testing"
+import (
+	"encoding/base64"
+	"testing"
+)
 
 func TestRebuttalProblems(t *testing.T) {
-	sig := map[string]any{"printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25"}
+	png := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nsig"))
+	sig := map[string]any{"printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25", "drawn": png}
 	full := map[string]any{
 		"party": map[string]any{"legal_name": "Acme Health", "contact_person": "Pat", "email": "pat@acme.test"},
 		"smmc":  false, "participate": "yes", "challenge_eligibility": "no",
 		"attest_signature": sig, "position": map[string]any{"basis": "Paid per contract."},
-		"certification": map[string]any{"agreed": true, "printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25"},
+		"certification": map[string]any{"agreed": true, "printed_name": "Pat", "title": "Claims Director", "signature": "Pat Plan", "date": "2026-11-25", "drawn": png},
 		"documents":     []any{"claim_forms", "contract"},
 	}
 	if p := rebuttalProblems("HEALTH_PLAN", full); len(p) != 0 {
@@ -29,8 +33,8 @@ func TestRebuttalProblems(t *testing.T) {
 		t.Fatalf("declining to take part refused: %v", p)
 	}
 	delete(no, "attest_signature")
-	if p := rebuttalProblems("HEALTH_PLAN", no); len(p) != 1 {
-		t.Fatalf("no signature: want 1 problem, got %v", p)
+	if p := rebuttalProblems("HEALTH_PLAN", no); len(p) != 2 { // the typed details and the drawn signature
+		t.Fatalf("no signature: want 2 problems, got %v", p)
 	}
 	// An SMMC plan must take part: it is not asked.
 	smmc := map[string]any{"party": full["party"], "smmc": true, "attest_signature": sig, "position": full["position"], "certification": full["certification"]}

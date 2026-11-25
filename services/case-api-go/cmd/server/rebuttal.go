@@ -65,11 +65,21 @@ func rebuttalProblems(side string, rb map[string]any) []string {
 	// "Signature required, even if not challenging eligibility or participating."
 	need(str(att, "printed_name") != "" && str(att, "title") != "" && str(att, "signature") != "" && str(att, "date") != "",
 		"Signature: printed name, title, electronic signature and date are required")
+	// The drawn signatures (change log #7): required, and real PNG images.
+	need(str(att, "drawn") != "", "Signature: sign in the signature box")
+	for _, m := range []map[string]any{att, cert} {
+		if v := str(m, "drawn"); v != "" {
+			if msg := signatureProblem(v); msg != "" {
+				out = append(out, "Signature: "+msg)
+			}
+		}
+	}
 	if str(rb, "participate") != "no" {
 		need(str(pos, "basis") != "", "Your position: describe the basis (question 1)")
 		agreed, _ := cert["agreed"].(bool)
 		need(agreed && str(cert, "printed_name") != "" && str(cert, "title") != "" && str(cert, "signature") != "" && str(cert, "date") != "",
 			"Certification: tick it and enter your printed name, title, electronic signature and the date")
+		need(str(cert, "drawn") != "", "Certification: sign in the signature box")
 	}
 	if docs, ok := rb["documents"].([]any); ok {
 		for _, x := range docs {

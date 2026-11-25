@@ -85,6 +85,35 @@ window.PacketForm = (() => {
   function text(d, key, label, attrs = "", after = "") {
     return `<label>${esc(label)}${after} <input name="d.${key}" value="${esc(d[key] ?? "")}" ${attrs} /></label>`;
   }
+  // A place to sign (change log 2026-11-25 #7): a pad drawn on with a mouse, finger or stylus; the signature is kept
+  // as a PNG in the hidden field d.<key>, and printed on the filing's PDF.
+  function sigPad(d, key, required = false) {
+    return `<div class="sig-pad" data-key="${key}"><span class="sig-label">Signature${required ? '<span class="pf-req" title="required">*</span>' : ""}
+        <span class="pf-hint">— sign in the box with your mouse, finger or stylus</span></span>
+      <canvas width="560" height="140" aria-label="Signature box"></canvas>
+      <input type="hidden" name="d.${key}" value="${esc(d[key] || "")}" />
+      <button type="button" class="mini ghost sig-clear">Clear signature</button></div>`;
+  }
+  function bindSigPads(root) {
+    root.querySelectorAll(".sig-pad").forEach((pad) => {
+      if (pad.dataset.bound) return;
+      pad.dataset.bound = "1";
+      const cv = pad.querySelector("canvas"), hid = pad.querySelector("input[type=hidden]"), ctx = cv.getContext("2d");
+      ctx.lineWidth = 2.4; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = "#111";
+      if (hid.value) { const img = new Image(); img.onload = () => ctx.drawImage(img, 0, 0, cv.width, cv.height); img.src = hid.value; }
+      let drawing = false, inked = !!hid.value;
+      const at = (ev) => { const b = cv.getBoundingClientRect(); return [(ev.clientX - b.left) * cv.width / b.width, (ev.clientY - b.top) * cv.height / b.height]; };
+      cv.addEventListener("pointerdown", (ev) => { drawing = true; cv.setPointerCapture(ev.pointerId); const [x, y] = at(ev); ctx.beginPath(); ctx.moveTo(x, y); ev.preventDefault(); });
+      cv.addEventListener("pointermove", (ev) => { if (!drawing) return; const [x, y] = at(ev); ctx.lineTo(x, y); ctx.stroke(); inked = true; ev.preventDefault(); });
+      const end = () => {
+        if (!drawing) return;
+        drawing = false;
+        if (inked) { hid.value = cv.toDataURL("image/png"); hid.dispatchEvent(new Event("input", { bubbles: true })); }
+      };
+      cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end); cv.addEventListener("pointerleave", end);
+      pad.querySelector(".sig-clear").addEventListener("click", () => { ctx.clearRect(0, 0, cv.width, cv.height); hid.value = ""; inked = false; hid.dispatchEvent(new Event("input", { bubbles: true })); });
+    });
+  }
   function radios(d, key, options, cls = "") {
     const cur = d[key];
     return `<div class="pf-choices ${cls}" role="radiogroup">${options.map(([v, label]) =>
@@ -178,7 +207,7 @@ window.PacketForm = (() => {
         <p class="pf-note pf-rural-note" role="status" ${att.rural_hospital ? "" : "hidden"}><b>Rural hospital:</b> remember to include the documentation showing the hospital meets the definition under s. 395.602(2), F.S., with your supporting documents.</p>
         <label class="pf-choice pf-certify"><input type="checkbox" name="d.attestation_certified" ${d.attestation_certified ? "checked" : ""} /> I certify that I am legally authorized to complete this attestation on behalf of the filing party, and that this claim meets every criterion ticked above.</label>
         <div class="pf-grid">${text(d, "attested_by_name", "Name (typed as your electronic signature)")}${text(d, "attested_by_title", "Title & organization name")}
-          ${text(d, "attested_on", "Date", 'type="date"')}</div></fieldset>
+          ${text(d, "attested_on", "Date", 'type="date"')}</div>${sigPad(d, "attested_signature")}</fieldset>
       <fieldset class="pf-sec"><legend>Appointment of representative</legend>
         <div class="pf-grid">${text(d, "aor_provider", "Provider")}${text(d, "aor_health_plan", "Health plan")}</div>
         ${text(d, "aor_representative", "Is hereby appointed to act as the representative of the provider for this case")}
@@ -187,11 +216,11 @@ window.PacketForm = (() => {
           naming who may act for you (<a href="/assets/aor-letter-example.pdf" target="_blank" rel="noopener">see an example</a>)</span>
           <input type="file" name="aor_letter_file" accept="application/pdf,.pdf" /></label>` : ""}
         <div class="pf-grid">${text(d, "aor_signed_by_name", "Name (typed as your electronic signature)")}${text(d, "aor_signed_by_title", "Title & organization name")}
-          ${text(d, "aor_signed_on", "Date", 'type="date"')}</div></fieldset>
+          ${text(d, "aor_signed_on", "Date", 'type="date"')}</div>${sigPad(d, "aor_signature")}</fieldset>
       <fieldset class="pf-sec"><legend>Certification${R}</legend>
         <label class="pf-choice pf-certify"><input type="checkbox" name="d.certification_agreed" ${d.certification_agreed ? "checked" : ""} /> I certify that I am legally authorized to complete this certification on behalf of the filing party. I understand and agree that if the filing party does not prevail it will be responsible for the full or apportioned review costs of this case; that if those costs are not paid within 35 days after the Agency's final order it will be subject to a fine; that if this case is settled before a decision is rendered, the parties will be responsible for the review costs incurred before the settlement; and that the filing party will be responsible for the initial review fee.</label>
         <div class="pf-grid">${text(d, "certified_by_name", "Name (typed as your electronic signature)")}${text(d, "certified_by_title", "Title & organization name")}
-          ${text(d, "certified_on", "Date", 'type="date"')}</div></fieldset>
+          ${text(d, "certified_on", "Date", 'type="date"')}</div>${sigPad(d, "certified_signature", !!opts.filer)}</fieldset>
     </div>`;
   }
   function area(d, key, label) {
@@ -216,6 +245,7 @@ window.PacketForm = (() => {
     // "nothing attested").
     const touch = () => { pf.dataset.touched = "1"; };
     pf.addEventListener("input", touch);
+    bindSigPads(pf);
     pf.addEventListener("change", touch);
     sync();
   }
@@ -522,6 +552,7 @@ window.PacketForm = (() => {
     if (!claims.length) out.push("Claim(s) information: enter at least one claim");
     if (REQUIRED_DOCS.some((k) => !(d.packet_documents_submitted || []).includes(k))) out.push("Supporting documents: tick every required document (*) you are submitting");
     if (!d.certification_agreed || !d.certified_by_name || !d.certified_by_title || !d.certified_on) out.push("Certification: tick it and enter your name, title and the date");
+    if (!d.certified_signature) out.push("Certification: sign in the signature box");
     return out;
   }
 
@@ -643,5 +674,5 @@ window.PacketForm = (() => {
   }
 
   return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS,
-    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles };
+    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles, sigPad, bindSigPads };
 })();
