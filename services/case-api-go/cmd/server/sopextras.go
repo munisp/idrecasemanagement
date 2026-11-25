@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 // storeGeneratedDocument files a document the system produced on a case:
@@ -38,8 +37,8 @@ func (s *server) storeGeneratedDocument(r *http.Request, tenant, caseID, filenam
 	if err != nil {
 		return "", err
 	}
-	if _, err := s.docs.mc.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
-		minio.PutObjectOptions{ContentType: "application/octet-stream", UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
+	if err := s.docs.api.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
+		putOpts{ContentType: "application/octet-stream", UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
 		return "", err
 	}
 	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`

@@ -20,8 +20,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/minio/minio-go/v7"
 )
 
 // replyText: what the sender wrote, without the message they replied to (quoted lines, "On … wrote:", the forwarded
@@ -406,7 +404,7 @@ func (s *server) attachmentsToCase(ctx context.Context, tenant, caseID, mailRowI
 	}
 	rows.Close()
 	for _, a := range atts {
-		obj, err := s.docs.mc.GetObject(ctx, docBucket, a.key, minio.GetObjectOptions{})
+		obj, err := s.docs.api.GetObject(ctx, docBucket, a.key)
 		if err != nil {
 			continue
 		}

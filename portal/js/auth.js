@@ -116,11 +116,19 @@ const Auth = (() => {
 
   // Sign out of Keycloak too. With the ID token as id_token_hint the session ends at once; without it Keycloak asks
   // "Do you want to log out?" and, if that page is left, the session stays and the portal signs straight back in.
+  // Upstream (DAST finding F4): purge the service worker's offline API cache before leaving -- it holds authenticated
+  // GET responses (case data) that must not outlive the session on a shared device. The shell cache (public static
+  // assets) stays.
   function logout() {
     const hint = sessionStorage.getItem(K.idToken);
     sessionStorage.clear();
-    location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`
-      + (hint ? `&id_token_hint=${encodeURIComponent(hint)}` : "");
+    const wipe = ("caches" in window)
+      ? caches.keys().then((ks) => Promise.all(ks.filter((k) => k.startsWith("idre-api")).map((k) => caches.delete(k))))
+      : Promise.resolve();
+    wipe.finally(() => {
+      location.href = `${base}/logout?client_id=${cfg.clientId}&post_logout_redirect_uri=${encodeURIComponent(location.origin + "/app.html")}`
+        + (hint ? `&id_token_hint=${encodeURIComponent(hint)}` : "");
+    });
   }
 
   return { login, logout, handleCallback, token, claims, can, reviewerScoped };

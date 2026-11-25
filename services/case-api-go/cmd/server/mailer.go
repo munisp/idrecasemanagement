@@ -121,8 +121,14 @@ func writeMailHeaders(b *strings.Builder, from string, to, cc []string, subject,
 }
 
 // smtpDeliver runs the SMTP transaction for an already-composed message (deliver, in mailqueue.go, paces and
-// queues around it).
+// queues around it), through upstream's smtp circuit breaker: a dead relay trips after 5 consecutive failures and
+// sends fail fast (ErrBreakerOpen) for 60s; the queue above retries, so mail is deferred, never silently dropped.
 func (s *server) smtpDeliver(from string, to, cc []string, msg []byte) error {
+	return smtpBreaker.do(func() error { return s.dialAndSend(from, to, cc, msg) })
+}
+
+// dialAndSend is the pre-breaker transaction: connection setup + SMTP dialogue.
+func (s *server) dialAndSend(from string, to, cc []string, msg []byte) error {
 	cfg := s.cfg
 	// Test addresses (EMAIL_TEST_DOMAINS: dev's .test suites) can never take mail: they are left off the envelope
 	// rather than spent from the provider's quota. Mail only to test addresses is not sent at all.

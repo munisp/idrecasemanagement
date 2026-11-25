@@ -36,7 +36,6 @@ import (
 	_ "time/tzdata" // programZone: the image may have no zoneinfo
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 // respondent is the other side as the filer names it.
@@ -356,7 +355,7 @@ func (s *server) respondingDocFile(actor string) http.HandlerFunc {
 			http.Error(w, `{"error":"document not found"}`, http.StatusNotFound)
 			return
 		}
-		obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+		obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 		if err != nil {
 			http.Error(w, `{"error":"object missing"}`, http.StatusNotFound)
 			return

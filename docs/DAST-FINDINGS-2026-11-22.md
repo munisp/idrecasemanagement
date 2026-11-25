@@ -1,0 +1,210 @@
+<!-- Author: Patrick Munis at newwave -->
+# DAST Findings — Live Run 2026-11-22
+
+Executes the deterministic checks of `deploy/artex/task-pack.md` against the
+platform running **natively** (no docker available in the test environment).
+The ARTEX planner/orchestrator itself was environment-blocked (no container
+runtime, no root, RAM/CPU budget incompatible with an LLM-driven agent loop);
+the task pack's checks were executed directly instead — every request below is
+a real HTTP call against real services, and every expectation was verified
+against the platform source before running.
+
+## Environment (reference run)
+
+| Component | How it ran |
+|---|---|
+| Postgres 16.2 | user-space `pgserver`, 50 `tenant_<st>` schemas + honeytokens seeded (`scripts/init-schemas.sql`, `scripts/seed-honeytokens.sql`) |
+| case-api | native Go binary, `ADDR=127.0.0.1:8082`, `METRICS_PORT=9091` |
+| vault-rs | native binary, `127.0.0.1:8081` |
+| storage-rs | native binary (OpenDAL fs backend), `127.0.0.1:8094` |
+| Auth | JWKS harness (`scripts/dast/jwks-*`) minting RS256 tokens — case-api performs full signature/issuer/tenant-claim verification; only the IdP is harnessed |
+| Temporal | `scripts/dast/temporal-stub.py` (gRPC UNIMPLEMENTED — sdk-go v1.30.0 accepts it at dial; no workflow executions in this check set) |
+| TigerBeetle | absent (client is lazy; no ledger ops in this check set) |
+| Wazuh | **absent** — detection assertions made via case-api action logs, not SIEM rules |
+| ClamAV | absent — used to prove the upload path fails closed |
+
+## Results: 40 PASS / 1 FAIL (41 checks)
+
+- **T0 preflight** — 3/3 PASS. healthz 200; `/metrics` absent from the API
+  port (404) and served on the dedicated 9091 listener (200) — the
+  availability-hardening change verified live.
+- **T1 cross-tenant isolation** — 16/16 PASS. Cross-tenant list/read/
+  advance/documents all 403; auditor read-only enforced (reads 200, write
+  403); malformed tenant 400; path traversal blocked 400; unauthenticated 401;
+  worker-token path works.
+- **T2 token forgery** — 5/6 PASS. Expired, wrong-issuer, alg=none,
+  wrong-key (real second RSA key), and garbage tokens all 401. One FAIL —
+  see F2.
+- **T4 internal service tokens** — 5/5 PASS. Vault and storage reject
+  missing/wrong `X-Internal-Auth` with 401; correct token yields a real
+  AES-GCM seal (200) and a real object write (201).
+- **T5 honeytokens** — PASS. CANARY visible to a broad admin read; the touch
+  is recorded by actionLog (log-verified; no Wazuh manager in sandbox).
+- **T9 payments** — 3/3 PASS. Stripe webhook rejects bad/missing HMAC with
+  401 (`bad signature`); checkout of unknown invoice is a clean 404.
+- **T10 exposed surface** — PASS. healthz body carries no version/build
+  detail; metrics unauthenticated-but-off-API-port by design (loopback/Cilium
+  locked).
+- **T6 injection** — 4/4 PASS. `sort`/`limit` SQLi probes silently ignored by
+  the whitelist (200, no SQLSTATE leak in body); post-probe DB integrity
+  confirmed (`CANARY-tx` intact).
+- **T7 uploads** — PASS. With ClamAV absent, EICAR upload is refused
+  (503) — the pipeline fails closed, nothing is stored.
+
+## Findings
+
+### F1 — HIGH: fresh-boot schema drift (deployment reproducibility)
+
+A stack brought up exactly per `docker-compose.yml` (initdb loads only
+`scripts/init-schemas.sql`) serves **500 on every case-list request**:
+`column "org" of relation "audit_log" does not exist (SQLSTATE 42703)`.
+The ~20 incremental scripts in `scripts/` (org_audit, audit_actor,
+casemgmt-core, payments, …) are referenced by no compose wiring, no startup
+migration, and no runbook ordering — case-api runs no migrations at boot.
+In this run the schema only converged after applying scripts manually in
+three dependency-ordering rounds, and `entity360.sql`/`db-optimization.sql`
+additionally require the `pg_trgm` extension. **Recommendation:** add an
+ordered migration runner (or an init wrapper that applies the numbered
+scripts in dependency order) so a fresh environment converges without human
+intervention.
+
+### F2 — LOW: member of an unprovisioned tenant gets a 500
+
+A valid token whose group claim names a tenant with no provisioned schema
+(e.g. `/tenant/zz`) passes membership and fails at the query with a generic
+500. No data crosses tenants (the schema does not exist) and the body leaks
+nothing, but the platform should answer a clean 403/503. **Recommendation:**
+verify schema presence (or a tenant registry lookup) in the tenancy
+middleware and fail closed with a precise status.
+
+### F3 — INFO: uppercase tenant codes are normalized
+
+`TX` is lower-cased by the tenancy middleware and treated as `tx`. Verified
+**not** a cross-tenant bypass (a non-member requesting `TX` still gets 403);
+noted for canonical-input strictness only.
+
+## Coverage caveats (honest)
+
+- Detection scored via application logs, not Wazuh rules 100200–100261.
+- ARTEX planner loop itself not executed (environment-blocked, above).
+- T3/T8/T11 were partial in the first run; deepened 2026-11-23 (below).
+
+## Second wave (2026-11-23): T3/T8/T11 deep run — 63/63 green
+
+**T3 same-tenant IDOR (7 checks).** Positive control holds (staff reads the
+seeded case); staff garbage/random ids answer clean 404s with no SQL leakage;
+external-party probes confirmed the accessGuard `own-case` gate answers
+**404, not 403** on unlinked cases — outside accounts cannot use responses
+as a case-id oracle.
+
+**T8 SSRF (3 checks + code audit).** `email-check` performs DNS on
+user-supplied domains by design; verified it answers canned verdicts only —
+no resolver data, IPs, or internal zone names in responses, including for
+`localhost` targets. Code audit: every outbound URL in case-api is
+config-sourced; no user-controlled fetch parameter exists.
+
+**T11 PWA surface (12 checks).** No `.git`/`.env`/compose exposure, no
+traversal, no shipped source maps, no hardcoded secrets, auth realm never
+cached. One genuine finding, fixed this wave:
+
+## Third wave (2026-11-23): NG-lineage parity run — 61/61 green (2 lineage-conditional skips)
+
+The suite ran unchanged against the idrecasemanagementNG stack (own
+binaries, own database, alternate ports). The first pass failed 13 checks
+and every one traced to a genuine NG-lineage defect — the run paid for
+itself immediately:
+
+- **NG-1 (HIGH): every case list 500s.** `listCases` joined
+  `escalations.case_id` (text) against `cases.id` (uuid) without the cast
+  the orig lineage already carries — `operator does not exist: text = uuid`
+  on literally every list. Fixed with `c.id::text`.
+- **NG-2 (MEDIUM): valueless cases invisible.** `getCase` coalesced
+  `benchmark_cents/qpa_cents` with no zero floor, so any case with both NULL
+  404'd on read; `listCases` had the same NULL hole and — worse — swallowed
+  scan errors with `err == nil`, silently dropping rows while `total` still
+  counted them (the seeded canary vanished from every list). Fixed with
+  three-way coalesce and a loud `slog.Error` on scan failure.
+- **NG-3 (HIGH): no accessGuard at all.** The NG middleware chain was
+  `authn, tenancy` only: an external party could read any case's documents
+  in its tenant (own-case 404-oracle-proofing didn't exist). Ported
+  `accesspolicy.go` from orig (denials recorded to the server log — NG has
+  no audit sink yet) and wired `s.accessGuard` into the chain; `getCase` now
+  also redacts office internals for external principals, matching orig.
+- **NG-4 (INFO): no email-check endpoint** — the T8 DNS-verdict checks
+  skip conditionally on 404 (no SSRF surface exists to test).
+- **migrate.sh hardened for lineage drift**: skips scripts absent from the
+  deployment's set and auto-includes directory extras (NG's
+  `program-manifest.sql`, `sector-ng.sql`).
+
+Final matrix: NG 61 PASS / 0 FAIL (email-check DNS pair skipped by design);
+orig re-confirmed 63/63 after suite parameterization (METRICS_BASE,
+CANARY_ID, lineage-conditional T8).
+
+### F4 — MEDIUM: offline API cache survived logout
+
+`portal/sw.js` caches every successful authenticated `/v1/` GET (case data)
+in Cache Storage for offline reads, but `Auth.logout()` cleared only
+sessionStorage — the `idre-api-v1` cache with case data persisted after
+logout on a shared device. **Fix**: logout now purges all `idre-api*` caches
+before the IdP redirect (shell cache stays — public assets). Also hardened:
+the active `security_headers` snippet in `deploy/caddy/Caddyfile` now emits
+HSTS (browsers ignore STS over plain HTTP per RFC 6797 §7.2, so the dev :80
+vhost is unaffected; it engages the moment DOMAIN/TLS is live).
+
+## Remediation (2026-11-23) — VERIFIED
+
+Both findings are fixed and the suite re-ran **41/41 green** against the
+fixed platform:
+
+- **F1**: `scripts/migrate.sh` (idempotent, bounded fixpoint, extension-aware)
+  now converges the full schema; `docker-compose.yml` first-boot runs it via
+  `scripts/docker-initdb.sh`. Verified from an empty database: converged in
+  round 5 of 8, `audit_log.org` and the full table set present. Existing
+  deployments run `bash scripts/migrate.sh` once.
+- **F2**: the tenancy middleware now checks a cached provisioned-tenant
+  registry (`tenant_registry.go`, 60s TTL, fail-closed on DB error) and
+  answers `503 {"error":"tenant not provisioned"}` before any handler runs.
+  Verified live, plus `tenant_registry_test.go` pins the contract.
+- Suite corrections from re-run (harness bugs, not platform): worker token
+  travels as `Authorization: Bearer`, `/docs/seal` takes `{tenant,key,
+  data_b64}`, storage list is `/objects/{bucket}`, and T7 now also accepts
+  415 — the executable-extension blocklist refuses `.com` before the scanner
+  stage, an even earlier fail-closed.
+
+## Fourth wave (2026-11-23): CI pre-deploy gate — dast-gate.yml live, both repos green
+
+- `.github/workflows/dast-gate.yml` boots the real stack on a GitHub runner
+  (postgres:16 service container, native Go/Rust release binaries, JWKS
+  harness, temporal gRPC stub, portal static server) and runs this suite on
+  every push, PR and manual dispatch. Any FAIL fails the job — merge/deploy
+  is blocked. Logs upload as artifacts on failure.
+- Run #1 failed on a harness misconfiguration, not a platform defect: a
+  job-level `DAST_HOME` export collided with the suite's repo-root use of the
+  same variable, so token mints pointed at a nonexistent path and every
+  authenticated check 401'd. Scoped `DAST_HOME` to the boot step; run #2:
+  **orig 63/63, NG 61/61** — green in ~4 minutes with a warm cargo cache.
+
+## Fifth wave (2026-11-23): pack-delta depth — 5 new checks + audience enforcement
+
+Gap audit of every task-pack bullet against the suite. Residuals closed:
+
+- **F5 (MEDIUM, closed): token audience not validated.** T2 of the pack calls
+  for wrong-audience rejection; the verifier pinned signature + issuer only,
+  so a token minted by the same realm for a different audience would have
+  authenticated. Fix: `KEYCLOAK_AUDIENCE` env — when set, the middleware
+  enforces `aud` via jwx `WithAudience`; when unset, validation is skipped
+  for legacy realms with no fixed client audience (documented on the config
+  field). The harness mint now emits `aud=idre-api` and the DAST boot sets
+  `KEYCLOAK_AUDIENCE=idre-api`.
+- T2 +2 checks: wrong audience → 401; RS256→HS256 algorithm confusion (the
+  public key from the JWKS used as the HMAC secret) → 401.
+- T4 +2 checks: cross-service token confusion — storage's token against
+  vault, vault's token against storage → 401 each.
+- T9 +1 check: mojaloop webhook with the provider unconfigured → 401
+  (verified identical in both lineages).
+- Out of gate scope (noted, not closed): the pack's analytics raw-SQL target
+  lives in `services/analytics-py` (`validate_readonly_sql`), which the gate
+  stack does not boot; T3 Permify-dependent findings remain dev-bypass
+  artifacts per the pack's own known-artifact note.
+
+Suite totals after this wave: **orig 68 checks, NG 66 checks**.

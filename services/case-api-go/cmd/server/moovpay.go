@@ -35,7 +35,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/minio/minio-go/v7"
 	"github.com/moov-io/ach"
 	"github.com/moov-io/fed"
 	imagecashletter "github.com/moov-io/imagecashletter"
@@ -800,7 +799,7 @@ func (s *server) createImageCashLetter(w http.ResponseWriter, r *http.Request) {
 	var total int64
 	for i, row := range rows {
 		checkID := fmt.Sprint(row["id"])
-		obj, err := s.docs.mc.GetObject(r.Context(), docBucket, fmt.Sprint(row["object_key"]), minio.GetObjectOptions{})
+		obj, err := s.docs.api.GetObject(r.Context(), docBucket, fmt.Sprint(row["object_key"]))
 		if err != nil {
 			continue
 		}

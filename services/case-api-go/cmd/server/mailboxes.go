@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 const resendAPI = "https://api.resend.com"
@@ -342,7 +341,7 @@ func (s *server) getMyMailAttachment(w http.ResponseWriter, r *http.Request) {
 
 // serveMailAttachment streams one stored attachment, unsealed.
 func (s *server) serveMailAttachment(w http.ResponseWriter, r *http.Request, tenant, key, name, ctype string) {
-	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 	if err != nil {
 		http.Error(w, `{"error":"store"}`, http.StatusBadGateway)
 		return
@@ -633,7 +632,7 @@ func (s *server) sealMailAttachment(ctx context.Context, tenant, sub, messageID,
 	if err != nil {
 		return "", err
 	}
-	_, err = s.docs.mc.PutObject(ctx, docBucket, key, bytes.NewReader(ct), int64(len(ct)), minio.PutObjectOptions{ContentType: "application/octet-stream"})
+	err = s.docs.api.PutObject(ctx, docBucket, key, bytes.NewReader(ct), int64(len(ct)), putOpts{ContentType: "application/octet-stream"})
 	return key, err
 }
 

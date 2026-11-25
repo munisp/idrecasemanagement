@@ -46,7 +46,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 const (
@@ -137,8 +136,8 @@ func (s *server) fillTPAPackage(r *http.Request, tenant, tpaID, pkgID string, me
 		objectKey := fmt.Sprintf("%s/tpa-packages/%s/merged-%s.enc", tenant, pkgID, newUUID())
 		ct, err := s.vaultSealDoc(r, tenant, objectKey, data)
 		if err == nil {
-			_, err = s.docs.mc.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
-				minio.PutObjectOptions{UserMetadata: map[string]string{"tenant": tenant, "package": pkgID}})
+			err = s.docs.api.PutObject(r.Context(), docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
+				putOpts{UserMetadata: map[string]string{"tenant": tenant, "package": pkgID}})
 		}
 		if err != nil {
 			return nil, []string{"merged.pdf store failed"}
@@ -225,7 +224,7 @@ func (s *server) attachPackageDocsToCase(r *http.Request, tenant string, k onboa
 	n := 0
 	for _, d := range docs {
 		var size int64
-		if st, err := s.docs.mc.StatObject(r.Context(), docBucket, d.key, minio.StatObjectOptions{}); err == nil {
+		if st, err := s.docs.api.StatObject(r.Context(), docBucket, d.key); err == nil {
 			size = st.Size
 		}
 		label := strings.ReplaceAll(strings.ToLower(d.slot), "_", " ")

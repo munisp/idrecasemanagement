@@ -29,7 +29,14 @@ services:
       - -c
       - idle_in_transaction_session_timeout=60000
     ports: ["5432:5432"]
-    volumes: ["pgdata:/var/lib/postgresql/data", "./scripts/init-schemas.sql:/docker-entrypoint-initdb.d/init.sql"]
+    # First boot runs docker-initdb.sh: base schemas + the full ordered
+    # migration set (scripts/migrate.sh), so a fresh stack converges with no
+    # manual SQL (DAST finding F1). Existing deployments: run
+    # `bash scripts/migrate.sh` once — it is idempotent.
+    volumes:
+      - "pgdata:/var/lib/postgresql/data"
+      - "./scripts/docker-initdb.sh:/docker-entrypoint-initdb.d/00-init.sh:ro"
+      - "./scripts:/platform-scripts:ro"
 
   redis:
     image: redis:7
@@ -158,13 +165,35 @@ services:
     ports: ["8265:8265", "10001:10001"]
     shm_size: "2gb"
 
-  minio-init:  # one-shot: the lakehouse bucket must exist before Flink/Spark write
+  minio-init:  # one-shot: buckets must exist before the storage gateway / Flink / Spark write
     image: minio/mc:latest
     depends_on: [minio]
     entrypoint: >
       /bin/sh -c "mc alias set local http://minio:9000 idre idre-secret
       && mc mb --ignore-existing local/lakehouse
-      && mc anonymous set none local/lakehouse"
+      && mc mb --ignore-existing local/idre
+      && mc anonymous set none local/lakehouse
+      && mc anonymous set none local/idre"
+
+  storage:  # OpenDAL object-storage gateway (storage-rs) — the platform's main
+    # object store. All application object I/O goes through here; logical
+    # buckets are key prefixes under OPENDAL_BUCKET. Backend is swappable via
+    # OPENDAL_SCHEME (s3 default; fs for air-gapped; gcs/azblob behind cargo
+    # features). Services fall back to direct MinIO only when
+    # STORAGE_GATEWAY_URL is unset (dev convenience).
+    build: ./services/storage-rs
+    environment:
+      OPENDAL_SCHEME: ${OPENDAL_SCHEME:-s3}
+      OPENDAL_BUCKET: ${OPENDAL_BUCKET:-idre}
+      OPENDAL_ENDPOINT: ${OPENDAL_ENDPOINT:-http://minio:9000}
+      OPENDAL_REGION: ${OPENDAL_REGION:-us-east-1}
+      OPENDAL_ACCESS_KEY_ID: ${OPENDAL_ACCESS_KEY_ID:-idre}
+      OPENDAL_SECRET_ACCESS_KEY: ${OPENDAL_SECRET_ACCESS_KEY:-idre-secret}
+      OPENDAL_ROOT: ${OPENDAL_ROOT:-/}
+      STORAGE_INTERNAL_TOKEN: ${STORAGE_INTERNAL_TOKEN:-dev-storage-token}  # must match consumers; fail-closed when set
+      LISTEN_ADDR: 0.0.0.0:8094
+    ports: ["127.0.0.1:8094:8094"]
+    depends_on: [minio-init]
 
   flink-jobmanager:
     image: flink:1.20
@@ -187,6 +216,12 @@ services:
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: idre
       S3_SECRET_KEY: idre-secret
+      OPENDAL_SCHEME: s3          # native opendal for parquet/model I/O
+      OPENDAL_BUCKET: lakehouse
+      OPENDAL_ENDPOINT: http://minio:9000
+      OPENDAL_REGION: us-east-1
+      OPENDAL_ACCESS_KEY_ID: idre
+      OPENDAL_SECRET_ACCESS_KEY: idre-secret
       MAX_QUERY_ROWS: "10000"
     ports: ["8092:8092"]
     depends_on: [keycloak, minio-init]
@@ -200,6 +235,12 @@ services:
       S3_ENDPOINT: minio:9000
       S3_ACCESS_KEY: idre
       S3_SECRET_KEY: idre-secret
+      OPENDAL_SCHEME: s3          # native opendal for parquet/model I/O
+      OPENDAL_BUCKET: lakehouse
+      OPENDAL_ENDPOINT: http://minio:9000
+      OPENDAL_REGION: us-east-1
+      OPENDAL_ACCESS_KEY_ID: idre
+      OPENDAL_SECRET_ACCESS_KEY: idre-secret
       TENANT: ${ANALYTICS_TENANT:-tx}
     ports: ["8093:8093"]
     depends_on: [ray-head, minio-init]
@@ -218,9 +259,61 @@ services:
       S3_ENDPOINT: minio:9000
       S3_ACCESS_KEY: idre
       S3_SECRET_KEY: idre-secret
+      OPENDAL_SCHEME: s3          # native opendal for parquet/model I/O
+      OPENDAL_BUCKET: lakehouse
+      OPENDAL_ENDPOINT: http://minio:9000
+      OPENDAL_REGION: us-east-1
+      OPENDAL_ACCESS_KEY_ID: idre
+      OPENDAL_SECRET_ACCESS_KEY: idre-secret
       TENANT_STATES: ${TENANT_STATES:-tx}
     volumes: ["./ref:/ref:ro"]   # mount Census TIGER GeoJSON here for load_us_states
     depends_on: [postgres, kafka, minio-init]
+
+  prometheus:  # SLO/degradation metrics plane (alerts: deploy/prometheus/idre-alerts.yml)
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/idre-alerts.yml:/etc/prometheus/idre-alerts.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [case-api, alertmanager]
+
+  alertmanager:  # pages/warnings per docs/RUNBOOK-incident-comms.md
+    image: prom/alertmanager:v0.27.1
+    environment:  # substituted into the config template at startup; no secrets in the repo
+      ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-localhost:25}
+      ALERT_SMTP_FROM: ${ALERT_SMTP_FROM:-idre-alerts@localhost}
+      ALERT_SMTP_USER: ${ALERT_SMTP_USER:-}
+      ALERT_SMTP_PASS: ${ALERT_SMTP_PASS:-}
+      ALERT_ONCALL_EMAIL: ${ALERT_ONCALL_EMAIL:-oncall@localhost}
+      ALERT_TEAM_EMAIL: ${ALERT_TEAM_EMAIL:-platform@localhost}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        sed -e "s|__ALERT_SMTP_HOST__|$${ALERT_SMTP_HOST}|g"
+        -e "s|__ALERT_SMTP_FROM__|$${ALERT_SMTP_FROM}|g"
+        -e "s|__ALERT_SMTP_USER__|$${ALERT_SMTP_USER}|g"
+        -e "s|__ALERT_SMTP_PASS__|$${ALERT_SMTP_PASS}|g"
+        -e "s|__ALERT_ONCALL_EMAIL__|$${ALERT_ONCALL_EMAIL}|g"
+        -e "s|__ALERT_TEAM_EMAIL__|$${ALERT_TEAM_EMAIL}|g"
+        /etc/alertmanager/alertmanager.yml.tmpl > /tmp/alertmanager.yml
+        && exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/tmp/alertmanager
+    volumes:
+      - ./deploy/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro
+    ports: ["127.0.0.1:9093:9093"]
+
+  grafana:  # SLO dashboard auto-provisioned (deploy/grafana/idre-slo.json)
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports: ["127.0.0.1:3000:3000"]
+    volumes:
+      - ./deploy/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./deploy/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./deploy/grafana/idre-slo.json:/var/lib/grafana/dashboards/idre-slo.json:ro
+    depends_on: [prometheus]
 
   # ---- platform services (build locally) -------------------------------------
   portal:  # fallback static host — the Caddy edge serves the PWA publicly;
@@ -256,8 +349,10 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-idre@localhost}                  # ClamAV malware scanner (uploads fail-closed if down)
+      STORAGE_GATEWAY_URL: http://storage:8094   # OpenDAL gateway — main object store (unset = direct MinIO dev fallback)
+      STORAGE_INTERNAL_TOKEN: ${STORAGE_INTERNAL_TOKEN:-dev-storage-token}  # must match the storage service
     ports: ["8080:8080"]
-    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify, clamd]
+    depends_on: [postgres, temporal, tigerbeetle, keycloak, vault, redis, permify, clamd, storage]
 
   lettergen:
     build: ./services/lettergen-py
@@ -267,9 +362,11 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_USER: idre
       MINIO_PASSWORD: idre-secret
+      STORAGE_GATEWAY_URL: http://storage:8094   # OpenDAL gateway — main object store (unset = MinIO dev fallback)
+      STORAGE_INTERNAL_TOKEN: ${STORAGE_INTERNAL_TOKEN:-dev-storage-token}
       VAULT_URL: http://vault:8081
       VAULT_INTERNAL_TOKEN: ${VAULT_INTERNAL_TOKEN:-dev-internal-token}  # must match the vault service
-    depends_on: [postgres, kafka, minio, vault]
+    depends_on: [postgres, kafka, minio, vault, storage]
 
   clamd:
     image: clamav/clamav:stable           # freshclam updates signatures on start
@@ -303,6 +400,8 @@ services:
       DATABASE_URL: postgres://idre:idre@postgres:5432/idre
       KAFKA_BROKERS: kafka:9092
       MINIO_ENDPOINT: minio:9000
+      STORAGE_GATEWAY_URL: http://storage:8094   # OpenDAL gateway — main object store (unset = MinIO dev fallback)
+      STORAGE_INTERNAL_TOKEN: ${STORAGE_INTERNAL_TOKEN:-dev-storage-token}
       VAULT_URL: http://vault:8081
       VAULT_INTERNAL_TOKEN: ${VAULT_INTERNAL_TOKEN:-dev-internal-token}  # must match the vault service
       CASE_API_URL: http://case-api:8080
@@ -310,7 +409,7 @@ services:
       VLM_ENDPOINT: ${VLM_ENDPOINT:-http://vllm:8000/v1}
       VLM_MODEL: ${VLM_MODEL:-paddleocr-vl}
       DEID_URL: http://deid:8083                # Phase 2 clinical NER per analyzed document
-    depends_on: [kafka, minio, vault, opensearch, deid]
+    depends_on: [kafka, minio, vault, opensearch, deid, storage]
 
   outbox-relay:  # Postgres outbox -> Kafka; without it the event backbone is silent
     build: ./services/outbox-relay-py

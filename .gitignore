@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 /services/*/cmd/server/server
 /services/vault-rs/target
+/services/storage-rs/target

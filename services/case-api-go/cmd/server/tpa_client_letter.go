@@ -10,7 +10,6 @@ import (
 	"net/http"
 
 	chi "github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 // tpaLetterClient: the caller's TPA, and the client in the path if it is one of that TPA's. The route rules already
@@ -72,8 +71,8 @@ func (s *server) tpaLetterUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"seal failed"}`, http.StatusBadGateway)
 		return
 	}
-	if _, err := s.docs.mc.PutObject(r.Context(), docBucket, key, bytes.NewReader(ct), int64(len(ct)),
-		minio.PutObjectOptions{UserMetadata: map[string]string{"tenant": tenant, "client": clientID}}); err != nil {
+	if err := s.docs.api.PutObject(r.Context(), docBucket, key, bytes.NewReader(ct), int64(len(ct)),
+		putOpts{UserMetadata: map[string]string{"tenant": tenant, "client": clientID}}); err != nil {
 		http.Error(w, `{"error":"store failed"}`, http.StatusBadGateway)
 		return
 	}
@@ -110,7 +109,7 @@ func (s *server) tpaLetterGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"no letter on file"}`, http.StatusNotFound)
 		return
 	}
-	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 	if err != nil {
 		http.Error(w, `{"error":"object missing"}`, http.StatusNotFound)
 		return

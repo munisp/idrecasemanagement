@@ -27,8 +27,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // The documents bucket and the search-index prefix are per deployment, so two
@@ -48,17 +46,24 @@ const (
 	tenantStorageQuota = 25 << 30
 )
 
-type docStore struct{ mc *minio.Client }
+type docStore struct{ api objectStoreAPI }
 
+// newDocStore wires the platform's object storage: the OpenDAL storage
+// gateway (STORAGE_GATEWAY_URL) is THE store in every real deployment;
+// direct MinIO is the dev fallback when the gateway isn't configured.
 func newDocStore(endpoint, user, pass string) (*docStore, error) {
-	mc, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(user, pass, ""),
-		Secure: false, // TLS terminated at ingress in prod; in-cluster plaintext
-	})
+	if gw := strings.TrimSpace(os.Getenv("STORAGE_GATEWAY_URL")); gw != "" {
+		g, err := newGatewayStore(gw, os.Getenv("STORAGE_INTERNAL_TOKEN"))
+		if err != nil {
+			return nil, err
+		}
+		return &docStore{api: g}, nil
+	}
+	m, err := newMinioStore(endpoint, user, pass)
 	if err != nil {
 		return nil, err
 	}
-	return &docStore{mc: mc}, nil
+	return &docStore{api: m}, nil
 }
 
 type vaultDocReq struct {
@@ -180,8 +185,8 @@ func (s *server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Persist ciphertext to MinIO with retention metadata.
-	_, err = s.docs.mc.PutObject(r.Context(), docBucket, objectKey,
-		bytes.NewReader(ct), int64(len(ct)), minio.PutObjectOptions{
+	err = s.docs.api.PutObject(r.Context(), docBucket, objectKey,
+		bytes.NewReader(ct), int64(len(ct)), putOpts{
 			ContentType:  "application/octet-stream",
 			UserMetadata: map[string]string{"tenant": tenant, "case": caseID},
 			// Legal hold: retention governs object-lock in prod (WORM bucket policy).
@@ -291,7 +296,7 @@ func (s *server) downloadDocument(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 	if err != nil {
 		http.Error(w, `{"error":"object missing"}`, http.StatusNotFound)
 		return
@@ -549,9 +554,18 @@ func (s *server) submitDocFeedback(w http.ResponseWriter, r *http.Request) {
 
 // ---- vault helpers ---------------------------------------------------------
 
+// vaultHTTP is a dedicated client: http.DefaultClient has NO timeout, so a
+// hung vault would pin request goroutines forever. 15s bounds the worst
+// case; the vault stays fail-closed (no breaker — it is internal, and
+// degraded crypto must surface, not be masked).
+var vaultHTTP = &http.Client{Timeout: 15 * time.Second}
+
 // vaultPost calls the vault with the incoming request's context, so the call
 // is cancelled with the request and its span joins the request's trace
 // (http.Post used context.Background and started a detached trace).
+// Every call is counted in idre_vault_call_total: transport failures and
+// 5xx count as errors (vault unhealthy); 4xx counts ok (vault answered —
+// the refusal is a data problem, not an outage).
 func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Response, error) {
 	ctx := context.Background()
 	if r != nil {
@@ -565,7 +579,17 @@ func (s *server) vaultPost(r *http.Request, path string, body []byte) (*http.Res
 	if tok := os.Getenv("VAULT_INTERNAL_TOKEN"); tok != "" {
 		req.Header.Set("X-Internal-Auth", tok)
 	}
-	return http.DefaultClient.Do(req)
+	resp, err := vaultHTTP.Do(req)
+	if err != nil {
+		vaultRequests.WithLabelValues("error").Inc()
+		return nil, err
+	}
+	if resp.StatusCode >= 500 {
+		vaultRequests.WithLabelValues("error").Inc()
+	} else {
+		vaultRequests.WithLabelValues("ok").Inc()
+	}
+	return resp, nil
 }
 
 func (s *server) vaultSealDoc(r *http.Request, tenant, key string, pt []byte) ([]byte, error) {

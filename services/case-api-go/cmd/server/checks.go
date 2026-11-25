@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 // uploadCheck accepts a check photo/scan (mobile deposit style). Sealed via
@@ -74,9 +73,9 @@ func (s *server) uploadCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"vault seal failed"}`, http.StatusBadGateway)
 		return
 	}
-	if _, err = s.docs.mc.PutObject(r.Context(), docBucket, key,
+	if err = s.docs.api.PutObject(r.Context(), docBucket, key,
 		bytes.NewReader(sealed), int64(len(sealed)),
-		minio.PutObjectOptions{ContentType: "application/octet-stream"}); err != nil {
+		putOpts{ContentType: "application/octet-stream"}); err != nil {
 		http.Error(w, `{"error":"storage failed"}`, http.StatusBadGateway)
 		return
 	}
@@ -519,7 +518,7 @@ func (s *server) checkImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+	obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 	if err != nil {
 		http.Error(w, `{"error":"storage"}`, http.StatusBadGateway)
 		return

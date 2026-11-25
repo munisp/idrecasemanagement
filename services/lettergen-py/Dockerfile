@@ -5,6 +5,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-wri
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py otel_setup.py builtin_letters.py office_letters.py docxfill.py ./
+COPY main.py otel_setup.py builtin_letters.py office_letters.py docxfill.py object_store.py ./
 COPY assets ./assets
 CMD ["python", "main.py"]

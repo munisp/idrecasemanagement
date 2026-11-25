@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 var docRequestReasons = map[string]string{
@@ -581,8 +580,8 @@ func (s *server) storeCaseFile(ctx context.Context, tenant, caseID, uploadedBy, 
 	if err != nil {
 		return "", http.StatusBadGateway, "seal failed"
 	}
-	if _, err := s.docs.mc.PutObject(ctx, docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
-		minio.PutObjectOptions{UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
+	if err := s.docs.api.PutObject(ctx, docBucket, objectKey, bytes.NewReader(ct), int64(len(ct)),
+		putOpts{UserMetadata: map[string]string{"tenant": tenant, "case": caseID}}); err != nil {
 		return "", http.StatusBadGateway, "store failed"
 	}
 	if _, err := s.db.Exec(ctx, fmt.Sprintf(`

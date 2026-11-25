@@ -31,7 +31,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
 )
 
 const (
@@ -161,7 +160,7 @@ func (s *server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"seal failed"}`, http.StatusBadGateway)
 		return
 	}
-	if _, err := s.docs.mc.PutObject(r.Context(), docBucket, key, bytes.NewReader(sealed), int64(len(sealed)), minio.PutObjectOptions{}); err != nil {
+	if err := s.docs.api.PutObject(r.Context(), docBucket, key, bytes.NewReader(sealed), int64(len(sealed)), putOpts{}); err != nil {
 		http.Error(w, `{"error":"store failed"}`, http.StatusBadGateway)
 		return
 	}
@@ -198,7 +197,7 @@ func (s *server) abortUpload(r *http.Request, tenant string, u *portalUpload) {
 
 func (s *server) removeUploadParts(r *http.Request, tenant string, u *portalUpload) {
 	for n := 1; n <= u.parts+1; n++ {
-		_ = s.docs.mc.RemoveObject(r.Context(), docBucket, uploadKey(tenant, u.id, n), minio.RemoveObjectOptions{})
+		_ = s.docs.api.RemoveObject(r.Context(), docBucket, uploadKey(tenant, u.id, n))
 	}
 }
 
@@ -207,7 +206,7 @@ func (s *server) joinUpload(r *http.Request, tenant string, u *portalUpload) ([]
 	var buf bytes.Buffer
 	for n := 1; n <= u.parts; n++ {
 		key := uploadKey(tenant, u.id, n)
-		obj, err := s.docs.mc.GetObject(r.Context(), docBucket, key, minio.GetObjectOptions{})
+		obj, err := s.docs.api.GetObject(r.Context(), docBucket, key)
 		if err != nil {
 			return nil, err
 		}
@@ -316,7 +315,7 @@ func (s *server) sweepExpiredUploads(ctx context.Context) {
 	rows.Close()
 	for _, g := range list {
 		for n := 1; n <= g.parts; n++ {
-			_ = s.docs.mc.RemoveObject(ctx, docBucket, uploadKey(g.tenant, g.id, n), minio.RemoveObjectOptions{})
+			_ = s.docs.api.RemoveObject(ctx, docBucket, uploadKey(g.tenant, g.id, n))
 		}
 	}
 }
