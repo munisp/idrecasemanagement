@@ -59,6 +59,10 @@ var (
 		Namespace: "idre", Name: "vault_call_total",
 		Help: "Vault seal/open calls by result (ok|error).",
 	}, []string{"result"})
+	rateLimited = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "idre", Name: "rate_limited_total",
+		Help: "Requests refused with 429 by the API rate limits, by caller kind (api_key|user|public).",
+	}, []string{"kind"})
 )
 
 // instrument records request count + latency per chi route template. It

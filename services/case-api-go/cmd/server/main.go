@@ -404,6 +404,7 @@ type server struct {
 	tb        tb.Client
 	docs      *docStore
 	rds       *redisClient // cache + idempotency (fail-open)
+	limits    apiLimits    // per-caller API rate limits (ratelimit.go)
 	permify   string       // Permify base URL ("" = ReBAC check disabled, dev mode)
 	// graphBackends: the Entity 360 relationship-graph provider chain
 	// (GRAPH_BACKENDS — sql | age | falkordb; sql always last). See
@@ -562,11 +563,11 @@ func main() {
 	must(err)
 
 	s := &server{cfg: cfg, db: pool, tc: tc, tb: tbc, docs: docs, rds: rds,
-		permify: envOr("PERMIFY_URL", "")}
+		permify: envOr("PERMIFY_URL", ""), limits: loadAPILimits()}
 	s.graphBackends = buildGraphBackends(pool, s)
 
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer, rejectMalformed, instrument)
+	r.Use(chimw.RequestID, chimw.RealIP, traceRequests, actionLog, chimw.Logger, chimw.Recoverer, rejectMalformed, instrument, s.publicRateLimit)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	// Metrics run on a DEDICATED listener (default :9091), never on the API
@@ -579,7 +580,7 @@ func main() {
 
 	// Authenticated, tenant-scoped API.
 	r.Route("/v1/tenants/{tenant}", func(r chi.Router) {
-		r.Use(a.middleware, noteActor, tenancy, s.apiKeyGuard, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
+		r.Use(a.middleware, noteActor, tenancy, s.apiKeyGuard, s.apiRateLimit, s.orgAudit, s.accessGuard, s.caseLockGuard, s.resumedUpload)
 		r.Post("/cases/initiate", s.initiateCase)
 		r.Get("/cases/prefill", s.casePrefill)      // prefill suggestions for the initiation form
 		r.Get("/cases/attention", s.casesAttention) // portfolio-level "what needs me most"
@@ -1119,7 +1120,7 @@ func main() {
 	// /tenant/<st> group membership, which is exactly what this creates) --
 	// auth only, then an inline FEDERAL_ADMIN/PLATFORM_ADMIN role check.
 	r.Route("/v1/admin", func(r chi.Router) {
-		r.Use(a.middleware, noteActor)
+		r.Use(a.middleware, noteActor, s.apiRateLimit)
 		r.Post("/tenants", s.createTenant)
 		r.Put("/tenants/{tenant}/features", s.setTenantFeatures)
 		r.Get("/mail-setup", s.mailSetup) // is mail set up: Resend domain, DNS, webhook, Outlook app (mailsetup.go)
