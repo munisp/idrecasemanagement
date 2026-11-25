@@ -215,7 +215,10 @@ const Views = (() => {
     if (!h) return;
     h.innerHTML = PacketForm.html(values || {}, { id: hostId + "-pf", ...opts });
     PacketForm.bind(h);
-    if (opts.readOnly) h.querySelectorAll("input,textarea,button").forEach((x) => { x.disabled = true; });
+    if (opts.readOnly) {
+      h.querySelectorAll("input,textarea,button").forEach((x) => { x.disabled = true; });
+      h.querySelectorAll(".pf-csv").forEach((x) => { x.hidden = true; }); // no claims upload on a form you can't change
+    }
     // A packet PDF read into the form also fills the filing screen's own short fields that are still empty.
     if (h.dataset.shortBound) return;
     h.dataset.shortBound = "1";
