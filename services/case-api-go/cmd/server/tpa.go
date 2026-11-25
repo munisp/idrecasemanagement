@@ -38,7 +38,7 @@ import (
 // and the whole filing body is capped so an unbounded payload cannot be posted.
 const (
 	maxFilingNoteBytes = 5 << 20  // 5 MB of free-text notes
-	maxFilingBodyBytes = 10 << 20 // 10 MB for the whole filing (note + packet + fields)
+	maxFilingBodyBytes = 30 << 20 // the whole filing: note, packet, fields and the packet's attached PDFs (base64)
 )
 
 type tpaOrg struct {
@@ -541,7 +541,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg})
 		return
 	}
-	if packetRejected(w, in.Packet) {
+	if filerPacketRejected(w, in.Packet) {
 		return
 	}
 	answers, msg := s.filerEligibilityAnswers(r, tenant, in.ProviderType, in.InNetwork)
@@ -555,7 +555,7 @@ func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}
-	if msg := emailReachMsg(r.Context(), "the health plan's email", rsp.Email); msg != "" {
+	if msg := emailReachMsg(r.Context(), "the health plan's email", rsp.Email); rsp.Email != "" && msg != "" {
 		http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 		return
 	}

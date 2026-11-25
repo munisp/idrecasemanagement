@@ -561,7 +561,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 			return
 		}
-		if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); msg != "" {
+		if msg := emailReachMsg(r.Context(), "the other party's email", rsp.Email); rsp.Email != "" && msg != "" {
 			http.Error(w, `{"error":"`+jsonSafe(msg)+`"}`, http.StatusBadRequest)
 			return
 		}
@@ -799,7 +799,8 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 			       disputed_amount_cents,
 			       qpa_cents,
 			       'case' AS origin,
-			       service_line
+			       service_line,
+			       details->>'packet_source' AS packet_source -- pdf | form (change log #12)
 			FROM tenant_%s.cases
 			WHERE details->>'requester_email' IS NOT NULL
 			ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))

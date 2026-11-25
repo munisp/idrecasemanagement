@@ -35,3 +35,9 @@
 .pf-csv-msg{flex-basis:100%;color:var(--text-secondary,#4a5160);font-size:13px}
 .pf-csv-msg:empty{display:none}
 .pf-csv[hidden]{display:none}
+.pf-req{color:var(--danger,#b42318);margin-left:2px;font-weight:600}
+.pf-req-hint{margin-bottom:4px}
+.pf[data-filer="1"][data-party="PROVIDER"] .pf-plan-contact{display:none}
+.pf-note{margin:8px 0 4px;padding:8px 10px;border-radius:8px;background:var(--warn-bg,#fff7e6);border:1px solid var(--warn-border,#f3d19e);font-size:13.5px}
+.pf-note[hidden]{display:none}
+.pf-file{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0;font-size:14px}

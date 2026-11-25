@@ -122,11 +122,11 @@
 
     // The filing packet form, its side following "Who is filing?"; a filled packet PDF fills it in.
     const party = document.getElementById("f-party"), pkHost = document.getElementById("f-packet");
-    pkHost.innerHTML = PacketForm.html({}, { id: "f-pf", partyFixed: party.value });
+    pkHost.innerHTML = PacketForm.html({}, { id: "f-pf", partyFixed: party.value, filer: true });
     PacketForm.bind(pkHost);
     document.getElementById("f-pdf").innerHTML = PacketForm.pdfPicker("#f-packet");
     party.addEventListener("change", () => {
-      PacketForm.fill(pkHost, PacketForm.read(pkHost).packet, { partyFixed: party.value });
+      PacketForm.fill(pkHost, PacketForm.read(pkHost).packet, { partyFixed: party.value, filer: true });
     });
     pkHost.addEventListener("packetfilled", (ev) => {
       const d = ev.detail.details || {};
@@ -143,9 +143,10 @@
       const yours = who.plan ? "Health plan" : "Provider";
       if (!who.filerEmail) problems.push(`${yours}: enter your e-mail address`);
       if (!who.otherName) problems.push(`${who.otherLabel}: name the side the dispute is against`);
-      if (!who.otherEmail) problems.push(`${who.otherLabel}: enter its e-mail address for dispute notices`);
+      // A provider isn't asked for the plan's notice contact (the office adds it); a plan filing names the provider's.
+      if (!who.otherEmail && who.plan) problems.push(`${who.otherLabel}: enter its e-mail address for dispute notices`);
       const probs = document.getElementById("f-problems");
-      probs.textContent = problems.length ? "Please complete the filing packet: " + problems.join("; ") : "";
+      probs.textContent = problems.length ? "Please complete the filing packet: " + [...new Set(problems)].join("; ") : "";
       if (problems.length) return;
       if (!sel.value) { msg.classList.add("err"); msg.textContent = "Please select your state."; return; }
       const fromClaims = packet.claims.reduce((n, c) => n + Number(c.disputed_cents || 0), 0);
@@ -157,6 +158,7 @@
       };
       btn.disabled = true; btn.textContent = "Submitting…";
       try {
+        packet.attachments = await PacketForm.attachments(pkHost);
         const resp = await fetch("/api/public/ahca-intake", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         });
@@ -168,16 +170,20 @@
           } else {
             msg.textContent = `Case ${data.case_number} opened — check your email for filing instructions and an upload link.`;
           }
+          if (packet.details.packet_attestation && packet.details.packet_attestation.rural_hospital) {
+            msg.textContent += " Rural hospital: include the documentation showing the hospital meets s. 395.602(2), F.S., with your documents.";
+          }
           e.target.reset();
-          PacketForm.fill(pkHost, {}, { partyFixed: party.value });
+          PacketForm.clearFiles(pkHost);
+          PacketForm.fill(pkHost, {}, { partyFixed: party.value, filer: true });
           filed = true; // the button stays "Filed" until the next filing is typed, so a second click can't file it twice
           e.target.addEventListener("input", () => { filed = false; btn.disabled = false; btn.textContent = "Start my dispute"; }, { once: true });
         } else {
           msg.classList.add("err");
           msg.textContent = data.error ? `Could not open your dispute: ${data.error}${data.problems ? " — " + data.problems.join("; ") : ""}` : `Submission failed (${resp.status}). Please try again later.`;
         }
-      } catch {
-        msg.classList.add("err"); msg.textContent = "Network error — please try again.";
+      } catch (err) {
+        msg.classList.add("err"); msg.textContent = err && err.message && !/fetch|network/i.test(err.message) ? err.message : "Network error — please try again.";
       } finally {
         if (filed) { btn.disabled = true; btn.textContent = "Filed — check your email"; }
         else { btn.disabled = false; btn.textContent = "Start my dispute"; }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -128,5 +129,37 @@ func TestIntakeChatNeedsTheOtherParty(t *testing.T) {
 	f.OtherPartyEmail = "disputes@bayhealth.example"
 	if m := intakeMissingFor(validateIntakeFields(f), true); len(m) != 0 {
 		t.Errorf("complete intake still missing %v", m)
+	}
+}
+
+func TestFilerRequiredFields(t *testing.T) {
+	amt := int64(250000)
+	full := &filingPacket{
+		Details: map[string]any{"packet_provider_type": "Hospital", "health_plan": "Acme", "plan_type": "Medicaid",
+			"type_of_service": "Professional", "claims_submitted": float64(1), "certification_agreed": true,
+			"certified_by_name": "Sam", "certified_by_title": "Director", "certified_on": "2026-11-25",
+			"packet_documents_submitted": []any{"claim_forms", "denials_eobs", "florida_license", "final_determination_letter"}},
+		DisputedAmountCents: &amt, Claims: []packetClaim{{ClaimNumber: "C1"}},
+	}
+	if p := full.requiredProblems(); len(p) != 0 {
+		t.Fatalf("complete packet refused: %v", p)
+	}
+	empty := &filingPacket{Details: map[string]any{"packet_provider_type": "Other"}}
+	if p := empty.requiredProblems(); len(p) != 9 {
+		t.Fatalf("want all 9 required items named, got %d: %v", len(p), p)
+	}
+}
+
+func TestFilingAttachments(t *testing.T) {
+	pdf := base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 x"))
+	ok := &filingPacket{Attachments: []filingAttachment{{Kind: "aor_letter", Filename: "aor.pdf", DataB64: pdf}}}
+	if p := ok.attachmentProblems(); len(p) != 0 || ok.Attachments[0].raw == nil {
+		t.Fatalf("a PDF refused: %v", p)
+	}
+	bad := &filingPacket{Attachments: []filingAttachment{
+		{Kind: "aor_letter", DataB64: base64.StdEncoding.EncodeToString([]byte("MZ not a pdf"))},
+		{Kind: "aor_letter", DataB64: pdf}, {Kind: "virus", DataB64: pdf}}}
+	if p := bad.attachmentProblems(); len(p) != 3 {
+		t.Fatalf("want 3 problems (not a PDF, two letters, unknown kind), got %v", p)
 	}
 }

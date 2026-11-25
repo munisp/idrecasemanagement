@@ -338,6 +338,8 @@ const Api = (() => {
       corrPreview: (id, body) => req("POST", `${t()}/cases/${id}/correspondence/preview`, body),
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
       filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),
+      respondent: (id) => req("GET", `${t()}/cases/${id}/respondent`),
+      setRespondent: (id, body) => req("PUT", `${t()}/cases/${id}/respondent`, body),
       lettergen: (id, templateKey) => req("POST", `${t()}/cases/${id}/lettergen/${templateKey}`),
       documents: (id) => req("GET", `${t()}/cases/${id}/documents`),
       timeAdd: (id, p) => req("POST", `${t()}/cases/${id}/time`, p),

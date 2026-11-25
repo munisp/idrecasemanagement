@@ -612,6 +612,8 @@ func main() {
 		// Stakeholder onboarding: applications, decisions, status.
 		r.Patch("/cases/{caseId}/details", s.setCaseDetails)
 		r.Put("/cases/{caseId}/filing-packet", s.putFilingPacket)                        // the filing packet form (filing_packet.go)
+		r.Get("/cases/{caseId}/respondent", s.getRespondentContact)                      // the other side's notice contact (respondents.go)
+		r.Put("/cases/{caseId}/respondent", s.setRespondentContact)
 		r.Get("/cases/{caseId}/change-requests", s.caseChangeRequests)                   // the filer's change requests + history (tpa_filing.go)
 		r.Post("/cases/{caseId}/change-requests/{requestId}/decide", s.caseChangeDecide) // approve (applied) or reject
 		r.Post("/cases/{caseId}/lettergen/{templateKey}", s.requestLetterGen)

@@ -1082,6 +1082,89 @@ def build_plan_packet(ctx, logo):
 
 
 # key -> (builder, needs extra filename fields)
+# The filing packet as the filer entered it on the filing form (change log 2026-11-25 #8): a record kept on the case
+# under Intake, so the team can verify against exactly what was filed. Not a letter to anyone: no QA, never mailed.
+_ATTESTATION = [("interest_only", "This claim is not related to an interest payment."),
+                ("late_payment_only", "This claim is not related solely to an issue of prompt payment."),
+                ("medicare_grievance", "Not part of a Medicare MCO internal grievance or a Medicare reconsideration appeal."),
+                ("medicaid_fair_hearing", "Not part of a Medicaid fair hearing (42 CFR §431.220 et seq.)."),
+                ("pending_court_action", "Not the basis for an action pending in state or federal court."),
+                ("pre_2000_binding_process", "Not subject to a binding dispute process by a contract before October 1, 2000."),
+                ("internal_process_not_exhausted", "Not subject to a contractual internal dispute process, or that process is exhausted."),
+                ("over_12_months", "No more than 12 months since the final determination."),
+                ("rural_hospital", "Filed by a Rural Hospital (s. 395.602(2), F.S.).")]
+_DOCS = {"claim_forms": "Claim form(s)", "denials_eobs": "Denial(s) / EOBs", "florida_license": "Florida license",
+         "final_determination_letter": "Final determination letter", "contract": "Contract", "waiver_of_payment": "Waiver of payment form",
+         "notice_of_overpayment": "Notice of overpayment", "overpayment_response": "Response to notice of overpayment",
+         "medical_records": "Medical records", "coding_rules": "Coding rules / policies", "other": "Other"}
+
+
+def build_filing_record(ctx, logo):
+    d0 = ctx["details"]
+    v = lambda k: "" if d0.get(k) in (None, "") else ("Yes" if d0.get(k) is True else "No" if d0.get(k) is False else str(d0.get(k)))
+    d = Letter(ctx, header_line=ctx["case_number"], logo=logo)
+    d.heading("FILING PACKET — AS FILED", center=True, space_after=2)
+    d.para(f"What the filing party entered on the online filing form for case {ctx['case_number']}"
+           f"{' on ' + long_date(ctx['opened_at']) if ctx.get('opened_at') else ''}. Kept for verification; not sent to anyone.",
+           align=WD_ALIGN_PARAGRAPH.CENTER)
+    party = "Health plan" if str(d0.get("filing_party_type", "")).upper() == "HEALTH_PLAN" else "Provider"
+    d.heading("Filing party and provider")
+    d.grid(["", ""], [[k, x] for k, x in [
+        ["Filing party", party], ["Provider", v("provider_org")], ["Legal entity", v("provider_legal_entity")],
+        ["Trade name", v("provider_trade_name")], ["Tax ID", v("provider_tin")], ["NPI", v("provider_npi")],
+        ["License no.", v("provider_license")],
+        ["Address", ", ".join(x for x in [v("provider_street"), v("provider_city"), v("provider_state"), v("provider_postal")] if x)],
+        ["Contact", v("provider_contact")], ["Telephone", v("provider_phone")], ["E-mail", v("provider_email")],
+        ["Provider type", v("packet_provider_type") + (f" — {v('provider_type_other')}" if v("provider_type_other") else "")]] if x],
+        widths=[2.0, 4.5], size=9)
+    d.heading("Health plan and the dispute")
+    d.grid(["", ""], [[k, x] for k, x in [
+        ["Health plan", v("health_plan")], ["Trade name", v("health_plan_trade_name")],
+        ["Health plan type", v("plan_type") + (f" — {v('plan_type_other')}" if v("plan_type_other") else "")],
+        ["Contracted with the plan", v("contracted")], ["Internal dispute process exhausted", v("internal_dispute_exhausted")],
+        ["Type of service", v("type_of_service") + (f" — {v('type_of_service_other')}" if v("type_of_service_other") else "")],
+        ["Number of claims", v("claims_submitted")],
+        ["Aggregated disputed amount", money(ctx["disputed_cents"]) if ctx.get("disputed_cents") else ""],
+        ["Full review fee estimate requested", v("fee_estimate_requested")]] if x],
+        widths=[2.4, 4.1], size=9)
+    with psycopg.connect(ctx["_dsn"]) as c:
+        rows = c.execute(
+            """SELECT claim_number, coalesce(nullif(trim(coalesce(patient_first_name,'')||' '||coalesce(patient_last_name,'')),''),''),
+                      coalesce(type_of_service,''), date_of_service, billed_cents, paid_cents, disputed_cents,
+                      date_claim_submitted, date_of_denial, date_of_final_determination
+               FROM public.case_claims WHERE tenant=%s AND case_id=%s ORDER BY claim_number LIMIT 500""",
+            (ctx["tenant"], ctx["case_id"])).fetchall()
+    ds = lambda x: x.strftime("%m/%d/%Y") if hasattr(x, "strftime") else (str(x) if x else "")
+    if rows:
+        d.heading(f"Claim(s) information — {len(rows)}")
+        d.grid(["Claim #", "Patient", "Service", "DOS", "Billed", "Paid", "In dispute", "Submitted", "Denied", "Final det."],
+               [[r[0], r[1], r[2], ds(r[3]), money(r[4]) if r[4] is not None else "", money(r[5]) if r[5] is not None else "",
+                 money(r[6]) if r[6] is not None else "", ds(r[7]), ds(r[8]), ds(r[9])] for r in rows], size=7)
+    for side, keys in (("Provider's position", ("provider_position_basis", "provider_position_references", "provider_position_rebuttal")),
+                       ("Health plan's position", ("plan_position_basis", "plan_position_references", "plan_position_rebuttal"))):
+        texts = [v(k) for k in keys if v(k)]
+        if texts:
+            d.heading(side)
+            for i, t in enumerate(texts, 1):
+                d.para(t, lead=f"{i}. ")
+    docs = d0.get("packet_documents_submitted") or []
+    if docs or v("documents_other"):
+        d.heading("Supporting documentation being submitted")
+        d.bullets([_DOCS.get(k, k) for k in docs] + ([f"Other: {v('documents_other')}"] if v("documents_other") else []))
+    att = d0.get("packet_attestation") or {}
+    if att:
+        d.heading("Eligibility attestation")
+        d.bullets([("☑ " if att.get(k) else "☐ ") + label for k, label in _ATTESTATION])
+        d.para(f"Certified: {v('attestation_certified') or 'No'} — {v('attested_by_name')}, {v('attested_by_title')}, {v('attested_on')}")
+    if v("aor_representative"):
+        d.heading("Appointment of representative")
+        d.para(f"{v('aor_representative')} is appointed to act as the representative of the provider ({v('aor_provider')}) "
+               f"against {v('aor_health_plan')}. Signed: {v('aor_signed_by_name')}, {v('aor_signed_by_title')}, {v('aor_signed_on')}.")
+    d.heading("Certification")
+    d.para(f"Agreed: {v('certification_agreed') or 'No'} — {v('certified_by_name')}, {v('certified_by_title')}, {v('certified_on')}")
+    return d
+
+
 BUILDERS = {
     "final_order_rationale": build_decision_report,
     "cover_letter_final_notice": build_cover_letter,
@@ -1094,6 +1177,7 @@ BUILDERS = {
     "rfi_letter": build_rfi,
     "default_determination": build_default_determination,
     "fl_plan_packet": build_plan_packet,
+    "filing_record": build_filing_record,
 }
 
 
@@ -1104,6 +1188,7 @@ def has_builder(key: str) -> bool:
 def build(dsn: str, minio, template_bucket: str, tenant: str, case_id: str, key: str) -> tuple[bytes, dict]:
     """DOCX bytes for a built-in letter, and the extra fields its filename and subject use."""
     ctx = load_context(dsn, tenant, case_id)
+    ctx["_dsn"] = dsn
     logo = _logo(minio, template_bucket, tenant)
     if key == "invoice_health_plan":
         d, extra = build_invoice(ctx, "HEALTH_PLAN", logo)

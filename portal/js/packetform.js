@@ -82,8 +82,8 @@ window.PacketForm = (() => {
     return `${y}-${String(m[1]).padStart(2, "0")}-${String(m[2]).padStart(2, "0")}`;
   };
 
-  function text(d, key, label, attrs = "") {
-    return `<label>${esc(label)} <input name="d.${key}" value="${esc(d[key] ?? "")}" ${attrs} /></label>`;
+  function text(d, key, label, attrs = "", after = "") {
+    return `<label>${esc(label)}${after} <input name="d.${key}" value="${esc(d[key] ?? "")}" ${attrs} /></label>`;
   }
   function radios(d, key, options, cls = "") {
     const cur = d[key];
@@ -100,8 +100,11 @@ window.PacketForm = (() => {
       <td><button type="button" class="pf-del" title="Remove this claim" onclick="PacketForm.removeRow(this)">×</button></td></tr>`;
   }
 
-  // The form. opts: { id, partyFixed: "PROVIDER"|"HEALTH_PLAN" (the filer's side is already known), staff: bool }.
+  // The form. opts: { id, partyFixed: "PROVIDER"|"HEALTH_PLAN" (the filer's side is already known), staff: bool,
+  // filer: bool -- the filer's own form (public, TPA, health plan): required fields marked and enforced, the
+  // plan's notice contact not asked of a provider, and the AOR letter upload (change log 2026-11-25 #1, #2, #6). }
   function html(values = {}, opts = {}) {
+    const R = opts.filer ? '<span class="pf-req" title="required">*</span>' : "";
     const d = { ...(values.details || {}) };
     if (opts.partyFixed) d.filing_party_type = opts.partyFixed;
     if (d.packet_provider_type && String(d.packet_provider_type).startsWith("Other:")) {
@@ -115,7 +118,8 @@ window.PacketForm = (() => {
     const rows = claims.map(claimRow).join("") + Array.from({ length: Math.max(0, 5 - claims.length) }, () => claimRow()).join("");
     const att = d.packet_attestation || {}, docs = d.packet_documents_submitted || [];
     const party = d.filing_party_type || "PROVIDER";
-    return `<div class="pf" id="${esc(opts.id || "pf")}" data-party="${esc(party)}">
+    return `<div class="pf" id="${esc(opts.id || "pf")}" data-party="${esc(party)}"${opts.filer ? ' data-filer="1"' : ""}>
+      ${opts.filer ? '<p class="pf-hint pf-req-hint">Fields marked <span class="pf-req">*</span> are required.</p>' : ""}
       <fieldset class="pf-sec"><legend>Filing party</legend>
         ${opts.partyFixed ? `<p class="pf-fixed">${party === "HEALTH_PLAN" ? "Health plan" : "Provider"}</p><input type="hidden" name="d.filing_party_type" value="${esc(party)}" />`
           : radios(d, "filing_party_type", [["PROVIDER", "Provider"], ["HEALTH_PLAN", "Health plan"]], "pf-inline")}</fieldset>
@@ -127,27 +131,27 @@ window.PacketForm = (() => {
         ${text(d, "provider_contact", "Contact person")}${text(d, "provider_alt_address", "Address (if different from above)")}
         ${text(d, "provider_phone", "Telephone number", 'type="tel"')}${text(d, "provider_fax", "Fax number", 'type="tel"')}
         ${text(d, "provider_email", "E-mail address", 'type="email"')}</div></fieldset>
-      <fieldset class="pf-sec"><legend>Provider type</legend>
+      <fieldset class="pf-sec"><legend>Provider type${R}</legend>
         ${radios(d, "packet_provider_type", PROVIDER_TYPES.map((x) => [x, x]), "pf-cols")}
         ${text(d, "provider_type_other", "Other provider type")}</fieldset>
       <fieldset class="pf-sec"><legend>Health plan</legend><div class="pf-grid">
-        ${text(d, "health_plan", "Health plan")}${text(d, "health_plan_trade_name", "Trade name")}</div>
-        <p class="pf-q">Health plan contact for dispute notices</p>
+        ${text(d, "health_plan", "Health plan name", "", R)}${text(d, "health_plan_trade_name", "Trade name")}</div>
+        <div class="pf-plan-contact"><p class="pf-q">Health plan contact for dispute notices</p>
         <p class="pf-hint">Not on the PDF packet. When a provider files, this is where the health plan is told about the dispute and sent its documents.</p>
         <div class="pf-grid">${text(d, "health_plan_contact", "Contact person")}${text(d, "health_plan_email", "E-mail address", 'type="email"')}
-          ${text(d, "health_plan_phone", "Telephone number", 'type="tel"')}${text(d, "health_plan_naic", "NAIC (optional)")}</div>
-        <p class="pf-q">Health plan type</p>${radios(d, "plan_type", PLAN_TYPES)}${text(d, "plan_type_other", "Other plan type")}</fieldset>
+          ${text(d, "health_plan_phone", "Telephone number", 'type="tel"')}${text(d, "health_plan_naic", "NAIC (optional)")}</div></div>
+        <p class="pf-q">Health plan type${R}</p>${radios(d, "plan_type", PLAN_TYPES)}${text(d, "plan_type_other", "Other plan type")}</fieldset>
       <fieldset class="pf-sec"><legend>The dispute</legend>
         <p class="pf-q">Is the provider contracted with the health plan?</p>${radios(d, "contracted", [["true", "Yes"], ["false", "No"]], "pf-inline")}
         <p class="pf-q">Has the provider fully exhausted an internal dispute resolution process?</p>${radios(d, "internal_dispute_exhausted", [["Yes", "Yes"], ["No", "No"], ["Unknown", "Unknown"]], "pf-inline")}
-        <p class="pf-q">Type of service</p>${radios(d, "type_of_service", SERVICE_TYPES)}${text(d, "type_of_service_other", "Other type of service")}
-        <div class="pf-grid">${text(d, "claims_submitted", "Number of claims included", 'type="number" min="0" step="1"')}
-          <label>Aggregated disputed amount ($) <input name="disputed_amount" inputmode="decimal" placeholder="0.00" value="${esc(money(values.disputed_amount_cents))}" /></label></div></fieldset>
-      <fieldset class="pf-sec"><legend>Claim(s) information</legend>
-        <p class="pf-hint">One row per claim. Many claims? Upload them from a CSV file (up to ${MAX_CLAIMS}), then check the rows below — you can still add or remove claims by hand.</p>
-        <div class="pf-csv"><label>Upload claims from a CSV file <input type="file" accept=".csv,text/csv"
-          onchange="PacketForm.claimsFromCsv(this)" /></label>
-          <a href="#" class="pf-csv-template" onclick="PacketForm.csvTemplate(event)">Download the CSV template</a>
+        <p class="pf-q">Type of service${R}</p>${radios(d, "type_of_service", SERVICE_TYPES)}${text(d, "type_of_service_other", "Other type of service")}
+        <div class="pf-grid">${text(d, "claims_submitted", "Number of claims included", 'type="number" min="0" step="1"', R)}
+          <label>Aggregated disputed amount ($)${R} <input name="disputed_amount" inputmode="decimal" placeholder="0.00" value="${esc(money(values.disputed_amount_cents))}" /></label></div></fieldset>
+      <fieldset class="pf-sec"><legend>Claim(s) information${R}</legend>
+        <p class="pf-hint">One row per claim. Many claims? Upload them from an Excel file (up to ${MAX_CLAIMS}), then check the rows below — you can still add or remove claims by hand.</p>
+        <div class="pf-csv"><label>Upload claims from an Excel file (.xlsx) <input type="file" accept=".xlsx,${XLSX_TYPE}"
+          onchange="PacketForm.claimsFromXlsx(this)" /></label>
+          <a href="#" class="pf-csv-template" onclick="PacketForm.xlsxTemplate(event)">Download the Excel template</a>
           <span class="pf-csv-msg" aria-live="polite"></span></div>
         <div class="pf-scroll"><table class="pf-claims"><thead><tr>${CLAIM_COLS.map(([, l]) => `<th>${esc(l)}</th>`).join("")}<th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>
@@ -164,13 +168,14 @@ window.PacketForm = (() => {
         ${area(d, "plan_position_basis", "1. Describe with all appropriate technical detail the basis for the determination that an overpayment was made for these services and the amount of that overpayment.")}
         ${area(d, "plan_position_references", "2. Provide specific references to the contract, provider manual and other supporting documentation to support your position.")}
         ${area(d, "plan_position_rebuttal", "3. State your understanding of the basis for the claim calculation made by the provider in denying that an overpayment was made, and your rebuttal argument against it.")}</fieldset>
-      <fieldset class="pf-sec"><legend>Supporting documentation being submitted</legend>
+      <fieldset class="pf-sec"><legend>Supporting documentation being submitted${R}</legend>
         <p class="pf-hint">* Required for all disputes. If a required document can't be filed, upload an explanation in its place.</p>
         <div class="pf-checks">${DOCUMENTS.map(([k, label, req]) => `<label class="pf-choice"><input type="checkbox" name="doc" value="${k}" ${docs.includes(k) ? "checked" : ""} /> ${req ? "* " : ""}${esc(label)}</label>`).join("")}</div>
         ${text(d, "documents_other", "Other documentation")}</fieldset>
       <fieldset class="pf-sec"><legend>Eligibility attestation</legend>
         <p class="pf-hint">To be completed by the owner, officer, director or other legally authorized representative of the filing party. Tick every criterion this claim meets.</p>
         <div class="pf-checks">${ATTESTATION.map(([k, label]) => `<label class="pf-choice"><input type="checkbox" name="att" value="${k}" ${att[k] ? "checked" : ""} /> ${esc(label)}</label>`).join("")}</div>
+        <p class="pf-note pf-rural-note" role="status" ${att.rural_hospital ? "" : "hidden"}><b>Rural hospital:</b> remember to include the documentation showing the hospital meets the definition under s. 395.602(2), F.S., with your supporting documents.</p>
         <label class="pf-choice pf-certify"><input type="checkbox" name="d.attestation_certified" ${d.attestation_certified ? "checked" : ""} /> I certify that I am legally authorized to complete this attestation on behalf of the filing party, and that this claim meets every criterion ticked above.</label>
         <div class="pf-grid">${text(d, "attested_by_name", "Name (typed as your electronic signature)")}${text(d, "attested_by_title", "Title & organization name")}
           ${text(d, "attested_on", "Date", 'type="date"')}</div></fieldset>
@@ -178,9 +183,11 @@ window.PacketForm = (() => {
         <div class="pf-grid">${text(d, "aor_provider", "Provider")}${text(d, "aor_health_plan", "Health plan")}</div>
         ${text(d, "aor_representative", "Is hereby appointed to act as the representative of the provider for this case")}
         <p class="pf-hint">The appointed representative receives all correspondence, including requests for information, the final order and the invoice.</p>
+        ${opts.filer ? `<label class="pf-file">Appointment of representative letter <span class="pf-hint">— a PDF on your company letterhead</span>
+          <input type="file" name="aor_letter_file" accept="application/pdf,.pdf" /></label>` : ""}
         <div class="pf-grid">${text(d, "aor_signed_by_name", "Name (typed as your electronic signature)")}${text(d, "aor_signed_by_title", "Title & organization name")}
           ${text(d, "aor_signed_on", "Date", 'type="date"')}</div></fieldset>
-      <fieldset class="pf-sec"><legend>Certification</legend>
+      <fieldset class="pf-sec"><legend>Certification${R}</legend>
         <label class="pf-choice pf-certify"><input type="checkbox" name="d.certification_agreed" ${d.certification_agreed ? "checked" : ""} /> I certify that I am legally authorized to complete this certification on behalf of the filing party. I understand and agree that if the filing party does not prevail it will be responsible for the full or apportioned review costs of this case; that if those costs are not paid within 35 days after the Agency's final order it will be subject to a fine; that if this case is settled before a decision is rendered, the parties will be responsible for the review costs incurred before the settlement; and that the filing party will be responsible for the initial review fee.</label>
         <div class="pf-grid">${text(d, "certified_by_name", "Name (typed as your electronic signature)")}${text(d, "certified_by_title", "Title & organization name")}
           ${text(d, "certified_on", "Date", 'type="date"')}</div></fieldset>
@@ -197,7 +204,13 @@ window.PacketForm = (() => {
       const party = (pf.querySelector('[name="d.filing_party_type"]:checked') || pf.querySelector('input[type=hidden][name="d.filing_party_type"]') || {}).value || "PROVIDER";
       pf.dataset.party = party;
     };
-    pf.addEventListener("change", (ev) => { if (ev.target.name === "d.filing_party_type") sync(); });
+    pf.addEventListener("change", (ev) => {
+      if (ev.target.name === "d.filing_party_type") sync();
+      if (ev.target.name === "att" && ev.target.value === "rural_hospital") {
+        const note = pf.querySelector(".pf-rural-note");
+        if (note) note.hidden = !ev.target.checked;
+      }
+    });
     // Whether the filer used the form at all: an untouched form is not sent (its empty tick boxes would read as
     // "nothing attested").
     const touch = () => { pf.dataset.touched = "1"; };
@@ -217,10 +230,12 @@ window.PacketForm = (() => {
     tr.remove();
   }
 
-  // Claims from a CSV file, read in the browser (nothing is uploaded): the rows land in the claims table, where the
-  // filer checks them and can still add or remove claims by hand. The first row names the columns -- the template's
-  // headings, or common variants of them (Claim Number, DOS, Billed, ...).
+  // Claims from an Excel workbook (.xlsx), read in the browser (nothing is uploaded) -- the change log asks for
+  // Excel only (2026-11-25 #3). The rows land in the claims table, where the filer checks them and can still add or
+  // remove claims by hand. The first row names the columns: the template's headings, or common variants of them.
+  // An .xlsx is a ZIP of XML parts; the browser's own DecompressionStream inflates it (no library, CSP-safe).
   const MAX_CLAIMS = 500; // filing_packet.go refuses more rows than this
+  const XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   const CSV_HEADINGS = {
     claim_number: ["claim", "claimno", "claimnumber", "claimid"],
     patient_name: ["patient", "patientname", "member", "membername"],
@@ -235,79 +250,169 @@ window.PacketForm = (() => {
     date_of_denial: ["dateofdenial", "denialdate", "denied", "datedenied"],
     date_of_final_determination: ["dateoffinaldetermination", "finaldeterminationdate", "finaldetermination"],
   };
+  const DATE_COLS = ["date_of_service", "date_claim_submitted", "date_of_denial", "date_of_final_determination"];
   const headingKey = (h) => {
-    const n = String(h).toLowerCase().replace(/#/g, "no").replace(/[^a-z0-9]/g, "");
+    const n = String(h ?? "").toLowerCase().replace(/#/g, "no").replace(/[^a-z0-9]/g, "");
     return Object.keys(CSV_HEADINGS).find((k) => CSV_HEADINGS[k].includes(n)) || null;
   };
-  // RFC 4180: quoted fields, doubled quotes, line breaks inside quotes; comma, semicolon or tab separated.
-  function parseCsv(text) {
-    const t = String(text).replace(/^﻿/, "");
-    const first = t.split(/\r?\n/).find((l) => l.trim()) || "";
-    const sep = [",", ";", "\t"].reduce((a, b) => (first.split(b).length > first.split(a).length ? b : a), ",");
-    const rows = []; let row = [], cell = "", q = false;
-    for (let i = 0; i < t.length; i++) {
-      const ch = t[i];
-      if (q) {
-        if (ch === '"' && t[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch;
-      } else if (ch === '"' && cell === "") q = true;
-      else if (ch === sep) { row.push(cell); cell = ""; }
-      else if (ch === "\n" || ch === "\r") {
-        if (ch === "\r" && t[i + 1] === "\n") i++;
-        row.push(cell); rows.push(row); row = []; cell = "";
-      } else cell += ch;
-    }
-    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
-    return rows.map((r) => r.map((c) => c.trim())); // blank lines kept, so messages can name the file's own line numbers
-  }
   const realDate = (iso) => {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ""), d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
     return d && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3] ? iso : "";
   };
-  // "1,250.00", "$1250", "(40.00)" (negative), and "12,50" (a decimal comma, as European spreadsheets save it).
-  const csvCents = (s) => {
-    let v = String(s).trim().replace(/^\((.*)\)$/, "-$1");
+  // An Excel date is a day count from 1899-12-30 (Excel's 1900 leap-year quirk included).
+  const serialDate = (n) => new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000).toISOString().slice(0, 10);
+  // "1,250.00", "$1250", "(40.00)" (negative), and "12,50" (a decimal comma); a number cell is used as it is.
+  const cellCents = (x) => {
+    if (typeof x === "number") return Math.round(x * 100);
+    let v = String(x).trim().replace(/^\((.*)\)$/, "-$1");
     if (/^-?[$€£]?\s*\d{1,3}(\.\d{3})*,\d{2}$|^-?[$€£]?\s*\d+,\d{2}$/.test(v)) v = v.replace(/\./g, "").replace(",", ".");
     return toCents(v.replace(/[€£]/g, ""));
   };
-  // {claims, problems} from the CSV's text. Dates are MM/DD/YYYY or YYYY-MM-DD; amounts like 1,250.00 or $1250.
-  function claimsFromCsvText(text) {
-    const rows = parseCsv(text), problems = [], claims = [];
-    const h = rows.findIndex((r) => r.some(Boolean));
-    if (h < 0) return { claims, problems: ["The file is empty."] };
+  const cellText = (x) => (x == null ? "" : typeof x === "number" ? String(x) : String(x).trim());
+
+  // ---- a minimal .xlsx reader / writer ----
+  async function unzip(buf) {
+    const dv = new DataView(buf), u8 = new Uint8Array(buf), dec = new TextDecoder();
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error("That file is not an Excel workbook (.xlsx).");
+    const out = new Map(), n = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);
+    for (let k = 0; k < n && dv.getUint32(p, true) === 0x02014b50; k++) {
+      const method = dv.getUint16(p + 10, true), size = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true),
+        el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true);
+      const name = dec.decode(u8.subarray(p + 46, p + 46 + nl));
+      p += 46 + nl + el + cl;
+      const start = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true);
+      out.set(name.replace(/^\//, ""), { method, data: u8.subarray(start, start + size) });
+    }
+    return out;
+  }
+  async function zipText(entries, name) {
+    const e = entries.get(name);
+    if (!e) return null;
+    let bytes = e.data;
+    if (e.method === 8) bytes = new Uint8Array(await new Response(new Blob([e.data]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
+    else if (e.method !== 0) throw new Error("This workbook is compressed in a way the reader does not know — save it again from Excel.");
+    return new TextDecoder().decode(bytes);
+  }
+  const xml = (t) => new DOMParser().parseFromString(t, "application/xml");
+  const tags = (doc, name) => [...doc.getElementsByTagNameNS("*", name)];
+  // The first worksheet's cells as rows of strings / numbers.
+  async function xlsxRows(buf) {
+    const z = await unzip(buf);
+    const wb = await zipText(z, "xl/workbook.xml");
+    if (!wb) throw new Error("That file is not an Excel workbook (.xlsx).");
+    const first = tags(xml(wb), "sheet")[0];
+    const rid = first && (first.getAttribute("r:id") || first.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id"));
+    let target = "worksheets/sheet1.xml";
+    const rels = await zipText(z, "xl/_rels/workbook.xml.rels");
+    if (rels && rid) { const r = tags(xml(rels), "Relationship").find((x) => x.getAttribute("Id") === rid); if (r) target = r.getAttribute("Target"); }
+    const path = target.startsWith("/") ? target.slice(1) : "xl/" + target.replace(/^\.\//, "");
+    const sheet = await zipText(z, path);
+    if (!sheet) throw new Error("The workbook's first sheet could not be read.");
+    const sstText = await zipText(z, "xl/sharedStrings.xml");
+    const sst = sstText ? tags(xml(sstText), "si").map((si) => tags(si, "t").map((t) => t.textContent).join("")) : [];
+    const col = (ref) => { let n = 0; for (const ch of ref.replace(/\d+$/, "")) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+    const rows = [];
+    for (const row of tags(xml(sheet), "row")) {
+      const out = [];
+      tags(row, "c").forEach((c, i) => {
+        const t = c.getAttribute("t"), v = tags(c, "v")[0], ref = c.getAttribute("r");
+        let val = "";
+        if (t === "s") val = sst[Number(v && v.textContent)] ?? "";
+        else if (t === "inlineStr") val = tags(c, "t").map((x) => x.textContent).join("");
+        else if (t === "str" || t === "e") val = v ? v.textContent : "";
+        else if (t === "b") val = v && v.textContent === "1" ? "TRUE" : "FALSE";
+        else if (v && v.textContent !== "") val = Number(v.textContent);
+        out[ref ? col(ref) : i] = val;
+      });
+      rows[(Number(row.getAttribute("r")) || rows.length + 1) - 1] = Array.from(out, (x) => x ?? "");
+    }
+    return Array.from(rows, (r) => r || []);
+  }
+  const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  function zipStore(files) { // [[name, string]] -> Uint8Array, stored (no compression)
+    const enc = new TextEncoder(), parts = [], central = [];
+    let off = 0;
+    for (const [name, text] of files) {
+      const nb = enc.encode(name), data = enc.encode(text), crc = crc32(data);
+      const h = new DataView(new ArrayBuffer(30));
+      h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint32(14, crc, true);
+      h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, nb.length, true);
+      parts.push(new Uint8Array(h.buffer), nb, data);
+      const c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint32(16, crc, true);
+      c.setUint32(20, data.length, true); c.setUint32(24, data.length, true); c.setUint16(28, nb.length, true); c.setUint32(42, off, true);
+      central.push(new Uint8Array(c.buffer), nb);
+      off += 30 + nb.length + data.length;
+    }
+    const csize = central.reduce((n, b) => n + b.length, 0), e = new DataView(new ArrayBuffer(22));
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+    e.setUint32(12, csize, true); e.setUint32(16, off, true);
+    const all = [...parts, ...central, new Uint8Array(e.buffer)], out = new Uint8Array(all.reduce((n, b) => n + b.length, 0));
+    let p = 0; for (const b of all) { out.set(b, p); p += b.length; }
+    return out;
+  }
+  function xlsxBytes(rows) { // rows of strings / numbers -> a one-sheet workbook
+    const x = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const ref = (i) => { let s = ""; for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
+    const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${
+      rows.map((r, ri) => `<row r="${ri + 1}">${r.map((v, ci) => typeof v === "number"
+        ? `<c r="${ref(ci)}${ri + 1}"><v>${v}</v></c>`
+        : `<c r="${ref(ci)}${ri + 1}" t="inlineStr"${ri === 0 ? ' s="1"' : ""}><is><t>${x(v)}</t></is></c>`).join("")}</row>`).join("")}</sheetData></worksheet>`;
+    const M = "http://schemas.openxmlformats.org", R = `${M}/officeDocument/2006/relationships`;
+    return zipStore([
+      ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="${M}/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
+      ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${M}/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+      ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="${M}/spreadsheetml/2006/main" xmlns:r="${R}"><sheets><sheet name="Claims" sheetId="1" r:id="rId1"/></sheets></workbook>`],
+      ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="${M}/package/2006/relationships"><Relationship Id="rId1" Type="${R}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${R}/styles" Target="styles.xml"/></Relationships>`],
+      ["xl/styles.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="${M}/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`],
+      ["xl/worksheets/sheet1.xml", sheet],
+    ]);
+  }
+
+  // {claims, problems} from a sheet's rows. Dates: a real Excel date, MM/DD/YYYY or YYYY-MM-DD; amounts: numbers or text.
+  function claimsFromRows(rows) {
+    const problems = [], claims = [];
+    const h = rows.findIndex((r) => r.some((x) => cellText(x)));
+    if (h < 0) return { claims, problems: ["The sheet is empty."] };
     const keys = rows[h].map(headingKey);
     if (!keys.includes("claim_number")) {
-      return { claims, problems: ["The first row must name the columns, with a Claim # column — download the CSV template to see them."] };
+      return { claims, problems: ["The first row must name the columns, with a Claim # column — download the Excel template to see them."] };
     }
     rows.forEach((r, i) => {
       if (i <= h) return;
       const line = i + 1, v = {};
-      keys.forEach((k, j) => { if (k && r[j] != null && r[j] !== "") v[k] = r[j]; });
+      keys.forEach((k, j) => { if (k && r[j] != null && cellText(r[j]) !== "") v[k] = r[j]; });
       if (!Object.keys(v).length) return;
       if (!v.claim_number) { problems.push(`Row ${line}: no claim #, skipped`); return; }
-      const c = { claim_number: v.claim_number.slice(0, 60), type_of_service: v.type_of_service || "",
-        patient_name: v.patient_name || [v.patient_first_name, v.patient_last_name].filter(Boolean).join(" ") };
-      for (const k of ["date_of_service", "date_claim_submitted", "date_of_denial", "date_of_final_determination"]) {
-        if (!v[k]) continue;
-        c[k] = realDate(isoDate(v[k]));
-        if (!c[k]) problems.push(`Row ${line} (claim ${c.claim_number}): "${v[k]}" is not a date — left blank`);
+      const c = { claim_number: cellText(v.claim_number).slice(0, 60), type_of_service: cellText(v.type_of_service),
+        patient_name: cellText(v.patient_name) || [cellText(v.patient_first_name), cellText(v.patient_last_name)].filter(Boolean).join(" ") };
+      for (const k of DATE_COLS) {
+        if (v[k] == null) continue;
+        c[k] = typeof v[k] === "number" ? (v[k] > 0 && v[k] < 2958466 ? serialDate(v[k]) : "") : realDate(isoDate(v[k]));
+        if (!c[k]) problems.push(`Row ${line} (claim ${c.claim_number}): "${cellText(v[k])}" is not a date — left blank`);
       }
       for (const [k, col] of [["billed_cents", "billed"], ["paid_cents", "paid"], ["disputed_cents", "disputed"]]) {
-        if (!v[col]) continue;
-        const cents = csvCents(v[col]);
-        if (Number.isNaN(cents)) problems.push(`Row ${line} (claim ${c.claim_number}): "${v[col]}" is not an amount — left blank`);
+        if (v[col] == null) continue;
+        const cents = cellCents(v[col]);
+        if (Number.isNaN(cents)) problems.push(`Row ${line} (claim ${c.claim_number}): "${cellText(v[col])}" is not an amount — left blank`);
         else c[k] = cents;
       }
       claims.push(c);
     });
     return { claims, problems };
   }
-  async function claimsFromCsv(input) {
+  async function claimsFromXlsx(input) {
     const sec = input.closest(".pf-sec"), pf = input.closest(".pf"), msg = sec.querySelector(".pf-csv-msg"), file = input.files[0];
     if (!file) return;
-    msg.textContent = "Reading the file…";
+    msg.textContent = "Reading the workbook…";
     try {
-      if (file.size > 2 << 20) throw new Error("That file is too large — a CSV of up to 500 claims is well under 2 MB.");
-      const { claims, problems } = claimsFromCsvText(await file.text());
+      if (!/\.xlsx$/i.test(file.name)) throw new Error("Upload an Excel workbook (.xlsx). In Excel, use File › Save As › Excel Workbook.");
+      if (file.size > 5 << 20) throw new Error("That file is too large — a workbook of up to 500 claims is well under 5 MB.");
+      const { claims, problems } = claimsFromRows(await xlsxRows(await file.arrayBuffer()));
       const tb = sec.querySelector("tbody");
       const filled = (tr) => [...tr.querySelectorAll("input[data-col]")].some((x) => x.value.trim());
       tb.querySelectorAll("tr.pf-claim").forEach((tr) => { if (!filled(tr)) tr.remove(); });
@@ -331,24 +436,23 @@ window.PacketForm = (() => {
       pf.dataset.touched = "1";
       const notes = [`Added ${added} claim${added === 1 ? "" : "s"} from ${file.name}.`];
       if (dup) notes.push(`${dup} already in the table, skipped.`);
-      if (over) notes.push(`${over} over the ${MAX_CLAIMS}-claim limit, not added — file the rest as a separate dispute or attach them as a spreadsheet.`);
+      if (over) notes.push(`${over} over the ${MAX_CLAIMS}-claim limit, not added — file the rest as a separate dispute.`);
       if (problems.length) notes.push(problems.slice(0, 5).join("; ") + (problems.length > 5 ? `; and ${problems.length - 5} more` : "") + ".");
       if (added) notes.push("Check the rows below before you send.");
       msg.textContent = notes.join(" ");
     } catch (e) {
-      msg.textContent = e.message || "Could not read that file.";
+      msg.textContent = e.message || "Could not read that workbook.";
     } finally {
       input.value = ""; // picking the same file again re-reads it
     }
   }
-  function csvTemplate(ev) {
+  function xlsxTemplate(ev) {
     ev.preventDefault();
     const head = CLAIM_COLS.map(([, label]) => label);
-    const example = ["ABC123456", "Jane Doe", "Emergency room visit", "01/15/2026", "1250.00", "300.00", "950.00", "02/01/2026", "03/01/2026", "04/15/2026"];
-    const csv = [head, example].map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(",")).join("\r\n") + "\r\n";
+    const example = ["ABC123456", "Jane Doe", "Emergency room visit", "01/15/2026", 1250, 300, 950, "02/01/2026", "03/01/2026", "04/15/2026"];
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = "claims-template.csv";
+    a.href = URL.createObjectURL(new Blob([xlsxBytes([head, example])], { type: XLSX_TYPE }));
+    a.download = "claims-template.xlsx";
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
@@ -397,8 +501,46 @@ window.PacketForm = (() => {
       }
       claims.push(c);
     });
+    if (pf.dataset.filer === "1") problems.push(...requiredProblems(details, amt, claims));
     const remove = (pf.dataset.removed || "").split("\n").filter((x) => x && !claims.some((c) => c.claim_number === x));
     return { packet: { details, disputed_amount_cents: amt, claims, remove_claims: remove }, problems };
+  }
+
+  // The change log's required fields (2026-11-25 #2) -- the same list filing_packet.go requiredProblems enforces.
+  const REQUIRED_DOCS = DOCUMENTS.filter(([, , req]) => req).map(([k]) => k);
+  function requiredProblems(d, amt, claims) {
+    const out = [], other = (k, o) => d[k] && (d[k] !== "Other" || d[o]);
+    if (!other("packet_provider_type", "provider_type_other")) out.push("Provider type is required");
+    if (!d.health_plan) out.push("Health plan name is required");
+    if (!other("plan_type", "plan_type_other")) out.push("Health plan type is required");
+    if (!other("type_of_service", "type_of_service_other")) out.push("Type of service is required");
+    if (!(Number(d.claims_submitted) >= 1)) out.push("Number of claims is required");
+    if (!(amt > 0)) out.push("Aggregated disputed amount is required");
+    if (!claims.length) out.push("Claim(s) information: enter at least one claim");
+    if (REQUIRED_DOCS.some((k) => !(d.packet_documents_submitted || []).includes(k))) out.push("Supporting documents: tick every required document (*) you are submitting");
+    if (!d.certification_agreed || !d.certified_by_name || !d.certified_by_title || !d.certified_on) out.push("Certification: tick it and enter your name, title and the date");
+    return out;
+  }
+
+  // The files that go with the filing (change log #6, #8): the packet PDF the form was filled from, and the AOR
+  // letter. [{kind, filename, data_b64}] for packet.attachments; PDFs up to 10 MB.
+  async function attachments(root) {
+    const host = root.querySelector(".pf")?.parentElement || root, out = [];
+    const b64 = async (f) => { const u8 = new Uint8Array(await f.arrayBuffer()); let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
+    const add = async (kind, f, what) => {
+      if (!f) return;
+      if (f.size > 10 << 20) throw new Error(`${what} is over 10 MB.`);
+      if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") throw new Error(`${what} must be a PDF.`);
+      out.push({ kind, filename: f.name, data_b64: await b64(f) });
+    };
+    await add("filing_packet", host._packetFile, "The packet PDF");
+    await add("aor_letter", host.querySelector('input[name="aor_letter_file"]')?.files?.[0], "The appointment of representative letter");
+    return out;
+  }
+  function clearFiles(root) {
+    const host = root.querySelector(".pf")?.parentElement || root;
+    delete host._packetFile;
+    const f = host.querySelector('input[name="aor_letter_file"]'); if (f) f.value = "";
   }
 
   // Who is who in a read packet: the side filing and the side the dispute is against, from its own fields.
@@ -414,8 +556,8 @@ window.PacketForm = (() => {
     const host = root.querySelector(".pf")?.parentElement || root;
     const id = (root.querySelector(".pf") || {}).id;
     const party = opts.partyFixed || root.querySelector('input[type=hidden][name="d.filing_party_type"]')?.value;
-    const wasTouched = touched(host);
-    host.innerHTML = html(values, { id, partyFixed: party });
+    const wasTouched = touched(host), filer = (root.querySelector(".pf") || {}).dataset?.filer === "1";
+    host.innerHTML = html(values, { id, partyFixed: party, filer: opts.filer ?? filer });
     bind(host);
     if (wasTouched || opts.touched) host.querySelector(".pf").dataset.touched = "1";
   }
@@ -491,11 +633,12 @@ window.PacketForm = (() => {
     try {
       const values = await fromPdf(file);
       fill(host, values, { touched: true });
+      host._packetFile = file; // kept with the filing (change log #8)
       host.dispatchEvent(new CustomEvent("packetfilled", { detail: values, bubbles: true }));
       msg.textContent = `Filled in from ${file.name} — check every section before you send it.`;
     } catch (e) { msg.textContent = e.message; }
   }
 
   return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS,
-    claimsFromCsv, claimsFromCsvText, csvTemplate };
+    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles };
 })();

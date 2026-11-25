@@ -1647,3 +1647,6 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .change-req{margin:8px 0 12px;padding:12px}
 .tpa-filing-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:10px 0 16px}
 .tpa-filing-actions .mfield{flex:1 1 100%}
+.chip-pdf{background:#e6f4ea;color:#1e6b34}
+.chip-form{background:#eef2ff;color:#3730a3}
+.warn-chip{background:#fff4e5;color:#8a4b00}
