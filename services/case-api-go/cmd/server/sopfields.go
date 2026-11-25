@@ -2,12 +2,12 @@
 // sopfields.go — the case fields the SOP assigns to one role each.
 //
 //   - Review notes: five fields, each written by the role that owns it
-//     (Reviewer/PM: Internal Case Review; Coder: Coder Review;
+//     (Admin/PM: Internal Case Review; Coder: Coder Review;
 //     Nurse/Physician: Clinical Review; Attorney: Legal Review; and the
 //     external Comments/Notes that go to the agency).
 //   - Dispute Summary: the Coder's -- plan type verified from the plan's
 //     letterhead, the summary, and the full review cost estimate.
-//   - AOR confirmation: the Attorney's ruling on an AOR the Reviewer flagged.
+//   - AOR confirmation: the Attorney's ruling on an AOR the Admin flagged.
 //   - Eligibility checklist: a printable record of the latest review.
 //
 // Everything is kept in the case's details JSON, so it travels with the case
@@ -165,7 +165,7 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	msg := "Dispute Summary completed by " + displayName(p)
 	if in.EstimateCents != nil {
-		// The SOP has the estimate recorded where the Reviewer and PM read it.
+		// The SOP has the estimate recorded where the Admin and PM read it.
 		msg += fmt.Sprintf(" — full review cost estimate $%d.%02d", *in.EstimateCents/100, *in.EstimateCents%100)
 		if b := strings.TrimSpace(in.EstimateBasis); b != "" {
 			msg += " (" + b + ")"
@@ -173,7 +173,7 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.EstimateCents != nil {
 		// "...records it in Internal Case Review notes": add a dated line to
-		// that field, leaving what the Reviewer and PM wrote in place.
+		// that field, leaving what the Admin and PM wrote in place.
 		line := fmt.Sprintf("[%s] Full review cost estimate: $%d.%02d", time.Now().UTC().Format("01/02/2006"), *in.EstimateCents/100, *in.EstimateCents%100)
 		if b := strings.TrimSpace(in.EstimateBasis); b != "" {
 			line += " (" + b + ")"
@@ -193,7 +193,7 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 // confirmAOR: POST /cases/{caseId}/aor-confirmation {valid, reason} — the
-// Attorney's ruling on an AOR the Reviewer recorded as invalid.
+// Attorney's ruling on an AOR the Admin recorded as invalid.
 func (s *server) confirmAOR(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {

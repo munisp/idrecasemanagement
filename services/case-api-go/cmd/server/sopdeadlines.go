@@ -349,11 +349,11 @@ func (s *server) fwaAction(w http.ResponseWriter, r *http.Request) {
 	}
 	caseID := chi.URLParam(r, "caseId")
 	var in struct {
-		Action   string `json:"action"`
-		Reason   string `json:"reason"`
-		Reviewer string `json:"reviewer"`
-		Agree    *bool  `json:"agree"`
-		Summary  string `json:"summary"`
+		Action  string `json:"action"`
+		Reason  string `json:"reason"`
+		Admin   string `json:"reviewer"`
+		Agree   *bool  `json:"agree"`
+		Summary string `json:"summary"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
@@ -397,11 +397,11 @@ func (s *server) fwaAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"nothing has been reported on this case"}`, http.StatusConflict)
 			return
 		}
-		if strings.TrimSpace(in.Reviewer) == "" {
+		if strings.TrimSpace(in.Admin) == "" {
 			http.Error(w, `{"error":"name the independent reviewer"}`, http.StatusBadRequest)
 			return
 		}
-		cur["status"], cur["reviewer"], cur["assigned_by"], cur["assigned_at"] = "UNDER_REVIEW", strings.TrimSpace(in.Reviewer), displayName(p), now
+		cur["status"], cur["reviewer"], cur["assigned_by"], cur["assigned_at"] = "UNDER_REVIEW", strings.TrimSpace(in.Admin), displayName(p), now
 	case "conclude":
 		if !isPM {
 			http.Error(w, `{"error":"forbidden: the PM records the outcome"}`, http.StatusForbidden)

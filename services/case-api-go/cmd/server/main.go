@@ -668,7 +668,7 @@ func main() {
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
 		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
-		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Reviewers in turn: on/off, the rotation, who is next
+		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Admins in turn: on/off, the rotation, who is next
 		r.Put("/assignment/auto", s.setAutoAssign)
 		r.Post("/assignment/auto/assign-open", s.assignOpenCases) // the unassigned backlog, in turn (autoassign.go)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
@@ -856,10 +856,10 @@ func main() {
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                                  // suspend|reactivate
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                                  // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)                                 // past reviews (G2)
-		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote)               // notes on a review (Reviewer, PM, Attorney)
+		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote)               // notes on a review (Admin, PM, Attorney)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist)                     // printable Eligibility Checklist
 		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                                          // the SOP steps: done, next, upcoming
-		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Reviewer: outcome, claims reviewed, award, party billed
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Admin: outcome, claims reviewed, award, party billed
 		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                              // the written decision: sections, amounts, claims tables
 		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
 		r.Post("/cases/{caseId}/revision-request", s.requestRevisions)         // the Attorney (or QA) asks the Coder / Nurse for revisions (role_notify.go)
@@ -1465,7 +1465,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	}
 	// Case-management enrichment: stage checklists + duplicate detection + timeline.
 	s.ensureChecklist(r, tenant, caseID)
-	s.autoAssignNewCase(r, tenant, caseID, req.CaseNumber) // the next Reviewer in turn (autoassign.go)
+	s.autoAssignNewCase(r, tenant, caseID, req.CaseNumber) // the next Admin in turn (autoassign.go)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
 		fmt.Sprintf("Dispute %s initiated (%s) — %s / %s, QPA $%d.%02d, workflow %s",
 			req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
@@ -1482,7 +1482,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 				INSERT INTO public.sla_breaches (tenant, case_id, clock, detail)
 				VALUES ($1,$2,'INITIATION_4BD',$3)`, tenant, caseID, detail)
 			s.logActivity(r.Context(), tenant, caseID, "LATE_INITIATION_FLAGGED", detail)
-			s.notify(r, tenant, "*", "LATE_INITIATION",
+			s.caseAlert(r, tenant, caseID, "LATE_INITIATION",
 				fmt.Sprintf("Case %s %s — flagged for compliance review", req.CaseNumber, detail),
 				fmt.Sprintf("#/cases/%s", caseID))
 		}
@@ -1631,7 +1631,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	if q.Get("mine") == "true" {
 		add("c.assigned_to = $%d", caller.Subject)
 	}
-	// A Reviewer sees only unassigned cases and their own (casescope.go).
+	// An Admin sees only unassigned cases and their own (casescope.go).
 	if cond, ok := caseScopeSQL(caller, "c", len(args)+1); ok {
 		args = append(args, caller.Subject)
 		where += cond
@@ -1870,7 +1870,7 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 // response and returns false when it refuses.
 func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenant, id, signal string, data map[string]any, reviewNote string) bool {
 	// Only the events the case workflows know. Any other name used to be accepted and written to the case's
-	// timeline under that name -- a Reviewer could post a "QA_APPROVED" or "INVOICE_PAID" entry.
+	// timeline under that name -- an Admin could post a "QA_APPROVED" or "INVOICE_PAID" entry.
 	if !knownCaseSignals[signal] {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown case event %q", signal)})
 		return false
@@ -1972,13 +1972,11 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		return false
 	}
 	s.notifyOnSignal(r, tenant, id, signal, data) // change log 2026-11-25 #14/#24 (role_notify.go)
-	// The Reviewer tells the Coder and the Attorney the packet is in: the
+	// The Admin tells the Coder and the Attorney the packet is in: the
 	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
 	if signal == "PACKET_COMPLETE" {
-		for _, role := range []string{"CODER", "ATTORNEY"} {
-			s.notify(r, tenant, "role:"+role, "PACKET_COMPLETE",
-				fmt.Sprintf("Case %s: the filing packet is complete and has been checked by the Reviewer", caseNumber), "#/cases/"+id)
-		}
+		s.caseAlert(r, tenant, id, "PACKET_COMPLETE",
+			fmt.Sprintf("Case %s: the filing packet is complete and has been checked by the Admin", caseNumber), "", "CODER", "ATTORNEY")
 	}
 	// The filing packet's claim count is recorded with the step that
 	// confirms the packet (report column E).
@@ -1992,7 +1990,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	if signal == "RFI_RESPONSE_RECEIVED" {
 		s.setProgramDateOn(r.Context(), tenant, id, "rfi_response_received_at", stepDay)
 	}
-	if signal == "ESTIMATE_PERMISSION" { // recorded by the Reviewer: the portal request is answered
+	if signal == "ESTIMATE_PERMISSION" { // recorded by the Admin: the portal request is answered
 		s.closePermissionRequests(r.Context(), tenant, id, "COMPLETE")
 	}
 	// The answer is the case's too: the acceptance letter and email drop the estimate language without one.

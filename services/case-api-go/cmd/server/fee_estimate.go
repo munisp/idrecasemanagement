@@ -7,8 +7,8 @@ package main
 //
 // When it is on and a filer answers "Yes" to "Do you want an estimate of the full review fee?", the filing form
 // shows the estimate (with the program's note: it is preliminary), and the case keeps it as
-// details.fee_estimate_preview_cents. The Reviewer's Cost Estimate letter stays the official figure: the case
-// page offers the preview as the starting value of the estimate, which the Reviewer can change.
+// details.fee_estimate_preview_cents. The Admin's Cost Estimate letter stays the official figure: the case
+// page offers the preview as the starting value of the estimate, which the Admin can change.
 //
 // Kept apart from program_rules.config->'fees' (migration-only, guarded by a trigger) because the office edits
 // it; every change is kept in fee_estimate_settings_history (scripts/fee_estimate.sql).

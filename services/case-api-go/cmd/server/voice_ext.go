@@ -78,7 +78,7 @@ func (s *server) outboundCall(w http.ResponseWriter, r *http.Request) {
 	// caller chooses, had no role check at all: any signed-in member of the
 	// tenant could do it. It belongs to the Voice console's roles.
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: outbound calls are placed by the Reviewer or an administrator"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: outbound calls are placed by the Admin or an administrator"}`, http.StatusForbidden)
 		return
 	}
 	var in struct {

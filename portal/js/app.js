@@ -101,6 +101,8 @@
     Api.program.tenantLabels().then((labels) => { tenantLabels = labels || {}; paintChip(); }).catch(() => {});
   } else {
     Api.program.get().then((pr) => {
+      // The staff roles this program uses (program config staff_roles; none listed = every role).
+      window.PROGRAM_STAFF_ROLES = (pr?.config?.staff_roles || []).length ? pr.config.staff_roles : null;
       const label = pr?.tenant_label;
       if (label) { tenantLabels[Api.getTenant()] = label; paintChip(); }
     }).catch(() => {});
@@ -206,7 +208,7 @@
   if (!programmed && has("PARTY", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/new", "＋", "New dispute"]);
   // TPA excluded -- Ask the graph answers from the whole tenant's case
   // data; matches the backend's graphAsk/graphFeedback TPA exclusion.
-  // Hidden from a Reviewer who sees only their own cases: it answers from every case in the tenant.
+  // Hidden from an Admin who sees only their own cases: it answers from every case in the tenant.
   if (!outside && !has("PARTY") && !Auth.reviewerScoped()) links.push(["#/ask", "✦", "Ask the graph"]);
   // Party workspace: an invited party's own disputes (party_accounts is the only source of access).
   if (has("PARTY") && feature("party_workspace")) links.push(["#/party", "⚭", "My disputes"]);
@@ -219,7 +221,7 @@
   if (queues && has("ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/LEGAL", "§", "Legal queue"]);
   if (queues && has("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/queues/pm", "▲", "PM board"]);
   if (has("CASE_MANAGER", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/assistant", "❖", "Assistant"]);
-  if (has("CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
+  if (has("CASE_MANAGER", "ARBITRATOR", "PM", "QA", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) {
     links.push(["#/qa", "✓", "QA gate"]);
     if (has("CASE_MANAGER", "PM", "ARBITRATOR", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) links.push(["#/doc-review", "◉", "Doc review"]);
   }

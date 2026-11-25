@@ -10,11 +10,11 @@ package main
 // someone who starts with fewer cases (cases also arrive by hand, by taking one, and leave by closing), so the load
 // comes first. Anyone suspended or taken out is skipped. On by default: a tenant with no row rotates.
 //
-//   - Reviewer: new cases are given out in turn as they are created (startAhcaCaseFull: the Florida intake in all its
+//   - Admin: new cases are given out in turn as they are created (startAhcaCaseFull: the Florida intake in all its
 //     forms; initiateCase: the federal one), filling only a case nobody holds yet. A case waiting on its initial fee
 //     is locked until it is paid, so it gets nobody (and uses no turn) until the payment opens it
 //     (activatePaidIntakeFor).
-//   - Every role, Reviewer included: when the PM hands a case to a role, "Next in turn" picks that role's next person
+//   - Every role, Admin included: when the PM hands a case to a role, "Next in turn" picks that role's next person
 //     (assignCase with next=true).
 //
 // The PM and the Tenant Admin change or undo any assignment as before (assignCase); a rotation simply carries on from
@@ -218,8 +218,8 @@ func (s *server) takeTurn(ctx context.Context, tenant, role, skip string, apply 
 	return who, names[who], nil
 }
 
-// autoAssignNewCase gives a just-created case to the next Reviewer in the rotation. Best-effort: when it is off,
-// there is no Reviewer, or anything fails, the case simply stays unassigned (the PM assigns it, or a Reviewer takes
+// autoAssignNewCase gives a just-created case to the next Admin in the rotation. Best-effort: when it is off,
+// there is no Admin, or anything fails, the case simply stays unassigned (the PM assigns it, or an Admin takes
 // it from the pool). Returns who got it ("" = nobody).
 func (s *server) autoAssignNewCase(r *http.Request, tenant, caseID, caseNumber string) string {
 	ctx := r.Context()
@@ -243,7 +243,7 @@ func (s *server) autoAssignNewCase(r *http.Request, tenant, caseID, caseNumber s
 	if who == "" {
 		return ""
 	}
-	s.logActivity(ctx, tenant, caseID, "MILESTONE", fmt.Sprintf("Assigned to %s (Reviewer) automatically, in turn", name))
+	s.logActivity(ctx, tenant, caseID, "MILESTONE", fmt.Sprintf("Assigned to %s (Admin) automatically, in turn", name))
 	s.logAudit(ctx, tenant, caseID, "CASE_ASSIGNED", map[string]any{
 		"by": "auto-assign", "assigned_to": who, "previous": "", "role": "CASE_MANAGER", "auto": true, "rule": "least_loaded_round_robin",
 	})
@@ -266,7 +266,7 @@ func canManageAssignment(p principal) bool {
 	return hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")
 }
 
-// rotationRole: the role a request is about (?role= or the body's), Reviewer when not given.
+// rotationRole: the role a request is about (?role= or the body's), Admin when not given.
 func rotationRole(raw string) (string, bool) {
 	role := strings.ToUpper(strings.TrimSpace(raw))
 	if role == "" {
@@ -277,7 +277,7 @@ func rotationRole(raw string) (string, bool) {
 }
 
 // getAutoAssign: GET /assignment/auto?role=CODER — whether the role's rotation is on, who is in it (with their open
-// caseload) and who gets the next case. Reviewer when no role is given.
+// caseload) and who gets the next case. Admin when no role is given.
 func (s *server) getAutoAssign(w http.ResponseWriter, r *http.Request) {
 	s.writeAutoAssign(w, r, r.URL.Query().Get("role"))
 }
@@ -396,8 +396,8 @@ const backlogCond = `(assigned_to IS NULL OR assigned_to = 'unassigned-pool')
 	AND coalesce(status,'') NOT IN ('AWAITING_PAYMENT','INELIGIBLE') AND ` + openCaseCond
 
 // assignOpenCases: POST /assignment/auto/assign-open — give the open cases nobody holds (cases from before automatic
-// assignment, or filed while it was off) to the Reviewers, oldest first, by the same rule as new cases. Up to 500 per
-// call; the answer says how many are left. Each Reviewer is told once, with their count.
+// assignment, or filed while it was off) to the Admins, oldest first, by the same rule as new cases. Up to 500 per
+// call; the answer says how many are left. Each Admin is told once, with their count.
 func (s *server) assignOpenCases(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !canManageAssignment(p) {
@@ -432,10 +432,10 @@ func (s *server) assignOpenCases(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case errors.Is(err, errRotationOff):
-			writeJSON(w, http.StatusConflict, map[string]any{"error": "the Reviewer rotation is off — turn it on first", "assigned": assigned})
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "the Admin rotation is off — turn it on first", "assigned": assigned})
 			return
 		case errors.Is(err, errRotationEmpty):
-			writeJSON(w, http.StatusConflict, map[string]any{"error": "nobody is in the Reviewer rotation — add someone first", "assigned": assigned})
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "nobody is in the Admin rotation — add someone first", "assigned": assigned})
 			return
 		case err != nil:
 			log.Printf("assign-open %s/%s: %v", tenant, c.number, err)
@@ -446,7 +446,7 @@ func (s *server) assignOpenCases(w http.ResponseWriter, r *http.Request) {
 		assigned++
 		given[who]++
 		names[who] = name
-		s.logActivity(ctx, tenant, c.id, "MILESTONE", fmt.Sprintf("Assigned to %s (Reviewer) in turn, from the unassigned cases, by %s", name, by))
+		s.logActivity(ctx, tenant, c.id, "MILESTONE", fmt.Sprintf("Assigned to %s (Admin) in turn, from the unassigned cases, by %s", name, by))
 		s.logAudit(ctx, tenant, c.id, "CASE_ASSIGNED", map[string]any{
 			"by": p.Subject, "assigned_to": who, "previous": "", "role": "CASE_MANAGER", "auto": true,
 			"rule": "least_loaded_round_robin", "backlog": true,

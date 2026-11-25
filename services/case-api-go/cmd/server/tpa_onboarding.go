@@ -884,7 +884,7 @@ func (s *server) tpaPackageStatus(w http.ResponseWriter, r *http.Request) {
 
 // packageFileable: a set can be filed with its dispute once every document in it has been read -- any documents,
 // as many as the dispute relies on, the six or not. The check of each document against its slot is a flag for the
-// Reviewer (who confirms the filing packet is complete), never a gate. prefix: tpa | hp.
+// Admin (who confirms the filing packet is complete), never a gate. prefix: tpa | hp.
 func (s *server) packageFileable(ctx context.Context, tenant, prefix, pkgID string) (bool, string) {
 	var status string
 	var docs, reading int

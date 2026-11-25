@@ -10,8 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Notes on eligibility reviews (scripts/eligibility_notes.sql). The Reviewer's working notes go in with the review
-// itself; the PM and the Attorney (and the Reviewer again) can add notes to a review afterwards. Notes are
+// Notes on eligibility reviews (scripts/eligibility_notes.sql). The Admin's working notes go in with the review
+// itself; the PM and the Attorney (and the Admin again) can add notes to a review afterwards. Notes are
 // append-only: the record keeps who wrote what, when, in which role.
 
 const eligibilityNoteMax = 4000
@@ -54,7 +54,7 @@ func (s *server) insertEligibilityNote(ctx context.Context, tenant, caseID, revi
 func (s *server) addEligibilityNote(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, eligibilityNoteRoles...) {
-		http.Error(w, `{"error":"forbidden: eligibility notes are written by the Reviewer, the PM or the Attorney"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: eligibility notes are written by the Admin, the PM or the Attorney"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

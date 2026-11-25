@@ -81,10 +81,10 @@ func TestReviewNoteOwners(t *testing.T) {
 
 func TestEligibilityChecklistHTML(t *testing.T) {
 	at := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
-	out := eligibilityChecklistHTML("FL26-000187", "INELIGIBLE", "below_threshold", "R. Reviewer <x>", at,
+	out := eligibilityChecklistHTML("FL26-000187", "INELIGIBLE", "below_threshold", "R. Admin <x>", at,
 		map[string]any{"provider_type": "physician_dentist", "threshold_min_cents": 50000, "flags": nil})
 	for _, want := range []string{"Eligibility Checklist — FL26-000187", "INELIGIBLE", "below threshold",
-		"October 11, 2026", "provider type", "physician_dentist", "R. Reviewer &lt;x&gt;"} {
+		"October 11, 2026", "provider type", "physician_dentist", "R. Admin &lt;x&gt;"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("checklist is missing %q", want)
 		}

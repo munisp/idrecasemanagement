@@ -64,7 +64,7 @@ func generateTempPassword() (string, error) {
 var validTenantRoles = map[string]bool{
 	"CASE_MANAGER": true, "ARBITRATOR": true, "PM": true, "CODER": true,
 	"NURSE_PHYSICIAN": true, "DOCTOR": true, "NURSE": true, "ATTORNEY": true, "FINANCE": true,
-	"STATE_AUDITOR": true, "PARTY": true, "TPA": true, "TENANT_ADMIN": true,
+	"STATE_AUDITOR": true, "PARTY": true, "TPA": true, "TENANT_ADMIN": true, "QA": true,
 }
 
 type createTenantRequest struct {
@@ -319,7 +319,7 @@ func (s *server) createTenant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !validTenantRoles[in.FirstUser.Role] {
-			http.Error(w, `{"error":"first_user.role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"first_user.role must be one of CASE_MANAGER, ARBITRATOR, PM, QA, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY"}`, http.StatusBadRequest)
 			return
 		}
 	}
@@ -484,7 +484,7 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !validTenantRoles[in.Role] {
-		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY, TENANT_ADMIN"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"role must be one of CASE_MANAGER, ARBITRATOR, PM, QA, CODER, DOCTOR, NURSE, NURSE_PHYSICIAN, ATTORNEY, FINANCE, STATE_AUDITOR, PARTY, TENANT_ADMIN"}`, http.StatusBadRequest)
 		return
 	}
 	// TENANT_ADMIN is deliberately the one role in validTenantRoles that
@@ -494,6 +494,10 @@ func (s *server) createTenantStaff(w http.ResponseWriter, r *http.Request) {
 	// a self-escalating admin chain within one state.
 	if in.Role == "TENANT_ADMIN" && !isAdmin {
 		http.Error(w, `{"error":"forbidden: only FEDERAL_ADMIN/PLATFORM_ADMIN may create a TENANT_ADMIN account"}`, http.StatusForbidden)
+		return
+	}
+	if !s.programAllowsRole(r, in.Tenant, in.Role) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("this program does not use the %s role", staffRoleWord(in.Role))})
 		return
 	}
 	var exists bool

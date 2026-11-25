@@ -7,7 +7,7 @@ const ConfigViews = (() => {
   const can = (...rs) => Auth.can(...rs);
   const money = (c) => c == null ? "—" : "$" + (Number(c) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const cents = (v) => Math.round(Number(String(v).replace(/[$,\s]/g, "")) * 100);
-  const ROLE = { CASE_MANAGER: "Reviewer", PM: "Project manager", CODER: "Coder", NURSE_PHYSICIAN: "Nurse / physician", DOCTOR: "Physician",
+  const ROLE = { CASE_MANAGER: "Admin", PM: "Project manager", CODER: "Coder", NURSE_PHYSICIAN: "Nurse / physician", DOCTOR: "Physician",
     NURSE: "Nurse", ATTORNEY: "Attorney", ARBITRATOR: "Arbitrator", FINANCE: "Finance" };
   const PTYPE = { hospital_inpatient: "Hospital — inpatient", hospital_outpatient: "Hospital — outpatient", physician_dentist: "Physician / dentist",
     rural_hospital: "Rural hospital", other: "Other" };
@@ -198,7 +198,7 @@ const ConfigViews = (() => {
   function outcomesHtml() {
     const edit = C.can_edit, list = C.outcomes || [];
     return `<h2>Case outcomes</h2>
-      <p class="muted">The outcomes a case can end with, and what each means. The Reviewer picks one when recording the outcome; it goes on the reports to the Agency and at the top of the case page. Cases keep the outcome they were given if it is later renamed or removed.</p>
+      <p class="muted">The outcomes a case can end with, and what each means. The Admin picks one when recording the outcome; it goes on the reports to the Agency and at the top of the case page. Cases keep the outcome they were given if it is later renamed or removed.</p>
       <table class="tbl cfg-outcomes" data-nosearch data-csort="kept-in-order"><thead><tr><th>Outcome</th><th>Definition</th>${edit ? "<th></th>" : ""}</tr></thead><tbody>
         ${list.map((o, i) => `<tr><td>${edit ? `<input data-o="${i}" data-f="name" value="${esc(o.name)}" aria-label="Outcome name" />` : `<b>${esc(o.name)}</b>`}</td>
           <td>${edit ? `<textarea data-o="${i}" data-f="definition" rows="2" aria-label="Definition of ${esc(o.name)}">${esc(o.definition || "")}</textarea>` : esc(o.definition || "—")}</td>

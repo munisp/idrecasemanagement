@@ -3,7 +3,7 @@
 //
 // Each section of the report is written by the people who own it: the physician's review by the clinical
 // reviewers, the coding review and the claims tables by the coder, the applicable law by the attorney; the
-// Reviewer and the PM may edit all of it. The server says which parts the caller may edit (can_edit) and refuses
+// Admin and the PM may edit all of it. The server says which parts the caller may edit (can_edit) and refuses
 // the rest regardless. Letters are built by lettergen from what is saved here and go to the QA queue.
 const Letters = (() => {
   const afterRender = (fn) => setTimeout(fn, 0);
@@ -19,31 +19,31 @@ const Letters = (() => {
 
   // [key, label, who writes it, hint, kind]
   const CLAIM_SECTIONS = [
-    ["claim_summary", "Claim summary", "Reviewer", "Left blank, the report says: “This case concerns N claims brought by the provider for services rendered to N patients enrolled in the plan.”"],
-    ["dispute_issue", "What the dispute is about", "Reviewer", "For example: “This dispute is regarding the appropriate reimbursement amount for the emergent surgical procedures provided to five (5) patients.”"],
-    ["provider_position", "Provider’s position", "Reviewer"],
-    ["plan_position", "Health Plan’s position", "Reviewer"],
+    ["claim_summary", "Claim summary", "Admin", "Left blank, the report says: “This case concerns N claims brought by the provider for services rendered to N patients enrolled in the plan.”"],
+    ["dispute_issue", "What the dispute is about", "Admin", "For example: “This dispute is regarding the appropriate reimbursement amount for the emergent surgical procedures provided to five (5) patients.”"],
+    ["provider_position", "Provider’s position", "Admin"],
+    ["plan_position", "Health Plan’s position", "Admin"],
     ["applicable_law", "Applicable law", "Attorney"],
-    ["analysis", "Analysis and conclusion", "Reviewer", "Printed at the end of the Rationale, before the reviews."],
+    ["analysis", "Analysis and conclusion", "Admin", "Printed at the end of the Rationale, before the reviews."],
     ["physician_review", "Independent Physician Review", "Nurse / Physician"],
     ["coding_review", "Coding Consultant Review", "Coder"],
     ["pricing_method", "How the claims were priced", "Coder", "For example: “Capitol Bridge used FAIR Health (80th percentile) to price all claims per Florida Statute § 641.513(5).”"],
-    ["closing_note", "Closing note", "Reviewer", "Optional — printed after “Based on the foregoing…”."],
-    ["case_file_summary", "Case File Summary (cover letter)", "Reviewer", "Left blank, the cover letter uses the claim summary."],
+    ["closing_note", "Closing note", "Admin", "Optional — printed after “Based on the foregoing…”."],
+    ["case_file_summary", "Case File Summary (cover letter)", "Admin", "Left blank, the cover letter uses the claim summary."],
     ["standard_of_review", "Standard of review", "Attorney", "Only to change the program’s standard wording."],
   ];
   const IRO_SECTIONS = [
-    ["iro_program_title", "Program line", "Reviewer", "Printed under the organization’s name, e.g. the state’s external review program."],
-    ["agency_case_no", "Agency case number", "Reviewer"],
-    ["iro_number", "IRO number", "Reviewer"],
-    ["plan_reference_no", "Plan reference number", "Reviewer"],
-    ["review_received_from", "Assignment received from", "Reviewer", "For example: “the Department of Insurance”."],
-    ["date_received", "Date received", "Reviewer", "", "date"],
-    ["records_received", "Case documentation received", "Reviewer", "", "date"],
-    ["decision_date", "Decision date", "Reviewer", "", "date"],
-    ["dates_of_service", "Date(s) of service", "Reviewer", "", "line"],
-    ["denial_reason", "Denial reason", "Reviewer", "", "line"],
-    ["claim_summary", "Claim summary", "Reviewer"],
+    ["iro_program_title", "Program line", "Admin", "Printed under the organization’s name, e.g. the state’s external review program."],
+    ["agency_case_no", "Agency case number", "Admin"],
+    ["iro_number", "IRO number", "Admin"],
+    ["plan_reference_no", "Plan reference number", "Admin"],
+    ["review_received_from", "Assignment received from", "Admin", "For example: “the Department of Insurance”."],
+    ["date_received", "Date received", "Admin", "", "date"],
+    ["records_received", "Case documentation received", "Admin", "", "date"],
+    ["decision_date", "Decision date", "Admin", "", "date"],
+    ["dates_of_service", "Date(s) of service", "Admin", "", "line"],
+    ["denial_reason", "Denial reason", "Admin", "", "line"],
+    ["claim_summary", "Claim summary", "Admin"],
     ["reviewer_credentials", "Who reviewed it", "Nurse / Physician", "For example: “A Capitol Bridge Medical Oncologist has reviewed this appeal… has more than five years of relevant practice experience.”"],
     ["determination_reason", "Because…", "Nurse / Physician", "Completes “…be overturned because …”.", "line"],
     ["evidence", "Evidence supporting the determination", "Nurse / Physician", "One reference per line."],
@@ -151,7 +151,7 @@ const Letters = (() => {
         <label><input type="radio" name="dr-mode" value="paste"${m === "paste" ? " checked" : ""}${dis} onchange="Letters.setMode('paste')" /> Paste the report</label>
         <label><input type="radio" name="dr-mode" value="upload"${m === "upload" ? " checked" : ""}${dis} onchange="Letters.setMode('upload')" /> Upload the finished report</label>
       </fieldset>
-      ${m === "paste" ? `<label class="dr-sec dr-full"><span><b>Review Rationale and Letter</b> <span class="chip">Reviewer</span>${(r.section_authors || {}).full_report ? `<span class="muted"> — last edited by ${esc(r.section_authors.full_report)}</span>` : ""}</span>
+      ${m === "paste" ? `<label class="dr-sec dr-full"><span><b>Review Rationale and Letter</b> <span class="chip">Admin</span>${(r.section_authors || {}).full_report ? `<span class="muted"> — last edited by ${esc(r.section_authors.full_report)}</span>` : ""}</span>
           <textarea data-sec="full_report" rows="${text.length > 2000 ? 24 : 14}" maxlength="200000"${dis} placeholder="Paste the whole report as it should read: the summary, the rationale, the reviews and the claims.">${esc(text)}</textarea>
           <span class="muted dr-hint">Blank lines start new paragraphs. “Generate the decision report” prints it on the letterhead, files it under Documents and sends it to the QA gate.</span></label>`
         : `<div class="dr-upload">
@@ -381,7 +381,7 @@ const Letters = (() => {
     const c = d.settings || {}, ro = d.can_edit ? "" : " disabled", m = c.method || "";
     const st = document.getElementById("fe-state");
     if (st) st.textContent = c.enabled ? "— on: filers who ask see an estimate" : "— off: filers who ask get the Cost Estimate letter only";
-    box.innerHTML = `<p class="muted">When this is on, a filer who answers <b>Yes</b> to “Do you want an estimate of the full review fee?” sees the estimate on the filing form, and the case keeps it. The Reviewer’s Cost Estimate letter stays the official figure, and the case page offers this estimate as its starting value.${d.can_edit ? "" : " Only an administrator can change it."}</p>
+    box.innerHTML = `<p class="muted">When this is on, a filer who answers <b>Yes</b> to “Do you want an estimate of the full review fee?” sees the estimate on the filing form, and the case keeps it. The Admin’s Cost Estimate letter stays the official figure, and the case page offers this estimate as its starting value.${d.can_edit ? "" : " Only an administrator can change it."}</p>
       <form id="fe-form" class="ls-form" onsubmit="event.preventDefault(); Letters.feSave(this)">
         <label class="fe-switch"><input type="checkbox" name="enabled"${c.enabled ? " checked" : ""}${ro} /> Show the estimate on the filing forms</label>
         <fieldset class="ls-group"><legend>How it is worked out</legend>

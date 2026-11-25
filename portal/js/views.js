@@ -94,11 +94,11 @@ const Views = (() => {
     date_final_order_sent: "Date Final Order Sent",
   };
   const SOP_NOTE_FIELDS = [
-    ["internal_case_review", "Internal Case Review notes", ["CASE_MANAGER", "PM"], "Reviewer / PM"],
+    ["internal_case_review", "Internal Case Review notes", ["CASE_MANAGER", "PM"], "Admin / PM"],
     ["coder_review", "Coder Review notes", ["CODER"], "Coder"],
     ["clinical_review", "Clinical Review notes", ["NURSE_PHYSICIAN", "DOCTOR", "NURSE"], "Nurse / Physician"],
     ["legal_review", "Legal Review notes", ["ATTORNEY"], "Attorney"],
-    ["external", "Comments/Notes (External for Florida)", ["CASE_MANAGER", "PM"], "Reviewer / PM"],
+    ["external", "Comments/Notes (External for Florida)", ["CASE_MANAGER", "PM"], "Admin / PM"],
   ];
   const sopStamp = (x) => (x && x.by ? `<span class="muted"> — ${esc(x.by)}, ${fmtDate(x.at)}</span>` : "");
   function sopNotesHtml(id, c) {
@@ -196,7 +196,7 @@ const Views = (() => {
       <ul>${cs.map((x) => `<li>${esc(name(x.field))}: case has <b>${esc(show(x.field, x.case_value))}</b>,
         ${esc(x.document || "a document")} says <b>${esc(show(x.field, x.document_value))}</b></li>`).join("")}</ul></div>`;
   }
-  // Case information: the fields the Reviewer completes after payment
+  // Case information: the fields the Admin completes after payment
   // (Provider & Health Plan Info), which the monthly report to Florida reads.
   function sopCaseInfoHtml(id, c, cfg) {
     const d = c.details || {}, fs = cfg.field_schema || {};
@@ -207,7 +207,7 @@ const Views = (() => {
     const inp = (name, label, extra = "") => `<label>${label} <input name="${name}" value="${esc(d[name] ?? "")}" ${extra} ${ro} /></label>`;
     const missing = ["line_of_business", "disputed_issue", "provider_street", "provider_postal"].filter((k) => !d[k]).length;
     return `<details class="prog-sec"><summary>Case information${missing && mine ? ` — ${missing} report field(s) not filled` : ""}</summary>
-      <p class="muted">Completed by the Reviewer. These go on the monthly report to Florida; the provider's name and the health plan come from the linked accounts unless typed here.</p>
+      <p class="muted">Completed by the Admin. These go on the monthly report to Florida; the provider's name and the health plan come from the linked accounts unless typed here.</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveCaseInfo('${id}', this)">
         <div class="field-grid">
           ${sel("line_of_business", "Line of business", fs.line_of_business)}
@@ -226,7 +226,7 @@ const Views = (() => {
       <div id="p-respondent" data-case="${esc(id)}">${(setTimeout(() => respondentBox(id), 0), "")}</div>${sopPacketFactsHtml(d)}</details>`;
   }
   // The other side's contact for dispute notices (change log 2026-11-25 #1): a provider is no longer asked for the
-  // health plan's at filing, so the Reviewer or the PM adds it here; saving it e-mails the plan if the dispute is
+  // health plan's at filing, so the Admin or the PM adds it here; saving it e-mails the plan if the dispute is
   // already eligible, and links the plan's portal account.
   async function respondentBox(id) {
     const box = document.getElementById("p-respondent");
@@ -728,7 +728,7 @@ const Views = (() => {
   }
   const packetErr = (e) => esc(e.message) + (e.problems ? ": " + esc(e.problems.join("; ")) : "");
   // The staff case page's "Filing packet": the packet's sections as the filer entered them or as document analysis
-  // read them from the uploaded packet; the Reviewer or PM corrects and saves (their values replace the case's).
+  // read them from the uploaded packet; the Admin or PM corrects and saves (their values replace the case's).
   const PACKET_EDITORS = ["CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"];
   function sopPacketFormHtml(id, c) {
     const staff = can(...PACKET_EDITORS);
@@ -742,7 +742,7 @@ const Views = (() => {
     }, 0);
     return `<details class="prog-sec" id="p-packet-details"><summary>Filing packet</summary>
       <p class="muted">The filing packet's sections — as the filer entered them, or as read from the uploaded packet.
-        ${staff ? "Correct anything here and save: your values replace the case's." : "Kept by the Reviewer and the PM."}</p>
+        ${staff ? "Correct anything here and save: your values replace the case's." : "Kept by the Admin and the PM."}</p>
       ${staff ? PacketForm.pdfPicker("#p-packet") : ""}<div id="p-packet"></div>
       ${staff ? `<button class="mini" onclick="Views.savePacketForm('${id}', this)">Save filing packet</button>` : ""}
       <div id="p-packet-out"></div></details>${caseChangesHtml(id)}`;
@@ -821,7 +821,7 @@ const Views = (() => {
       <input name="reviewer" required placeholder="independent reviewer (medical expertise)" value="${esc(f.reviewer || "")}" />
       <button class="mini">${f.reviewer ? "Change reviewer" : "Assign reviewer"}</button></form>`;
     if (isPM && f.status === "UNDER_REVIEW") body += `<form class="inline-form" onsubmit="event.preventDefault(); Views.fwaAct('${id}','conclude',this)">
-      <select name="agree" required><option value="">outcome…</option><option value="true">Reviewer agrees — refer to the agency</option><option value="false">Not substantiated</option></select>
+      <select name="agree" required><option value="">outcome…</option><option value="true">Admin agrees — refer to the agency</option><option value="false">Not substantiated</option></select>
       <input name="summary" required placeholder="findings and summary" style="flex:1;min-width:260px" /><button class="mini">Record outcome</button></form>`;
     return `<details class="prog-sec" ${open ? "open" : ""}><summary>Fraud, waste or abuse${open ? " — review open" : ""}</summary>
       <p class="muted">Any staff member who suspects fraud, waste or abuse records the reason here; it goes to the PM, who assigns an independent reviewer. Disputes of $1,000,000 or more are raised automatically.</p>${body}</details>`;
@@ -908,7 +908,7 @@ const Views = (() => {
     let r;
     try { r = await Api.program.workflow(id); }
     catch (e) {
-      // Reassigned to someone else while open: for a Reviewer the case is no longer theirs to see.
+      // Reassigned to someone else while open: for an Admin the case is no longer theirs to see.
       if (e.status === 404 && Auth.reviewerScoped()) { caseGone(); return; }
       box.innerHTML = `<p class="muted">⚠ Steps could not be loaded: ${esc(e.message)}</p>`; return;
     }
@@ -958,7 +958,7 @@ const Views = (() => {
     wfApplyLocks();
   }
   // Change log 2026-11-25 #19: the Final Order Rationale Copy is sent only when a party asks for it. Once the package
-  // has gone to AHCA, the Reviewer or the PM can add it as the last step.
+  // has gone to AHCA, the Admin or the PM can add it as the last step.
   function foCopyOffer(id, steps) {
     const sent = steps.some((x) => x.key === "letter:final_order" && x.state === "done");
     const listed = steps.some((x) => x.key === "letter:final_order_rationale_copy");
@@ -1010,7 +1010,7 @@ const Views = (() => {
     };
     step(0);
   }
-  // The case was reassigned away from this Reviewer while they had it open.
+  // The case was reassigned away from this Admin while they had it open.
   function caseGone() {
     clearInterval(wfPoll); clearTimeout(wfTimer); window._wf = null;
     UI.toast("This case was reassigned to someone else and is no longer on your list.", { kind: "warn", duration: 9000 });
@@ -1607,7 +1607,7 @@ const Views = (() => {
     sel.insertAdjacentHTML("beforeend", types.map((x) => `<option value="${esc(x)}">${esc(providerTypeLabel(x))}</option>`).join(""));
     sel.dataset.filled = "1";
   }
-  // The eligibility inputs, as the Reviewer knows them.
+  // The eligibility inputs, as the Admin knows them.
   const ELIG_INPUT_LABELS = {
     provider_type: ["Provider type", "what kind of provider this is"],
     contracted: ["In the plan's network", "whether the provider is in the health plan's network"],
@@ -1728,7 +1728,7 @@ const Views = (() => {
         selection.clear(); App.rerender();
       }, "Assigning…");
     };
-    // PM: route the whole selection, any roles at once (e.g. when someone leaves or is overloaded): the Reviewer holds
+    // PM: route the whole selection, any roles at once (e.g. when someone leaves or is overloaded): the Admin holds
     // each case, the specialists are added alongside. Rows left on "Keep" are not touched.
     const assignTo = $("#bk-assign-to");
     if (assignTo) assignTo.onclick = async (ev) => {
@@ -1802,7 +1802,7 @@ const Views = (() => {
     if (!all) return "";
     const st = all.stages || [];
     const sum = (k) => st.reduce((t, x) => t + (Number(x[k]) || 0), 0);
-    // Unassigned and paid: the ones waiting for a Reviewer. An unpaid filing is not given out until its fee is paid.
+    // Unassigned and paid: the ones waiting for an Admin. An unpaid filing is not given out until its fee is paid.
     const un = sum("unassigned_paid"), unpaid = sum("awaiting_payment");
     return ListUI.summary([
       { label: "Disputes", value: Number(all.total) || 0, sub: "$" + Math.round(sum("disputed_cents") / 100).toLocaleString() + " disputed" },
@@ -1830,7 +1830,7 @@ const Views = (() => {
       const asgParams = { ...(assigned ? { assigned } : {}), ...(assignee ? { assignee } : {}) };
       const stalled = hq.get("stalled") === "1";
       const reqParams = { limit: Pager.size(), ...(status ? { status } : {}), ...(sort ? { sort } : {}), ...(lane ? { lane } : {}), ...(search ? { q: search } : {}), ...(stalled ? { stalled: "true" } : {}), ...asgParams };
-      // The reviewers, for the Reviewer filter (their workload is on the Team page).
+      // The reviewers, for the Admin filter (their workload is on the Team page).
       const team = canAssign() ? Api.cm.assignees("CASE_MANAGER").then((r) => r.assignees || []).catch(() => []) : Promise.resolve([]);
       // Summary figures for the whole list (the search applies; the other filters are the switches below).
       const sumOpts = search ? { q: search } : {};
@@ -1962,7 +1962,7 @@ const Views = (() => {
           <button class="mini" id="batch-tgl" aria-pressed="${groupBatch}" title="Collapse batched disputes into one reviewable group">${groupBatch ? "▦ Batches: grouped" : "▦ Group batches"}</button>
         </div>
         <p class="viewbar">
-          ${canAssign() ? `<label class="asg-filter">Reviewer
+          ${canAssign() ? `<label class="asg-filter">Admin
             <select id="asg-person"><option value="">Anyone</option>
               ${reviewers.map((a) => `<option value="${esc(a.id)}"${assignee === a.id ? " selected" : ""}>${esc(a.username)}</option>`).join("")}</select></label>` : ""}
           ${Auth.reviewerScoped() ? `<span class="muted">You see the cases assigned to you. New ones are given out in turn by the PM's rotation.</span>` : ""}
@@ -2034,18 +2034,18 @@ const Views = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
 
-  const ASSIGN_ROLES = [["CASE_MANAGER", "Reviewer"], ["ARBITRATOR", "Arbitrator"], ["CODER", "Coder"],
-    ["NURSE_PHYSICIAN", "Clinical reviewer"], ["ATTORNEY", "Attorney"]];
+  const ASSIGN_ROLES = [["CASE_MANAGER", "Admin"], ["ARBITRATOR", "Arbitrator"], ["CODER", "Coder"],
+    ["NURSE_PHYSICIAN", "Nurse Reviewer"], ["ATTORNEY", "Attorney"], ["QA", "QA"]];
   const NEXT_IN_TURN = "__next";
   const assigneeOptions = (list) => [["", "Auto — whoever has the fewest open cases"],
     ...list.map((a) => [a.id, `${esc(a.username)} — ${a.open_cases} open case${a.open_cases === 1 ? "" : "s"}`])];
 
   // ---- Assignment: who holds a case, and who may change that --------------------------------------------------
-  // The PM and the Tenant Admin assign and reassign; a Tenant Admin can also take a case themselves. A Reviewer
+  // The PM and the Tenant Admin assign and reassign; a Tenant Admin can also take a case themselves. An Admin
   // takes an unassigned case ("Take"); they cannot route cases to others. The server enforces all of it.
   const canAssign = () => can("PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
   const canTakeOwn = () => (Auth.claims()?.roles || []).some((r) => ["TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"].includes(r));
-  const canClaim = () => canAssign(); // a Reviewer sees only their own cases (casescope.go): nothing to take
+  const canClaim = () => canAssign(); // an Admin sees only their own cases (casescope.go): nothing to take
   const myId = () => Auth.claims()?.sub || "";
   // The list's Assigned cell: the person, or Unassigned; with the one action this viewer has on it.
   function assigneeCell(c) {
@@ -2089,18 +2089,19 @@ const Views = (() => {
           ${rowActs.length ? `<span class="team-acts">${rowActs.join("")}</span>` : ""}</div>`;
       const helpers = (a.helpers || []).map((h) => row(h.role_label, esc(h.id === myId() ? "You" : (h.name || "Staff")), h.id === myId(),
         isAssigner ? [link("Change", `Views.assign('${esc(caseId)}')`), link("Remove", `Views.unassignHelper('${esc(caseId)}','${esc(h.role)}','${esc(h.id)}')`, true)] : [])).join("");
-      const missing = ASSIGN_ROLES.filter(([r]) => r !== "CASE_MANAGER" && !(a.helpers || []).some((h) => h.role === r));
-      el.innerHTML = row("Reviewer", a.assigned_to ? esc(mine ? "You" : a.name) : '<span class="asg-none">Nobody yet</span>', mine, acts)
+      const missing = ASSIGN_ROLES.filter(([r]) => r !== "CASE_MANAGER" && (!window.PROGRAM_STAFF_ROLES || window.PROGRAM_STAFF_ROLES.includes(r)) && !(a.helpers || []).some((h) => h.role === r));
+      el.innerHTML = row("Admin", a.assigned_to ? esc(mine ? "You" : a.name) : '<span class="asg-none">Nobody yet</span>', mine, acts)
         + helpers
-        + (isAssigner && missing.length ? `<button type="button" class="team-add" onclick="Views.assign('${esc(caseId)}')">＋ Add a specialist</button>` : "");
+        + (isAssigner && missing.length ? `<button type="button" class="team-add" onclick="Views.assign('${esc(caseId)}')">＋ Add a specialist</button>` : "")
+        + `<p class="muted team-note">The Coder, Nurse Reviewer, Attorney and QA hear this case’s alerts only when they are named here; the Tenant Admin, the Admin and the PM hear every case’s.</p>`;
       el.dataset.assignee = a.assigned_to || "";
     } catch { el.innerHTML = ""; }
   }
 
-  // A Reviewer (or the PM / Tenant Admin) takes an unassigned case. Only one person can win it; the other is told.
+  // An Admin (or the PM / Tenant Admin) takes an unassigned case. Only one person can win it; the other is told.
   async function claim(caseId, caseNumber) {
     const ok = await UI.modal({ title: "Take this case?", submitLabel: "Take it",
-      body: `${caseNumber ? `<b>${esc(caseNumber)}</b> ` : "It "}moves to your list as its Reviewer. Other reviewers will no longer see it.` });
+      body: `${caseNumber ? `<b>${esc(caseNumber)}</b> ` : "It "}moves to your list as its Admin. Other reviewers will no longer see it.` });
     if (!ok) return;
     try {
       const r = await Api.cm.claim(caseId);
@@ -2113,7 +2114,7 @@ const Views = (() => {
   async function assignToMe(caseId) {
     const cur = await Api.cm.assignment(caseId).catch(() => ({}));
     const v = await UI.modal({ title: "Assign to me", submitLabel: "Take it over", danger: !!cur.name,
-      body: cur.name ? `It is with <b>${esc(cur.name)}</b> now; they'll be told it moved to you.` : "You become its Reviewer.",
+      body: cur.name ? `It is with <b>${esc(cur.name)}</b> now; they'll be told it moved to you.` : "You become its Admin.",
       fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }] });
     if (!v) return;
     try {
@@ -2123,8 +2124,8 @@ const Views = (() => {
     } catch (e) { e.status === 409 ? assignConflict(e) : UI.toast(e.message, { kind: "warn" }); }
   }
 
-  // Assign the people on a case, every role at once: the Reviewer, who holds the case, and the specialists named
-  // alongside (Coder, Clinical reviewer, Attorney, Arbitrator). Each row offers "Next in turn" (the role's rotation),
+  // Assign the people on a case, every role at once: the Admin, who holds the case, and the specialists named
+  // alongside (Coder, Nurse Reviewer, Attorney, Arbitrator). Each row offers "Next in turn" (the role's rotation),
   // "Auto" (fewest open cases), a person from the list (least loaded first), or removing a specialist; a row left
   // on "Keep" is not touched. Whoever loses a place is told.
   const KEEP = "__keep", REMOVE = "__remove";
@@ -2147,7 +2148,7 @@ const Views = (() => {
       });
       fields.push({ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" });
       const v = await UI.modal({ title: "People on this case", wide: true, fields, submitLabel: "Save",
-        body: "Change any row; rows on <b>Keep</b> stay as they are. The Reviewer holds the case; the others are added alongside." });
+        body: "Change any row; rows on <b>Keep</b> stay as they are. The Admin holds the case; the others are added alongside." });
       if (!v) return;
       const done = [], failed = [];
       for (const [r, label] of ASSIGN_ROLES) {
@@ -2170,7 +2171,7 @@ const Views = (() => {
 
   async function unassignHelper(caseId, role, who) {
     const label = (ASSIGN_ROLES.find(([k]) => k === role) || [role, role])[1];
-    const v = await UI.modal({ title: `Remove the ${label}`, body: "The Reviewer keeps the case; the person removed is told.",
+    const v = await UI.modal({ title: `Remove the ${label}`, body: "The Admin keeps the case; the person removed is told.",
       fields: [{ name: "reason", label: "Reason", type: "textarea", placeholder: "Optional — kept on the case history" }],
       submitLabel: "Remove", danger: true });
     if (!v) return;
@@ -2330,7 +2331,7 @@ const Views = (() => {
   // ---- Specialty review queues -------------------------------------------------
   const DISCIPLINES = {
     CODING: { title: "Coding review queue", who: "coder", blurb: "Bundling, unbundling and code-accuracy questions waiting for a coder. Claim one to take it; completing it moves the case on." },
-    CLINICAL: { title: "Clinical review queue", who: "clinical reviewer", blurb: "Medical-necessity and level-of-care questions waiting for a doctor or nurse. Claim one to take it; completing it moves the case on." },
+    CLINICAL: { title: "Clinical review queue", who: "Nurse Reviewer", blurb: "Medical-necessity and level-of-care questions waiting for a doctor or nurse. Claim one to take it; completing it moves the case on." },
     LEGAL: { title: "Legal review queue", who: "attorney", blurb: "Opt-out, eligibility and process questions waiting for an attorney. Claim one to take it; completing it moves the case on." },
   };
 
@@ -2415,7 +2416,7 @@ const Views = (() => {
           const list = full.queue || full.reviews || (Array.isArray(full) ? full : []);
           const done = list.filter((r) => r.review_status === "COMPLETE");
           await UI.modal({ title: "Completed reviews", wide: true, submitLabel: "Close",
-            body: done.length ? `<table><thead><tr><th>Case</th><th>Reviewer</th><th>Completed</th><th>Note</th></tr></thead><tbody>` +
+            body: done.length ? `<table><thead><tr><th>Case</th><th>Admin</th><th>Completed</th><th>Note</th></tr></thead><tbody>` +
               done.map((r) => `<tr><td class="mono">${esc(r.case_number || r.case_id)}</td><td>${esc(r.reviewer || "")}</td><td>${fmtDate(r.completed_at)}</td><td>${esc(r.note || "")}</td></tr>`).join("") + `</tbody></table>`
               : "<p class='muted'>No completed reviews yet.</p>",
             fields: [] });
@@ -2976,7 +2977,7 @@ const Views = (() => {
       });
       return html;
     } catch (e) {
-      // A Reviewer opening a case that is someone else's (a shared link, an old bookmark): say so plainly.
+      // An Admin opening a case that is someone else's (a shared link, an old bookmark): say so plainly.
       if (e.status === 404 && Auth.reviewerScoped()) {
         return `<div class="empty-state"><h1>This case isn't on your list</h1>
           <p class="muted">You see unassigned cases and the ones assigned to you. This one is with another reviewer, or it no longer exists.
@@ -3078,10 +3079,10 @@ const Views = (() => {
     try { r = await Api.cases.qaDraftQuality(90); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
     const ts = r.templates || [];
     const pct = (a, b) => (b ? Math.round((100 * a) / b) + "%" : "—");
-    box.innerHTML = ts.length ? `<div class="tbl-wrap"><table class="tbl qa-tbl"><thead><tr><th>Template</th><th>Drafts</th><th>Approved as written</th><th>Approved after edits</th><th>Sent back</th><th>Edited, on average</th><th>Reviewers</th></tr></thead><tbody>
+    box.innerHTML = ts.length ? `<div class="tbl-wrap"><table class="tbl qa-tbl"><thead><tr><th>Template</th><th>Drafts</th><th>Approved as written</th><th>Approved after edits</th><th>Sent back</th><th>Edited, on average</th><th>Admins</th></tr></thead><tbody>
         ${ts.map((x) => `<tr><td class="qa-tbl-main">${esc(qaTpl(x.artifact))} <span class="muted">${esc(x.channel || "")}</span></td><td data-label="Drafts">${x.drafts}</td>
           <td data-label="As written">${pct(x.approved_unedited, x.drafts)}</td><td data-label="After edits">${pct(x.approved - x.approved_unedited, x.drafts)}</td>
-          <td data-label="Sent back">${pct(x.rejected, x.drafts)}</td><td data-label="Edited">${x.avg_edit_ratio != null ? Math.round(x.avg_edit_ratio * 100) + "% of the text" : "—"}</td><td data-label="Reviewers">${x.reviewers}</td></tr>`).join("")}</tbody></table></div>`
+          <td data-label="Sent back">${pct(x.rejected, x.drafts)}</td><td data-label="Edited">${x.avg_edit_ratio != null ? Math.round(x.avg_edit_ratio * 100) + "% of the text" : "—"}</td><td data-label="Admins">${x.reviewers}</td></tr>`).join("")}</tbody></table></div>`
       : `<p class="muted">No QA decisions recorded yet in the last ${r.days || 90} days. Each approval or send-back from now on is counted here.</p>`;
   }
   // Screens as people know them: telemetry records each by a key (telemetry.js workflowOf), the TPA and health plan
@@ -4061,7 +4062,7 @@ const Views = (() => {
         const el = document.getElementById("p-elig-history"); if (!el) return;
         const revs = r.reviews || [];
         const canNote = Auth.can("CASE_MANAGER", "PM", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
-        const ROLE_LABEL = { CASE_MANAGER: "Reviewer", PM: "PM", ATTORNEY: "Attorney", TENANT_ADMIN: "Admin", FEDERAL_ADMIN: "Admin", PLATFORM_ADMIN: "Admin" };
+        const ROLE_LABEL = { CASE_MANAGER: "Admin", PM: "PM", ATTORNEY: "Attorney", TENANT_ADMIN: "Admin", FEDERAL_ADMIN: "Admin", PLATFORM_ADMIN: "Admin" };
         const notesRow = (v) => {
           const ns = v.notes || [];
           if (!ns.length && !canNote) return "";
@@ -4158,7 +4159,7 @@ const Views = (() => {
         return filled;
       };
       // Change log 2026-11-25 #9: the review opens prefilled from the case, its filing packet and its documents, for
-      // the Reviewer to verify -- nothing is decided until Compute eligibility.
+      // the Admin to verify -- nothing is decided until Compute eligibility.
       if (document.getElementById("p-elig")) {
         Api.program.eligibilityInputs(id).then((r) => {
           const f = document.getElementById("p-elig");
@@ -4465,7 +4466,7 @@ const Views = (() => {
       rows.map((x) => `<tr><td class="mono"><a href="#/cases/${esc(x.case_id)}">${esc(x.case_number)}</a></td><td>${esc(x.filer || "—")}</td>
         <td class="num">${x.amount_cents ? usd(x.amount_cents) : "—"}</td><td>${fmtDate(x.flagged_at)}</td>
         <td class="num">${x.days_waiting} day${x.days_waiting === 1 ? "" : "s"}</td>
-        <td>${d.can_approve ? `<button class="mini" onclick="Views.wfAnytime('${esc(x.case_id)}','REFUND_APPROVED')">Close and refund</button>` : '<span class="muted">The Reviewer or PM decides</span>'}</td></tr>`).join("") +
+        <td>${d.can_approve ? `<button class="mini" onclick="Views.wfAnytime('${esc(x.case_id)}','REFUND_APPROVED')">Close and refund</button>` : '<span class="muted">The Admin or PM decides</span>'}</td></tr>`).join("") +
       `</tbody></table></div></section>`;
   }
 
@@ -4565,7 +4566,7 @@ const Views = (() => {
           <table class="qa-tbl"><thead><tr><th>Subject</th><th>Case</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
           toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span></td><td data-label="Case">${qaCase(i)}</td>
             <td data-label="Approved by">${esc(i.reviewed_by || "—")}</td><td class="muted" data-label="To">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
-            <td class="qa-tbl-act">${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Reviewer</span>`}</td></tr>`).join("") +
+            <td class="qa-tbl-act">${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Admin</span>`}</td></tr>`).join("") +
           `</tbody></table></section>` : "";
       const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
           <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
@@ -4672,7 +4673,7 @@ const Views = (() => {
   }
 
   // What a draft's detail offers follows its state: only a pending draft can be approved or sent back. One that has
-  // passed QA waits to be sent (by its drafter or a Reviewer); a decided one just says what happened. Offering
+  // passed QA waits to be sent (by its drafter or an Admin); a decided one just says what happened. Offering
   // Approve on an approved draft sent a second approval the server then refused.
   function qaActionsHtml(d, qaId, isNote, isLetter) {
     if (d.status === "PENDING")
@@ -4683,13 +4684,13 @@ const Views = (() => {
       const maySend = d.requested_by_sub === Auth.claims()?.sub || can("CASE_MANAGER", "CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
       const list = (v) => (Array.isArray(v) ? v : []).join(", ");
       return `<span class="badge s-paid">Passed QA${by}${when}</span>
-        ${maySend ? `<button onclick="Views.qaSendFn('${qaId}','${esc(list(d.to_recipients))}','${esc(list(d.cc_recipients))}')">Send it</button>` : '<span class="muted">waiting for the drafter or a Reviewer to send it</span>'}`;
+        ${maySend ? `<button onclick="Views.qaSendFn('${qaId}','${esc(list(d.to_recipients))}','${esc(list(d.cc_recipients))}')">Send it</button>` : '<span class="muted">waiting for the drafter or an Admin to send it</span>'}`;
     }
     const label = { APPROVED: d.channel === "email" ? "Approved" : isNote ? "Approved and filed" : "Letter approved", SENT: "Sent", REJECTED: "Sent back" }[d.status] || d.status;
     return `<span class="badge">${esc(label)}${by}${when}</span>${d.status === "REJECTED" && d.review_note ? ` <span class="muted">— ${esc(d.review_note)}</span>` : ""}`;
   }
 
-  // The Reviewer sends a draft that has passed QA (SOP stage 0): the
+  // The Admin sends a draft that has passed QA (SOP stage 0): the
   // addresses are entered or corrected here, the approved text is not editable.
   async function qaSendFn(qaId, to, cc) {
     const v = await UI.modal({ title: "Send the approved email", submitLabel: "Send now",
@@ -4764,7 +4765,7 @@ const Views = (() => {
 
   const INTAKE_STATUSES = ["DOCS_RECEIVED", "PACKET_COMPLETE", "PAID", "CONVERTED", "INELIGIBLE", "CLOSED_REFUNDED"];
   function intake() {
-    // The Reviewer owns intake (SOP): it sends the submission instructions,
+    // The Admin owns intake (SOP): it sends the submission instructions,
     // which is what opening an intake does. Matches createIntake/bulkIntake.
     const canCreate = can("CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
     afterRender(() => {
@@ -6632,7 +6633,7 @@ const Views = (() => {
   // A Nurse / Physician logs each entry as a Nurse or as a Physician: the two are billed at different rates, so
   // the combined role is never an entry's role (the server refuses it) and there is no "primary" to fall back on.
   const TIME_ROLE_WORDS = { DOCTOR: "Physician", NURSE: "Nurse", CODER: "Coder", ARBITRATOR: "Arbitrator", ATTORNEY: "Attorney",
-    CASE_MANAGER: "Reviewer", PM: "PM", FINANCE: "Finance", STATE_AUDITOR: "State auditor", FEDERAL_ADMIN: "Federal admin", PLATFORM_ADMIN: "Platform admin" };
+    CASE_MANAGER: "Admin", PM: "PM", FINANCE: "Finance", STATE_AUDITOR: "State auditor", FEDERAL_ADMIN: "Federal admin", PLATFORM_ADMIN: "Platform admin" };
   const timeRoleSelect = () => {
     const held = (Auth.claims()?.roles || []).filter((r) => TIME_ENTRY_ROLES.includes(r));
     const combined = held.includes("NURSE_PHYSICIAN");
@@ -8348,7 +8349,7 @@ const Views = (() => {
         { name: "username", label: "First user — username" },
         { name: "email", label: "First user — email" },
         { name: "role", label: "First user — role", value: "CASE_MANAGER", options: [
-          ["CASE_MANAGER", "Reviewer (Case Manager)"], ["PM", "PM"], ["CODER", "Coder"],
+          ["CASE_MANAGER", "Admin (Case Manager)"], ["PM", "PM"], ["CODER", "Coder"],
           ["NURSE_PHYSICIAN", "Nurse / Physician"], ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"],
           ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"],
           ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"]] },
@@ -8442,11 +8443,13 @@ const Views = (() => {
   // self-delete too, but hiding them here avoids a round-trip just to find
   // that out, and stops an admin from locking themselves out by accident.
   // The tenant's staff roles, as the Team page shows and edits them (staffroles.go: staffEditableRoles).
-  const TEAM_ROLES = [["CASE_MANAGER", "Reviewer"], ["PM", "PM"], ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Clinical reviewer"],
+  const TEAM_ROLES = [["CASE_MANAGER", "Admin"], ["PM", "PM"], ["QA", "QA"], ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse Reviewer"],
     ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"], ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"],
     ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"], ["TENANT_ADMIN", "Tenant Admin"]];
   const staffRoleLabel = (r) => (TEAM_ROLES.find(([k]) => k === r) || [r, r])[1];
   const staffRolesOf = (m) => (m.roles || []).filter((r) => TEAM_ROLES.some(([k]) => k === r));
+  // Whether this program uses a staff role (program config staff_roles; none listed = every role).
+  const programUsesRole = (r) => !window.PROGRAM_STAFF_ROLES || window.PROGRAM_STAFF_ROLES.includes(r);
   let teamStaff = [], staffRoleFilter = "";
 
   function staffTableHtml(members, scope, tenant) {
@@ -8519,7 +8522,7 @@ const Views = (() => {
         : a.next === m.id ? "in the rotation — <b>next in turn</b>" : "in the rotation";
       return `<li>${esc(label)}: ${state}</li>`;
     }).join("");
-    const boxes = TEAM_ROLES.map(([r, label]) => {
+    const boxes = TEAM_ROLES.filter(([r]) => programUsesRole(r) || (m.roles || []).includes(r)).map(([r, label]) => {
       const has = (m.roles || []).includes(r);
       const locked = isSelf || (r === "TENANT_ADMIN" && !isAdmin);
       return `<label class="sr-role"><input type="checkbox" name="role_${r}" ${has ? "checked" : ""} ${locked ? "disabled" : ""} /> ${esc(label)}</label>`;
@@ -8535,6 +8538,7 @@ const Views = (() => {
     if (!v || isSelf) return;
     const roles = TEAM_ROLES.filter(([r]) => {
       const locked = r === "TENANT_ADMIN" && !isAdmin;
+      if (!programUsesRole(r) && !(m.roles || []).includes(r)) return false; // not offered
       return locked ? (m.roles || []).includes(r) : v["role_" + r] === "on";
     }).map(([r]) => r);
     if (!roles.length) { UI.toast("Keep at least one role — suspend the account instead to stop them working.", { kind: "warn" }); return; }
@@ -8576,7 +8580,7 @@ const Views = (() => {
   }
 
   // Workload: for each role that does case work, everyone holding it with their open cases (a bar against the
-  // busiest), where they stand in the rotation, and a link to their cases; for Reviewers, the cases nobody holds.
+  // busiest), where they stand in the rotation, and a link to their cases; for Admins, the cases nobody holds.
   let teamOpen = {};
   function teamWorkloadHtml(held, rotations) {
     if (!held.length) return "";
@@ -8596,7 +8600,7 @@ const Views = (() => {
           <td class="num"><a href="#/cases?assignee=${encodeURIComponent(x.id)}">${x.open_cases.toLocaleString()}</a></td>
           <td>${state(x)}</td></tr>`).join("");
       const backlog = a.new_cases && a.unassigned_open
-        ? `<a class="load-unassigned" href="#/cases?assigned=unassigned">${a.unassigned_open.toLocaleString()} open case${a.unassigned_open === 1 ? "" : "s"} waiting for a Reviewer →</a>` : "";
+        ? `<a class="load-unassigned" href="#/cases?assigned=unassigned">${a.unassigned_open.toLocaleString()} open case${a.unassigned_open === 1 ? "" : "s"} waiting for an Admin →</a>` : "";
       return `<div class="load-role"><h3>${esc(label)}s <span class="muted">${people.length} · ${total.toLocaleString()} open case${total === 1 ? "" : "s"}</span></h3>
         ${backlog}
         ${people.length ? `<table class="load-tbl" data-page-size="5" data-nosearch><thead><tr><th>Person</th><th>Open cases</th><th class="num"></th><th>Rotation</th></tr></thead><tbody>${rows}</tbody></table>`
@@ -8607,7 +8611,7 @@ const Views = (() => {
       <div class="load-grid">${panels}</div></section>`;
   }
 
-  // Automatic assignment: one rotation per role -- the fewest open cases first, ties in turn. Reviewers get new cases
+  // Automatic assignment: one rotation per role -- the fewest open cases first, ties in turn. Admins get new cases
   // as they come in; for every role the PM
   // can hand a case to "Next in turn". The PM / Tenant Admin turns a rotation on or off and takes people out of it;
   // any assignment can still be changed by hand on the case.
@@ -8618,17 +8622,17 @@ const Views = (() => {
     try { a = await Api.cm.autoAssign(aaRole); } catch (e) {
       return `<h2>Automatic assignment</h2><p class="muted">${esc(e.message)}</p>`;
     }
-    const label = a.role_label || "Reviewer";
+    const label = a.role_label || "Admin";
     const people = a.people || [];
     const next = people.find((p) => p.id === a.next);
     const inTurn = people.filter((p) => p.in_rotation).length;
     const status = a.new_cases
-      ? (!a.enabled ? "Off — new cases wait in the unassigned pool for the PM to assign or a Reviewer to take."
+      ? (!a.enabled ? "Off — new cases wait in the unassigned pool for the PM to assign or an Admin to take."
         : !inTurn ? "On, but nobody is in the rotation — new cases wait in the unassigned pool."
         : `On — the next new case goes to <strong>${esc(next?.username || "—")}</strong>.`)
       : (!a.enabled ? `Off — a ${esc(label)} is named on a case by hand.`
         : !inTurn ? `On, but nobody is in the rotation — name a ${esc(label)} on the case by hand.`
-        : `On — the next case that reaches a ${esc(label)} step (or is handed to one with "Next in turn") goes to <strong>${esc(next?.username || "—")}</strong>. The Reviewer keeps the case.`);
+        : `On — the next case that reaches a ${esc(label)} step (or is handed to one with "Next in turn") goes to <strong>${esc(next?.username || "—")}</strong>. The Admin keeps the case.`);
     const tabs = ASSIGN_ROLES.map(([r, l]) =>
       `<button type="button" class="tab ${r === aaRole ? "active" : ""}" onclick="Views.autoAssignRole('${r}')">${esc(l)}</button>`).join("");
     const rows = people.map((p) => `<tr>
@@ -8640,10 +8644,10 @@ const Views = (() => {
       <div class="tabs aa-tabs" role="tablist">${tabs}</div>
       <div class="card aa-card">
         <label class="aa-toggle"><input type="checkbox" ${a.enabled ? "checked" : ""} onchange="Views.autoAssignToggle(this.checked, this)" />
-          ${a.new_cases ? "Assign new cases to Reviewers automatically, in turn" : `Add a ${esc(label)} automatically, in turn, when a case reaches their step`}</label>
+          ${a.new_cases ? "Assign new cases to Admins automatically, in turn" : `Add a ${esc(label)} automatically, in turn, when a case reaches their step`}</label>
         <p class="muted">${status} Whoever in the rotation has the fewest open cases goes first; people with the same number take turns. You can change who has any case on the case itself.${a.updated_by ? ` Last changed by ${esc(a.updated_by)}.` : ""}</p>
         ${a.new_cases && a.unassigned_open ? `<div class="aa-backlog"><span><strong>${a.unassigned_open}</strong> open case${a.unassigned_open === 1 ? "" : "s"}
-          nobody holds (from before automatic assignment, or filed while it was off). Reviewers can't see them until they're assigned.</span>
+          nobody holds (from before automatic assignment, or filed while it was off). Admins can't see them until they're assigned.</span>
           <button class="mini" onclick="Views.autoAssignBacklog(this)" ${!a.enabled || !inTurn ? "disabled" : ""}>Assign them now, in turn</button></div>` : ""}
         ${people.length
           ? `<table data-page-size="10"><thead><tr><th>${esc(label)}</th><th class="num">Open cases</th><th>Takes cases in turn</th></tr></thead><tbody>${rows}</tbody></table>`
@@ -8658,12 +8662,12 @@ const Views = (() => {
 
   async function autoAssignRole(role) { aaRole = role; await aaRefresh(); }
 
-  // The unassigned backlog to the Reviewers, by the same rule as new cases; 500 per round, repeated until done.
+  // The unassigned backlog to the Admins, by the same rule as new cases; 500 per round, repeated until done.
   async function autoAssignBacklog(el) {
     const a = await Api.cm.autoAssign("CASE_MANAGER").catch(() => null);
     const n = a?.unassigned_open || 0;
     if (!n || !(await UI.confirm(`Assign ${n} case${n === 1 ? "" : "s"} now?`,
-      "They go to the Reviewers in the rotation, oldest first: whoever has the fewest open cases goes first. Each Reviewer is told how many they got. Cases waiting on their fee stay as they are.",
+      "They go to the Admins in the rotation, oldest first: whoever has the fewest open cases goes first. Each Admin is told how many they got. Cases waiting on their fee stay as they are.",
       "Assign them"))) return;
     await UI.run(el, async () => {
       let total = 0;
@@ -8732,22 +8736,28 @@ const Views = (() => {
           hint: "2-letter lowercase USPS code — must already be an activated tenant" },
         { name: "username", label: "Username", required: true },
         { name: "email", label: "Email", required: true },
-        { name: "role", label: "Role", value: "CASE_MANAGER", options: [
-          ["CASE_MANAGER", "Reviewer (Case Manager)"], ["PM", "PM"], ["CODER", "Coder"],
-          ["NURSE_PHYSICIAN", "Nurse / Physician"], ["ATTORNEY", "Attorney"], ["ARBITRATOR", "Arbitrator"],
-          ["DOCTOR", "Doctor (older role)"], ["NURSE", "Nurse (older role)"],
-          ["FINANCE", "Finance"], ["STATE_AUDITOR", "State Auditor"], ["PARTY", "Party"],
-          // Minting a TENANT_ADMIN is federal/platform-admin-only server-side
-          // (avoids a self-escalating admin chain within one state) -- the
-          // option only appears here when the caller could actually use it.
-          ...(can("FEDERAL_ADMIN", "PLATFORM_ADMIN") ? [["TENANT_ADMIN", "Tenant Admin (super admin)"]] : [])] },
       ],
+      // Roles: tick every one this person has (only the roles this program uses are offered). Minting a TENANT_ADMIN
+      // is federal/platform-admin-only server-side, so that box appears only for those callers.
+      html: `<span class="sr-head">Roles</span><div class="sr-roles">${[
+        ["CASE_MANAGER", "Admin"], ["PM", "PM"], ["QA", "QA"], ["CODER", "Coder"], ["NURSE_PHYSICIAN", "Nurse Reviewer"],
+        ["ATTORNEY", "Attorney"], ["FINANCE", "Finance"], ["ARBITRATOR", "Arbitrator"], ["STATE_AUDITOR", "State Auditor"],
+        ...(can("FEDERAL_ADMIN", "PLATFORM_ADMIN") ? [["TENANT_ADMIN", "Tenant Admin"]] : [])]
+        .filter(([r]) => r === "TENANT_ADMIN" || !window.PROGRAM_STAFF_ROLES || window.PROGRAM_STAFF_ROLES.includes(r))
+        .map(([r, l]) => `<label class="sr-role"><input type="checkbox" name="role_${r}" ${r === "CASE_MANAGER" ? "checked" : ""} /> ${esc(l)}</label>`).join("")}</div>`,
     });
     if (!v) return;
+    const picked = Object.keys(v).filter((k) => k.startsWith("role_") && v[k] === "on").map((k) => k.slice(5));
+    if (!picked.length) { UI.toast("Tick at least one role", { kind: "warn" }); return; }
+    v.role = picked[0];
     const tenant = (v.tenant || "").trim().toLowerCase();
     if (!/^[a-z]{2}$/.test(tenant)) { UI.toast("State code must be exactly 2 lowercase letters", { kind: "error" }); return; }
     try {
       const r = await Api.admin.createTenantStaff({ tenant, username: v.username, email: v.email, role: v.role });
+      if (!r.role_assignment_error && picked.length > 1) { // the other roles ticked, in one change
+        try { await Api.admin.setTenantStaffRoles(tenant, r.username || v.username, picked); r.role = picked.join(", "); }
+        catch (e) { r.role_assignment_error = "the extra roles: " + e.message; }
+      }
       if (r.role_assignment_error) {
         UI.toast(`User "${r.username}" created, but role assignment FAILED: ${r.role_assignment_error} — fix this in Keycloak directly before relying on this account`,
           { kind: "error", sticky: true });
@@ -11538,7 +11548,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     }, "Preparing…");
   }
   const tpaBdPay = (batchId, btn) => tpaPayDialog({ batch_id: batchId }, btn);
-  // Eligibility as decided by the Reviewer (eligibility_reviews), in words.
+  // Eligibility as decided by the Admin (eligibility_reviews), in words.
   const ELIG = { ELIGIBLE: ["filed", "Eligible"], INELIGIBLE: ["rejected", "Not eligible"], HOLD_AOR: ["needs-review", "On hold — authorization (AOR)"] };
   const eligBadge = (x) => {
     if (x.eligibility) { const [cls, t] = ELIG[x.eligibility] || ["", x.eligibility]; return `<span class="badge s-${cls}">${esc(t)}</span>`; }
@@ -11967,7 +11977,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       const r = await Api.program.adminTpas();
       // CASE_MANAGER excluded per the "reviewer only reviews" follow-up --
       // matches adminSetTPAStatus/claimTPA's backend
-      // gates. Reviewer still sees this table, just not the action buttons.
+      // gates. Admin still sees this table, just not the action buttons.
       const canAct = can("FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN");
       const rows = (r.tpas || []).map((t) => `<tr><td>${esc(t.name)}</td><td>${esc(t.contact_email)}</td><td>${t.clients}</td><td>${t.cases_filed}</td>
         <td>${badge(t.status)}</td>

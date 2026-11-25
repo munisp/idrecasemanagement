@@ -25,7 +25,7 @@ import (
 // generation) that the portal's own UI already restricts to case-management
 // roles -- as opposed to tighter gates for money (FINANCE/PM) or
 // management-only actions (CASE_MANAGER/PM).
-var caseStaffRoles = []string{"CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+var caseStaffRoles = []string{"CASE_MANAGER", "PM", "QA", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 // crmStaffRoles: CRM (accounts/contacts/tasks/notes/leads) and case-relating
 // actions -- the portal's nav shows Accounts/Leads/Tasks to every
@@ -50,7 +50,7 @@ var financialReadRoles = []string{"FINANCE", "PM", "FEDERAL_ADMIN", "PLATFORM_AD
 // qaReadRoles: the QA review queue/detail (correspondence drafts awaiting
 // approval) -- same gap as financialReadRoles, same fix. Matches the
 // portal's own QA Gate nav gate.
-var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
+var qaReadRoles = []string{"CASE_MANAGER", "ARBITRATOR", "PM", "QA", "ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 // qaAgingHours: a PENDING draft older than this is stuck, not queued.
 // 24h is deliberately shorter than the doc-findings 48h — a QA draft sits
@@ -71,7 +71,7 @@ const qaSendOverdueHours = 24
 // financialReadRoles: reviewer loses Reports entirely, not just a subset.
 // TENANT_ADMIN added back explicitly: it used to ride in on CASE_MANAGER's
 // hasRole quirk, and removing CASE_MANAGER from this list silently took
-// TENANT_ADMIN down with it -- confirmed live, not intended. Reviewer and
+// TENANT_ADMIN down with it -- confirmed live, not intended. Admin and
 // tenant admin are different roles with different scopes going forward;
 // every "CASE_MANAGER removed" change from the reviewer-only-reviews work
 // gets this same explicit TENANT_ADMIN restoration.
@@ -372,7 +372,7 @@ func (s *server) escalateCase(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(r.Context(), `
 		INSERT INTO public.escalations (tenant, case_id, clock, escalated_to, detail)
 		VALUES ($1,$2,$3,$4,$5)`, tenant, caseID, in.Clock, escalatedTo, in.Detail)
-	s.notify(r, tenant, "*", "SLA_BREACH",
+	s.caseAlertAll(r, tenant, caseID, "SLA_BREACH",
 		fmt.Sprintf("SLA breach %s on case %s — escalated to %s", in.Clock, caseNumber, escalatedTo),
 		"#/cases/"+caseID)
 	// supervisor task so the escalation is owned, not just logged

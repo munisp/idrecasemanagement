@@ -542,7 +542,7 @@ const Tips = (() => {
     "DISPUTED": "The amount in dispute: what was billed minus what the plan paid, across the claims in this dispute.",
     "QPA": "Qualifying payment amount — the plan's median contracted rate for the service, the federal benchmark for out-of-network payment.",
     "STATUS": "Where the item stands now. Hover a status chip for what it means.",
-    "ASSIGNED": "The Reviewer who owns the case. An unassigned case waits for the PM's rotation or for someone to take it.",
+    "ASSIGNED": "The Admin who owns the case. An unassigned case waits for the PM's rotation or for someone to take it.",
     "ASSIGNEE": "The person the item is assigned to.",
     "SERVICE": "The service line of the disputed claims, e.g. emergency, anesthesia, radiology, lab.",
     "OPENED": "When the dispute was filed.",

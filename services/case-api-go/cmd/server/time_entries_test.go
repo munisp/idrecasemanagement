@@ -102,9 +102,9 @@ func TestCsvCell(t *testing.T) {
 
 func timeFixture() []timeEntryRow {
 	return []timeEntryRow{
-		{ID: 1, CaseID: "c1", CaseNumber: "FL26-001", Subject: "u-ada", Who: "Ada Reviewer", Role: "CASE_MANAGER", Date: "2026-10-05", Minutes: 60, Billable: true},
+		{ID: 1, CaseID: "c1", CaseNumber: "FL26-001", Subject: "u-ada", Who: "Ada Admin", Role: "CASE_MANAGER", Date: "2026-10-05", Minutes: 60, Billable: true},
 		{ID: 2, CaseID: "c1", CaseNumber: "FL26-001", Subject: "u-ben", Who: "Ben Coder", Role: "CODER", Date: "2026-10-06", Minutes: 30, Billable: true},
-		{ID: 3, CaseID: "c2", CaseNumber: "FL26-002", Subject: "u-ada", Who: "Ada Reviewer", Role: "CASE_MANAGER", Date: "2026-10-06", Minutes: 45, Billable: false},
+		{ID: 3, CaseID: "c2", CaseNumber: "FL26-002", Subject: "u-ada", Who: "Ada Admin", Role: "CASE_MANAGER", Date: "2026-10-06", Minutes: 45, Billable: false},
 		{ID: 4, CaseID: "c2", CaseNumber: "FL26-002", Subject: "u-cy", Who: "Cy Attorney", Role: "ATTORNEY", Date: "2026-10-07", Minutes: 120, Billable: true},
 	}
 }
@@ -177,7 +177,7 @@ func TestSummarizeTimeTotalsAndMoney(t *testing.T) {
 		t.Errorf("by case: %+v", byCase[0])
 	}
 	byPerson := r["by_person"].([]*timeReportAcc)
-	if byPerson[0].Who != "Cy Attorney" || byPerson[1].Who != "Ada Reviewer" || byPerson[1].Minutes != 105 || byPerson[1].Billable != 60 {
+	if byPerson[0].Who != "Cy Attorney" || byPerson[1].Who != "Ada Admin" || byPerson[1].Minutes != 105 || byPerson[1].Billable != 60 {
 		t.Errorf("by person: %+v %+v", byPerson[0], byPerson[1])
 	}
 	// A viewer who may not see money gets hours and no amounts at all.
@@ -244,7 +244,7 @@ func TestBilledRoleFor(t *testing.T) {
 		{np, "nurse", "", "NURSE", false},      // as a Nurse
 		{np, "Physician", "", "DOCTOR", false}, // as a Physician (the physician expert rate)
 		{np, "CODER", "", "", true},            // not a role they hold
-		{principal{Roles: []string{"CASE_MANAGER"}}, "Reviewer", "", "CASE_MANAGER", false},
+		{principal{Roles: []string{"CASE_MANAGER"}}, "Admin", "", "CASE_MANAGER", false},
 		{principal{Roles: []string{"DOCTOR"}}, "", "DOCTOR", "DOCTOR", false},
 		{principal{Roles: []string{"NURSE"}}, "physician", "", "", true}, // a Nurse alone can't bill as a Physician
 	} {

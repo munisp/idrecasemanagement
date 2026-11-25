@@ -27,7 +27,7 @@ import (
 // number equals the case number (program convention); both parties can carry
 // independent receivables on one case (dual receivables).
 func (s *server) issueInvoice(w http.ResponseWriter, r *http.Request) {
-	// The PM creates invoices (SOP); the Reviewer does not.
+	// The PM creates invoices (SOP); the Admin does not.
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: invoices are created by the PM"}`, http.StatusForbidden)
 		return
@@ -509,7 +509,7 @@ func (s *server) createIntake(w http.ResponseWriter, r *http.Request) {
 	// one -- reviewer keeps advanceIntake (working an existing intake)
 	// but not this. TENANT_ADMIN added back -- see reportsReadRoles
 	// (casemgmt.go) for why.
-	// CASE_MANAGER is back: the SOP has the Reviewer send the submission
+	// CASE_MANAGER is back: the SOP has the Admin send the submission
 	// instructions, and that is what opening an intake does.
 	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN", serviceRole) {
 		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, PM, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)

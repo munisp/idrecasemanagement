@@ -587,7 +587,7 @@ func packetRejected(w http.ResponseWriter, pk *filingPacket) bool {
 
 // fileWithPacket is what the three filing paths (public, TPA, health plan) call right after the case exists: save
 // the form the filer completed, fill-only. A packet that does not check out never blocks the filing -- the problems
-// go on the case timeline for the Reviewer, who corrects them from the case page.
+// go on the case timeline for the Admin, who corrects them from the case page.
 func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *filingPacket, by string) {
 	if pk == nil {
 		return
@@ -662,7 +662,7 @@ func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *fi
 func (s *server) putFilingPacket(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: the filing packet is kept by the Reviewer or the PM"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the filing packet is kept by the Admin or the PM"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

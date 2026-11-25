@@ -58,7 +58,7 @@ type wfFacts struct {
 	AORConfirmedAt   time.Time
 	Act              map[string]wfAct  // latest timeline entry per type (signals)
 	Letter           map[string]string // template -> status of its latest draft
-	HasOutcome       bool              // the Reviewer recorded the outcome and party billed
+	HasOutcome       bool              // the Admin recorded the outcome and party billed
 	ReviewerSends    bool              // an approved draft goes back to its drafter to send
 	ReviewInvoice    bool              // an invoice other than the initial fee exists
 	OpenInvoices     int
@@ -68,7 +68,7 @@ type wfFacts struct {
 }
 
 var wfOwnerLabels = map[string]string{
-	"CASE_MANAGER": "Reviewer", "PM": "PM", "CODER": "Coder", "NURSE_PHYSICIAN": "Nurse / Physician",
+	"CASE_MANAGER": "Admin", "PM": "PM", "QA": "QA", "CODER": "Coder", "NURSE_PHYSICIAN": "Nurse Reviewer",
 	"ATTORNEY": "Attorney", "FINANCE": "Finance",
 }
 
@@ -279,7 +279,7 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
 			f.Generated["cover_letter_final_notice"], "")
 		invoiceLetters()
-		// The Reviewer and the PM may both edit the whole report.
+		// The Admin and the PM may both edit the whole report.
 		for i := reportFrom; i < len(steps); i++ {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
@@ -340,7 +340,7 @@ func wfFlag(f wfFacts, typ, field string) bool {
 	return strings.Contains(strings.ReplaceAll(f.Act[typ].Body, " ", ""), `"`+field+`":true`)
 }
 
-// wfEstimateRequested: what the Reviewer confirmed (Confirm if Cost Estimate requested), or for a case from
+// wfEstimateRequested: what the Admin confirmed (Confirm if Cost Estimate requested), or for a case from
 // before that step, the answer recorded with the filing packet.
 func wfEstimateRequested(f wfFacts) bool {
 	if _, ok := f.Act["ESTIMATE_CONFIRMED"]; ok {
@@ -642,7 +642,7 @@ func (s *server) stepGuard(w http.ResponseWriter, r *http.Request, tenant, caseI
 }
 
 // estimatePair: the Cost Estimate and the acceptance as one pair (change log 2026-11-25 #13): the Coder drafts the
-// estimate, the Reviewer the acceptance; the PM passes each in QA -- the first approval holds it -- and the second
+// estimate, the Admin the acceptance; the PM passes each in QA -- the first approval holds it -- and the second
 // approval sends both, the estimate first. Where the drafter sends (ReviewerSends), the estimate goes before the
 // acceptance.
 func estimatePair(f wfFacts, add func(key, label, owner, action string, done bool, hint string)) {

@@ -119,7 +119,7 @@ func TestResendKey(t *testing.T) {
 
 func TestIsStaff(t *testing.T) {
 	if !isStaff(principal{Subject: "s", Username: "u", Roles: []string{"CASE_MANAGER"}}) {
-		t.Error("a Reviewer is staff")
+		t.Error("an Admin is staff")
 	}
 	for _, roles := range [][]string{{"TPA"}, {"HEALTH_PLAN"}, {"PARTY"}} {
 		if isStaff(principal{Subject: "s", Username: "u", Roles: roles}) {

@@ -16,7 +16,7 @@ import (
 // The decision report (scripts/decision_reports.sql): what the reviewers write for the Review Rationale and
 // Letter, the cover letter and the invoices. Each part is written by the people who own it -- the physician's
 // review by the clinical reviewers, the coding review and the claims tables by the coder, the applicable law by
-// the attorney -- and the Reviewer and the PM may edit all of it. lettergen builds the letters from it.
+// the attorney -- and the Admin and the PM may edit all of it. lettergen builds the letters from it.
 //
 // The letterhead and invoice details (public.letter_settings) are per tenant: the program config carries the
 // standard wording ("letters"), the table carries what an office changes, and the remit-to bank details, which
@@ -649,7 +649,7 @@ func (s *server) putLetterSettings(w http.ResponseWriter, r *http.Request) {
 func (s *server) attachDecisionReport(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !drCan(p, drReviewerRoles) {
-		http.Error(w, `{"error":"forbidden: the Reviewer or the PM uploads the decision report"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the Admin or the PM uploads the decision report"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -693,7 +693,7 @@ func (s *server) attachDecisionReport(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1,$2,'final_order_rationale','letter',$3,$4,'PENDING',$5,$6) RETURNING id`,
 		tenant, caseID, "Review Rationale and Letter "+caseNumber,
 		fmt.Sprintf("Uploaded by %s: %s", displayName(p), name), displayName(p), p.Subject).Scan(&qid)
-	s.notify(r, tenant, "role:PM", "QA_REVIEW",
+	s.notifyQA(r, tenant, caseID, "PM", "QA_REVIEW",
 		fmt.Sprintf("Decision report uploaded for case %s — awaiting QA", caseNumber), "#/qa")
 	s.logActivity(r.Context(), tenant, caseID, "DECISION_REPORT_UPLOADED",
 		fmt.Sprintf("Decision report uploaded by %s: %s, queued for QA", displayName(p), name))

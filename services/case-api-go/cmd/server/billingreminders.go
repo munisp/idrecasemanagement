@@ -7,9 +7,9 @@
 // one of each per invoice. They are DRAFTS in the PM's QA queue, like every
 // other email -- nothing is sent without approval.
 //
-// Outcome: after the Final Order, the Reviewer records the Case Outcome,
+// Outcome: after the Final Order, the Admin records the Case Outcome,
 // Number of Claims Reviewed, Final Amount Awarded and Party Billed (SOP
-// stage 6). It is a step of its own, owned by the Reviewer.
+// stage 6). It is a step of its own, owned by the Admin.
 //
 // Time prompts: what a person did on a dispute is already on the audit
 // trail; a day with work on a dispute and no time entry for it is offered
@@ -127,19 +127,19 @@ func (s *server) sweepPaymentReminders() int {
 		s.logCorrespondenceHeld(r, x.tenant, x.caseID, tplKey, subject, body, to, nil, "system: collection reminders", qid)
 		s.logActivity(ctx, x.tenant, x.caseID, "REMINDER_DRAFTED",
 			fmt.Sprintf("%s drafted for %s (invoice due %s) — waiting in the QA gate", subject, who, x.due.Format("Jan 2, 2006")))
-		s.notify(r, x.tenant, "role:"+tpl.QARole, "QA_REVIEW",
+		s.notifyQA(r, x.tenant, x.caseID, tpl.QARole, "QA_REVIEW",
 			fmt.Sprintf("%s drafted automatically for case %s — review and send", tplKey, x.caseID), "#/qa")
 		drafted++
 	}
 	return drafted
 }
 
-// recordOutcome: POST /cases/{caseId}/outcome — the Reviewer's record after
+// recordOutcome: POST /cases/{caseId}/outcome — the Admin's record after
 // the Final Order: outcome, claims reviewed, amount awarded, party billed.
 func (s *server) recordOutcome(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		http.Error(w, `{"error":"forbidden: the case outcome is recorded by the Reviewer"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the case outcome is recorded by the Admin"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -404,5 +404,5 @@ func (s *server) draftInvoiceEmail(r *http.Request, tenant, caseID, party, qid s
 	s.logCorrespondenceHeld(r, tenant, caseID, "invoice", subject, body, to, nil, "system: invoice email", did)
 	s.logActivity(ctx, tenant, caseID, "INVOICE_EMAIL_DRAFTED",
 		fmt.Sprintf("Invoice %s email to %s drafted — waiting in the QA gate", invoiceNo, who))
-	s.notify(r, tenant, "role:"+tpl.QARole, "QA_REVIEW", fmt.Sprintf("Invoice %s email drafted for %s — review and send", invoiceNo, who), "#/qa")
+	s.notifyQA(r, tenant, caseID, tpl.QARole, "QA_REVIEW", fmt.Sprintf("Invoice %s email drafted for %s — review and send", invoiceNo, who), "#/qa")
 }

@@ -2,14 +2,16 @@
 package main
 
 // Who is told what as a case moves (change log 2026-11-25 #14 and #24, "Notifications/Roles" and "Required Workflow
-// Notifications"). In this program the Reviewer (CASE_MANAGER) is the change log's Administrator, and the PM keeps
-// the QA gate, so "notify QA" and "notify the PM" both reach role:PM -- one notice, not two.
+// Notifications"). The Admin (CASE_MANAGER) is the change log's Administrator. QA is its own role (QA); the program's
+// templates still name the PM as their QA approver, so a QA approval step accepts QA or the PM, and "notify QA"
+// reaches both (notifyQA) -- the PM keeps sight of everything, as the change log asks.
 //
-//   a. the Reviewer drafts the Acceptance / Plan Notification   -> QA (the template's QA role) + the PM, for sight
+//   a. the Admin drafts the Acceptance / Plan Notification   -> QA (the template's QA role) + the PM, for sight
 //   b. the Coder / Nurse finishes a review (the decision letter) -> the Attorney + the PM
 //   c. the Attorney asks for revisions                           -> the Coder / Nurse;  approves -> QA (the PM)
-//   d. QA sends a decision letter or the Final Order back        -> the Coder, the Nurse and the Attorney
-//      QA passes it                                              -> the PM
+//   d. QA sends a decision letter or the Final Order back        -> the Coder, the Nurse, the Attorney and the PM
+//      QA passes it                                              -> the PM, the Coder, the Nurse and the Attorney
+//      QA passes the Acceptance letter                           -> the PM (case acceptance)
 //   e. the Final Order is released                               -> the case team and the PM
 // plus: a case reaching coding review tells the Coder; a requested clinical review tells the Nurse / Physician;
 // an eligibility problem (ineligible, AOR hold) tells the PM.
@@ -38,26 +40,72 @@ func (s *server) caseNumberOf(ctx context.Context, tenant, caseID string) string
 	return n
 }
 
-// notifyRoles sends one notice to each role (each once).
-func (s *server) notifyRoles(r *http.Request, tenant, caseID, typ, body string, roles ...string) {
+// Who hears a case's alerts (2026-11-25): the Tenant Admin, the Admin and the PM hear every one; the Coder, the
+// Nurse Reviewer, the Attorney and QA hear a case's alerts only when they are on that case (case_helpers, set from
+// the case's Assignment box). An alert for a specialist role nobody holds on the case reaches the three who hear
+// everything, who can then assign someone. Roles outside the case team (Finance) still hear by role.
+var (
+	alwaysAlertedRoles = []string{"TENANT_ADMIN", "CASE_MANAGER", "PM"}
+	caseTeamRoles      = map[string]bool{"CODER": true, "NURSE_PHYSICIAN": true, "ATTORNEY": true, "QA": true, "ARBITRATOR": true}
+	caseTeamRoleList   = []string{"CODER", "NURSE_PHYSICIAN", "ATTORNEY", "QA", "ARBITRATOR"}
+)
+
+// caseAlertTargets: the notification targets for an alert about caseID meant for roles. Pure apart from helpers
+// (role -> the person on the case), so it is tested.
+func caseAlertTargets(helpers map[string]string, roles ...string) []string {
+	var out []string
 	seen := map[string]bool{}
-	for _, role := range roles {
-		if role == "" || seen[role] {
-			continue
+	add := func(t string) {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
 		}
-		seen[role] = true
-		s.notify(r, tenant, "role:"+role, typ, body, "#/cases/"+caseID)
+	}
+	for _, rl := range alwaysAlertedRoles {
+		add("role:" + rl)
+	}
+	for _, role := range roles {
+		if role == "DOCTOR" || role == "NURSE" {
+			role = "NURSE_PHYSICIAN"
+		}
+		switch {
+		case role == "" || contains(alwaysAlertedRoles, role):
+		case caseTeamRoles[role]:
+			add(helpers[role]) // nobody on the case in that role: the three above have it
+		default:
+			add("role:" + role)
+		}
+	}
+	return out
+}
+
+// caseAlert sends one alert about a case to whoever should hear it (caseAlertTargets).
+func (s *server) caseAlert(r *http.Request, tenant, caseID, typ, body, link string, roles ...string) {
+	if link == "" {
+		link = "#/cases/" + caseID
+	}
+	var helpers map[string]string
+	if caseID != "" {
+		helpers = s.caseHelpers(r.Context(), tenant, caseID)
+	}
+	for _, t := range caseAlertTargets(helpers, roles...) {
+		s.notify(r, tenant, t, typ, body, link)
 	}
 }
 
-// notifyCaseTeam: the case's Reviewer (its assignee), the specialists who worked it and the PM.
+// caseAlertAll: an alert for everyone working the case.
+func (s *server) caseAlertAll(r *http.Request, tenant, caseID, typ, body, link string) {
+	s.caseAlert(r, tenant, caseID, typ, body, link, caseTeamRoleList...)
+}
+
+// notifyRoles: an alert about the case for these roles (caseAlert).
+func (s *server) notifyRoles(r *http.Request, tenant, caseID, typ, body string, roles ...string) {
+	s.caseAlert(r, tenant, caseID, typ, body, "", roles...)
+}
+
+// notifyCaseTeam: everyone working the case.
 func (s *server) notifyCaseTeam(r *http.Request, tenant, caseID, typ, body string) {
-	var who string
-	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(assigned_to,'') FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&who)
-	if who != "" {
-		s.notify(r, tenant, who, typ, body, "#/cases/"+caseID)
-	}
-	s.notifyRoles(r, tenant, caseID, typ, body, "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "PM")
+	s.caseAlertAll(r, tenant, caseID, typ, body, "")
 }
 
 // notifyOnSignal: the hand-offs a recorded step makes.
@@ -82,7 +130,7 @@ func (s *server) notifyOnSignal(r *http.Request, tenant, caseID, signal string, 
 		}
 	case "ATTORNEY_REVIEW_COMPLETE":
 		s.notifyRoles(r, tenant, caseID, "DECISION_LETTER_APPROVED",
-			fmt.Sprintf("Case %s: the Attorney approved the decision letter — ready for final QA review", cn), "PM")
+			fmt.Sprintf("Case %s: the Attorney approved the decision letter — ready for final QA review", cn), "QA", "PM")
 	case "FINAL_ORDER_ISSUED":
 		s.notifyCaseTeam(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: AHCA's Final Order is recorded — the case moves to invoicing", cn))
 		s.archiveCaseLater(r, tenant, caseID) // #24e.ii: archive the case documentation (case_archive.go)
@@ -103,17 +151,22 @@ func (s *server) notifyOnDraft(r *http.Request, tenant, caseID, template, qaRole
 
 // notifyOnQA: a QA decision on a decision letter or the Final Order (d).
 func (s *server) notifyOnQA(r *http.Request, tenant, caseID, artifact, decision, note string) {
+	cn := s.caseNumberOf(r.Context(), tenant, caseID)
+	if (artifact == "acceptance" || artifact == "acceptance_letter") && decision != "REJECT" {
+		s.notifyRoles(r, tenant, caseID, "CASE_ACCEPTED", fmt.Sprintf("Case %s: the Acceptance letter passed QA — the case is accepted", cn), "PM")
+		return
+	}
 	if !decisionLetters[artifact] {
 		return
 	}
-	cn := s.caseNumberOf(r.Context(), tenant, caseID)
 	what := templateWords(artifact)
-	if decision == "REJECT" {
+	if decision == "REJECT" { // the PM hears of significant revisions and quality issues
 		s.notifyRoles(r, tenant, caseID, "REVISIONS_REQUESTED",
-			fmt.Sprintf("Case %s: QA sent the %s back for revisions%s", cn, what, orDash(" — "+note)), "CODER", "NURSE_PHYSICIAN", "ATTORNEY")
+			fmt.Sprintf("Case %s: QA sent the %s back for revisions%s", cn, what, orDash(" — "+note)), "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "PM")
 		return
 	}
-	s.notifyRoles(r, tenant, caseID, "QA_PASSED", fmt.Sprintf("Case %s: the %s passed QA", cn, what), "PM")
+	// "Notify PM when approved"; the Coder, Nurse Reviewer and Attorney hear the final review is complete.
+	s.notifyRoles(r, tenant, caseID, "QA_PASSED", fmt.Sprintf("Case %s: the %s passed QA", cn, what), "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY")
 	if artifact == "final_order" {
 		s.notifyCaseTeam(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: the Final Order package went to AHCA", cn))
 	}
@@ -146,7 +199,7 @@ func templateWords(key string) string {
 // to change (change log 2026-11-25 #24c). Recorded on the case; the specialists are told.
 func (s *server) requestRevisions(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "ATTORNEY", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, "ATTORNEY", "QA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: the Attorney or QA asks for revisions"}`, http.StatusForbidden)
 		return
 	}
@@ -173,4 +226,22 @@ func (s *server) requestRevisions(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), tenant, caseID, "REVISIONS_REQUESTED", fmt.Sprintf("%s asked %s for revisions: %s", displayName(p), who, in.Note))
 	s.logAudit(r.Context(), tenant, caseID, "REVISIONS_REQUESTED", map[string]any{"by": p.Subject, "to": in.To, "note": in.Note})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// qaAcceptRoles: who may decide a QA step the program assigns to role. The QA role and the PM stand in for each
+// other (the templates name the PM; the change log's QA role does the review).
+func qaAcceptRoles(role string) []string {
+	if role == "PM" || role == "QA" {
+		return []string{"QA", "PM"}
+	}
+	if role == "" {
+		return nil
+	}
+	return []string{role}
+}
+
+// notifyQA tells whoever decides a QA step on caseID: the case's QA (and the PM) when the step is the PM's or
+// QA's, otherwise the role named -- through caseAlert, so the Tenant Admin and the Admin hear it too.
+func (s *server) notifyQA(r *http.Request, tenant, caseID, role, typ, body, link string) {
+	s.caseAlert(r, tenant, caseID, typ, body, link, qaAcceptRoles(role)...)
 }

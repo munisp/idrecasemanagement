@@ -10,7 +10,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 )
 
-// "Reviewer only reviews" follow-up: CASE_MANAGER keeps every DECIDE/
+// "Admin only reviews" follow-up: CASE_MANAGER keeps every DECIDE/
 // ADVANCE/UPDATE action on an existing record (advanceIntake, qaDecide,
 // convertLead, completeTask, addNote, submitDeliverable, assign, escalate,
 // decide) but loses the ability to CREATE a new top-level record. PM picks
@@ -23,7 +23,7 @@ func TestReviewerOnlyReviewsRoleFloors(t *testing.T) {
 		gate  []string
 		want  bool
 	}{
-		// createIntake: the SOP has the Reviewer send the submission
+		// createIntake: the SOP has the Admin send the submission
 		// instructions, which is what opening an intake does.
 		{"createIntake: PM allowed", []string{"PM"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},
 		{"createIntake: CASE_MANAGER allowed", []string{"CASE_MANAGER"}, []string{"CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}, true},

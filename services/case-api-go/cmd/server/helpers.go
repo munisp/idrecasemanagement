@@ -1,11 +1,11 @@
 package main
 
-// helpers.go — the specialists on a case, alongside its Reviewer.
+// helpers.go — the specialists on a case, alongside its Admin.
 //
-// A case belongs to its Reviewer from intake to close (cases.assigned_to; casescope.go decides what a Reviewer sees
-// from it). The Coder, the Clinical reviewer, the Attorney and the Arbitrator do their part of the SOP as well, and
+// A case belongs to its Admin from intake to close (cases.assigned_to; casescope.go decides what an Admin sees
+// from it). The Coder, the Nurse Reviewer, the Attorney and the Arbitrator do their part of the SOP as well, and
 // each can be named on the case (public.case_helpers, scripts/case_helpers.sql): one person per role, without taking
-// the case off the Reviewer.
+// the case off the Admin.
 //
 //   - The PM names or changes one on the case (assignCase with a specialist role), by hand or "Next in turn".
 //   - When the case's next step belongs to a specialist role (workflowsteps.go: coding, clinical and attorney
@@ -26,8 +26,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// helperRoles: the roles named alongside the Reviewer, and the review queue each works from ("" = none).
-var helperRoles = map[string]string{"CODER": "CODING", "NURSE_PHYSICIAN": "CLINICAL", "ATTORNEY": "LEGAL", "ARBITRATOR": ""}
+// helperRoles: the roles named alongside the Admin, and the review queue each works from ("" = none).
+var helperRoles = map[string]string{"CODER": "CODING", "NURSE_PHYSICIAN": "CLINICAL", "ATTORNEY": "LEGAL", "QA": "", "ARBITRATOR": ""}
 
 // disciplineRole: the specialist role behind a review queue.
 var disciplineRole = map[string]string{"CODING": "CODER", "CLINICAL": "NURSE_PHYSICIAN", "LEGAL": "ATTORNEY"}
@@ -60,7 +60,7 @@ func (s *server) helperView(ctx context.Context, tenant, caseID string) []map[st
 	}
 	names := s.resolveSubjectNames(ctx, ids)
 	out := []map[string]any{}
-	for _, role := range []string{"CODER", "NURSE_PHYSICIAN", "ATTORNEY", "ARBITRATOR"} {
+	for _, role := range []string{"CODER", "NURSE_PHYSICIAN", "ATTORNEY", "QA", "ARBITRATOR"} {
 		if who, ok := h[role]; ok {
 			out = append(out, map[string]any{"role": role, "role_label": assignableRoles[role], "id": who, "name": names[who]})
 		}
@@ -71,8 +71,8 @@ func (s *server) helperView(ctx context.Context, tenant, caseID string) []map[st
 const upsertHelperSQL = `INSERT INTO public.case_helpers (tenant, case_id, role, user_id, assigned_by, assigned_at) VALUES ($1,$2,$3,$4,$5,now())
 	ON CONFLICT (tenant, case_id, role) DO UPDATE SET user_id=$4, assigned_by=$5, assigned_at=now()`
 
-// assignHelper: assignCase for a specialist role — names, changes or removes the Coder / Clinical reviewer /
-// Attorney / Arbitrator on a case. The Reviewer keeps the case. Same body as assignCase: assignee (or next=true for
+// assignHelper: assignCase for a specialist role — names, changes or removes the Coder / Nurse Reviewer /
+// Attorney / Arbitrator on a case. The Admin keeps the case. Same body as assignCase: assignee (or next=true for
 // the role's next in turn, or "" for whoever has the fewest open cases), expected (the person the caller saw in
 // that place; a change since is a 409), action "unassign", reason.
 func (s *server) assignHelper(w http.ResponseWriter, r *http.Request, p principal, tenant, caseID, cn, role, assignee, reason, action string, next bool, expected *string) {
@@ -179,7 +179,7 @@ func (s *server) assignHelper(w http.ResponseWriter, r *http.Request, p principa
 			writeJSON(w, http.StatusOK, map[string]any{"role": role, "assigned_to": who, "name": name, "unchanged": true})
 			return
 		}
-		// Change-detected like the Reviewer's place: only when it still holds what we read.
+		// Change-detected like the Admin's place: only when it still holds what we read.
 		changed, err := s.writeHelper(ctx, tenant, caseID, role, who, p.Subject, prev)
 		if err != nil {
 			http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
@@ -312,7 +312,7 @@ func (s *server) ensureStepHelper(r *http.Request, tenant, caseID string) {
 	}
 }
 
-// helperCounts: user id → open cases they are named on as a specialist (adds to openCaseCounts' Reviewer load).
+// helperCounts: user id → open cases they are named on as a specialist (adds to openCaseCounts' Admin load).
 func (s *server) helperCounts(ctx context.Context, tenant string) map[string]int {
 	out := map[string]int{}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`

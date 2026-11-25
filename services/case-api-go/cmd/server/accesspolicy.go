@@ -98,7 +98,7 @@ func outsideOpenPaths(p principal) []*regexp.Regexp {
 // notes, eligibility evidence, QA drafts or correspondence log.
 var tpaOwnCasePaths = regexp.MustCompile(`^/cases/([0-9a-fA-F-]{36})(|/clocks|/documents|/documents/[0-9a-fA-F-]{36}/download)$`)
 
-// The routes that name one case, a QA item or an invoice: a Reviewer reaches them only for a case they may see.
+// The routes that name one case, a QA item or an invoice: an Admin reaches them only for a case they may see.
 var (
 	reviewerCasePath    = regexp.MustCompile(`^/cases/([0-9a-fA-F-]{36})(/|$)`)
 	reviewerQAPath      = regexp.MustCompile(`^/qa/([0-9a-fA-F-]{36})(/|$)`)
@@ -150,7 +150,7 @@ func filingDetails(details map[string]any) map[string]any {
 //
 //	"allow"      carry on to the handler (which applies its own checks)
 //	"own-case"   allow only if the caller filed the case named in caseID
-//	"assigned-case" a Reviewer: allow only if the case named in caseID is
+//	"assigned-case" an Admin: allow only if the case named in caseID is
 //	             assigned to them (casescope.go)
 //	"qa-case" / "invoice-case"  the same, for the case a QA item or an
 //	             invoice belongs to (caseID then holds that item's id)
@@ -184,9 +184,9 @@ func accessDecision(p principal, method, rel string) (decision, caseID, reason s
 			return "invoice-case", m[1], ""
 		}
 		// One question can draw on every case at once, and its answer is model-written text: it cannot be
-		// filtered to the cases a Reviewer may see. The assistant and each case's own copilot stay available.
+		// filtered to the cases an Admin may see. The assistant and each case's own copilot stay available.
 		if rel == "/graph/ask" || rel == "/graph/hints" {
-			return "deny", "", "Ask the graph covers every case in the tenant; a Reviewer works only the cases assigned to them"
+			return "deny", "", "Ask the graph covers every case in the tenant; an Admin works only the cases assigned to them"
 		}
 	}
 	if method == http.MethodGet {

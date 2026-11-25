@@ -43,7 +43,7 @@ type eligibilityInput struct {
 	FinalDeterminationAt string   `json:"final_determination_at"` // YYYY-MM-DD
 	Flags                []string `json:"flags"`
 	AORValid             *bool    `json:"aor_valid"`
-	AORReason            string   `json:"aor_reason"`   // why the Reviewer found the AOR valid or not
+	AORReason            string   `json:"aor_reason"`   // why the Admin found the AOR valid or not
 	ServiceDate          string   `json:"service_date"` // YYYY-MM-DD, earliest date of service in dispute
 	DisputeType          string   `json:"dispute_type"` // denied_in_full | denied_in_part | underpaid | overpaid
 	// FiledOn is when the dispute was filed (YYYY-MM-DD): the filing window is about that day, not the day the
@@ -54,7 +54,7 @@ type eligibilityInput struct {
 }
 
 // computedIneligibilityReasons: the reasons evalEligibility itself can give (beside the program's own
-// eligibility.ineligibility_reasons, which a Reviewer ticks). GET /program publishes them, so every reason a review
+// eligibility.ineligibility_reasons, which an Admin ticks). GET /program publishes them, so every reason a review
 // can carry is one the program lists.
 var computedIneligibilityReasons = []string{"below_threshold", "over_filing_window", "service_before_program_start",
 	"not_an_eligible_dispute_type", "unrecognized_provider_type", "aor_invalid_pending_attorney"}
@@ -280,7 +280,7 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	// determination date counts: a date of service is not one (it comes before
 	// the plan decides, often by months), and using it made disputes filed in
 	// time look late. The filing packet's claim table states the same dates (final determination, else denial),
-	// so the latest of those and the documents' counts too. No determination date anywhere = the Reviewer enters it.
+	// so the latest of those and the documents' counts too. No determination date anywhere = the Admin enters it.
 	if in.FinalDeterminationAt == "" {
 		var fromDocs, fromClaims string
 		// Any analyzed document's labelled decision date counts, whatever type it was read as: a final
@@ -396,7 +396,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 				caseID, result, strings.Join(opts.borderlineReasons, "; ")), "#/cases/"+caseID)
 	}
 	if opts.override {
-		s.notify(r, tenant, "*", "ELIGIBILITY_OVERRIDE",
+		s.caseAlertAll(r, tenant, caseID, "ELIGIBILITY_OVERRIDE",
 			fmt.Sprintf("Case %s: INELIGIBLE overridden to ELIGIBLE by %s — reason: %s",
 				caseID, decidedBy, opts.overrideReason), "#/cases/"+caseID)
 	}
@@ -411,7 +411,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 	case "HOLD_AOR":
 		_, _ = s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Hold', agency_status='Other', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
-		s.notify(r, tenant, "role:ATTORNEY", "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — please confirm (case page, Eligibility review)", caseID), "#/cases/"+caseID)
+		s.caseAlert(r, tenant, caseID, "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — please confirm (case page, Eligibility review)", caseID), "", "ATTORNEY")
 	case "INELIGIBLE":
 		// Nothing to set here any more: "Provider Closure Letter Issued" is a
 		// fact about a letter, so the status is taken when the Ineligible
@@ -426,15 +426,13 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 		_ = s.sigCase(r.Context(), tenant, caseID, wfID, "ELIGIBILITY_RESULT", map[string]any{"result": result, "reason": reason})
 	}
-	// The SOP has the Reviewer tell the PM and the Coder the result.
+	// The SOP has the Admin tell the PM and the Coder the result.
 	reasonSuffix := ""
 	if reason != "" {
 		reasonSuffix = " — " + strings.ReplaceAll(reason, "_", " ")
 	}
-	for _, role := range []string{"PM", "CODER"} {
-		s.notify(r, tenant, "role:"+role, "ELIGIBILITY_RESULT",
-			fmt.Sprintf("Case %s: eligibility %s%s", orDash(caseNumber), result, reasonSuffix), "#/cases/"+caseID)
-	}
+	s.caseAlert(r, tenant, caseID, "ELIGIBILITY_RESULT",
+		fmt.Sprintf("Case %s: eligibility %s%s", orDash(caseNumber), result, reasonSuffix), "", "PM", "CODER")
 	if caseNumber != "" {
 		s.fileEligibilityChecklist(r, tenant, caseID, caseNumber, result, reason, decidedBy, evidence)
 	}
@@ -456,7 +454,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Reviewer"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Admin"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -487,7 +485,7 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	}
 	if missing := missingEligibilityInputs(cfg, in); len(missing) > 0 {
 		// What was found goes back too, so the form can be filled with it
-		// and only the blanks are left to the Reviewer.
+		// and only the blanks are left to the Admin.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"result": "NEEDS_HUMAN", "missing": missing, "inputs": in,
 			"detail": "rule-required inputs are not derivable from the case record or analyzed documents",

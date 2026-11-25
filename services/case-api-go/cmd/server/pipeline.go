@@ -22,7 +22,7 @@ func (s *server) pipelineCounts(w http.ResponseWriter, r *http.Request) {
 		by = "status"
 	}
 	// The same filters as the cards' /cases list, so a column's count is the number of cards it pages through:
-	// the Reviewer's scope (only unassigned cases and their own), assigned=mine|unassigned, and the ?q= search.
+	// the Admin's scope (only unassigned cases and their own), assigned=mine|unassigned, and the ?q= search.
 	caller := r.Context().Value(ctxPrincipal{}).(principal)
 	args := []any{tenant}
 	where := " AND $1::text IS NOT NULL"
@@ -48,7 +48,7 @@ func (s *server) pipelineCounts(w http.ResponseWriter, r *http.Request) {
 		SELECT coalesce(c.%[1]s, '') AS stage, count(*) AS count,
 		       coalesce(sum(c.disputed_amount_cents), 0) AS disputed_cents, coalesce(sum(c.qpa_cents), 0) AS qpa_cents,
 		       count(*) FILTER (WHERE c.assigned_to IS NULL OR c.assigned_to IN ('', 'unassigned-pool')) AS unassigned,
-		       -- unassigned AND paid: the ones actually waiting for a Reviewer (an unpaid filing is not given out yet)
+		       -- unassigned AND paid: the ones actually waiting for an Admin (an unpaid filing is not given out yet)
 		       count(*) FILTER (WHERE (c.assigned_to IS NULL OR c.assigned_to IN ('', 'unassigned-pool')) AND c.status <> 'AWAITING_PAYMENT') AS unassigned_paid,
 		       count(*) FILTER (WHERE c.status = 'AWAITING_PAYMENT') AS awaiting_payment
 		FROM tenant_%[2]s.cases c WHERE true%[3]s GROUP BY 1 ORDER BY 1`, by, sanitizeTenant(tenant), where), args...)

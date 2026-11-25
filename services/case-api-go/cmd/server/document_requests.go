@@ -43,7 +43,7 @@ var docRequestReasons = map[string]string{
 	"OTHER":               "Other",
 }
 
-// docRequestRoles may ask for documents: the Reviewer, the PM and the case's
+// docRequestRoles may ask for documents: the Admin, the PM and the case's
 // specialists, and admins.
 var docRequestRoles = []string{"CASE_MANAGER", "PM", "ARBITRATOR", "ATTORNEY", "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE",
 	"TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
@@ -643,7 +643,7 @@ func (s *server) permissionDocRequest(r *http.Request, tenant, caseID string) {
 		"Give your permission to proceed, or say you do not wish to proceed. Without permission within 15 calendar days the dispute is dismissed.", 15, by)
 }
 
-// closePermissionRequests: the permission was recorded another way (the Reviewer's step), or the case was dismissed.
+// closePermissionRequests: the permission was recorded another way (the Admin's step), or the case was dismissed.
 func (s *server) closePermissionRequests(ctx context.Context, tenant, caseID, status string) {
 	_, _ = s.db.Exec(ctx, `UPDATE public.document_requests SET status=$3, closed_at=now() WHERE tenant=$1 AND case_id=$2
 		AND reason='PERMISSION' AND status='OPEN'`, tenant, caseID, status)
@@ -691,7 +691,7 @@ func (s *server) answerDocRequest(r *http.Request, tenant, caseID, reqID, actorS
 		s.logActivity(r.Context(), tenant, caseID, "RFI_RESPONSE_RECEIVED", "RFI response received ("+via+") from "+orgName)
 		s.setProgramDateToday(r.Context(), tenant, caseID, "rfi_response_received_at")
 	}
-	// The provider's permission (step 4, within 15 calendar days): recorded on the case as the Reviewer's step
+	// The provider's permission (step 4, within 15 calendar days): recorded on the case as the Admin's step
 	// would record it, so the workflow moves on -- the plan's notice, or the dismissal.
 	if reason == "PERMISSION" {
 		data := map[string]any{"granted": decision == "PROCEED", "date": time.Now().UTC().Format("2006-01-02"),

@@ -283,7 +283,7 @@ var mailSenderEditors = []string{"PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFOR
 
 // caseSendersHTTP: GET/POST/DELETE /cases/{caseId}/mail-senders -- who may put mail on this dispute: the parties'
 // addresses (as the trust rules see them), the senders authorized on it (by code, by hand, by the office), and its
-// current reply code. The case's Reviewer, PMs and admins add or remove a sender for this dispute.
+// current reply code. The case's Admin, PMs and admins add or remove a sender for this dispute.
 func (s *server) caseSendersHTTP(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	tenant := r.Context().Value(ctxTenant{}).(string)

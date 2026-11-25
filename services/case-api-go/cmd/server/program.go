@@ -141,7 +141,10 @@ type ThresholdRule struct {
 
 type ProgramConfig struct {
 	// TimeZone: the program's clock (IANA name). Fees take effect, and "today" turns over, on this clock.
-	TimeZone   string `json:"time_zone,omitempty"`
+	TimeZone string `json:"time_zone,omitempty"`
+	// StaffRoles: the staff roles this program uses (empty = every role). Florida: the change log's roles
+	// (2026-11-25) -- Admin, PM, QA, Coder, Nurse Reviewer, Attorney -- with the Tenant Admin and Finance.
+	StaffRoles []string `json:"staff_roles,omitempty"`
 	CaseNumber struct {
 		Pattern string `json:"pattern"` // e.g. "FL{yy}-{seq}"
 		SeqPad  int    `json:"seq_pad"`
@@ -643,7 +646,7 @@ func (s *server) setDualStatus(w http.ResponseWriter, r *http.Request) {
 func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Reviewer"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Admin"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -671,7 +674,7 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	var override struct {
 		Override bool   `json:"override"`
 		Reason   string `json:"override_reason"`
-		Notes    string `json:"notes"` // the Reviewer's working notes, saved with the review (eligibility_notes.go)
+		Notes    string `json:"notes"` // the Admin's working notes, saved with the review (eligibility_notes.go)
 	}
 	// Decode twice: the decision input, then the override envelope (separate
 	// type so eligibilityInput stays exactly the rule inputs).
@@ -718,7 +721,7 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	in.FiledOn = ""
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(opened_at::date::text,'') FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), id).Scan(&in.FiledOn)
 	if in.FinalDeterminationAt != "" {
-		in.DeterminationFrom = "entered by the Reviewer"
+		in.DeterminationFrom = "entered by the Admin"
 	}
 	// Decision + persistence both live in triage.go, shared with the
 	// auto-adjudication endpoint — one implementation, so the auto path
@@ -860,14 +863,14 @@ func (s *server) escalationTrigger(r *http.Request, tenant, caseID string, dispu
 	// abuse: the PM assigns an independent reviewer (sopdeadlines.go) -- unless
 	// the tenant turned that review off; the escalation above stands either way.
 	if !s.featureEnabled(r, tenant, "fwa_review") {
-		s.notify(r, tenant, "*", "ESCALATION", detail, "#/cases/"+caseID)
+		s.caseAlertAll(r, tenant, caseID, "ESCALATION", detail, "#/cases/"+caseID)
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE tenant_%s.cases SET details = jsonb_build_object('fwa', jsonb_build_object(
 		  'status','REPORTED','reason',$2::text,'reported_by','system','reported_at',$3::text)) || details
 		WHERE id::text=$1 AND NOT (details ? 'fwa')`, sanitizeTenant(tenant)), caseID, detail, time.Now().UTC().Format(time.RFC3339))
-	s.notify(r, tenant, "*", "ESCALATION", detail, "#/cases/"+caseID)
+	s.caseAlertAll(r, tenant, caseID, "ESCALATION", detail, "#/cases/"+caseID)
 }
 
 // canonStatus finds v in the program's status list ignoring case and returns

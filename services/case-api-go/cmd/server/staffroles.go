@@ -1,6 +1,6 @@
 package main
 
-// staffroles.go — the PM and the Tenant Admin change what a staff member does (Reviewer, Coder, Attorney…) from the
+// staffroles.go — the PM and the Tenant Admin change what a staff member does (Admin, Coder, Attorney…) from the
 // Team page, instead of only at account creation.
 //
 // Only the tenant staff roles are touched (staffEditableRoles); anything else the account holds in Keycloak
@@ -24,7 +24,7 @@ import (
 // accounts, not staff.
 var staffEditableRoles = map[string]bool{
 	"CASE_MANAGER": true, "ARBITRATOR": true, "PM": true, "CODER": true, "NURSE_PHYSICIAN": true, "DOCTOR": true,
-	"NURSE": true, "ATTORNEY": true, "FINANCE": true, "STATE_AUDITOR": true, "TENANT_ADMIN": true,
+	"NURSE": true, "ATTORNEY": true, "FINANCE": true, "STATE_AUDITOR": true, "TENANT_ADMIN": true, "QA": true,
 }
 
 // roleChanges: what to add and remove to go from `current` to `want`, limited to the editable roles. Sorted, so it
@@ -145,6 +145,12 @@ func (s *server) setTenantStaffRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, ro := range add {
+		if !s.programAllowsRole(r, in.Tenant, ro) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("this program does not use the %s role", staffRoleWord(ro))})
+			return
+		}
+	}
+	for _, ro := range add {
 		if err := s.kcAssignRealmRole(r.Context(), tok, userID, ro); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "keycloak role update failed: " + err.Error()})
 			return
@@ -161,4 +167,24 @@ func (s *server) setTenantStaffRoles(w http.ResponseWriter, r *http.Request) {
 		"by": p.Subject, "username": username, "added": add, "removed": remove,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"username": username, "roles": s.kcUserRoles(r.Context(), tok, userID), "added": add, "removed": remove})
+}
+
+// programAllowsRole: whether the tenant's program uses this staff role (ProgramConfig.StaffRoles; no list = all).
+// Roles that are not tenant staff roles (PARTY, TPA, platform roles) are not the program's to limit.
+func (s *server) programAllowsRole(r *http.Request, tenant, role string) bool {
+	if !staffEditableRoles[role] {
+		return true
+	}
+	cfg := s.loadProgram(r, tenant)
+	if cfg == nil || len(cfg.StaffRoles) == 0 {
+		return true
+	}
+	return contains(cfg.StaffRoles, role)
+}
+
+func staffRoleWord(role string) string {
+	if w := wfOwnerLabels[role]; w != "" {
+		return w
+	}
+	return strings.ToLower(strings.ReplaceAll(role, "_", " "))
 }

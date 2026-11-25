@@ -27,7 +27,7 @@ func TestGraphFiguresFollowTheScreens(t *testing.T) {
 		role       string
 		has, hasNo []string
 	}{
-		// The Reviewer has no Reports, Ops or money screens.
+		// The Admin has no Reports, Ops or money screens.
 		{"CASE_MANAGER", []string{"caseload", "services"}, []string{"parties", "eligibility", "outcomes", "deadlines", "money"}},
 		{"CODER", []string{"caseload", "services"}, []string{"parties", "eligibility", "deadlines", "money"}},
 		{"ATTORNEY", []string{"caseload", "services"}, []string{"parties", "deadlines", "money"}},

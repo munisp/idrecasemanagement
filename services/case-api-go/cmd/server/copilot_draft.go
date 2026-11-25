@@ -101,7 +101,7 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// In a program with role-owned steps, the assistant drafts only what the
-	// caller could draft by hand: letters are the Reviewer's, the legal
+	// caller could draft by hand: letters are the Admin's, the legal
 	// rationale is the Attorney's. (TENANT_ADMIN passes either, as elsewhere.)
 	if s.loadProgram(r, tenant) != nil {
 		owner := "CASE_MANAGER"
@@ -175,7 +175,7 @@ func (s *server) copilotDraft(w http.ResponseWriter, r *http.Request) {
 	s.logAudit(r.Context(), tenant, caseID, "COPILOT_DRAFT_QUEUED", map[string]any{
 		"by": p.Subject, "model": s.cfg.CopilotModel, "kind": in.Kind, "qa_id": qid,
 	})
-	s.notify(r, tenant, "*", "QA_REVIEW",
+	s.caseAlertAll(r, tenant, caseID, "QA_REVIEW",
 		fmt.Sprintf("Copilot %s draft on case %s awaiting QA approval", in.Kind, facts.CaseNumber), "#/qa")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"qa_id": qid, "kind": in.Kind, "subject": subject, "draft": footed,
