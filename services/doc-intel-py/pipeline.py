@@ -1468,7 +1468,10 @@ def stage_validate(ctx: dict, cfg: dict, case: dict | None) -> dict:
     layout_read = any((ctx.get("extracted_fields") or {}).get(k) for k in ("remit", "ub04", "packet"))
     # A clinical record named by its own headings is evidence too, though it holds no billing field to extract.
     clinical = ctx.get("doc_type") == "medical_records" and ctx.get("classify_score", 0) >= WEIGHT["strong"]
-    if layout_read or clinical:
+    # So is one of the office's own letters recognised by its wording (several of its phrases): a cover letter to
+    # the Agency holds only names and addresses, and the model votes it "not medical billing".
+    office_letter = ctx.get("doc_type") in _letter_docs.LETTER_TYPES and ctx.get("classify_score", 0) >= 2 * WEIGHT["strong"]
+    if layout_read or clinical or office_letter:
         pass
     elif unreadable and (ctx.get("in_domain") is False or (ctx.get("classify_score", 1) == 0 and not ex_fields)):
         # The model saw too little legible text to recognise the page. That is

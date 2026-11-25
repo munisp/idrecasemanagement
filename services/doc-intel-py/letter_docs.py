@@ -50,12 +50,13 @@ _CASE_ANY_RE = re.compile(r"\b([A-Z]{2}\d{2}-\d{2,7})\b")
 _CLAIM_RE = re.compile(r"(?i)\bclaim\s*no\.?\s*:?\s*([A-Z0-9][-A-Z0-9]{0,30})")
 _AWARD_RE = re.compile(r"(?is)the\s+amount\s+of\s*" + _AMT + r"\s*be\s+awarded\s+to\s+the\s+(provider|health\s+plan)")
 _PAID_RE = re.compile(r"(?is)of\s+which\s*" + _AMT + r"\s*was\s+already\s+paid")
-_BAL_RE = re.compile(r"(?is)balance\s+of\s*" + _AMT + r"\s*is\s+owed")
+# "a balance of $X is owed" (the built-in letter) or "Therefore, an additional amount of $X be awarded" (the office's)
+_BAL_RE = re.compile(r"(?is)(?:balance\s+of\s*" + _AMT + r"\s*is\s+owed|an\s+additional\s+amount\s+of\s*" + _AMT + r"\s*be\s+awarded)")
 _PCT_AWARD_RE = re.compile(r"(?is)or\s+(\d{1,3}(?:\.\d+)?)\s*%\s+of\s+the\s+disputed")
 _CONTROVERSY_RE = re.compile(r"(?is)amount\s+in\s+controversy\s+is\s*" + _AMT)
 _INV_NO_H_RE = re.compile(r"\b([A-Z]{2}\d{2}-\d{2,7}H)\b")  # a health plan invoice: the number with H, anywhere
 _INV_NO_RE = re.compile(r"(?is)invoice\s*#.{0,400}?\b([A-Z]{2}\d{2}-\d{2,7}H?)\b")
-_RESP_RE = re.compile(r"(?is)\b(health\s+plan|provider)\s+is\s+responsible\s+for\s+(\d{1,3})\s*%")
+_RESP_RE = re.compile(r"(?is)\b(health\s+plan|plan|provider)\s+is\s+responsible\s+for\s+(\d{1,3})\s*%")  # the office invoice says "Plan"
 _RULE_RE = re.compile(r"59A-12\.030\s*\(4\)\s*\(([ab])\)")
 _COST_RE = re.compile(r"(?is)review\s+costs?\s*:\s*" + _AMT)
 _TOTAL_RE = re.compile(r"(?is)\btotal\s*:\s*" + _AMT)
@@ -117,7 +118,7 @@ def extract(doc_type: str, text: str) -> tuple[dict, list[str]]:
             out["already_paid_cents"] = _cents(m.group(1))
         m = _BAL_RE.search(t)
         if m:
-            out["balance_cents"] = _cents(m.group(1))
+            out["balance_cents"] = _cents(m.group(1) or m.group(2))
         m = _PCT_AWARD_RE.search(t)
         if m:
             out["percent_awarded"] = float(m.group(1))

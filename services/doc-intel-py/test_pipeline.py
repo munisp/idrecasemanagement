@@ -702,6 +702,16 @@ def test_an_unreadable_page_is_called_unreadable_not_unrelated():
     assert clear["doc_type"] == "unrelated" and any("not related to medical billing" in f["issue"] for f in clear["findings"])
 
 
+def test_an_office_letter_named_by_its_wording_is_not_made_unrelated_by_the_model():
+    # The office's cover letter to the Agency holds only names and addresses; the model votes it off-topic.
+    ctx = {"doc_type": "fl_cover_letter", "classify_score": 12, "in_domain": False, "extracted": {}, "text": "cover"}
+    out = pl.stage_validate(ctx, {}, None)
+    assert out["doc_type"] == "fl_cover_letter"
+    assert not any("not related to medical billing" in f["issue"] for f in out["findings"])
+    weak = pl.stage_validate({"doc_type": "fl_cover_letter", "classify_score": 2, "in_domain": False, "extracted": {}, "text": "x"}, {}, None)
+    assert weak["doc_type"] == "unrelated"  # one stray phrase is not enough to overrule the model
+
+
 # --- deterministic field extraction (stage_fields) --------------------------
 
 import fields as _fields
