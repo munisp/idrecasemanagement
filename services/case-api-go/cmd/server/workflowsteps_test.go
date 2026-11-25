@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -78,14 +79,23 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Generated["invoice_health_plan"] = true
 	expect("letter:final_order", "Reviewer")
 	f.Letter["final_order"] = "SENT"
-	expect("final_order_issued", "Reviewer")
-	f.Act["FINAL_ORDER_ISSUED"] = wfAct{At: now}
-	expect("letter:final_order_rationale_copy", "Reviewer")
-	f.Letter["final_order_rationale_copy"] = "SENT"
+	// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 	expect("outcome", "Reviewer")
 	f.HasOutcome = true
+	expect("final_order_issued", "Reviewer")
+	f.Act["FINAL_ORDER_ISSUED"] = wfAct{At: now}
 	expect("payment", "Finance")
+	// #19: the Final Order Rationale Copy is not a step unless a party asks for it.
+	if strings.Contains(fmt.Sprint(buildWorkflowSteps(f)), "final_order_rationale_copy") {
+		t.Fatal("the rationale copy is a step though nobody asked for it")
+	}
+	f.CopyRequested = true
 	f.OpenInvoices, f.Internal = 0, "Invoice Paid"
+	steps := buildWorkflowSteps(f)
+	if !strings.Contains(fmt.Sprint(steps), "letter:final_order_rationale_copy") {
+		t.Fatal("a requested copy is not listed")
+	}
+	f.Letter["final_order_rationale_copy"] = "SENT"
 	if n := wfNext(buildWorkflowSteps(f)); n != nil {
 		t.Fatalf("a closed case has no next step, got %+v", n)
 	}
@@ -340,5 +350,41 @@ func TestOutOfOrderStepSkipsNothing(t *testing.T) {
 				t.Errorf("%s was done, got %s", st.Key, st.State)
 			}
 		}
+	}
+}
+
+// Change log 2026-11-25 #13: with a cost estimate requested, the Cost Estimate then the acceptance, both through QA,
+// the second approval sending both.
+func TestWorkflowEstimatePair(t *testing.T) {
+	now := time.Now()
+	f := wfBase()
+	f.Status = "PENDING_INTAKE"
+	f.Act["PACKET_COMPLETE"] = wfAct{Body: `{"estimate_requested":true}`, At: now}
+	f.HasElig, f.EligResult, f.EligAt, f.HasSummary = true, "ELIGIBLE", now, true
+	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `Workflow signal ESTIMATE_CONFIRMED delivered — {"requested":true}`, At: now}
+	next := func() string {
+		if n := wfNext(buildWorkflowSteps(f)); n != nil {
+			return n.Key
+		}
+		return ""
+	}
+	want := func(k string) {
+		t.Helper()
+		if got := next(); got != k {
+			t.Fatalf("next: got %s, want %s", got, k)
+		}
+	}
+	want("estimate")
+	f.HasEstimate = true
+	want("letter:estimate_cost")
+	f.Letter["estimate_cost"] = "PENDING"
+	want("letter:acceptance")
+	f.Letter["acceptance"] = "PENDING"
+	want("qa:estimate_cost")
+	f.Letter["estimate_cost"] = "APPROVED" // held for the acceptance
+	want("qa:acceptance")
+	f.Letter["estimate_cost"], f.Letter["acceptance"] = "SENT", "SENT"
+	if strings.HasPrefix(next(), "qa:") || strings.HasPrefix(next(), "letter:acceptance") {
+		t.Fatalf("both sent, still on %s", next())
 	}
 }

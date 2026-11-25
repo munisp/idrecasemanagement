@@ -859,6 +859,7 @@ func main() {
 		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Reviewer: outcome, claims reviewed, award, party billed
 		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                              // the written decision: sections, amounts, claims tables
 		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
+		r.Post("/cases/{caseId}/revision-request", s.requestRevisions) // the Attorney (or QA) asks the Coder / Nurse for revisions (role_notify.go)
 		r.Post("/cases/{caseId}/decision-report/file", s.attachDecisionReport) // the finished report, uploaded
 		r.Get("/letter-settings", s.getLetterSettings)                         // letterhead, Agency addressee, invoice terms, remit-to
 		r.Put("/letter-settings", s.putLetterSettings)
@@ -987,6 +988,7 @@ func main() {
 		r.Get("/admin/healthplans", s.adminListHealthPlans)
 		r.Post("/admin/healthplans/{planId}/status", s.adminSetHealthPlanStatus)
 		r.Post("/cases/{caseId}/eligibility/auto", s.autoEligibility) // auto-adjudicate from case+doc data (Lever 1)
+		r.Get("/cases/{caseId}/eligibility/inputs", s.eligibilityInputs) // the derived inputs, no decision (form prefill)
 		r.Post("/cases/{caseId}/copilot/brief", s.copilotBrief)       // grounded advisory brief (Phase 1 copilot)
 		r.Get("/cases/{caseId}/copilot/brief", s.copilotBriefLatest)  // latest persisted brief
 		r.Post("/cases/{caseId}/copilot/draft", s.copilotDraft)       // Phase 2: QA-gated determination/correspondence drafts
@@ -1827,6 +1829,17 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
+	// Change log 2026-11-25 #15: a clinical review that needed the external Medical Reviewer names them and their findings.
+	if body.Signal == "CLINICAL_REVIEW_COMPLETE" {
+		if v, _ := body.Data["medical_reviewer_required"].(bool); v {
+			name, _ := body.Data["medical_reviewer"].(string)
+			found, _ := body.Data["medical_reviewer_findings"].(string)
+			if strings.TrimSpace(name) == "" || strings.TrimSpace(found) == "" {
+				http.Error(w, `{"error":"the Medical Reviewer was needed: name them and record their findings"}`, http.StatusBadRequest)
+				return
+			}
+		}
+	}
 	// Unmapped signals (PACKET_COMPLETE, OUTREACH_DONE, PROVIDER_WITHDRAW,
 	// AOR_REVISED, ESTIMATE_PERMISSION, PLAN_RESPONSE_RECEIVED, RFI_SENT,
 	// RFI_RESPONSE_RECEIVED, FINAL_ORDER_ISSUED) default to the broad
@@ -1949,6 +1962,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		http.Error(w, `{"error":"signal failed"}`, http.StatusBadGateway)
 		return false
 	}
+	s.notifyOnSignal(r, tenant, id, signal, data) // change log 2026-11-25 #14/#24 (role_notify.go)
 	// The Reviewer tells the Coder and the Attorney the packet is in: the
 	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
 	if signal == "PACKET_COMPLETE" {

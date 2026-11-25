@@ -531,11 +531,8 @@ func (s *server) fillResponseDue(r *http.Request, tenant string, rows []map[stri
 			}
 			if started != "" {
 				if basis, err := time.Parse("2006-01-02", started); err == nil {
-					if rule.DayType == "business" {
-						due = addBusinessDays(basis, rule.Days).Format("2006-01-02")
-					} else {
-						due = basis.AddDate(0, 0, rule.Days).Format("2006-01-02")
-					}
+					d, _ := programDue(basis, rule.Days, rule.DayType)
+					due = d.Format("2006-01-02")
 				}
 			}
 		}
