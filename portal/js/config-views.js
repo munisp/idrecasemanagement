@@ -47,7 +47,7 @@ const ConfigViews = (() => {
       <div class="card" id="cfg-more"><h2>Other settings</h2>
         <ul class="cfg-links">
           <li><a href="#/features">Feature toggles</a> — switch parts of the platform on or off (step order, payment lock, fraud review…)</li>
-          <li><a href="#/templates">Templates and letter settings</a> — letter wording, letterhead, the Agency addressee, remit-to and invoice terms</li>
+          <li><a href="#/templates">Templates and letter settings</a> — letter wording, letterhead, the Agency addressee, remit-to and invoice terms, and the fee estimate shown at filing</li>
           <li><a href="#/rules">Program rules</a> — automatic actions, the program's display name and brand</li>
           <li><a href="#/team">Team</a> — staff accounts, roles and the assignment rotation</li></ul></div>`;
   }

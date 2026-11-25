@@ -868,6 +868,8 @@ const Api = (() => {
       attachReport: (caseId, docId) => req("POST", `${t()}/cases/${caseId}/decision-report/file`, { doc_id: docId }),
       settings: () => req("GET", `${t()}/letter-settings`),
       saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
+      feeEstimate: () => req("GET", `${t()}/fee-estimate-settings`),
+      saveFeeEstimate: (body) => req("PUT", `${t()}/fee-estimate-settings`, body),
       variables: () => req("GET", `${t()}/template-variables`),
       saveVariables: (body) => req("PUT", `${t()}/template-variables`, body),
     },

@@ -600,6 +600,17 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 			s.caseNumberOf(r.Context(), tenant, caseID), strings.Join(problems, "; ")), "PM") // change log #14
 		return
 	}
+	amount := int64(0) // change log #4: the full review fee estimate, when the filer asked and it is switched on
+	if disputed != nil {
+		amount = *disputed
+	} else {
+		for _, c := range claims {
+			if c.DisputedCents != nil {
+				amount += *c.DisputedCents
+			}
+		}
+	}
+	s.feeEstimateOnFiling(r.Context(), tenant, details, len(claims), &amount)
 	keys, err := s.applyFilingPacket(r.Context(), tenant, caseID, details, disputed, claims, nil, false)
 	if err != nil {
 		s.logActivity(r.Context(), tenant, caseID, "FILING_PACKET_INCOMPLETE", "The filing form could not be saved; enter it from the case page.")

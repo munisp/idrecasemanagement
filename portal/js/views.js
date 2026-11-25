@@ -151,7 +151,9 @@ const Views = (() => {
     const mine = can("CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
     const ro = mine ? "" : "disabled";
     const matrix = (cfg.estimate && cfg.estimate.cost_matrix) || [];
-    const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : "";
+    // Change log #4: the estimate shown to the filer at filing is the starting value until the estimate is recorded.
+    const preview = (c.details || {}).fee_estimate_preview_cents;
+    const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : preview != null ? (preview / 100).toFixed(2) : "";
     return `<details class="prog-sec" id="p-summary-details" data-wf="summary" data-wf-roles="CODER"><summary>Dispute Summary (Coder)</summary>
       <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead, the summary of the dispute,
         and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${ds.by ? `<br/><span class="form-stamp">Last saved by ${esc(ds.by)}, ${fmtDate(ds.at)}</span>` : ""}</p>
@@ -175,7 +177,8 @@ const Views = (() => {
               <option value="">Choose a row…</option>
               ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select></label>` : ""}
             <label>Estimate ($)
-              <input name="estimate" type="number" step="0.01" min="0" placeholder="0.00" value="${est}" ${ro} /></label>
+              <input name="estimate" type="number" step="0.01" min="0" placeholder="0.00" value="${est}" ${ro} />
+              ${ds.full_review_estimate_cents == null && preview != null ? `<span class="field-hint">the estimate shown to the filer at filing — confirm or change it</span>` : ""}</label>
             <label>Basis for the estimate
               <input name="basis" placeholder="matrix row or reason" value="${esc(ds.estimate_basis || "")}" ${ro} /></label>
           </div></div>
@@ -7148,6 +7151,7 @@ const Views = (() => {
       <span class="muted">the emails this program sends, and which one is used when</span></div>
       ${Letters.variablesCardHtml()}
       ${Letters.settingsCardHtml()}
+      ${Letters.feeEstimateCardHtml()}
       <div id="tpl-health"></div>
       <div id="tpl-root"><p class="muted">Loading…</p></div>`;
   }
@@ -8892,6 +8896,7 @@ const Views = (() => {
       <p class="muted">Idempotent per period — an existing active invoice for the same period is reported, never duplicated. Billable time without a role rate blocks generation (configurable).</p>
       <div id="billing-gen-out"></div></div>
       ${Letters.settingsCardHtml()}
+      ${Letters.feeEstimateCardHtml()}
       <div id="billing-list"><p class="muted">Loading…</p></div>
       <div id="billing-detail"></div>`;
   }

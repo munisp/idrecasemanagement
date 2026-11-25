@@ -47,3 +47,5 @@
 .sig-pad .sig-clear{align-self:flex-start}
 .sig-label{font-size:14px}
 .sig-ro canvas{pointer-events:none;border-style:solid}.sig-ro .sig-clear{display:none}
+.pf-estimate{margin:10px 0 2px;padding:10px 12px;border:1px solid var(--border-default,#c9cdd3);border-left:4px solid var(--accent,#2f6f5e);border-radius:6px;background:var(--surface-raised,#fff);max-width:640px}
+.pf-estimate p{margin:0 0 4px}.pf-estimate p:last-child{margin:0}

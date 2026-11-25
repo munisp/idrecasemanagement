@@ -866,6 +866,8 @@ func main() {
 		r.Post("/cases/{caseId}/decision-report/file", s.attachDecisionReport) // the finished report, uploaded
 		r.Get("/letter-settings", s.getLetterSettings)                         // letterhead, Agency addressee, invoice terms, remit-to
 		r.Put("/letter-settings", s.putLetterSettings)
+		r.Get("/fee-estimate-settings", s.getFeeEstimateSettings) // change log #4: the estimate shown at filing (fee_estimate.go)
+		r.Put("/fee-estimate-settings", s.putFeeEstimateSettings)
 		r.Get("/template-variables", s.getTemplateVariables) // the office's values and its own {variables}
 		r.Put("/template-variables", s.putTemplateVariables)
 		r.Post("/cases/{caseId}/fwa", s.fwaAction)           // fraud/waste/abuse: report, assign reviewer, conclude
@@ -1182,8 +1184,9 @@ func main() {
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
 	r.Get("/api/public/brand", s.publicBrand)
-	r.Get("/api/public/docs/{audience}", s.publicAPIDoc) // TPA and health plan API references (apidocs.go)
-	r.Get("/api/public/email-check", s.emailCheck)       // does this address take mail (emailcheck.go)
+	r.Get("/api/public/fee-estimate", s.publicFeeEstimate) // what the filing forms show for "Yes, estimate the fee"
+	r.Get("/api/public/docs/{audience}", s.publicAPIDoc)   // TPA and health plan API references (apidocs.go)
+	r.Get("/api/public/email-check", s.emailCheck)         // does this address take mail (emailcheck.go)
 	r.Post("/api/public/healthplan/register", s.registerHealthPlan)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale

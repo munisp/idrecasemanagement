@@ -357,6 +357,76 @@ const Letters = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
   }
 
+  // ---- the full review fee estimate shown at filing (change log #4; case-api fee_estimate.go) ----------------------
+  // Off until an administrator switches it on; everyone who handles fees can see it.
+  function feeEstimateCardHtml() {
+    if (!can("PM", "FINANCE", "CASE_MANAGER", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return "";
+    afterRender(feLoad);
+    return `<details class="card" id="fe-card"><summary><b>Fee estimate at filing</b> <span class="muted" id="fe-state">— loading…</span></summary>
+      <div id="fe-body"><p class="muted">Loading…</p></div></details>`;
+  }
+  const feMoney = (c) => (c ? (c / 100).toFixed(2) : "");
+  const feCents = (v) => { v = String(v || "").replace(/[$,\s]/g, ""); if (!v) return 0; const n = Number(v); return Number.isFinite(n) ? Math.round(n * 100) : NaN; };
+  function feTierRow(t = {}) {
+    return `<tr class="fe-tier"><td><input name="up_to" inputmode="decimal" placeholder="no limit" value="${feMoney(t.up_to_cents)}" aria-label="Disputed amount up to ($)" /></td>
+      <td><input name="fee" inputmode="decimal" value="${feMoney(t.fee_cents)}" aria-label="Estimated fee ($)" /></td>
+      <td><button type="button" class="mini ghost" onclick="this.closest('tr').remove()">Remove</button></td></tr>`;
+  }
+  async function feLoad() {
+    const box = document.getElementById("fe-body");
+    if (!box) return;
+    let d;
+    try { d = await Api.letters.feeEstimate(); }
+    catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const c = d.settings || {}, ro = d.can_edit ? "" : " disabled", m = c.method || "";
+    const st = document.getElementById("fe-state");
+    if (st) st.textContent = c.enabled ? "— on: filers who ask see an estimate" : "— off: filers who ask get the Cost Estimate letter only";
+    box.innerHTML = `<p class="muted">When this is on, a filer who answers <b>Yes</b> to “Do you want an estimate of the full review fee?” sees the estimate on the filing form, and the case keeps it. The Reviewer’s Cost Estimate letter stays the official figure, and the case page offers this estimate as its starting value.${d.can_edit ? "" : " Only an administrator can change it."}</p>
+      <form id="fe-form" class="ls-form" onsubmit="event.preventDefault(); Letters.feSave(this)">
+        <label class="fe-switch"><input type="checkbox" name="enabled"${c.enabled ? " checked" : ""}${ro} /> Show the estimate on the filing forms</label>
+        <fieldset class="ls-group"><legend>How it is worked out</legend>
+          <label><input type="radio" name="method" value="flat"${m === "flat" ? " checked" : ""}${ro} onchange="Letters.feShow(this.form)" /> One flat fee</label>
+          <label><input type="radio" name="method" value="per_claim"${m === "per_claim" ? " checked" : ""}${ro} onchange="Letters.feShow(this.form)" /> A fee per claim line</label>
+          <label><input type="radio" name="method" value="tiered"${m === "tiered" ? " checked" : ""}${ro} onchange="Letters.feShow(this.form)" /> By the aggregated disputed amount (bands)</label>
+          <label data-for="flat">Flat fee ($)<input name="flat" inputmode="decimal" value="${feMoney(c.flat_cents)}"${ro} /></label>
+          <label data-for="per_claim">Fee per claim ($)<input name="per_claim" inputmode="decimal" value="${feMoney(c.per_claim_cents)}"${ro} /></label>
+          <div data-for="tiered"><table class="fe-tiers"><thead><tr><th>Disputed amount up to ($)</th><th>Estimated fee ($)</th><th></th></tr></thead>
+            <tbody>${(c.tiers || []).map(feTierRow).join("") || feTierRow()}</tbody></table>
+            ${d.can_edit ? `<button type="button" class="mini" onclick="Letters.feAddTier(this)">Add a band</button>` : ""}
+            <p class="muted">Leave “up to” blank on the last band to cover every larger amount; otherwise disputes above it get no estimate.</p></div>
+        </fieldset>
+        <fieldset class="ls-group"><legend>Limits and wording</legend>
+          <label>Minimum ($, optional)<input name="min" inputmode="decimal" value="${feMoney(c.min_cents)}"${ro} /></label>
+          <label>Maximum ($, optional)<input name="max" inputmode="decimal" value="${feMoney(c.max_cents)}"${ro} /></label>
+          <label class="fe-note">Note shown with the figure<textarea name="note" rows="2" maxlength="600" placeholder="${esc(d.default_note || "")}"${ro}>${esc(c.note || "")}</textarea></label>
+        </fieldset>
+        ${d.can_edit ? `<div class="actions"><button>Save fee estimate</button></div>` : ""}
+      </form>
+      ${d.updated_by ? `<p class="muted">Last changed by ${esc(d.updated_by)}, ${new Date(d.updated_at).toLocaleString()}.</p>` : ""}`;
+    feShow(document.getElementById("fe-form"));
+  }
+  function feShow(form) {
+    const m = (form.querySelector('[name="method"]:checked') || {}).value || "";
+    form.querySelectorAll("[data-for]").forEach((el) => { el.hidden = el.dataset.for !== m; });
+  }
+  function feAddTier(btn) { btn.parentElement.querySelector("tbody").insertAdjacentHTML("beforeend", feTierRow()); }
+  async function feSave(form) {
+    const bad = [];
+    const cents = (name, label) => { const v = feCents(form.elements[name].value); if (Number.isNaN(v)) { bad.push(`${label}: enter an amount like 450.00`); return 0; } return v; };
+    const body = { enabled: form.enabled.checked, method: (form.querySelector('[name="method"]:checked') || {}).value || "",
+      flat_cents: cents("flat", "Flat fee"), per_claim_cents: cents("per_claim", "Fee per claim"),
+      min_cents: cents("min", "Minimum"), max_cents: cents("max", "Maximum"), note: form.note.value.trim(), tiers: [] };
+    form.querySelectorAll("tr.fe-tier").forEach((tr, i) => {
+      const up = feCents(tr.querySelector('[name="up_to"]').value), fee = feCents(tr.querySelector('[name="fee"]').value);
+      if (Number.isNaN(up) || Number.isNaN(fee)) { bad.push(`Band ${i + 1}: enter amounts like 5000.00`); return; }
+      if (!up && !fee) return;
+      body.tiers.push({ up_to_cents: up, fee_cents: fee });
+    });
+    if (bad.length) { UI.toast(bad.join("; "), { kind: "warn", duration: 9000 }); return; }
+    try { await Api.letters.saveFeeEstimate(body); UI.toast(body.enabled ? "Fee estimate saved — filers who ask now see it" : "Fee estimate saved (off)"); feLoad(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
+
   // ---- template variables (Templates page) --------------------------------------------------------------------
   // Named values set once for the whole tenant and used as {name} in any email template or uploaded letter:
   // the office's own (organization name, contact details, the Agency's salutation) and any the office adds,
@@ -427,5 +497,6 @@ const Letters = (() => {
       UI.toast("Sent back for revisions — they have been notified"); form.note.value = "";
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
-  return { askRevisions, caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
+  return { askRevisions, caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave,
+    feeEstimateCardHtml, feShow, feAddTier, feSave };
 })();

@@ -188,7 +188,8 @@ window.PacketForm = (() => {
       <fieldset class="pf-sec"><legend>Full review fee</legend>
         <p class="pf-q">Do you want an estimate of the full review fee for this case?</p>
         ${radios(d, "fee_estimate_requested", [["true", "Yes — if the case is eligible, Capitol Bridge provides an estimate before accepting the case for review"],
-          ["false", "No — if the case is eligible, Capitol Bridge accepts the case, issues a recommendation and includes an invoice for the full review"]])}</fieldset>
+          ["false", "No — if the case is eligible, Capitol Bridge accepts the case, issues a recommendation and includes an invoice for the full review"]])}
+        <div class="pf-estimate" role="status" aria-live="polite" hidden></div></fieldset>
       <fieldset class="pf-sec pf-pos-provider"><legend>If the filing party is a provider: your position</legend>
         ${area(d, "provider_position_basis", "1. Describe with all appropriate technical detail the basis for and amount of payment you believe you should have received for these services.")}
         ${area(d, "provider_position_references", "2. Provide specific references to the contract, provider manual and other supporting documentation to support your position.")}
@@ -248,6 +249,57 @@ window.PacketForm = (() => {
     bindSigPads(pf);
     pf.addEventListener("change", touch);
     sync();
+    bindEstimate(pf);
+  }
+
+  // The full review fee estimate (change log #4): shown under "Do you want an estimate?" when the filer answers Yes
+  // and the program has switched it on (Settings → Fee estimate). The server works out the same figure at filing.
+  const estCfg = {};
+  function estTenant(pf) {
+    const el = pf.closest("[data-tenant]");
+    if (el) return el.dataset.tenant;
+    const st = document.getElementById("f-state");
+    if (st && st.value) return st.value;
+    return (window.Api && Api.getTenant && Api.getTenant()) || "fl";
+  }
+  function estimateFor(cfg, claims, cents) {
+    if (!cfg || !cfg.enabled) return null;
+    let fee = null;
+    if (cfg.method === "flat") fee = cfg.flat_cents || 0;
+    else if (cfg.method === "per_claim") fee = (cfg.per_claim_cents || 0) * Math.max(1, claims);
+    else if (cfg.method === "tiered") { const t = (cfg.tiers || []).find((x) => !x.up_to_cents || cents <= x.up_to_cents); fee = t ? t.fee_cents : null; }
+    if (fee == null) return null;
+    if (cfg.min_cents && fee < cfg.min_cents) fee = cfg.min_cents;
+    if (cfg.max_cents && fee > cfg.max_cents) fee = cfg.max_cents;
+    return fee;
+  }
+  const dollars = (c) => "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function bindEstimate(pf) {
+    const box = pf.querySelector(".pf-estimate");
+    if (!box) return;
+    let timer = null;
+    const show = async () => {
+      const yes = pf.querySelector('[name="d.fee_estimate_requested"][value="true"]');
+      if (!yes || !yes.checked) { box.hidden = true; return; }
+      const tenant = estTenant(pf);
+      try {
+        if (!estCfg[tenant]) estCfg[tenant] = fetch(`/api/public/fee-estimate?tenant=${encodeURIComponent(tenant)}`).then((r) => r.ok ? r.json() : { enabled: false });
+        const cfg = await estCfg[tenant];
+        if (!cfg.enabled) { box.hidden = true; return; }
+        const { packet } = read(pf);
+        const cents = packet.disputed_amount_cents || packet.claims.reduce((n, c) => n + Number(c.disputed_cents || 0), 0);
+        const fee = estimateFor(cfg, packet.claims.length, cents);
+        box.innerHTML = fee == null
+          ? `<p><b>Estimated full review fee:</b> given in the Cost Estimate letter.</p><p class="muted">${esc(cfg.note || "")}</p>`
+          : `<p><b>Estimated full review fee: ${dollars(fee)}</b>${cfg.method === "per_claim" ? ` <span class="muted">(${packet.claims.length || 1} claim${packet.claims.length === 1 ? "" : "s"})</span>` : ""}</p><p class="muted">${esc(cfg.note || "")}</p>`;
+        box.hidden = false;
+      } catch { delete estCfg[tenant]; box.hidden = true; }
+    };
+    const soon = () => { clearTimeout(timer); timer = setTimeout(show, 300); };
+    pf.addEventListener("change", soon);
+    pf.addEventListener("input", soon);
+    pf.addEventListener("packetclaims", soon);
+    show();
   }
   const touched = (root) => (root.querySelector(".pf") || root).dataset.touched === "1";
   function addRow(btn) {
@@ -259,6 +311,7 @@ window.PacketForm = (() => {
     const tr = btn.closest("tr"), pf = btn.closest(".pf");
     if (tr.dataset.orig) pf.dataset.removed = [...(pf.dataset.removed ? pf.dataset.removed.split("\n") : []), tr.dataset.orig].join("\n");
     tr.remove();
+    pf.dispatchEvent(new CustomEvent("packetclaims"));
   }
 
   // Claims from an Excel workbook (.xlsx), read in the browser (nothing is uploaded) -- the change log asks for
@@ -467,6 +520,7 @@ window.PacketForm = (() => {
         if (any) { amount.value = money(sum); amount.dataset.fromCsv = amount.value; }
       }
       pf.dataset.touched = "1";
+      pf.dispatchEvent(new CustomEvent("packetclaims"));
       const notes = [`Added ${added} claim${added === 1 ? "" : "s"} from ${file.name}.`];
       if (dup) notes.push(`${dup} already in the table, skipped.`);
       if (over) notes.push(`${over} over the ${MAX_CLAIMS}-claim limit, not added — file the rest as a separate dispute.`);
@@ -674,5 +728,5 @@ window.PacketForm = (() => {
   }
 
   return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS,
-    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles, sigPad, bindSigPads };
+    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles, sigPad, bindSigPads, estimateFor };
 })();
