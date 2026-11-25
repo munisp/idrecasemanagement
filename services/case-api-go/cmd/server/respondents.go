@@ -423,13 +423,22 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 			return
 		}
 		var in struct {
-			Note string `json:"note"`
+			Note     string         `json:"note"`
+			Rebuttal map[string]any `json:"rebuttal"` // the Responding Party Claim Rebuttal Form (rebuttal.go)
 		}
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in)
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&in)
 		var docs int
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT count(*) FROM tenant_%s.documents WHERE case_id::text=$1 AND folder='PARTY_UPLOADS' AND uploaded_by LIKE 'respondent:%%'`,
 			sanitizeTenant(tenant)), caseID).Scan(&docs)
-		if docs == 0 && strings.TrimSpace(in.Note) == "" {
+		if in.Rebuttal != nil {
+			var side string
+			_ = s.db.QueryRow(r.Context(), `SELECT side FROM public.case_respondents WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&side)
+			if problems := rebuttalProblems(side, in.Rebuttal); len(problems) > 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the rebuttal form is not complete", "problems": problems})
+				return
+			}
+		}
+		if docs == 0 && strings.TrimSpace(in.Note) == "" && in.Rebuttal == nil {
 			http.Error(w, `{"error":"add your response documents (or at least a written response) before submitting"}`, http.StatusBadRequest)
 			return
 		}
@@ -442,6 +451,20 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 		}
 		var caseNumber string
 		_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+		if in.Rebuttal != nil { // kept on the case, and as a PDF of what they filled in (no QA, never mailed)
+			in.Rebuttal["submitted_by"], in.Rebuttal["submitted_at"] = sc.label, time.Now().UTC().Format(time.RFC3339)
+			if raw, err := json.Marshal(in.Rebuttal); err == nil {
+				_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('responding_rebuttal', $2::jsonb) WHERE id::text=$1`,
+					sanitizeTenant(tenant)), caseID, string(raw))
+			}
+			_ = s.enqueueLetter(r, tenant, caseID, caseNumber, "rebuttal_record", sc.label)
+			if p, _ := in.Rebuttal["participate"].(string); p == "no" {
+				s.notifyRoles(r, tenant, caseID, "PLAN_DECLINES", fmt.Sprintf("Case %s: %s says on its rebuttal form it does not wish to participate (non-SMMC plan) — the Attorney decides", caseNumber, sc.label), "ATTORNEY", "PM")
+			}
+			if c, _ := in.Rebuttal["challenge_eligibility"].(string); c == "yes" {
+				s.notifyRoles(r, tenant, caseID, "ELIGIBILITY_CHALLENGED", fmt.Sprintf("Case %s: %s challenges the claim's eligibility on its rebuttal form", caseNumber, sc.label), "CASE_MANAGER", "ATTORNEY", "PM")
+			}
+		}
 		wfID := fmt.Sprintf("IDR-%s-%s", strings.ToUpper(tenant), caseNumber)
 		if s.loadProgram(r, tenant) != nil {
 			wfID = fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)

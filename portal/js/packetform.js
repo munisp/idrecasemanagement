@@ -183,7 +183,8 @@ window.PacketForm = (() => {
         <div class="pf-grid">${text(d, "aor_provider", "Provider")}${text(d, "aor_health_plan", "Health plan")}</div>
         ${text(d, "aor_representative", "Is hereby appointed to act as the representative of the provider for this case")}
         <p class="pf-hint">The appointed representative receives all correspondence, including requests for information, the final order and the invoice.</p>
-        ${opts.filer ? `<label class="pf-file">Appointment of representative letter <span class="pf-hint">— a PDF on your company letterhead</span>
+        ${opts.filer ? `<label class="pf-file">Appointment of representative letter <span class="pf-hint">— a PDF on your company letterhead,
+          naming who may act for you (<a href="/assets/aor-letter-example.pdf" target="_blank" rel="noopener">see an example</a>)</span>
           <input type="file" name="aor_letter_file" accept="application/pdf,.pdf" /></label>` : ""}
         <div class="pf-grid">${text(d, "aor_signed_by_name", "Name (typed as your electronic signature)")}${text(d, "aor_signed_by_title", "Title & organization name")}
           ${text(d, "aor_signed_on", "Date", 'type="date"')}</div></fieldset>
@@ -249,8 +250,10 @@ window.PacketForm = (() => {
     date_claim_submitted: ["dateclaimsubmitted", "submitted", "datesubmitted", "submitteddate", "submissiondate"],
     date_of_denial: ["dateofdenial", "denialdate", "denied", "datedenied"],
     date_of_final_determination: ["dateoffinaldetermination", "finaldeterminationdate", "finaldetermination"],
+    // The plan's Claim Information Worksheet (rebuttalform.js)
+    date_grievance_completed: ["dateinternalgrievanceprocesscompleted", "internalgrievanceprocesscompleted", "dategrievancecompleted", "grievancecompleted"],
   };
-  const DATE_COLS = ["date_of_service", "date_claim_submitted", "date_of_denial", "date_of_final_determination"];
+  const DATE_COLS = ["date_of_service", "date_claim_submitted", "date_of_denial", "date_of_final_determination", "date_grievance_completed"];
   const headingKey = (h) => {
     const n = String(h ?? "").toLowerCase().replace(/#/g, "no").replace(/[^a-z0-9]/g, "");
     return Object.keys(CSV_HEADINGS).find((k) => CSV_HEADINGS[k].includes(n)) || null;

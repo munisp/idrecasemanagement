@@ -287,6 +287,8 @@ def docx_preview(docx_bytes: bytes) -> str:
 INTERNAL_RECORDS = {
     "filing_record": {"key": "filing_record", "folder": "INTAKE", "filename": "Filing packet as filed {case_number}.pdf",
                       "subject": "Filing packet as filed"},
+    "rebuttal_record": {"key": "rebuttal_record", "folder": "CORRESPONDENCE",
+                        "filename": "Responding party rebuttal as submitted {case_number}.pdf", "subject": "Rebuttal form as submitted"},
 }
 
 

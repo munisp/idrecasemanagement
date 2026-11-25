@@ -1165,6 +1165,81 @@ def build_filing_record(ctx, logo):
     return d
 
 
+# The Responding Party Claim Rebuttal Form as the responding party filled it in on the portal (2026-11-25): kept on
+# the case under Correspondence for the team. Not a letter to anyone: no QA, never mailed.
+_REBUTTAL_EXCLUSIONS = [
+    ("interest_payment", "This claim is related to an interest payment."),
+    ("prompt_payment", "This claim is related solely to an issue of prompt payment."),
+    ("medicare_grievance", "Part of an internal grievance in a Medicare MCO or a Medicare reconsideration appeal."),
+    ("medicaid_fair_hearing", "Part of a Medicaid fair hearing (42 CFR §431.220 et seq.)."),
+    ("pending_court_action", "The basis for an action pending in state or federal court."),
+    ("pre_2000_binding", "Subject to a binding dispute process by a contract entered into before October 1, 2000."),
+    ("internal_not_exhausted", "Subject to a contractual internal dispute process (on or after October 1, 2000) not yet exhausted."),
+    ("over_12_months", "More than 12 months since the final determination by the Managed Care Organization."),
+    ("plan_not_fl_regulated", "This Health Plan is not regulated by the State of Florida."),
+]
+_REBUTTAL_DOCS = {"claim_forms": "Claims form(s) submitted to the Managed Care Organization",
+                  "denials_eobs": "Denial(s) / Explanation of Benefits", "final_determination": "Final Determination Letter / Decision",
+                  "contract": "Contract between Provider and Managed Care Organization", "medical_records": "Medical Records",
+                  "coding_rules": "Coding Rules / Policies", "other": "Other"}
+
+
+def build_rebuttal_record(ctx, logo):
+    rb = ctx["details"].get("responding_rebuttal") or {}
+    if not rb:
+        raise LetterDataMissing("no rebuttal form was submitted on this case")
+    g = lambda m, k: str((m or {}).get(k) or "").strip()
+    party, att, cert, pos, info = (rb.get(k) or {} for k in ("party", "attest_signature", "certification", "position", "claim_info"))
+    d = Letter(ctx, header_line=ctx["case_number"], logo=logo)
+    d.heading("RESPONDING PARTY CLAIM REBUTTAL FORM — AS SUBMITTED", center=True, space_after=2)
+    d.para(f"Florida AHCA Case Number {ctx['case_number']}. Submitted on the portal by {g(rb, 'submitted_by')}"
+           f"{' on ' + g(rb, 'submitted_at')[:10] if g(rb, 'submitted_at') else ''}. Kept for the review team; not sent to anyone.",
+           align=WD_ALIGN_PARAGRAPH.CENTER)
+    d.heading("Responding party")
+    rows = [["Legal name", g(party, "legal_name")], ["Trade name (d/b/a)", g(party, "trade_name")],
+            ["Address", ", ".join(x for x in [g(party, "address"), g(party, "city"), g(party, "state"), g(party, "zip")] if x)],
+            ["Product name", g(party, "product_name")], ["Contact person", g(party, "contact_person")],
+            ["Physical address", ", ".join(x for x in [g(party, "physical_address"), g(party, "physical_city"), g(party, "physical_state"), g(party, "physical_zip")] if x)],
+            ["Telephone", g(party, "phone")], ["Fax", g(party, "fax")], ["E-mail", g(party, "email")]]
+    d.grid(["", ""], [r for r in rows if r[1]], widths=[2.0, 4.5], size=9)
+    if rb.get("smmc") is True:
+        d.para("A Statewide Medicaid Managed Care (SMMC) contracted plan: it must participate.")
+    elif g(rb, "participate"):
+        d.para(f"Wishes to participate in the dispute process: {g(rb, 'participate').title()}. "
+               f"Challenges the eligibility of this claim: {g(rb, 'challenge_eligibility').title() or '—'}.")
+    if g(rb, "challenge_eligibility") == "yes":
+        ex = set(rb.get("exclusions") or [])
+        d.heading("Eligibility attestation")
+        d.bullets([("☑ " if k in ex else "☐ ") + label for k, label in _REBUTTAL_EXCLUSIONS])
+    d.para(f"Signed: {g(att, 'signature')} — {g(att, 'printed_name')}, {g(att, 'title')}, {g(att, 'date')}")
+    if any(g(info, k) for k in ("claims_count", "dates_of_service", "type_of_service", "patient_names")):
+        d.heading("Claim information")
+        d.grid(["", ""], [[k, v] for k, v in [["Number of claims", g(info, "claims_count")], ["Date(s) of service", g(info, "dates_of_service")],
+                                              ["Type of service", g(info, "type_of_service")], ["Patient name(s)", g(info, "patient_names")]] if v],
+               widths=[2.0, 4.5], size=9)
+    texts = [g(pos, k) for k in ("basis", "references", "rebuttal") if g(pos, k)]
+    if texts:
+        d.heading("Position regarding this claim")
+        for i, t in enumerate(texts, 1):
+            d.para(t, lead=f"{i}. ")
+    docs = rb.get("documents") or []
+    if docs:
+        d.heading("Supporting documentation being submitted")
+        d.bullets([_REBUTTAL_DOCS.get(k, k) + (f" — {g(rb, k + '_specify')}" if g(rb, k + "_specify") else "") for k in docs])
+    if cert.get("agreed"):
+        d.heading("Certification")
+        d.para(f"Agreed and signed: {g(cert, 'signature')} — {g(cert, 'printed_name')}, {g(cert, 'title')}, {g(cert, 'date')}")
+    ws = rb.get("worksheet") or []
+    if ws:
+        m = lambda c: money(c) if isinstance(c, (int, float)) else ""
+        d.heading(f"Claim information worksheet — {len(ws)}")
+        d.grid(["Claim #", "Patient", "Service", "DOS", "Billed", "Paid", "In dispute", "Submitted", "Denied", "Grievance done"],
+               [[g(w, "claim_number"), g(w, "patient_name"), g(w, "type_of_service"), g(w, "date_of_service"), m(w.get("billed_cents")),
+                 m(w.get("paid_cents")), m(w.get("disputed_cents")), g(w, "date_claim_submitted"), g(w, "date_of_denial"),
+                 g(w, "date_grievance_completed")] for w in ws[:500]], size=7)
+    return d
+
+
 BUILDERS = {
     "final_order_rationale": build_decision_report,
     "cover_letter_final_notice": build_cover_letter,
@@ -1178,6 +1253,7 @@ BUILDERS = {
     "default_determination": build_default_determination,
     "fl_plan_packet": build_plan_packet,
     "filing_record": build_filing_record,
+    "rebuttal_record": build_rebuttal_record,
 }
 
 

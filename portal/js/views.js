@@ -11853,7 +11853,11 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
           ${open ? `<form class="inline-form" style="padding-left:0" onsubmit="event.preventDefault(); Views.respondUploadFn(this,'${k}','${caseId}')">
               <input name="file" type="file" required /><button class="mini">Add document</button></form>` : ""}</div></div>
         ${open ? `<form class="rsp-submit" onsubmit="event.preventDefault(); Views.respondSubmitFn(this,'${k}','${caseId}')">
-            <label>Your response (optional when you added documents)<textarea name="note" rows="3" placeholder="e.g. QPA methodology attached; the claim was paid at the median contracted rate."></textarea></label>
+            <h3>Responding Party Claim Rebuttal Form</h3>
+            <div id="${k}-rsp-rebuttal">${RebuttalForm.html(c.side, {})}</div>
+            ${(setTimeout(() => RebuttalForm.bind(document.getElementById(`${k}-rsp-rebuttal`)), 0), "")}
+            <p id="${k}-rsp-problems" class="error" role="alert"></p>
+            <label>Anything else to add (optional)<textarea name="note" rows="3" placeholder="e.g. QPA methodology attached; the claim was paid at the median contracted rate."></textarea></label>
             <div class="rsp-actions"><button>Submit response</button>
               ${k === "hp" ? `<button type="button" class="mini" onclick="Views.respondOptOutFn('${caseId}')">Ask to opt out</button>` : ""}</div>
             <p class="muted">Submitting counts as your response straight away; the reviewer is told and the case moves on.</p></form>`
@@ -11876,9 +11880,13 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
   async function respondSubmitFn(form, k, caseId) {
+    const host = document.getElementById(`${k}-rsp-rebuttal`), probs = document.getElementById(`${k}-rsp-problems`);
+    const { rebuttal, problems } = host ? RebuttalForm.read(host) : { rebuttal: null, problems: [] };
+    if (probs) probs.textContent = problems.length ? "Please complete the rebuttal form: " + problems.join("; ") : "";
+    if (problems.length) { probs.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
     if (!(await UI.confirm("Submit your response?", "It counts as your response straight away; you can't change it afterwards.", "Submit"))) return;
     try {
-      const r = await Api.program.respondSubmit(k, caseId, form.note.value.trim());
+      const r = await Api.program.respondSubmit(k, caseId, form.note.value.trim(), rebuttal);
       UI.toast(r.workflow_signalled === false ? "Response recorded — the reviewer will move the case on." : "Response submitted");
       respondOpen(k, caseId); if (k !== "party") respondListBox(k);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }

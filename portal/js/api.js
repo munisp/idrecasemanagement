@@ -735,7 +735,7 @@ const Api = (() => {
         const fd = new FormData(); fd.append("file", file);
         return req("POST", (k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + "/documents", fd, true);
       },
-      respondSubmit: (k, id, note) => req("POST", (k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + "/submit", { note }),
+      respondSubmit: (k, id, note, rebuttal) => req("POST", (k === "party" ? `${t()}/party/cases/${id}/respond` : `${t()}/${k}/responding/${id}`) + "/submit", { note, rebuttal }),
       respondOptOut: (id, reason) => req("POST", `${t()}/hp/responding/${id}/opt-out`, { reason }),
       tpaFeesCheckout: (body) => req("POST", `${t()}/tpa/fees/checkout`, body || {}),
       healthPlanRegister: (body) => req("POST", "/api/public/healthplan/register", body),
