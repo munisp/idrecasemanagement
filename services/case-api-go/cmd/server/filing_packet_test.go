@@ -140,10 +140,15 @@ func TestFilerRequiredFields(t *testing.T) {
 			"certified_by_name": "Sam", "certified_by_title": "Director", "certified_on": "2026-11-25",
 			"certified_signature":        "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nsig")),
 			"packet_documents_submitted": []any{"claim_forms", "denials_eobs", "florida_license", "final_determination_letter"}},
-		DisputedAmountCents: &amt, Claims: []packetClaim{{ClaimNumber: "C1"}},
+		DisputedAmountCents: &amt, Claims: []packetClaim{{ClaimNumber: "C1", DateOfFinalDetermination: "2026-10-01"}, {ClaimNumber: "C2", DateOfDenial: "2026-09-01"}},
 	}
 	if p := full.requiredProblems(); len(p) != 0 {
 		t.Fatalf("complete packet refused: %v", p)
+	}
+	// Every claim needs its final determination date, or its denial date (2026-11-26).
+	full.Claims = append(full.Claims, packetClaim{ClaimNumber: "C3"})
+	if p := full.requiredProblems(); len(p) != 1 || !strings.Contains(p[0], "Claim C3: enter the date of final determination") {
+		t.Fatalf("a claim with no date passed: %v", p)
 	}
 	empty := &filingPacket{Details: map[string]any{"packet_provider_type": "Other"}}
 	if p := empty.requiredProblems(); len(p) != 10 {

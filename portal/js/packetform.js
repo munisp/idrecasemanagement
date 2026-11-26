@@ -62,7 +62,7 @@ window.PacketForm = (() => {
   const CLAIM_COLS = [["claim_number", "Claim #", "text"], ["patient_name", "Patient name", "text"], ["type_of_service", "Type of service", "text"],
     ["date_of_service", "Date of service", "date"], ["billed", "Amount billed", "money"], ["paid", "Amount paid", "money"],
     ["disputed", "Amount in dispute", "money"], ["date_claim_submitted", "Date claim submitted", "date"],
-    ["date_of_denial", "Date of denial", "date"], ["date_of_final_determination", "Date of final determination", "date"]];
+    ["date_of_denial", "Date of denial", "date"], ["date_of_final_determination", "Date of final determination *", "date"]];
   const PDF_CLAIM_COLS = ["Claim Row", "Patient NameRow", "Type of ServiceRow", "Date of ServiceRow", "Amount BilledRow", "Amount PaidRow",
     "Amount in DisputeRow", "Date Claim SubmittedRow", "Date of DenialRow", "Date of Final DeterminationRow"];
 
@@ -604,6 +604,9 @@ window.PacketForm = (() => {
     if (!(Number(d.claims_submitted) >= 1)) out.push("Number of claims is required");
     if (!(amt > 0)) out.push("Aggregated disputed amount is required");
     if (!claims.length) out.push("Claim(s) information: enter at least one claim");
+    // The 12-month filing window runs from the final determination: every claim states it, or its denial date.
+    claims.filter((c) => !c.date_of_final_determination && !c.date_of_denial)
+      .forEach((c) => out.push(`Claim ${c.claim_number}: enter the date of final determination (or the date of denial)`));
     if (REQUIRED_DOCS.some((k) => !(d.packet_documents_submitted || []).includes(k))) out.push("Supporting documents: tick every required document (*) you are submitting");
     if (!d.certification_agreed || !d.certified_by_name || !d.certified_by_title || !d.certified_on) out.push("Certification: tick it and enter your name, title and the date");
     if (!d.certified_signature) out.push("Certification: sign in the signature box");

@@ -152,6 +152,13 @@ func (pk *filingPacket) requiredProblems() []string {
 		}
 	}
 	need(claims > 0, "Claim(s) information: enter at least one claim")
+	// The 12-month filing window runs from the final determination (2026-11-26): every claim states it, or its
+	// denial date, so eligibility can be checked from the filing.
+	for _, c := range pk.Claims {
+		if strings.TrimSpace(c.ClaimNumber) != "" && strings.TrimSpace(c.DateOfFinalDetermination) == "" && strings.TrimSpace(c.DateOfDenial) == "" {
+			out = append(out, "Claim "+strings.TrimSpace(c.ClaimNumber)+": enter the date of final determination (or the date of denial)")
+		}
+	}
 	docs := map[string]bool{}
 	if list, ok := d["packet_documents_submitted"].([]any); ok {
 		for _, x := range list {
