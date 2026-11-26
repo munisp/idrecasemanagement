@@ -17,13 +17,25 @@ import psycopg
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+
+# A tenant as it names a schema: lower-case letters, digits and "_", as case-api provisions them (2026-11-26).
+_TENANT_RE = re.compile(r"[a-z][a-z0-9_]{0,40}")
+
+
+def tenant_schema(tenant: str) -> str:
+    """tenant_<x> for a well-formed tenant; anything else is refused before it reaches SQL."""
+    if not _TENANT_RE.fullmatch(str(tenant or "")):
+        raise ValueError(f"malformed tenant {str(tenant)[:40]!r}")
+    return "tenant_" + tenant
+
+
 _TENANT = re.compile(r"^[a-z]{2,8}$")
 CONFIRM_ATTEMPTS = 3
 
 
 async def case_exists(dsn: str, tenant: str, case_id: str) -> bool:
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-        cur = await conn.execute(f"SELECT 1 FROM tenant_{tenant}.cases WHERE id=%s", (case_id,))
+        cur = await conn.execute(f"SELECT 1 FROM {tenant_schema(tenant)}.cases WHERE id=%s", (case_id,))  # nosec B608  # tenant_schema() validates the tenant; values are bound
         return await cur.fetchone() is not None
 
 

@@ -1,0 +1,9 @@
+# cargo audit's reviewed exceptions for storage-rs (2026-11-26).
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071 (rsa 0.9, "Marvin" timing side channel in RSA *decryption*): no fixed rsa release exists.
+  # rsa only reaches this build through OpenDAL's request signers for the optional gcs / azblob backends
+  # (reqsign-google, reqsign-azure-storage), which use RSA to *sign* requests with a service account's own key --
+  # storage-rs never decrypts with RSA, so the side channel has nothing to observe. Revisit when rsa 0.10 is stable.
+  "RUSTSEC-2023-0071",
+]

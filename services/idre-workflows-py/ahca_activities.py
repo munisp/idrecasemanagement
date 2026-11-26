@@ -11,7 +11,7 @@ import httpx
 import psycopg
 from temporalio import activity
 
-from case_guard import ensure_case
+from case_guard import ensure_case, tenant_schema
 
 DSN = os.environ.get("DATABASE_URL", "postgres://idre:idre@localhost:5432/idre")
 CASE_API = os.environ.get("CASE_API_URL", "http://localhost:8080")
@@ -60,15 +60,15 @@ async def recommendation_days_left(tenant: str, case_id: str) -> int:
     reported so the caller waits instead of flagging a breach."""
     await ensure_case(DSN, tenant, case_id)
     with _conn() as c:
-        st = c.execute(f"SELECT status FROM tenant_{tenant}.cases WHERE id=%s", (case_id,)).fetchone()
+        st = c.execute(f"SELECT status FROM {tenant_schema(tenant)}.cases WHERE id=%s", (case_id,)).fetchone()  # nosec B608  # tenant_schema() validates the tenant; values are bound
         if st and st[0] == "AWAITING_PAYMENT":
             return 60
         row = c.execute(
             f"SELECT (program_dates->>'received_at')::date + 60 - current_date"
             f" + coalesce((SELECT sum(days) FROM public.case_deadline_extensions e"
             f"             WHERE e.tenant=%s AND e.case_id=%s::text AND e.clock='AGENCY_RECOMMENDATION'), 0)"
-            f" FROM tenant_{tenant}.cases "
-            f"WHERE id=%s AND coalesce(program_dates->>'received_at','') ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}'",
+            f" FROM {tenant_schema(tenant)}.cases "
+            f"WHERE id=%s AND coalesce(program_dates->>'received_at','') ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}'",  # nosec B608  # tenant_schema() validates the tenant; values are bound
             (tenant, case_id, case_id),
         ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
@@ -197,7 +197,7 @@ async def record_followup_action(tenant: str, case_id: str, action: str, detail:
     with _conn() as c:
         row = c.execute(
             f"SELECT case_number, coalesce(assigned_to,''), coalesce(details->>'line_of_business','') "
-            f"FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),
+            f"FROM {tenant_schema(tenant)}.cases WHERE id=%s", (case_id,),  # nosec B608  # tenant_schema() validates the tenant; values are bound
         ).fetchone()
         case_number, assignee, lob = row if row else ("", "", "")
         if action == "medicaid_ahca_notify":

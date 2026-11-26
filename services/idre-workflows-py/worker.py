@@ -170,7 +170,7 @@ def start_dapr_listener(client: Client) -> None:
             pass
 
     port = int(os.environ.get("DAPR_APP_PORT", "9100"))
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Handler).serve_forever(),
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", port), Handler).serve_forever(),  # nosec B104  # a container service listens on all interfaces; exposure is set by its k8s Service and network policy
                      daemon=True).start()
 
 

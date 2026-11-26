@@ -200,4 +200,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", 8092), Handler).serve_forever()
+    HTTPServer(("0.0.0.0", 8092), Handler).serve_forever()  # nosec B104  # a container service listens on all interfaces; exposure is set by its k8s Service and network policy

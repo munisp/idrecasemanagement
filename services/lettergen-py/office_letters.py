@@ -81,7 +81,7 @@ def _extra(dsn: str, ctx: dict) -> dict:
     claims' eligibility, the plan's day-13 reminder, the late-fee terms."""
     t, cid = ctx["tenant"], ctx["case_id"]
     with psycopg.connect(dsn) as c:
-        st = c.execute(f"SELECT coalesce(internal_status,''), coalesce(details->>'case_outcome','') FROM tenant_{t}.cases WHERE id=%s",
+        st = c.execute(f"SELECT coalesce(internal_status,''), coalesce(details->>'case_outcome','') FROM tenant_{t}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in main.py before any letter is built; values bound
                        (cid,)).fetchone() or ("", "")
         claims = c.execute("""SELECT coalesce(claim_number,''), coalesce(status,'') FROM public.case_claims
                               WHERE tenant=%s AND case_id=%s ORDER BY claim_number""", (t, cid)).fetchall()
