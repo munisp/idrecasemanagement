@@ -58,6 +58,8 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Letter["plan_notification"] = "SENT"
 	expect("plan_response", "Admin")
 	f.Act["PLAN_RESPONSE_RECEIVED"] = wfAct{At: now}
+	expect("full_review", "Coder") // SOP step 7, recorded by the Coder (2026-11-26)
+	f.Act["FULL_REVIEW_INITIATED"] = wfAct{At: now}
 	expect("coding_review", "Coder")
 	f.Act["CODING_REVIEW_COMPLETE"] = wfAct{Body: `{"clinical_requested": true}`, At: now}
 	expect("clinical_review", "Nurse Reviewer")
@@ -304,6 +306,7 @@ func TestWorkflowDecisionReportEarly(t *testing.T) {
 	f.HasElig, f.EligResult, f.EligAt, f.HasSummary = true, "ELIGIBLE", now, true
 	f.Letter["acceptance"], f.Letter["plan_notification"] = "SENT", "SENT"
 	f.Act["PLAN_RESPONSE_RECEIVED"] = wfAct{At: now}
+	f.Act["FULL_REVIEW_INITIATED"] = wfAct{At: now}
 	f.ReportSaved = true
 	f.Generated = map[string]bool{"final_order_rationale": true}
 	steps := buildWorkflowSteps(f)

@@ -125,7 +125,8 @@ const Letters = (() => {
         <label>Amount owed to the provider ($)<input data-f="owed_cents" inputmode="decimal" value="${esc(dollars(r.owed_cents ?? null))}" placeholder="enter it"${dis("decision")}
           title="Entered by the reviewer; the letters print exactly this amount" /></label>`}
       </div>
-      ${recLine}${startOutcome}
+      ${recLine}${(data.reviews || []).length ? `<details class="dr-reviews"><summary>Every reviewer's review (${data.reviews.length})</summary><ul>${data.reviews.map((x) =>
+        `<li><b>${esc(x.user_name)}</b> <span class="muted">(${esc(x.role === "CODER" ? "Coder" : "Nurse Reviewer")}, ${esc(new Date(x.created_at).toLocaleDateString())})</span> — recommends ${esc(OUTCOMES.find((o) => o[0] === x.recommended_outcome)?.[1] || x.recommended_outcome)}<div class="muted">${esc(x.findings)}</div></li>`).join("")}</ul></details>` : ""}${startOutcome}
       ${iro ? "" : `<p class="muted" id="dr-balance">${balanceText(aw, paid, c.disputed_cents, r.owed_cents ?? null)}</p>`}
       <fieldset class="dr-reviewers"><legend>Reviewed by (named in the cover letter)</legend>
         ${(data.reviewer_kinds || []).map((k) => `<label><input type="checkbox" data-rev="${esc(k)}"${(r.reviewers || []).includes(k) ? " checked" : ""}${dis("decision")} /> ${esc(REVIEWER_LABEL[k] || k)}</label>`).join("")}

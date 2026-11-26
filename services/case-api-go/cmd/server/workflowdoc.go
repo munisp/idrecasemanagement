@@ -137,7 +137,8 @@ func buildDocSteps(f wfFacts, steps []wfStep) wfDoc {
 			add(wfDocStep{Title: "Health Plan response period", Detail: "Up to 15 calendar days; a reminder of the due date on the 13th day",
 				Keys: []string{"plan_response"}, Clock: "PLAN_RESPONSE"})
 			add(wfDocStep{Title: "Health Plan submits required documentation", done: responded})
-			add(wfDocStep{Phase: phase2, Title: "Full Review Initiated", Detail: "Review clock begins upon receipt of complete Health Plan packet", done: responded})
+			add(wfDocStep{Phase: phase2, Title: "Full Review Initiated", Detail: "Review clock begins upon receipt of complete Health Plan packet",
+				Keys: []string{"full_review"}})
 			add(wfDocStep{Title: "Nurse/Coder review begins", Detail: "Approximately 15 days after receipt of plan packet", Clock: "REVIEW_START",
 				done: f.Dates["coding_review_started_at"] != "" || f.Dates["clinical_review_started_at"] != "" || state["coding_review"] == "done"})
 			add(wfDocStep{Title: "Requests for Information (RFI) issued as needed", State: "optional",

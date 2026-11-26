@@ -65,6 +65,7 @@ type wfFacts struct {
 	ReportSaved      bool            // the decision report has been saved
 	Generated        map[string]bool // generated letter (lettergen template) -> a draft not rejected in QA
 	CopyRequested    bool            // a party asked for the Final Order Rationale Copy (change log 2026-11-25 #19)
+	Reviewers        []wfReviewer    // further reviewers named on the case (SOP step 10, review_team.go)
 }
 
 var wfOwnerLabels = map[string]string{
@@ -253,9 +254,25 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		closing = true
 	}
 	if !withdrawn && !closing {
+		// SOP step 7 (2026-11-26): the Coder records that the full review has started, once the plan's packet is in.
+		add("full_review", "Record that the full review has started", "CODER", "signal:FULL_REVIEW_INITIATED",
+			has("FULL_REVIEW_INITIATED") || has("CODING_REVIEW_COMPLETE") || f.Dates["coding_review_started_at"] != "" ||
+				f.Internal == "Review In Progress", // a case already in review before this step existed is not asked again
+			"The review clock starts on receipt of the health plan's complete packet.")
+		// Further reviewers (SOP step 10, 2026-11-26): each records their own review before the main one completes.
+		furtherReview := func(role, kind string) {
+			for _, x := range f.Reviewers {
+				if x.Role == role {
+					add("review:"+x.ID, kind+" review — "+x.Name, role, "review:"+x.ID, x.Done, "Your own review: findings and the outcome you recommend.")
+				}
+			}
+		}
+		furtherReview("CODER", "Coding")
 		add("coding_review", "Coding review", "CODER", "signal:CODING_REVIEW_COMPLETE", has("CODING_REVIEW_COMPLETE"),
 			"Decide whether clinical review is needed.")
-		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") {
+		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") || len(pendingReviewers(f.Reviewers, "NURSE_PHYSICIAN")) > 0 ||
+			hasReviewerRole(f.Reviewers, "NURSE_PHYSICIAN") {
+			furtherReview("NURSE_PHYSICIAN", "Clinical")
 			// Change log 2026-11-25 #15: the Coder's call on the scenario says who reviews with the Nurse / Physician.
 			hint := "Medical necessity: review it, and decide whether the external Medical Reviewer (a physician) is needed."
 			if strings.Contains(strings.ReplaceAll(f.Act["CODING_REVIEW_COMPLETE"].Body, " ", ""), `"review_scenario":"med_nec_coding"`) {
@@ -514,6 +531,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 		}
 		rows.Close()
 	}
+	f.Reviewers = s.caseReviewTeam(ctx, tenant, caseID) // further reviewers (SOP step 10)
 	return f, nil
 }
 
@@ -571,6 +589,9 @@ func (s *server) caseWorkflow(w http.ResponseWriter, r *http.Request) {
 	rules := s.stepRules(r, tenant)
 	for i := range steps {
 		steps[i].CanAct = rules.open(steps[i]) && rules.mayAct(p, steps[i])
+		if id, ok := strings.CutPrefix(steps[i].Action, "review:"); ok { // a further reviewer's own review: theirs to record
+			steps[i].CanAct = !wfClosedStatuses[f.Internal] && p.Subject == id
+		}
 	}
 	out := map[string]any{"steps": steps, "programmed": true, "closed": wfClosedStatuses[f.Internal], "is_admin": wfIsAdmin(p),
 		"step_order": rules.order, "step_owner": rules.owner}
@@ -665,4 +686,13 @@ func estimatePair(f wfFacts, add func(key, label, owner, action string, done boo
 		"Approving it holds it until the acceptance has passed QA too.")
 	add("qa:acceptance", "QA the Acceptance letter — both go out together", "PM", "qa:acceptance", acc == "SENT",
 		"Approving it sends the Cost Estimate, then the acceptance.")
+}
+
+func hasReviewerRole(team []wfReviewer, role string) bool {
+	for _, x := range team {
+		if x.Role == role {
+			return true
+		}
+	}
+	return false
 }

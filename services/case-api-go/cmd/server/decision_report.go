@@ -227,6 +227,7 @@ func (s *server) getDecisionReport(w http.ResponseWriter, r *http.Request) {
 			"outcome": drOutcomeFromCase(caseOutcome), "claims": claims,
 		},
 		"can_edit": canEdit, "reviewer_kinds": drReviewerKinds, "recommendation": s.reviewRecommendation(r, tenant, caseID),
+		"reviews": s.caseReviewRecords(r, tenant, caseID),
 	})
 }
 

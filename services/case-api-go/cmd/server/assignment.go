@@ -127,7 +127,8 @@ func (s *server) assigneesFor(ctx context.Context, tenant, role string) ([]assig
 
 // listAssignees: GET /cases/assignees?role=CASE_MANAGER — the picker: eligible staff, least loaded first.
 func (s *server) listAssignees(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	// The Admin reads it too since 2026-11-26: it names further reviewers (review_team.go).
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "CASE_MANAGER", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: cases are assigned by the PM"}`, http.StatusForbidden)
 		return
 	}

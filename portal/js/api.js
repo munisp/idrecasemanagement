@@ -460,6 +460,10 @@ const Api = (() => {
         req("POST", `${t()}/cases/${caseId}/assign`, { role, next: true, reason, ...(expected !== undefined ? { expected } : {}) }),
       claim: (caseId, reason = "") => req("POST", `${t()}/cases/${caseId}/assign`, { action: "claim", reason }),
       assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
+      reviewTeam: (caseId) => req("GET", `${t()}/cases/${caseId}/review-team`),
+      reviewerAdd: (caseId, userId, role) => req("POST", `${t()}/cases/${caseId}/review-team`, { user_id: userId, role }),
+      reviewerRemove: (caseId, userId) => req("DELETE", `${t()}/cases/${caseId}/review-team/${encodeURIComponent(userId)}`),
+      reviewRecord: (caseId, body) => req("POST", `${t()}/cases/${caseId}/review-records`, body),
       assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
       // A role's rotation (Admin when none): { role, role_label, new_cases, enabled, people: [{id, username, open_cases, in_rotation}], next }.
       autoAssign: (role = "CASE_MANAGER") => req("GET", `${t()}/assignment/auto?role=${encodeURIComponent(role)}`),

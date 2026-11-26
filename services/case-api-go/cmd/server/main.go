@@ -667,8 +667,12 @@ func main() {
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
-		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
-		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Admins in turn: on/off, the rotation, who is next
+		r.Get("/cases/{caseId}/review-team", s.getReviewTeam) // further reviewers (SOP step 10, review_team.go)
+		r.Post("/cases/{caseId}/review-team", s.addReviewer)
+		r.Delete("/cases/{caseId}/review-team/{userId}", s.removeReviewer)
+		r.Post("/cases/{caseId}/review-records", s.recordReview) // a further reviewer's own review
+		r.Get("/cases/assignees", s.listAssignees)               // the PM's picker: eligible staff, least loaded first
+		r.Get("/assignment/auto", s.getAutoAssign)               // new cases to Admins in turn: on/off, the rotation, who is next
 		r.Put("/assignment/auto", s.setAutoAssign)
 		r.Post("/assignment/auto/assign-open", s.assignOpenCases) // the unassigned backlog, in turn (autoassign.go)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
@@ -1803,6 +1807,7 @@ var signalRoleFloors = map[string][]string{
 	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ATTORNEY_REVIEW_COMPLETE": {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"PACKET_COMPLETE":          {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"FULL_REVIEW_INITIATED":    {"CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, // SOP step 7, recorded by the Coder (2026-11-26)
 	"AOR_REVISED":              {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ESTIMATE_PERMISSION":      {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"PLAN_RESPONSE_RECEIVED":   {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
@@ -1826,7 +1831,7 @@ var knownCaseSignals = map[string]bool{
 	"OFFER_SUBMITTED": true, "OUTREACH_DONE": true, "PACKET_COMPLETE": true, "PAYMENT_RECORDED": true, "PLAN_OPT_OUT": true,
 	"PLAN_RESPONSE_RECEIVED": true, "PROVIDER_WITHDRAW": true, "REFUND_APPROVED": true, "RESPONSE_FILED": true,
 	"RFI_RESPONSE_RECEIVED": true, "RFI_SENT": true, "SELECTION_FINALIZED": true, "SETTLED_OR_WITHDRAWN": true,
-	"WITHDRAWAL_CONFIRMED": true,
+	"WITHDRAWAL_CONFIRMED": true, "FULL_REVIEW_INITIATED": true,
 }
 
 func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
@@ -1906,6 +1911,13 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		}
 	}
 	// SOP: a dispute is withdrawn after acceptance and before the final determination.
+	// SOP step 10 (2026-11-26): the main Coding / Clinical review waits for every further reviewer of its kind.
+	if role := map[string]string{"CODING_REVIEW_COMPLETE": "CODER", "CLINICAL_REVIEW_COMPLETE": "NURSE_PHYSICIAN"}[signal]; role != "" {
+		if left := pendingReviewers(s.caseReviewTeam(r.Context(), tenant, id), role); len(left) > 0 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "still waiting for the review of " + strings.Join(left, ", ") + " — each named reviewer records theirs first"})
+			return false
+		}
+	}
 	if signal == "PROVIDER_WITHDRAW" {
 		if f, err := s.workflowFacts(r.Context(), tenant, id); err == nil {
 			if msg := withdrawalRefusal(f.Letter["acceptance"], f.Letter["final_order"]); msg != "" {
