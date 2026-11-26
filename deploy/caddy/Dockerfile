@@ -21,6 +21,14 @@ RUN xcaddy build \
 
 FROM caddy:2.8-alpine AS appsec
 COPY --from=appsec-build /usr/bin/caddy /usr/bin/caddy
+# Not root (2026-11-26, Trivy DS-0002): Caddy keeps ports 80/443 through a file capability instead.
+RUN apk add --no-cache libcap && setcap cap_net_bind_service=+ep /usr/bin/caddy \
+	&& adduser -S -D -H -u 10001 caddy && mkdir -p /data /config && chown -R 10001 /data /config
+USER 10001
 
 # Default target: stock Caddy. Must stay the LAST stage in this file.
 FROM caddy:2.8-alpine AS stock
+# Not root (2026-11-26, Trivy DS-0002): Caddy keeps ports 80/443 through a file capability instead.
+RUN apk add --no-cache libcap && setcap cap_net_bind_service=+ep /usr/bin/caddy \
+	&& adduser -S -D -H -u 10001 caddy && mkdir -p /data /config && chown -R 10001 /data /config
+USER 10001

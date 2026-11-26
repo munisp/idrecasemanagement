@@ -17,20 +17,34 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          securityContext:   # not root (2026-11-26, Trivy KSV-0118)
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile: { type: RuntimeDefault }
           containers:
             - name: verify
+              securityContext:   # (2026-11-26, Trivy KSV-0014)
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
               image: ghcr.io/munisp/idre/idre-workflows:latest  # has psycopg
               # script mounted from ConfigMap (kubectl create configmap
               # audit-chain-verify --from-file=scripts/verify-audit-chain.py)
               command: ["python3", "/scripts/verify-audit-chain.py"]
-              volumeMounts:
-                - { name: script, mountPath: /scripts }
-          volumes:
-            - name: script
-              configMap: { name: audit-chain-verify }
+              # env belongs to the container (it sat under volumes before 2026-11-26, so the job never got its DSN)
               env:
                 - name: DATABASE_URL
                   valueFrom: { secretKeyRef: { name: idre-db, key: dsn } }
               resources:
                 requests: { cpu: "100m", memory: 256Mi }
                 limits:   { cpu: "1",    memory: 1Gi }
+              volumeMounts:
+                - { name: script, mountPath: /scripts }
+                - { name: tmp, mountPath: /tmp }   # writable scratch under a read-only root
+          volumes:
+            - name: script
+              configMap: { name: audit-chain-verify }
+            - name: tmp
+              emptyDir: { medium: Memory, sizeLimit: 64Mi }
