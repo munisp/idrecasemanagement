@@ -586,6 +586,8 @@ const Views = (() => {
         <textarea id="tpa-filing-reason" rows="2" placeholder="For example: the claim amount was typed wrong; the corrected EOB is attached to the dispute"></textarea></label>` : ""}
       <button type="button" class="mini" onclick="Views.tpaFilingSave('${caseId}', this)">${r.mode === "request" ? "Send the change request" : "Save changes"}</button>
       <button type="button" class="mini ghost" onclick="Views.tpaFilingCancel('${caseId}')">Cancel</button>`;
+    // Withdrawal (2026-11-26): the TPA can ask at any point before the case closes; the office confirms it.
+    if (!fin && !st.editing && r.mode !== "closed") actions += ` <button type="button" class="mini danger" onclick="Views.tpaWithdrawFn('${caseId}')">Request withdrawal</button>`;
     box.innerHTML = `<p>${badge(r.status)} <span class="muted">${esc(how)}</span></p>
       ${req ? `<div class="card change-req"><b>Change request waiting for the case team</b>
         <span class="muted">sent by ${esc(req.requested_by)} · ${esc(fmtDate(req.created_at))}</span>
@@ -617,6 +619,15 @@ const Views = (() => {
         tpaFilingDraw(caseId);
       } catch (e) { out.innerHTML = `<p class="error">${packetErr(e)}</p>`; }
     }, request ? "Sending…" : "Saving…");
+  }
+  async function tpaWithdrawFn(caseId) {
+    const v = await UI.modal({ title: "Request withdrawal of this dispute", submitLabel: "Send the request", danger: true,
+      body: "The case team verifies the request with you and then confirms the withdrawal; the case closes once the Withdrawal letter has been sent.",
+      fields: [{ name: "reason", label: "Why is the dispute being withdrawn?", type: "textarea", required: true }] });
+    if (!v) return;
+    try { const r = await Api.program.tpaWithdraw(caseId, v.reason); UI.toast(r.next || "Withdrawal requested", { duration: 9000 }); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+    tpaFilingDraw(caseId);
   }
   async function tpaFilingWithdraw(caseId, reqId) {
     if (!(await UI.confirm("Withdraw this change request?", "The case team will not act on it. The request and its withdrawal stay in the history.", "Withdraw", true))) return;
@@ -859,6 +870,15 @@ const Views = (() => {
     try { await Api.program.setReviewNote(id, field, form.text.value); UI.toast("Notes saved"); }
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
   }
+  // The split invoice (change log #17, 2026-11-26): each party's share; typing one fills the other to 100%, and the
+  // amounts are shown as they will be billed.
+  function invSplit(form, typed) {
+    const a = typed === "plan" ? form.pct_plan : form.pct_provider, b = typed === "plan" ? form.pct_provider : form.pct_plan;
+    if (typed && a.value !== "" && Number(a.value) >= 0 && Number(a.value) <= 100) b.value = String(Math.round((100 - Number(a.value)) * 100) / 100);
+    const total = Math.round(Number(form.amount.value || 0) * 100), pp = Number(form.pct_plan.value || 0);
+    const plan = Math.round(total * pp / 100), out = form.querySelector(".inv-split-out");
+    if (out) out.textContent = total ? `health plan ${usdC(plan)} · provider ${usdC(total - plan)}` : "";
+  }
   async function saveDisputeSummary(id, form) {
     const body = { plan_type: form.plan_type.value, plan_type_verified_from_letterhead: form.verified.checked,
       coding_review_required: form.coding.checked, summary: form.summary.value, estimate_basis: form.basis.value,
@@ -1079,6 +1099,10 @@ const Views = (() => {
     }
   }
   const WF_YESNO = [["", "choose…"], ["yes", "Yes"], ["no", "No"]];
+  // The reviewer's recommended outcome (2026-11-26): it starts the decision report and picks its letter.
+  const WF_RECOMMEND = { name: "recommended_outcome", label: "Recommended outcome", required: true,
+    options: [["", "choose…"], ["OVERTURNED", "Overturned"], ["PARTIALLY_OVERTURNED", "Partially overturned"], ["UPHELD", "Upheld"]],
+    hint: "Starts the decision report for the Attorney, with the matching decision letter (coding: claim dispute letter; medical necessity: medical-necessity letter). The Attorney confirms or changes it." };
   const WF_SCENARIOS = [["", "choose…"], ["coding", "Coding only — no clinical review"],
     ["med_nec", "Medical necessity — the Nurse / Physician reviews (and the Medical Reviewer if needed)"],
     ["med_nec_coding", "Medical necessity and coding — the Nurse / Physician with the Coder (and the Medical Reviewer if needed)"]];
@@ -1196,23 +1220,24 @@ const Views = (() => {
     CODING_REVIEW_COMPLETE: { title: "Coding review complete", submit: "Complete", toast: "Coding review recorded",
       fields: [{ name: "scenario", label: "What does this dispute turn on?", required: true, options: WF_SCENARIOS,
         hint: "Medical necessity goes to the Nurse / Physician, who decides whether the external Medical Reviewer is needed." },
-        wfNote("Your findings", true, WF_REVIEW_NOTE)],
-      data: (v) => ({ clinical_requested: v.scenario !== "coding", review_scenario: v.scenario }) },
+        WF_RECOMMEND, wfNote("Your findings", true, WF_REVIEW_NOTE)],
+      data: (v) => ({ clinical_requested: v.scenario !== "coding", review_scenario: v.scenario, recommended_outcome: v.recommended_outcome }) },
     CLINICAL_REVIEW_COMPLETE: { title: "Clinical review complete", submit: "Complete", toast: "Clinical review recorded",
       fields: [{ name: "mr", label: "Was the external Medical Reviewer (physician) needed?", required: true, options: WF_YESNO,
         hint: "Medical necessity the record alone can't settle goes to the Medical Reviewer." },
         { name: "mr_name", label: "Medical Reviewer (if needed)", placeholder: "Name and specialty" },
         { name: "mr_findings", label: "The Medical Reviewer's findings (if needed)", type: "textarea" },
-        wfNote("Your findings", true, WF_REVIEW_NOTE)],
+        WF_RECOMMEND, wfNote("Your findings", true, WF_REVIEW_NOTE)],
       data: (v) => ({ medical_reviewer_required: v.mr === "yes", medical_reviewer: v.mr === "yes" ? String(v.mr_name || "").trim() : "",
-        medical_reviewer_findings: v.mr === "yes" ? String(v.mr_findings || "").trim() : "" }) },
+        medical_reviewer_findings: v.mr === "yes" ? String(v.mr_findings || "").trim() : "", recommended_outcome: v.recommended_outcome }) },
     ATTORNEY_REVIEW_COMPLETE: { title: "Attorney review complete", submit: "Complete", toast: "Attorney review recorded",
       body: "This records the final rationale and the Final Order package. The outcome itself is recorded in its own step.",
       fields: [wfNote("Final rationale", true, WF_REVIEW_NOTE)] },
     FINAL_ORDER_ISSUED: { title: "AHCA's Final Order", toast: "Final Order recorded", body: "AHCA has issued its Final Order on this case. Upload the order the Agency sent; it is filed under Determination.",
-      fields: [{ name: "file", label: "AHCA's Final Order (PDF)", type: "file", required: true, accept: ".pdf,application/pdf" },
+      // 2026-11-26: AHCA's Final Order can come as several files (the order and its attachments).
+      fields: [{ name: "file", label: "AHCA's Final Order (PDF — choose several if it came in parts)", type: "file", required: true, multiple: true, accept: ".pdf,application/pdf" },
         // Change log 2026-11-25 #22: a redacted copy for Finance goes with it (filed under Invoices).
-        { name: "file_redacted", label: "Redacted Final Order for Finance (PDF, optional)", type: "file", accept: ".pdf,application/pdf",
+        { name: "file_redacted", label: "Redacted Final Order for Finance (PDF, optional)", type: "file", multiple: true, accept: ".pdf,application/pdf",
           folder: "INVOICES", rename: "Redacted Final Order", hint: "The copy Finance invoices from, with protected details removed." },
         wfDate("Final Order issued on"), { name: "order_number", label: "Final Order number", placeholder: "As on the order, if it has one" }, wfNote()] },
     PROVIDER_WITHDRAW: { title: "Withdrawal requested", submit: "Record the request", danger: true, toast: "Withdrawal request recorded",
@@ -1253,14 +1278,16 @@ const Views = (() => {
     // The documents the step brings (AHCA's Final Order, and its redacted copy for Finance) are uploaded first and
     // named on the step; the first one is the step's document.
     for (const file of f.fields.filter((x) => x.type === "file")) {
-      let fv = v[file.name];
-      if (!(fv instanceof File) || !fv.size) continue; // an empty picker gives an empty File
-      if (file.rename) fv = new File([fv], `${file.rename} — ${fv.name}`, { type: fv.type });
-      try {
-        const up = await Api.cases.upload(id, fv, false, file.folder || "DETERMINATION");
-        if (!data.doc_id) data.doc_id = up.doc_id; else (data.more_doc_ids = data.more_doc_ids || []).push(up.doc_id);
-        data.record += `\n${file.label}: ${fv.name}`;
-      } catch (e) { UI.toast(`${file.label} could not be uploaded: ${e.message}`, { kind: "warn", duration: 9000 }); return; }
+      const picked = Array.isArray(v[file.name]) ? v[file.name] : [v[file.name]];
+      for (let fv of picked) {
+        if (!(fv instanceof File) || !fv.size) continue; // an empty picker gives an empty File
+        if (file.rename) fv = new File([fv], `${file.rename} — ${fv.name}`, { type: fv.type });
+        try {
+          const up = await Api.cases.upload(id, fv, false, file.folder || "DETERMINATION");
+          if (!data.doc_id) data.doc_id = up.doc_id; else (data.more_doc_ids = data.more_doc_ids || []).push(up.doc_id);
+          data.record += `\n${file.label.replace(/ \(.*$/, "")}: ${fv.name}`;
+        } catch (e) { UI.toast(`${fv.name} could not be uploaded: ${e.message}`, { kind: "warn", duration: 9000 }); return; }
+      }
     }
     wfSend(id, signal, data, f.toast || "Recorded");
   }
@@ -3874,7 +3901,7 @@ const Views = (() => {
         ${(setTimeout(() => corrTemplatesFor(id, "#p-send"), 0), "")}
         <div class="field-grid">
           <label>Template <select name="template" onchange="Views.corrTemplateBody(this)">${corrTemplateOptions(cfg.correspondence?.templates || [])}</select></label>
-          <label>Goes to <select name="rfi_to" title="Who a Request for Additional Information goes to — and anything whose template names no recipient" onchange="Views.corrFillRecipientsFn(this.form)"><option value="agency" selected>The Agency (AHCA)</option><option value="provider">The provider</option><option value="plan">The health plan</option></select></label>
+          <label>Goes to <select name="rfi_to" title="Who a Request for Additional Information or a copy of the Final Order Rationale goes to (the Agency by default) — and anything whose template names no recipient" onchange="Views.corrFillRecipientsFn(this.form)"><option value="agency" selected>The Agency (AHCA)</option><option value="provider">The provider</option><option value="plan">The health plan</option></select></label>
           <label>To <input name="to" type="text" placeholder="name@example.com, …" required /></label>
           <label>Cc <input name="cc" type="text" placeholder="optional" /></label>
           <span class="muted rcpt-hint wide"></span>
@@ -3891,10 +3918,14 @@ const Views = (() => {
       ${can("PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") ? `<form id="p-inv" class="inline-form" data-wf="invoice">
         <label>Bill to <select name="party" onchange="this.form.querySelector('.inv-split').hidden = this.value !== 'BOTH'"><option value="HEALTH_PLAN">Health plan</option><option value="PROVIDER">Provider</option>
           <option value="BOTH">Both parties — split by percentage</option></select></label>
-        <label class="inv-split" hidden>Health plan's share (%) <input name="pct" type="number" min="1" max="99" step="1" placeholder="e.g. 92"
-          title="A partial overturn bills both sides: the health plan this share of the amount, the provider the rest" /></label>
+        <span class="inv-split" hidden>
+          <label>Health plan (%) <input name="pct_plan" type="number" min="0" max="100" step="0.01" placeholder="e.g. 90"
+            oninput="Views.invSplit(this.form, 'plan')" title="A partial overturn bills both sides: each party its share of the amount" /></label>
+          <label>Provider (%) <input name="pct_provider" type="number" min="0" max="100" step="0.01" placeholder="e.g. 10"
+            oninput="Views.invSplit(this.form, 'provider')" /></label>
+          <span class="muted inv-split-out"></span></span>
         <label>Invoice for <select name="kind"><option value="INITIAL_FEE">Initial fee</option><option value="FULL_REVIEW">Full review</option><option value="DEFAULT">Default</option></select></label>
-        <label>Amount ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required /></label>
+        <label>Amount ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required oninput="Views.invSplit(this.form)" /></label>
         <button>Issue invoice</button></form>` : `<p class="muted">Invoices are created by the PM.</p>`}<div id="p-inv-list" data-case-id="${esc(id)}"></div>
       <div class="claims-csv">
         <h3>Claims</h3>
@@ -4302,13 +4333,14 @@ const Views = (() => {
         // Change log 2026-11-25 #17: a partial overturn bills both parties -- two invoices whose amounts add up to the
         // amount entered, split by the health plan's percentage (each invoice's letter states its party's share).
         if (f.party.value === "BOTH") {
-          const pct = Number(f.pct.value), total = money(f.amount.value);
-          if (!(pct >= 1 && pct <= 99)) { UI.toast("Enter the health plan's share as a percentage from 1 to 99", { kind: "warn" }); return; }
-          const plan = Math.round(total * pct / 100);
+          const pp = Number(f.pct_plan.value), pv = Number(f.pct_provider.value), total = money(f.amount.value);
+          if (f.pct_plan.value === "" || f.pct_provider.value === "" || pp < 0 || pv < 0 || Math.abs(pp + pv - 100) > 0.001) {
+            UI.toast("Enter each party's share; the two must add up to 100% (e.g. health plan 90, provider 10)", { kind: "warn" }); return; }
+          const plan = Math.round(total * pp / 100);
           try {
-            await Api.program.issueInvoice(id, { party: "HEALTH_PLAN", kind: f.kind.value, amount_cents: plan });
-            await Api.program.issueInvoice(id, { party: "PROVIDER", kind: f.kind.value, amount_cents: total - plan });
-            UI.toast(`Two invoices issued: health plan ${pct}% (${usdC(plan)}), provider ${100 - pct}% (${usdC(total - plan)})`, { duration: 9000 });
+            if (plan > 0) await Api.program.issueInvoice(id, { party: "HEALTH_PLAN", kind: f.kind.value, amount_cents: plan });
+            if (total - plan > 0) await Api.program.issueInvoice(id, { party: "PROVIDER", kind: f.kind.value, amount_cents: total - plan });
+            UI.toast(`Invoices issued: health plan ${pp}% (${usdC(plan)}), provider ${pv}% (${usdC(total - plan)})`, { duration: 9000 });
             refreshInv();
           } catch (e) { UI.toast(e.message, { kind: "warn" }); refreshInv(); }
           return;
@@ -12837,5 +12869,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn };
 })();

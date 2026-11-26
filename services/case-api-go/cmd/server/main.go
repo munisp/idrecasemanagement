@@ -852,6 +852,7 @@ func main() {
 		r.Put("/tpa/disputes/{caseId}/filing", s.tpaFilingPut)                                     // edit it directly while the fee is unpaid
 		r.Post("/tpa/disputes/{caseId}/change-requests", s.tpaChangeRequest)                       // ask for a change once paid
 		r.Delete("/tpa/disputes/{caseId}/change-requests/{requestId}", s.tpaChangeRequestWithdraw) // withdraw my open request
+		r.Post("/tpa/disputes/{caseId}/withdraw", s.tpaWithdrawRequest)                            // ask to withdraw the dispute, any time before it closes (tpa_withdraw.go)
 		r.Get("/admin/tpas", s.adminListTPAs)                                                      // state oversight
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                                  // suspend|reactivate
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                                  // threshold matrix + filing window (G2)
@@ -1184,6 +1185,7 @@ func main() {
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
 	r.Get("/api/public/brand", s.publicBrand)
+	r.Get("/api/public/turnstile", s.publicTurnstile)      // the "I am human" check's site key (turnstile.go)
 	r.Get("/api/public/fee-estimate", s.publicFeeEstimate) // what the filing forms show for "Yes, estimate the fee"
 	r.Get("/api/public/docs/{audience}", s.publicAPIDoc)   // TPA and health plan API references (apidocs.go)
 	r.Get("/api/public/email-check", s.emailCheck)         // does this address take mail (emailcheck.go)
@@ -1972,6 +1974,9 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		return false
 	}
 	s.notifyOnSignal(r, tenant, id, signal, data) // change log 2026-11-25 #14/#24 (role_notify.go)
+	if signal == "CODING_REVIEW_COMPLETE" || signal == "CLINICAL_REVIEW_COMPLETE" {
+		s.recordRecommendation(r, tenant, id, signal, data) // the reviewer's recommended outcome starts the report (review_recommendation.go)
+	}
 	// The Admin tells the Coder and the Attorney the packet is in: the
 	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
 	if signal == "PACKET_COMPLETE" {

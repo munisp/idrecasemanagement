@@ -38,6 +38,9 @@ import (
 )
 
 func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
+	if !turnstilePassed(w, r) { // the "I am human" check, when switched on (turnstile.go)
+		return
+	}
 	ip := clientIP(r)
 	if !s.rateLimit("ahca-intake:"+ip, 10, 3600) {
 		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)

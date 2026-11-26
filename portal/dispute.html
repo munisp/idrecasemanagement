@@ -46,6 +46,7 @@
       <div id="f-pdf"></div>
       <div id="f-packet"></div>
       <p id="f-problems" class="pf-problems" role="alert"></p>
+      <div class="human-check" data-for="f-submit"></div>
       <button class="btn solid lg" type="submit" id="f-submit">Start my dispute</button>
       <p id="f-msg" class="form-msg" role="status"></p>
     </form>
@@ -67,6 +68,7 @@
         <label>Contact name <input id="t-contact" maxlength="120" /></label>
         <label>Contact email * <input id="t-email" type="email" data-email-check required maxlength="200" /></label>
       </div>
+      <div class="human-check" data-for="t-submit"></div>
       <button class="btn solid" type="submit" id="t-submit">Register as a TPA</button>
       <p id="t-msg" class="form-msg" role="status"></p>
     </form>
@@ -98,6 +100,7 @@
         <label>Contact email * <input id="p-email" type="email" data-email-check required maxlength="200" /></label>
       </div>
       <label>QPA methodology contact email <input id="p-qpa" type="email" data-email-check maxlength="200" /></label>
+      <div class="human-check" data-for="p-submit"></div>
       <button class="btn solid" type="submit" id="p-submit">Register as a health plan</button>
       <p id="p-msg" class="form-msg" role="status"></p>
     </form>
@@ -111,6 +114,32 @@
 
   <script src="/js/emailcheck.js?v=__BUILD_VERSION__"></script>
   <script src="/js/packetform.js?v=__BUILD_VERSION__"></script>
+  <script>
+    // The "I am human" check (Cloudflare Turnstile, 2026-11-26): shown above each submit button when the program has a
+    // site key; its token goes with the form in the X-Turnstile-Token header. No key = no check.
+    window.HumanCheck = (() => {
+      const widgets = {};
+      let key = "";
+      fetch("/api/public/turnstile").then((r) => r.json()).then((d) => {
+        key = d.site_key || "";
+        if (!key) return;
+        const s = document.createElement("script");
+        s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+        s.onload = () => document.querySelectorAll(".human-check").forEach((el) => {
+          widgets[el.dataset.for] = window.turnstile.render(el, { sitekey: key, theme: "auto" });
+        });
+        document.head.appendChild(s);
+      }).catch(() => {});
+      return {
+        headers(btnId) {
+          const h = { "Content-Type": "application/json" };
+          if (key && window.turnstile && widgets[btnId] !== undefined) h["X-Turnstile-Token"] = window.turnstile.getResponse(widgets[btnId]) || "";
+          return h;
+        },
+        reset(btnId) { if (key && window.turnstile && widgets[btnId] !== undefined) window.turnstile.reset(widgets[btnId]); },
+      };
+    })();
+  </script>
   <script>
     const STATES = ["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"];
     const NAMES = {AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",MA:"Massachusetts",MI:"Michigan",MN:"Minnesota",MS:"Mississippi",MO:"Missouri",MT:"Montana",NE:"Nebraska",NV:"Nevada",NH:"New Hampshire",NJ:"New Jersey",NM:"New Mexico",NY:"New York",NC:"North Carolina",ND:"North Dakota",OH:"Ohio",OK:"Oklahoma",OR:"Oregon",PA:"Pennsylvania",RI:"Rhode Island",SC:"South Carolina",SD:"South Dakota",TN:"Tennessee",TX:"Texas",UT:"Utah",VT:"Vermont",VA:"Virginia",WA:"Washington",WV:"West Virginia",WI:"Wisconsin",WY:"Wyoming"};
@@ -160,8 +189,9 @@
       try {
         packet.attachments = await PacketForm.attachments(pkHost);
         const resp = await fetch("/api/public/ahca-intake", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          method: "POST", headers: HumanCheck.headers("f-submit"), body: JSON.stringify(body),
         });
+        HumanCheck.reset("f-submit"); // a token is good once
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
@@ -241,8 +271,9 @@
       btn.disabled = true; btn.textContent = "Registering…";
       try {
         const resp = await fetch("/api/public/tpa/register", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          method: "POST", headers: HumanCheck.headers("t-submit"), body: JSON.stringify(body),
         });
+        HumanCheck.reset("t-submit");
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");
@@ -286,8 +317,9 @@
       btn.disabled = true; btn.textContent = "Registering…";
       try {
         const resp = await fetch("/api/public/healthplan/register", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          method: "POST", headers: HumanCheck.headers("p-submit"), body: JSON.stringify(body),
         });
+        HumanCheck.reset("p-submit");
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
           msg.classList.add("ok");

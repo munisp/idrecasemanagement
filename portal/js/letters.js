@@ -109,6 +109,9 @@ const Letters = (() => {
     const dis = (k) => (ce[k] ? "" : " disabled");
     const by = (k) => (authors[k] ? `<span class="muted"> — last edited by ${esc(authors[k])}</span>` : "");
     const outcome = r.outcome || "";
+    const rec = data.recommendation;
+    const recLine = rec ? `<p class="dr-rec"><b>Recommended by the ${esc(rec.role || "reviewer")}</b> (${esc(rec.by || "")}): ${esc(OUTCOMES.find((o) => o[0] === rec.outcome)?.[1] || rec.outcome)}
+      — ${rec.report_type === "IRO" ? "medical-necessity letter" : "claim dispute letter"}.${r.outcome && r.outcome !== rec.outcome ? ` <span class="muted">The report now says otherwise.</span>` : " Confirm or change it below."}</p>` : "";
     const startOutcome = !r.outcome && c.outcome ? `<p class="muted">The recorded case outcome (“${esc(c.case_outcome)}”) suggests <b>${esc(OUTCOMES.find((o) => o[0] === c.outcome)?.[1] || c.outcome)}</b>.</p>` : "";
     const aw = r.awarded_cents ?? null, paid = r.already_paid_cents ?? null;
     box.innerHTML = `
@@ -119,10 +122,11 @@ const Letters = (() => {
         <label>Outcome<select data-f="outcome"${dis("decision")}>${OUTCOMES.map(([v, l]) => `<option value="${v}"${v === outcome ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
         ${iro ? "" : `<label>Amount awarded ($)<input data-f="awarded_cents" inputmode="decimal" value="${esc(dollars(aw))}" placeholder="${esc(dollars(c.awarded_cents))}"${dis("decision")} /></label>
         <label>Already paid to the provider ($)<input data-f="already_paid_cents" inputmode="decimal" value="${esc(dollars(paid))}" placeholder="${esc(dollars(c.already_paid_cents))}"${dis("decision")} /></label>
-        <label>Amount owed to the provider ($)<input id="dr-owed" value="${esc(owedText(aw, paid))}" readonly tabindex="-1" title="The amount awarded less what was already paid" /></label>`}
+        <label>Amount owed to the provider ($)<input data-f="owed_cents" inputmode="decimal" value="${esc(dollars(r.owed_cents ?? null))}" placeholder="enter it"${dis("decision")}
+          title="Entered by the reviewer; the letters print exactly this amount" /></label>`}
       </div>
-      ${startOutcome}
-      ${iro ? "" : `<p class="muted" id="dr-balance">${balanceText(aw, paid, c.disputed_cents)}</p>`}
+      ${recLine}${startOutcome}
+      ${iro ? "" : `<p class="muted" id="dr-balance">${balanceText(aw, paid, c.disputed_cents, r.owed_cents ?? null)}</p>`}
       <fieldset class="dr-reviewers"><legend>Reviewed by (named in the cover letter)</legend>
         ${(data.reviewer_kinds || []).map((k) => `<label><input type="checkbox" data-rev="${esc(k)}"${(r.reviewers || []).includes(k) ? " checked" : ""}${dis("decision")} /> ${esc(REVIEWER_LABEL[k] || k)}</label>`).join("")}
       </fieldset>
@@ -182,12 +186,11 @@ const Letters = (() => {
     }, "Uploading…");
   }
 
-  // The amount owed: the award less what the plan already paid (never below zero).
-  const owedCents = (aw, paid) => (aw == null ? null : Math.max(aw - (paid || 0), 0));
-  const owedText = (aw, paid) => (aw == null ? "" : dollars(owedCents(aw, paid)));
-  function balanceText(aw, paid, disputed) {
-    if (aw == null) return "Enter the amount awarded; the amount owed is the award less what was already paid.";
-    return `Amount owed to the provider: <b>${usd(owedCents(aw, paid))}</b>${disputed ? ` · of the ${usd(disputed)} in dispute` : ""}.`;
+  // The amount owed to the provider is entered by the reviewer (2026-11-26), never worked out; the letters print
+  // exactly what is entered, and a letter that states it waits until it is.
+  function balanceText(aw, paid, disputed, owed) {
+    if (owed == null) return "Enter the amount owed to the provider yourself — it is not worked out from the award.";
+    return `Amount owed to the provider: <b>${usd(owed)}</b>${disputed ? ` · of the ${usd(disputed)} in dispute` : ""}.`;
   }
 
   function gridHtml(name, cols, rows, editable) {
@@ -230,9 +233,7 @@ const Letters = (() => {
     else r[f] = cents(el.value);
     markDirty(f);
     const b = document.getElementById("dr-balance");
-    if (b) b.innerHTML = balanceText(r.awarded_cents, r.already_paid_cents, state.data.case?.disputed_cents);
-    const o = document.getElementById("dr-owed");
-    if (o) o.value = owedText(r.awarded_cents, r.already_paid_cents);
+    if (b) b.innerHTML = balanceText(r.awarded_cents, r.already_paid_cents, state.data.case?.disputed_cents, r.owed_cents ?? null);
   }
 
   function markDirty(part) {
@@ -253,7 +254,7 @@ const Letters = (() => {
   // The parts that changed and that the caller may write: the server refuses anything else.
   function body() {
     const ce = state.data.can_edit || {}, r = state.report, ch = state.changed || new Set(), out = {};
-    for (const f of ["report_type", "outcome", "awarded_cents", "already_paid_cents", "reviewers"])
+    for (const f of ["report_type", "outcome", "awarded_cents", "already_paid_cents", "owed_cents", "reviewers"])
       if (ch.has(f) && ce.decision) out[f] = r[f] ?? null;
     if (ch.has("sections")) {
       const secs = {};

@@ -85,6 +85,9 @@ func (s *server) healthPlanForPrincipal(r *http.Request, tenant string) (*health
 // registered mailbox only. FEIN is required, and NAIC for every line of
 // business but ASO (a self-funded group has none).
 func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
+	if !turnstilePassed(w, r) { // the "I am human" check, when switched on (turnstile.go)
+		return
+	}
 	var in struct {
 		Tenant         string `json:"tenant"`
 		Name           string `json:"name"`

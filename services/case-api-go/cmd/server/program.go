@@ -148,6 +148,8 @@ type ProgramConfig struct {
 	CaseNumber struct {
 		Pattern string `json:"pattern"` // e.g. "FL{yy}-{seq}"
 		SeqPad  int    `json:"seq_pad"`
+		// Start: the first number of a year's sequence (2026-11-26; 0 or 1 = from 1). Set on the Configuration page.
+		Start int64 `json:"start,omitempty"`
 	} `json:"case_number"`
 	Statuses struct {
 		Internal []string `json:"internal"`
@@ -831,10 +833,10 @@ func (s *server) nextCaseNumber(r *http.Request, tenant string, cfg *ProgramConf
 		prefix := strings.ReplaceAll(strings.SplitN(cfg.CaseNumber.Pattern, "{seq}", 2)[0], "{yy}", yy)
 		err = s.db.QueryRow(r.Context(), fmt.Sprintf(`
 		INSERT INTO public.case_sequences (tenant, yy, last)
-		SELECT $1::text, $2::text, coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0) + 1
+		SELECT $1::text, $2::text, greatest(coalesce(max((regexp_match(case_number, '(\d{1,9})$'))[1]::bigint), 0) + 1, $4::bigint)
 		FROM tenant_%s.cases WHERE $3 <> '' AND starts_with(case_number, $3)
 		ON CONFLICT (tenant, yy) DO UPDATE SET last = public.case_sequences.last + 1
-		RETURNING last`, sanitizeTenant(tenant)), tenant, yy, prefix).Scan(&n)
+		RETURNING last`, sanitizeTenant(tenant)), tenant, yy, prefix, max(cfg.CaseNumber.Start, 1)).Scan(&n)
 		if err != nil {
 			// No counter table yet (older database): fall back to the count.
 			_ = s.db.QueryRow(r.Context(),
@@ -1060,4 +1062,18 @@ func (s *server) addCaseNote(ctx context.Context, tenant, caseID, author, body s
 		return
 	}
 	_, _ = s.db.Exec(ctx, `INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES ($1,$2,'NOTE',$3)`, tenant, caseID, body)
+}
+
+// peekCaseNumber: the number the next case will get, without taking it (for the Configuration page).
+func (s *server) peekCaseNumber(r *http.Request, tenant string, cfg *ProgramConfig) string {
+	if cfg == nil || cfg.CaseNumber.Pattern == "" {
+		return ""
+	}
+	yy := time.Now().Format("06")
+	var last int64
+	if s.db.QueryRow(r.Context(), `SELECT last FROM public.case_sequences WHERE tenant=$1 AND yy=$2`, tenant, yy).Scan(&last) != nil {
+		last = max(cfg.CaseNumber.Start, 1) - 1
+	}
+	out := strings.ReplaceAll(cfg.CaseNumber.Pattern, "{yy}", yy)
+	return strings.ReplaceAll(out, "{seq}", fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, last+1))
 }

@@ -625,6 +625,7 @@ const Api = (() => {
       tpaFilingSave: (caseId, packet) => req("PUT", `${t()}/tpa/disputes/${caseId}/filing`, packet),
       tpaChangeRequest: (caseId, packet, reason) => req("POST", `${t()}/tpa/disputes/${caseId}/change-requests`, { packet, reason }),
       tpaChangeWithdraw: (caseId, reqId) => req("DELETE", `${t()}/tpa/disputes/${caseId}/change-requests/${reqId}`),
+      tpaWithdraw: (caseId, reason) => req("POST", `${t()}/tpa/disputes/${caseId}/withdraw`, { reason }),
       caseChangeRequests: (caseId) => req("GET", `${t()}/cases/${caseId}/change-requests`),
       caseChangeDecide: (caseId, reqId, approve, note) => req("POST", `${t()}/cases/${caseId}/change-requests/${reqId}/decide`, { approve, note }),
       draftList: (form) => req("GET", `${t()}/drafts${form ? `?form=${encodeURIComponent(form)}` : ""}`),

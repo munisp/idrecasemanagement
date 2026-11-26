@@ -101,3 +101,4 @@ a { color: var(--pine-2); }
   .hero-cta .btn.lg { padding: 10px 18px; font-size: 15px; }
   .tab-bar [role="tab"] { flex: 1 1 0; min-width: 0; white-space: normal; padding-left: 6px; padding-right: 6px; }
 }
+.human-check{margin:10px 0 6px;min-height:0}

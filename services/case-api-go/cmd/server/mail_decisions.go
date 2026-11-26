@@ -375,6 +375,7 @@ func (s *server) withdrawByMail(ctx context.Context, r *http.Request, tenant, ca
 	s.setProgramDateOn(ctx, tenant, caseID, "withdrawal_requested_at", day)
 	s.setCaseDetail(ctx, tenant, caseID, "withdrawal_requested_by", by)
 	s.logActivity(ctx, tenant, caseID, "WITHDRAWAL_REQUESTED_BY_MAIL", fmt.Sprintf("%s asked by email to withdraw the dispute — the office confirms it", orgName))
+	s.logActivity(ctx, tenant, caseID, "PROVIDER_WITHDRAW", fmt.Sprintf(`Withdrawal requested by email from %s — {"by":%q,"source":"email"}`, orgName, by)) // the step the workflow reads
 	holder := orWord(s.currentAssignee(ctx, tenant, caseID), "role:CASE_MANAGER")
 	s.notifyCtx(ctx, tenant, holder, "WITHDRAWAL_REQUESTED", fmt.Sprintf("%s asked by email to withdraw %s — confirm the withdrawal", orgName, caseNumber), "#/cases/"+caseID)
 	d := recorded("REQUESTED", "withdrawal requested — waiting for the office's confirmation")

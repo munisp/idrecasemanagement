@@ -104,6 +104,9 @@ func tpaUsernameFromEmail(email string) string {
 // returns the credentials directly, the same way staff account creation
 // does, since a brand-new registrant has no other way to get one.
 func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
+	if !turnstilePassed(w, r) { // the "I am human" check, when switched on (turnstile.go)
+		return
+	}
 	var in struct {
 		Tenant       string `json:"tenant"`
 		Name         string `json:"name"`

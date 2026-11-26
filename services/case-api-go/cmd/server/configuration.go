@@ -77,7 +77,9 @@ func (s *server) getConfiguration(w http.ResponseWriter, r *http.Request) {
 			"thresholds": cfg.Eligibility.Thresholds, "filing_window_months": cfg.Eligibility.FilingWindowMonths,
 			"services_after": cfg.Eligibility.ServicesAfter,
 		},
-		"outcomes":       outcomeList(cfg),
+		"outcomes": outcomeList(cfg),
+		"case_number": map[string]any{"pattern": cfg.CaseNumber.Pattern, "seq_pad": cfg.CaseNumber.SeqPad, "start": max(cfg.CaseNumber.Start, 1),
+			"next": s.peekCaseNumber(r, tenant, cfg)},
 		"outcome_groups": cfg.OutcomeGroups,
 		"clocks":         cfg.Clocks,
 		"billing":        billingDefaults(cfg),
@@ -142,6 +144,33 @@ func (s *server) putConfiguration(w http.ResponseWriter, r *http.Request) {
 		if msg = checkFees(body, now, loc); msg == "" {
 			conf["fees"] = mergedFees(sub("fees"), body, now, loc)
 		}
+	case "case_number":
+		// The format of new case numbers and where a year's count starts (2026-11-26).
+		var in struct {
+			Pattern string `json:"pattern"`
+			SeqPad  int    `json:"seq_pad"`
+			Start   int64  `json:"start"`
+		}
+		_ = json.Unmarshal(body, &in)
+		in.Pattern = strings.TrimSpace(in.Pattern)
+		switch {
+		case !strings.Contains(in.Pattern, "{seq}") || strings.Count(in.Pattern, "{seq}") != 1:
+			msg = "the format must contain {seq} once, where the running number goes (e.g. FL{yy}-{seq})"
+		case len(in.Pattern) > 40 || strings.ContainsAny(in.Pattern, " /\\?#%"):
+			msg = "the format may not be longer than 40 characters, or contain spaces or / \\ ? # %"
+		case in.SeqPad < 1 || in.SeqPad > 9:
+			msg = "the number of digits must be from 1 to 9"
+		case in.Start < 1 || in.Start > 999_999_999:
+			msg = "the starting number must be from 1 to 999,999,999"
+		}
+		if msg == "" {
+			cn := sub("case_number")
+			cn["pattern"], cn["seq_pad"], cn["start"] = in.Pattern, in.SeqPad, in.Start
+			conf["case_number"] = cn
+			// This year's counter moves up to the start when it is below it -- never down, so no number is issued twice.
+			_, _ = s.db.Exec(r.Context(), `UPDATE public.case_sequences SET last = $3 - 1 WHERE tenant=$1 AND yy=$2 AND last < $3 - 1`,
+				tenant, now.In(loc).Format("06"), in.Start)
+		}
 	case "eligibility":
 		var m map[string]any
 		m, msg = applyEligibility(sub("eligibility"), body)
@@ -164,7 +193,7 @@ func (s *server) putConfiguration(w http.ResponseWriter, r *http.Request) {
 			conf["outcome_definitions"] = defs
 		}
 	default:
-		http.Error(w, `{"error":"section must be general, fees, eligibility, clocks, billing or outcomes"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"section must be general, case_number, fees, eligibility, clocks, billing or outcomes"}`, http.StatusBadRequest)
 		return
 	}
 	if msg != "" {

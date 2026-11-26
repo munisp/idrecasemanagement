@@ -1577,7 +1577,9 @@ func splitEmails(v string) []string {
 // toRolesFor: who a letter goes to. An RFI goes to the side picked on the form -- the Agency (the form's default since
 // change log 2026-11-25 #18), the provider or the health plan; any other template to its own parties.
 func toRolesFor(key string, tplTo []string, goesTo string) []string {
-	if key != "rfi" {
+	// The "Goes to" choice (Agency by default on the form) picks the recipient of an RFI and, since 2026-11-26, of
+	// the Final Order Rationale copy: the provider, the health plan or the Agency.
+	if key != "rfi" && key != "final_order_rationale_copy" {
 		return tplTo
 	}
 	switch goesTo {
@@ -1585,6 +1587,11 @@ func toRolesFor(key string, tplTo []string, goesTo string) []string {
 		return []string{"health_plan"}
 	case "agency":
 		return []string{"agency"}
+	case "provider":
+		return []string{"provider"}
+	}
+	if key == "final_order_rationale_copy" {
+		return tplTo // no choice: the template's own recipients
 	}
 	return []string{"provider"} // blank: the provider, as before (older RFIs on file carry no choice)
 }

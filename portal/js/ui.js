@@ -119,7 +119,7 @@ const UI = (() => {
                     ? `<textarea name="${esc(f.name)}" rows="3" placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""}>${esc(f.value || "")}</textarea>`
                     : `<input name="${esc(f.name)}" type="${esc(f.type || "text")}" value="${esc(f.value || "")}"
                         placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""} ${f.step ? `step="${esc(f.step)}"` : ""}
-                        ${f.min ? `min="${esc(f.min)}"` : ""} ${f.max ? `max="${esc(f.max)}"` : ""} ${f.accept ? `accept="${esc(f.accept)}"` : ""} />`}
+                        ${f.min ? `min="${esc(f.min)}"` : ""} ${f.max ? `max="${esc(f.max)}"` : ""} ${f.accept ? `accept="${esc(f.accept)}"` : ""} ${f.multiple ? "multiple" : ""} />`}
                 ${f.hint ? `<span class="mhint">${esc(f.hint)}</span>` : ""}
               </label>`).join("")}
             <div class="modal-f">
@@ -156,9 +156,11 @@ const UI = (() => {
       }
       scrim.querySelector("form").onsubmit = (e) => {
         e.preventDefault();
-        const data = Object.fromEntries(new FormData(e.target));
+        const fd = new FormData(e.target), data = Object.fromEntries(fd);
+        // A file field marked multiple gives every chosen file, as a list.
+        for (const f of fields) if (f.type === "file" && f.multiple) data[f.name] = fd.getAll(f.name).filter((x) => x instanceof File && x.size > 0);
         for (const f of fields) {
-          const missing = f.type === "file" ? !(data[f.name] instanceof File && data[f.name].size > 0) : !String(data[f.name] || "").trim();
+          const missing = f.type === "file" ? (f.multiple ? !data[f.name].length : !(data[f.name] instanceof File && data[f.name].size > 0)) : !String(data[f.name] || "").trim();
           if (f.required && missing) {
             e.target.querySelector(`[name="${f.name}"]`).focus();
             toast(`Enter ${f.label.toLowerCase()} to continue.`, { kind: "warn" });

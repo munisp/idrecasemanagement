@@ -41,9 +41,9 @@ const ConfigViews = (() => {
     return `<div class="view-head"><h1>Configuration</h1>
         <span class="muted">The program's fees, pay rates, eligibility rules, deadlines and billing — changed here, never in code. Every change is recorded with who made it.</span></div>
       ${ro}
-      <nav class="cfg-jump" aria-label="Sections">${[["general", "Date and time"], ["fees", "Dispute fee"], ["rates", "Pay rates"], ["eligibility", "Eligibility"], ["outcomes", "Case outcomes"], ["clocks", "Deadlines"], ["billing", "Billing"], ["more", "Other settings"]]
+      <nav class="cfg-jump" aria-label="Sections">${[["general", "Date and time"], ["casenum", "Case numbers"], ["fees", "Dispute fee"], ["rates", "Pay rates"], ["eligibility", "Eligibility"], ["outcomes", "Case outcomes"], ["clocks", "Deadlines"], ["billing", "Billing"], ["more", "Other settings"]]
         .map(([k, l]) => `<a href="#/configuration" onclick="event.preventDefault(); document.getElementById('cfg-${k}').scrollIntoView({behavior:'smooth'})">${l}</a>`).join("")}</nav>
-      ${["general", "fees", "rates", "eligibility", "outcomes", "clocks", "billing"].map((k) => `<div class="card" id="cfg-${k}" data-cfg-section="${k}"><p class="muted">Loading…</p></div>`).join("")}
+      ${["general", "casenum", "fees", "rates", "eligibility", "outcomes", "clocks", "billing"].map((k) => `<div class="card" id="cfg-${k}" data-cfg-section="${k}"><p class="muted">Loading…</p></div>`).join("")}
       <div class="card" id="cfg-more"><h2>Other settings</h2>
         <ul class="cfg-links">
           <li><a href="#/features">Feature toggles</a> — switch parts of the platform on or off (step order, payment lock, fraud review…)</li>
@@ -55,7 +55,7 @@ const ConfigViews = (() => {
   function render(section) {
     const el = document.getElementById("cfg-" + section);
     if (!el || !C) return;
-    el.innerHTML = ({ outcomes: outcomesHtml, general: generalHtml, fees: feesHtml, rates: ratesHtml, eligibility: eligHtml, clocks: clocksHtml, billing: billingHtml })[section]();
+    el.innerHTML = ({ outcomes: outcomesHtml, general: generalHtml, casenum: caseNumHtml, fees: feesHtml, rates: ratesHtml, eligibility: eligHtml, clocks: clocksHtml, billing: billingHtml })[section]();
   }
 
   // ── Date and time ──
@@ -72,6 +72,24 @@ const ConfigViews = (() => {
   function zoneSave(form) {
     if (form.time_zone.value === C.time_zone) return;
     saveSection("general", { time_zone: form.time_zone.value }, "Time zone saved").then(() => document.querySelectorAll("[data-cfg-section]").forEach((el) => render(el.dataset.cfgSection)));
+  }
+
+  // ── Case numbers (2026-11-26) ──
+  function caseNumHtml() {
+    const c = C.case_number || {}, edit = C.can_edit, dis = edit ? "" : " disabled";
+    return `<h2>Case numbers</h2>
+      <p class="muted">How new cases are numbered. <code>{yy}</code> is the year's last two digits and <code>{seq}</code> the running number,
+        which starts again each year. A new starting number only ever moves the count forward, so no number is given twice.</p>
+      <p class="cfg-now">The next case will be <b>${esc(c.next || "—")}</b></p>
+      <form class="inline-form" onsubmit="event.preventDefault(); ConfigViews.caseNumSave(this)">
+        <label>Format <input name="pattern" value="${esc(c.pattern || "")}" placeholder="FL{yy}-{seq}" required${dis} /></label>
+        <label>Digits in the number <input name="seq_pad" type="number" min="1" max="9" value="${esc(c.seq_pad || 3)}" required${dis} /></label>
+        <label>Start each year at <input name="start" type="number" min="1" value="${esc(c.start || 1)}" required${dis} /></label>
+        ${edit ? `<button class="mini">Save</button>` : ""}</form>`;
+  }
+  function caseNumSave(form) {
+    saveSection("case_number", { pattern: form.pattern.value.trim(), seq_pad: Number(form.seq_pad.value), start: Number(form.start.value) }, "Case numbering saved")
+      .then(() => render("casenum"));
   }
 
   // ── Dispute fee ──
@@ -273,5 +291,5 @@ const ConfigViews = (() => {
     });
   }
 
-  return { page, outcomeMove, outcomeRemove, outcomeAdd, outcomesSave, zoneSave, feeAdd, feeRemove, feeTerms, lateFeeSave, rateSet, eligSave, clocksSave, billingSave };
+  return { page, outcomeMove, outcomeRemove, outcomeAdd, outcomesSave, zoneSave, caseNumSave, feeAdd, feeRemove, feeTerms, lateFeeSave, rateSet, eligSave, clocksSave, billingSave };
 })();
