@@ -40,7 +40,7 @@ env ADDR=127.0.0.1:8080 \
   VAULT_URL=http://127.0.0.1:8081 VAULT_INTERNAL_TOKEN=dev-internal-token \
   STORAGE_GATEWAY_URL=http://127.0.0.1:8094 STORAGE_INTERNAL_TOKEN=dev-storage-token \
   STRIPE_SECRET_KEY= STRIPE_WEBHOOK_SECRET=whsec_dast_run \
-  REDIS_ADDR= PERMIFY_URL= \
+  REDIS_ADDR="${REDIS_ADDR:-127.0.0.1:6379}" PERMIFY_URL= \
   METRICS_PORT=9091 OTEL_SDK_DISABLED=true \
   setsid nohup "$CASE_API_BIN" </dev/null >>"$DAST_HOME/work/case-api.log" 2>&1 &
 

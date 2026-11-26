@@ -32,8 +32,20 @@ spec:
         dapr.io/sidecar-memory-request: "128Mi"
         dapr.io/sidecar-memory-limit: "256Mi"
     spec:
+      volumes: [{ name: tmp, emptyDir: { medium: Memory, sizeLimit: 64Mi } }]
+      securityContext:   # not root (2026-11-26, Trivy KSV-0118)
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: worker
+          securityContext:   # (2026-11-26, Trivy KSV-0014)
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]   # writable scratch under a read-only root
           image: ghcr.io/munisp/idre/idre-workflows:latest   # services/idre-workflows-py
           env:
             - name: DATABASE_URL
@@ -63,8 +75,20 @@ spec:
     metadata:
       labels: { app: outbox-relay }
     spec:
+      volumes: [{ name: tmp, emptyDir: { medium: Memory, sizeLimit: 64Mi } }]
+      securityContext:   # not root (2026-11-26, Trivy KSV-0118)
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: relay
+          securityContext:   # (2026-11-26, Trivy KSV-0014)
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]   # writable scratch under a read-only root
           image: ghcr.io/munisp/idre/outbox-relay:latest   # services/outbox-relay-py
           env:
             - name: DATABASE_URL

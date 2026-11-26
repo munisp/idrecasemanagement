@@ -39,7 +39,9 @@ def chat(endpoint: str, model: str, q: str) -> str:
     req = urllib.request.Request(
         endpoint.rstrip("/") + "/v1/chat/completions",
         data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as r:
+    if not endpoint.lower().startswith(("http://", "https://")):
+        raise SystemExit("the endpoint must be an http(s) URL")
+    with urllib.request.urlopen(req, timeout=300) as r:  # nosec B310  # http(s) only, checked above
         return json.loads(r.read())["choices"][0]["message"]["content"]
 
 

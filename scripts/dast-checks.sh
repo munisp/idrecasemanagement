@@ -201,8 +201,11 @@ chk T11 "no compose file exposure" 404 "$(code $PORTAL_BASE/docker-compose.yml)"
 chk T11 "traversal blocked" 404 "$(code --path-as-is $PORTAL_BASE/../../../docker-compose.yml)"
 chk T11 "encoded traversal blocked" 404 "$(code --path-as-is "$PORTAL_BASE/%2e%2e%2f%2e%2e%2fdocker-compose.yml")"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-chk T11 "no source maps shipped" 0 "$(grep -rl sourceMappingURL $REPO_ROOT/portal/js/ 2>/dev/null | wc -l)"
-chk T11 "no hardcoded secrets in portal" 0 "$(grep -rInE 'github_pat|sk_live|whsec_|BEGIN [A-Z ]*PRIVATE KEY|api_key[[:space:]]*[:=]' $REPO_ROOT/portal/ 2>/dev/null | wc -l)"
+# A shipped map is a .map file or a file's own trailing "//# sourceMappingURL=" pointer; a library that merely
+# builds inline maps at runtime (redoc's styled-components) mentions the word in its code and ships nothing.
+chk T11 "no source maps shipped" 0 "$( { find $REPO_ROOT/portal -name '*.map' 2>/dev/null; grep -rlE '^//[#@] sourceMappingURL=' $REPO_ROOT/portal/js/ 2>/dev/null; } | wc -l)"
+# Real key shapes, not the bare prefixes: the portal's help text names them ("its signing secret starts whsec_").
+chk T11 "no hardcoded secrets in portal" 0 "$(grep -rInE 'github_pat_[A-Za-z0-9_]{20,}|sk_live_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9+/=]{16,}|BEGIN [A-Z ]*PRIVATE KEY|api_key[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_-]{16,}' $REPO_ROOT/portal/ 2>/dev/null | wc -l)"
 chk T11 "sw.js keeps auth realm uncached" 0 "$(grep -c 'realms.*cache\|cache.*realms' $REPO_ROOT/portal/sw.js | head -1)"
 chk T11 "logout purges API cache (F4 fixed)" 1 "$(grep -c 'caches.delete' $REPO_ROOT/portal/js/auth.js)"
 chk T11 "edge sets HSTS (active snippet)" 1 "$(sed -n '/(security_headers)/,/^}/p' $REPO_ROOT/deploy/caddy/Caddyfile | grep -c Strict-Transport-Security)"

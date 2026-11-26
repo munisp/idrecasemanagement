@@ -23,8 +23,18 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels: { app: tigerbeetle }
+      securityContext:   # not root (2026-11-26, Trivy KSV-0118)
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: tigerbeetle
+          securityContext:   # (2026-11-26, Trivy KSV-0014)
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           image: ghcr.io/tigerbeetle/tigerbeetle:0.16.0
           args:
             - start

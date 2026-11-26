@@ -44,7 +44,8 @@ MODEL_VERSION = "graphsage-np-1.0"
 
 
 def _bucket(value: str, n: int) -> int:
-    return int(hashlib.md5((value or "").encode()).hexdigest(), 16) % n
+    # Spreads values over buckets; not used for security.
+    return int(hashlib.md5((value or "").encode(), usedforsecurity=False).hexdigest(), 16) % n
 
 
 # Edges scored per training epoch, at most (a sample of them on a big graph).

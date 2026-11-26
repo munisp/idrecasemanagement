@@ -104,63 +104,63 @@ def _compute(tenant: str) -> dict[str, list[str]]:
     with conn:
         # ---- caseload ---------------------------------------------------
         r = one(f"SELECT count(*), count(*) FILTER (WHERE {closed}), "
-                f"count(*) FILTER (WHERE opened_at > now() - interval '30 days') FROM {t}.cases")
+                f"count(*) FILTER (WHERE opened_at > now() - interval '30 days') FROM {t}.cases")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[0]:
             add("caseload", f"There are {r[0]} disputes in total: {r[0] - r[1]} open and {r[1]} closed or decided.")
             add("caseload", f"{r[2]} disputes were opened in the last 30 days.")
-        rs = rows(f"SELECT status, count(*) FROM {t}.cases GROUP BY status ORDER BY count(*) DESC")
+        rs = rows(f"SELECT status, count(*) FROM {t}.cases GROUP BY status ORDER BY count(*) DESC")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("caseload", rs and "Disputes by status (the stage each is in): " + _pairs(rs) + ".")
         rs = rows(f"SELECT internal_status, count(*) FROM {t}.cases WHERE internal_status IS NOT NULL "
-                  f"GROUP BY internal_status ORDER BY count(*) DESC LIMIT 12")
+                  f"GROUP BY internal_status ORDER BY count(*) DESC LIMIT 12")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("caseload", rs and "Disputes by internal status (where the work is): " + _pairs(rs) + ".")
         rs = rows(f"SELECT agency_status, count(*) FROM {t}.cases WHERE agency_status IS NOT NULL "
-                  f"GROUP BY agency_status ORDER BY count(*) DESC")
+                  f"GROUP BY agency_status ORDER BY count(*) DESC")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("caseload", rs and "Disputes by agency status: " + _pairs(rs) + ".")
 
         # ---- parties ----------------------------------------------------
         rs = rows(f"SELECT details->>'requester_org', count(*) FROM {t}.cases "
-                  f"WHERE coalesce(details->>'requester_org','') <> '' GROUP BY 1 ORDER BY count(*) DESC LIMIT 8")
+                  f"WHERE coalesce(details->>'requester_org','') <> '' GROUP BY 1 ORDER BY count(*) DESC LIMIT 8")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("parties", rs and "Organizations that filed the most disputes: " + _pairs(rs) + ".")
         rs = rows(f"SELECT CASE details->>'filing_party_type' WHEN 'HEALTH_PLAN' THEN 'health plans' "
                   f"WHEN 'PROVIDER' THEN 'providers' ELSE 'not recorded' END, count(*) FROM {t}.cases GROUP BY 1 "
-                  f"ORDER BY count(*) DESC")
+                  f"ORDER BY count(*) DESC")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("parties", rs and "Disputes by who filed: " + _pairs(rs) + ".")
         rs = rows(f"SELECT details->>'health_plan', count(*) FROM {t}.cases "
-                  f"WHERE coalesce(details->>'health_plan','') <> '' GROUP BY 1 ORDER BY count(*) DESC LIMIT 8")
+                  f"WHERE coalesce(details->>'health_plan','') <> '' GROUP BY 1 ORDER BY count(*) DESC LIMIT 8")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("parties", rs and "Health plans named in the most disputes: " + _pairs(rs) + ".")
         rs = rows(f"SELECT details->>'provider_org', count(*) FROM {t}.cases "
-                  f"WHERE coalesce(details->>'provider_org','') <> '' GROUP BY 1 ORDER BY count(*) DESC LIMIT 8")
+                  f"WHERE coalesce(details->>'provider_org','') <> '' GROUP BY 1 ORDER BY count(*) DESC LIMIT 8")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("parties", rs and "Providers named in the most disputes: " + _pairs(rs) + ".")
-        r = one(f"SELECT count(*) FILTER (WHERE coalesce(details->>'health_plan','') = ''), count(*) FROM {t}.cases")
+        r = one(f"SELECT count(*) FILTER (WHERE coalesce(details->>'health_plan','') = ''), count(*) FROM {t}.cases")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[1] and r[0]:
             add("parties", f"{r[0]} of {r[1]} disputes have no health plan name recorded yet, so plan rankings cover only the rest.")
         rs = rows(f"SELECT (details->>'provider_org') || ' vs ' || (details->>'health_plan'), count(*) FROM {t}.cases "
                   f"WHERE coalesce(details->>'provider_org','') <> '' AND coalesce(details->>'health_plan','') <> '' "
-                  f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 5")
+                  f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 5")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("parties", rs and "Provider and plan pairs that appear together most: " + _pairs(rs) + ".")
 
         # ---- services ---------------------------------------------------
-        rs = rows(f"SELECT service_line, count(*) FROM {t}.cases GROUP BY service_line ORDER BY count(*) DESC")
+        rs = rows(f"SELECT service_line, count(*) FROM {t}.cases GROUP BY service_line ORDER BY count(*) DESC")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("services", rs and "Disputes by service line: " + _pairs([(_svc(n), c) for n, c in rs]) + ".")
         rs = rows(f"SELECT service_line, round(avg(disputed_amount_cents)) FROM {t}.cases "
                   f"WHERE service_line IS NOT NULL AND disputed_amount_cents > 0 GROUP BY service_line "
-                  f"ORDER BY avg(disputed_amount_cents) DESC")
+                  f"ORDER BY avg(disputed_amount_cents) DESC")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("money", rs and "Average disputed amount by service line: "
             + ", ".join(f"{n}: {_money(v)}" for n, v in rs) + ".")
         rs = rows(f"SELECT service_line, string_agg(case_number, ', ') FROM ("
                   f"SELECT service_line, case_number, row_number() OVER (PARTITION BY service_line ORDER BY opened_at DESC) rn "
-                  f"FROM {t}.cases WHERE service_line IS NOT NULL) x WHERE rn <= 5 GROUP BY service_line")
+                  f"FROM {t}.cases WHERE service_line IS NOT NULL) x WHERE rn <= 5 GROUP BY service_line")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         for name, nums in rs:
             add("services", f"Most recent {_svc(name)} disputes: {nums}.")
 
         # ---- deadlines --------------------------------------------------
         r = one(f"SELECT count(*) FILTER (WHERE opened_at < now() - interval '60 days'), "
                 f"count(*) FILTER (WHERE opened_at < now() - interval '90 days'), count(*) "
-                f"FROM {t}.cases WHERE NOT {closed}")
+                f"FROM {t}.cases WHERE NOT {closed}")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[2]:
             add("deadlines", f"Of {r[2]} open disputes, {r[0]} have been open more than 60 days and {r[1]} more than 90 days.")
         rs = rows(f"SELECT case_number, (now()::date - opened_at::date) FROM {t}.cases WHERE NOT {closed} "
-                  f"AND opened_at < now() - interval '60 days' ORDER BY opened_at LIMIT 8")
+                  f"AND opened_at < now() - interval '60 days' ORDER BY opened_at LIMIT 8")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("deadlines", rs and "Oldest open disputes past 60 days: "
             + ", ".join(f"{n} ({d} days)" for n, d in rs) + ".")
         rs = rows("SELECT clock, count(*) FROM public.escalations WHERE tenant=%s GROUP BY clock ORDER BY count(*) DESC",
@@ -175,26 +175,26 @@ def _compute(tenant: str) -> dict[str, list[str]]:
                   "ORDER BY due_date LIMIT 6", (tenant,))
         add("deadlines", rs and "Deliverables currently due: " + ", ".join(f"{n} (due {d})" for n, d in rs) + ".")
         r = one(f"SELECT round(avg(extract(epoch FROM (updated_at - opened_at)) / 86400)), count(*) FROM {t}.cases "
-                f"WHERE {closed} AND updated_at > opened_at")
+                f"WHERE {closed} AND updated_at > opened_at")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[1]:
             add("deadlines", f"Closed disputes took {int(r[0])} days on average from opening to their last update ({r[1]} cases).")
 
         # ---- eligibility ------------------------------------------------
         latest = ("(SELECT DISTINCT ON (case_id) case_id, result, reason, borderline FROM public.eligibility_reviews "
                   "WHERE tenant=%s ORDER BY case_id, created_at DESC) e")
-        rs = rows(f"SELECT result, count(*) FROM {latest} GROUP BY result ORDER BY count(*) DESC", (tenant,))
+        rs = rows(f"SELECT result, count(*) FROM {latest} GROUP BY result ORDER BY count(*) DESC", (tenant,))  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("eligibility", rs and "Latest eligibility decision per dispute: " + _pairs(rs) + ".")
         rs = rows(f"SELECT reason, count(*) FROM {latest} WHERE result='INELIGIBLE' GROUP BY reason "
-                  f"ORDER BY count(*) DESC LIMIT 8", (tenant,))
+                  f"ORDER BY count(*) DESC LIMIT 8", (tenant,))  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("eligibility", rs and "Reasons for ineligibility: "
             + _pairs([(str(n or '').replace('_', ' '), c) for n, c in rs]) + ".")
-        r = one(f"SELECT count(*) FILTER (WHERE result='HOLD_AOR'), count(*) FILTER (WHERE borderline) FROM {latest}",
+        r = one(f"SELECT count(*) FILTER (WHERE result='HOLD_AOR'), count(*) FILTER (WHERE borderline) FROM {latest}",  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
                 (tenant,))
         if r:
             add("eligibility", f"{r[0]} disputes are on hold for an invalid authorization of representative; "
                                f"{r[1]} decisions were borderline and sent for a second look.")
         r = one(f"SELECT count(*) FROM {t}.cases c WHERE NOT {closed} AND status NOT IN ('AWAITING_PAYMENT') "
-                f"AND NOT EXISTS (SELECT 1 FROM public.eligibility_reviews e WHERE e.tenant=%s AND e.case_id::text=c.id::text)",
+                f"AND NOT EXISTS (SELECT 1 FROM public.eligibility_reviews e WHERE e.tenant=%s AND e.case_id::text=c.id::text)",  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
                 (tenant,))
         if r:
             add("eligibility", f"{r[0]} open disputes past payment have no eligibility decision yet.")
@@ -203,33 +203,33 @@ def _compute(tenant: str) -> dict[str, list[str]]:
         r = one(f"SELECT count(*), sum(disputed_amount_cents), round(avg(disputed_amount_cents)), "
                 f"percentile_cont(0.5) WITHIN GROUP (ORDER BY disputed_amount_cents), "
                 f"count(*) FILTER (WHERE disputed_amount_cents >= 100000000) "
-                f"FROM {t}.cases WHERE disputed_amount_cents > 0")
+                f"FROM {t}.cases WHERE disputed_amount_cents > 0")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[0]:
             add("money", f"Total amount in dispute: {_money(r[1])} across {r[0]} disputes with an amount recorded. "
                          f"Average {_money(r[2])}, median {_money(r[3])}.")
             add("money", f"{r[4]} disputes are $1,000,000 or more.")
         rs = rows(f"SELECT case_number, disputed_amount_cents FROM {t}.cases WHERE disputed_amount_cents > 0 "
-                  f"ORDER BY disputed_amount_cents DESC LIMIT 5")
+                  f"ORDER BY disputed_amount_cents DESC LIMIT 5")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("money", rs and "Five largest disputes by amount: " + ", ".join(f"{n} ({_money(v)})" for n, v in rs) + ".")
-        r = one(f"SELECT count(*) FROM {t}.cases WHERE coalesce(disputed_amount_cents,0) = 0")
+        r = one(f"SELECT count(*) FROM {t}.cases WHERE coalesce(disputed_amount_cents,0) = 0")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[0]:
             add("money", f"{r[0]} disputes have no amount recorded and are not in these totals.")
 
         # ---- outcomes ---------------------------------------------------
         rs = rows(f"SELECT agency_status, count(*) FROM {t}.cases WHERE agency_status IN ('Decided','Closed') "
-                  f"GROUP BY agency_status")
+                  f"GROUP BY agency_status")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("outcomes", rs and "Decided and closed disputes: " + _pairs(rs) + ".")
         rs = rows(f"SELECT details->>'case_outcome', count(*) FROM {t}.cases "
-                  f"WHERE coalesce(details->>'case_outcome','') <> '' GROUP BY 1 ORDER BY count(*) DESC")
+                  f"WHERE coalesce(details->>'case_outcome','') <> '' GROUP BY 1 ORDER BY count(*) DESC")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("outcomes", rs and "Recorded outcomes: " + _pairs(rs) + ".")
         r = one(f"SELECT count(*), sum((details->>'final_amount_awarded_cents')::bigint) FROM {t}.cases "
-                f"WHERE details->>'final_amount_awarded_cents' ~ '^[0-9]+$'")
+                f"WHERE details->>'final_amount_awarded_cents' ~ '^[0-9]+$'")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         if r and r[0]:
             add("money", f"Final amount awarded is recorded on {r[0]} disputes, totalling {_money(r[1])}.")
         else:
             add("money", "No final award amounts have been recorded yet.")
         rs = rows(f"SELECT status_reason, count(*) FROM {t}.cases WHERE {closed} AND coalesce(status_reason,'') <> '' "
-                  f"GROUP BY status_reason ORDER BY count(*) DESC LIMIT 6")
+                  f"GROUP BY status_reason ORDER BY count(*) DESC LIMIT 6")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
         add("outcomes", rs and "Why disputes closed: " + _pairs(rs) + ".")
     return out
 
@@ -276,25 +276,25 @@ def hints(tenant: str) -> dict:
                     return []
             out["case_numbers"] = col(
                 f"SELECT case_number FROM {t}.cases WHERE coalesce(details->>'requester_org','') <> '' "
-                f"AND case_number ~ '[0-9]' ORDER BY opened_at DESC LIMIT 2") or col(
-                f"SELECT case_number FROM {t}.cases ORDER BY opened_at DESC LIMIT 2")
+                f"AND case_number ~ '[0-9]' ORDER BY opened_at DESC LIMIT 2") or col(  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
+                f"SELECT case_number FROM {t}.cases ORDER BY opened_at DESC LIMIT 2")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
             out["filers"] = col(
                 f"SELECT details->>'requester_org' FROM {t}.cases WHERE coalesce(details->>'requester_org','') <> '' "
-                f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 2")
+                f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 2")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
             out["plans"] = col(
                 f"SELECT details->>'health_plan' FROM {t}.cases WHERE coalesce(details->>'health_plan','') <> '' "
-                f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 1")
+                f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 1")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
             try:
                 r = c.execute(
                     f"SELECT details->>'provider_org', details->>'health_plan' FROM {t}.cases "
                     f"WHERE coalesce(details->>'provider_org','') <> '' AND coalesce(details->>'health_plan','') <> '' "
-                    f"GROUP BY 1, 2 ORDER BY count(*) DESC LIMIT 1").fetchone()
+                    f"GROUP BY 1, 2 ORDER BY count(*) DESC LIMIT 1").fetchone()  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
                 out["pair"] = list(r) if r else []
             except Exception:
                 pass
             out["service_lines"] = col(
                 f"SELECT service_line FROM {t}.cases WHERE service_line IS NOT NULL AND service_line <> 'OTHER' "
-                f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 2")
+                f"GROUP BY 1 ORDER BY count(*) DESC LIMIT 2")  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
     except Exception:
         pass
     return out
@@ -310,7 +310,7 @@ def case_lines(tenant: str, case_id: str) -> list[str]:
             r = c.execute(
                 f"SELECT case_number, status, internal_status, agency_status, service_line, disputed_amount_cents, "
                 f"opened_at::date, details->>'requester_org', details->>'provider_org', details->>'health_plan', "
-                f"details->>'provider_type', details->>'filing_party_type' FROM {t}.cases WHERE id::text=%s", (case_id,)
+                f"details->>'provider_type', details->>'filing_party_type' FROM {t}.cases WHERE id::text=%s", (case_id,)  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
             ).fetchone()
             if not r:
                 return out
@@ -336,8 +336,8 @@ def case_lines(tenant: str, case_id: str) -> list[str]:
                     continue
                 sib = c.execute(
                     f"SELECT case_number FROM {t}.cases WHERE details->>'{key}'=%s AND id::text<>%s "
-                    f"ORDER BY opened_at DESC LIMIT 10", (val, case_id)).fetchall()
-                n = c.execute(f"SELECT count(*) FROM {t}.cases WHERE details->>'{key}'=%s AND id::text<>%s",
+                    f"ORDER BY opened_at DESC LIMIT 10", (val, case_id)).fetchall()  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
+                n = c.execute(f"SELECT count(*) FROM {t}.cases WHERE details->>'{key}'=%s AND id::text<>%s",  # nosec B608  # schema from _schema() (letters, digits, _); fixed SQL fragments; values bound
                               (val, case_id)).fetchone()[0]
                 out.append(f"Other disputes with the same {label} as {num} ({val}): "
                            + (", ".join(x[0] for x in sib) + (f" and {n - len(sib)} more" if n > len(sib) else "")

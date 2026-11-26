@@ -155,7 +155,7 @@ def load_context(dsn: str, tenant: str, case_id: str) -> dict:
         row = c.execute(
             f"""SELECT case_number, provider_id, payer_id, details, coalesce(program_dates,'{{}}'::jsonb),
                        disputed_amount_cents, num_claims, opened_at
-                FROM tenant_{tenant}.cases WHERE id=%s""",
+                FROM tenant_{tenant}.cases WHERE id=%s""",  # nosec B608  # tenant checked by TENANT_RE in main.py before any letter is built; values bound
             (case_id,),
         ).fetchone()
         if not row:

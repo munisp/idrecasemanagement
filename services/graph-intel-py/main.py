@@ -145,13 +145,13 @@ def _load_cases(tenant: str, case_id: str | None = None) -> list[dict]:
             rows = c.execute(
                 f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
                 f" provider_id, payer_id, opened_at, details->>'provider_org', details->>'health_plan',"
-                f" details->>'requester_org', details->>'filing_party_type' FROM tenant_{t}.cases" + where, args
+                f" details->>'requester_org', details->>'filing_party_type' FROM tenant_{t}.cases" + where, args  # nosec B608  # schema reduced to letters and digits above; values are bound
             ).fetchall()
             use = named
         except Exception:  # a tenant whose cases table has no details column
             rows = c.execute(
                 f"SELECT id, case_number, status, service_line, plan_type, qpa_cents,"
-                f" provider_id, payer_id, opened_at FROM tenant_{t}.cases" + where, args
+                f" provider_id, payer_id, opened_at FROM tenant_{t}.cases" + where, args  # nosec B608  # schema reduced to letters and digits above; values are bound
             ).fetchall()
             use = cols
     out = []
@@ -344,4 +344,4 @@ def feedback(req: FeedbackRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8082")))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8082")))  # nosec B104  # a container service listens on all interfaces; exposure is set by its k8s Service and network policy

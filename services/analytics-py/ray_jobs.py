@@ -192,6 +192,6 @@ class SettlementPropensity:
 
 
 if __name__ == "__main__":
-    serve.start(http_options={"host": "0.0.0.0", "port": 8093})
+    serve.start(http_options={"host": "0.0.0.0", "port": 8093})  # nosec B104  # a container service listens on all interfaces; exposure is set by its k8s Service and network policy
     serve.run(QpaOutlier.bind(), SettlementPropensity.bind())
     print("Ray Serve: :8093/ml/qpa-outlier, :8093/ml/settlement-propensity")

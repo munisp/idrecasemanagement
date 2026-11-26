@@ -100,10 +100,15 @@ func progRaw(r *http.Request, s *server, tenant, key string) (json.RawMessage, b
 // enqueueLetter asks lettergen for one letter on a case (a letter.requested event through the outbox) and notes it
 // on the case's activity; by is who it is generated for.
 func (s *server) enqueueLetter(r *http.Request, tenant, caseID, caseNumber, key, by string) error {
+	// Who asked, as an account too: QA's verdict on the letter reaches its drafter by it (change log #14).
+	sub := ""
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok {
+		sub = p.Subject
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"type": "letter.requested", "tenant": tenant, "case_id": caseID,
 		"template": key, "case_number": caseNumber,
-		"requested_by": by, "at": time.Now().UTC(),
+		"requested_by": by, "requested_by_sub": sub, "at": time.Now().UTC(),
 		"traceparent": traceparentOf(r.Context()),
 	})
 	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(

@@ -547,6 +547,7 @@ const Api = (() => {
       tpaBulkSample: (layout) => download(`${t()}/tpa/disputes/bulk/sample.zip?layout=${layout === "merged" ? "merged" : "separate"}`, `sample-disputes-${layout === "merged" ? "merged" : "separate"}.zip`),
       setReviewNote: (caseId, field, text) => req("PUT", `${t()}/cases/${caseId}/review-notes`, { field, text }),
       setDisputeSummary: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/dispute-summary`, body),
+      setCostEstimate: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/cost-estimate`, body),
       confirmAor: (caseId, valid, reason) => req("POST", `${t()}/cases/${caseId}/aor-confirmation`, { valid, reason }),
       optOut: (caseId, eligible, rationale) => req("POST", `${t()}/cases/${caseId}/opt-out`, { eligible, rationale }),
       send: (caseId, p) => req("POST", `${t()}/cases/${caseId}/correspondence`, p),

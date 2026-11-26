@@ -890,7 +890,8 @@ func main() {
 		r.Delete("/program/templates/{key}", s.deleteTemplate) // remove one, or restore the standard wording
 		r.Get("/cases/{caseId}/correspondence/templates", s.caseTemplates)
 		r.Put("/cases/{caseId}/review-notes", s.setReviewNote)        // per-role notes fields
-		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary) // Coder's Dispute Summary + cost estimate
+		r.Put("/cases/{caseId}/dispute-summary", s.setDisputeSummary) // the Coder's Dispute Summary
+		r.Put("/cases/{caseId}/cost-estimate", s.setCostEstimate)     // the Admin prepares the full review cost estimate (change log #14)
 		r.Post("/cases/{caseId}/aor-confirmation", s.confirmAOR)      // Attorney rules on a flagged AOR
 		// TPA onboarding (tpa_onboarding.go): profile -> payment -> 6-doc package.
 		r.Put("/tpa/clients/{clientId}/profile", s.tpaUpdateClientProfile)
@@ -1638,7 +1639,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 		add("c.assigned_to = $%d", caller.Subject)
 	}
 	// An Admin sees only unassigned cases and their own (casescope.go).
-	if cond, ok := caseScopeSQL(caller, "c", len(args)+1); ok {
+	if cond, ok := caseScopeSQL(caller, tenant, "c", len(args)+1); ok {
 		args = append(args, caller.Subject)
 		where += cond
 	}
@@ -1778,7 +1779,7 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 		"internal_status": internal, "agency_status": agency, "details": dj, "program_dates": pd,
 		// "" | AWAITING_PAYMENT | INELIGIBLE -- the portal freezes everything
 		// but correspondence on a locked case (caselock.go).
-		"lock": s.caseLock(r.Context(), c.Tenant, c.ID),
+		"lock":       s.caseLock(r.Context(), c.Tenant, c.ID),
 		"filed_with": filedWith, "filing_docs": filingDocs,
 	})
 }

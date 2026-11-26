@@ -30,7 +30,7 @@ import json
 import re
 import sys
 import urllib.request
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as SafeET  # pip install defusedxml
 from pathlib import Path
 
 ECFR_URL = ("https://www.ecfr.gov/api/versioner/v1/full/{date}/title-45.xml"
@@ -43,7 +43,7 @@ REFUSAL = ("That is not in the record or authority available to me. "
 def fetch_part149(date: str) -> str:
     url = ECFR_URL.format(date=date)
     req = urllib.request.Request(url, headers={"User-Agent": "idre-copilot-training/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=120) as r:  # nosec B310  # the fixed https eCFR address (ECFR_URL)
         return r.read().decode("utf-8")
 
 
@@ -52,7 +52,7 @@ def sections_from_ecfr(xml_text: str) -> list[tuple[str, str]]:
     elements headed N='149.x'. Defensive: any DIV8 whose HEAD mentions a
     section number is taken."""
     out = []
-    root = ET.fromstring(xml_text)
+    root = SafeET.fromstring(xml_text)  # defusedxml: no entity expansion from a downloaded document
     for div in root.iter("DIV8"):
         sec_no = div.attrib.get("N", "")
         text = re.sub(r"\s+", " ", " ".join(div.itertext())).strip()

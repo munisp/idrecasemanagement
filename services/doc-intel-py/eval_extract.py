@@ -197,8 +197,10 @@ _VLM_QUESTIONS = {
 
 def _vlm_available(endpoint: str) -> bool:
     import urllib.request
+    if not endpoint.lower().startswith(("http://", "https://")):
+        return False
     try:
-        with urllib.request.urlopen(endpoint.rstrip("/") + "/models", timeout=3) as r:
+        with urllib.request.urlopen(endpoint.rstrip("/") + "/models", timeout=3) as r:  # nosec B310  # http(s) only, checked above
             return r.status == 200
     except Exception:
         try:

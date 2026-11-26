@@ -199,11 +199,11 @@ def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") ->
     # Lock the package first: two workers finishing two of its documents at
     # once each counted the other's verdict as not there yet (uncommitted),
     # and the package stayed VALIDATING with all six accepted.
-    locked = conn.execute(f"SELECT status FROM public.{prefix}_packages WHERE tenant=%s AND id=%s FOR UPDATE",
+    locked = conn.execute(f"SELECT status FROM public.{prefix}_packages WHERE tenant=%s AND id=%s FOR UPDATE",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
                           (tenant, package_id)).fetchone()
     was = locked[0] if locked else ""
     rows = conn.execute(
-        f"SELECT slot, status FROM public.{prefix}_package_docs WHERE tenant=%s AND package_id=%s",
+        f"SELECT slot, status FROM public.{prefix}_package_docs WHERE tenant=%s AND package_id=%s",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
         (tenant, package_id)).fetchall()
     by_slot = {r[0]: r[1] for r in rows}
     if by_slot and not any(v in ("PENDING", "ANALYZING") for v in by_slot.values()):
@@ -211,7 +211,7 @@ def _refresh_package(conn, tenant: str, package_id: str, prefix: str = "tpa") ->
     else:
         status = "VALIDATING"
     conn.execute(
-        f"UPDATE public.{prefix}_packages SET status=%s, updated_at=now() WHERE tenant=%s AND id=%s",
+        f"UPDATE public.{prefix}_packages SET status=%s, updated_at=now() WHERE tenant=%s AND id=%s",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
         (status, tenant, package_id))
     if status == "REJECTED" and was != "REJECTED":
         _notify_rejected(conn, tenant, package_id, prefix)
@@ -332,7 +332,7 @@ def _handle_discrete(evt: dict, ctx: dict, actor: str = "tpa") -> None:
     prefix = "hp" if actor == "healthplan" else "tpa"
     with psycopg.connect(ctx["dsn"]) as conn:
         conn.execute(
-            f"UPDATE public.{prefix}_package_docs SET status='ANALYZING' WHERE tenant=%s AND id=%s",
+            f"UPDATE public.{prefix}_package_docs SET status='ANALYZING' WHERE tenant=%s AND id=%s",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
             (tenant, doc_id))
         conn.commit()
     try:
@@ -354,7 +354,7 @@ def _handle_discrete(evt: dict, ctx: dict, actor: str = "tpa") -> None:
         conn.execute(
             f"""UPDATE public.{prefix}_package_docs
                SET status=%s, reasons=%s::jsonb, fields=%s::jsonb, analyzed_at=now()
-               WHERE tenant=%s AND id=%s""",
+               WHERE tenant=%s AND id=%s""",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
             (status, json.dumps(reasons), json.dumps(fields), tenant, doc_id))
         pkg_status = _refresh_package(conn, tenant, evt["package_id"], prefix)
         conn.commit()
@@ -396,7 +396,7 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
                              object_key=excluded.object_key, filename=excluded.filename,
                              status=excluded.status, reasons=excluded.reasons, fields=excluded.fields,
                              page_start=excluded.page_start, page_end=excluded.page_end,
-                             analyzed_at=now()""",
+                             analyzed_at=now()""",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
                         (tenant, package_id, slot, key, f"{slot.lower()} (pages {start + 1}-{end + 1})",
                          status, json.dumps(reasons + [{"code": "SPLIT_FROM_MERGED",
                                                         "detail": f"pages {start + 1}-{end + 1}"}]),
@@ -411,7 +411,7 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
                            VALUES (%s,%s,%s,%s,%s,'NEEDS_REVIEW',
                                    %s::jsonb, now())
                            ON CONFLICT (package_id, slot) DO UPDATE SET
-                             status='NEEDS_REVIEW', reasons=excluded.reasons, analyzed_at=now()""",
+                             status='NEEDS_REVIEW', reasons=excluded.reasons, analyzed_at=now()""",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
                         (tenant, package_id, slot, evt["object_key"], evt.get("filename") or "merged.pdf",
                          json.dumps([{"code": "SLOT_NOT_FOUND_IN_MERGED",
                                       "detail": "page classification found no segment for this slot"}])))
@@ -421,7 +421,7 @@ def _handle_merged(evt: dict, ctx: dict, actor: str = "tpa") -> None:
     except Exception as exc:  # noqa: BLE001
         with psycopg.connect(ctx["dsn"]) as conn:
             conn.execute(
-                f"UPDATE public.{prefix}_packages SET status='REJECTED', updated_at=now() WHERE tenant=%s AND id=%s",
+                f"UPDATE public.{prefix}_packages SET status='REJECTED', updated_at=now() WHERE tenant=%s AND id=%s",  # nosec B608  # prefix is the constant "hp" or "tpa"; values are bound
                 (tenant, package_id))
             conn.commit()
         print(f"tpa-doc merged {package_id} FAILED: {exc}", flush=True)
