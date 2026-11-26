@@ -65,7 +65,7 @@ def main() -> None:
         text = PROMPT.format(**ex) + tokenizer.eos_token
         return {"text": text}
 
-    ds = load_dataset("json", data_files=args.dataset, split="train").map(fmt)
+    ds = load_dataset("json", data_files=args.dataset, split="train").map(fmt)  # nosec B615  # a local JSON file, not a hub download
 
     trainer = SFTTrainer(
         model=model,

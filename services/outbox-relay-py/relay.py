@@ -44,7 +44,7 @@ def relay_once(conn, producer: Producer, schema: str) -> int:
         rows = conn.execute(
             f"""SELECT id, topic, key, payload FROM {schema}.outbox
                 WHERE published_at IS NULL
-                ORDER BY id LIMIT {BATCH} FOR UPDATE SKIP LOCKED"""
+                ORDER BY id LIMIT {BATCH} FOR UPDATE SKIP LOCKED"""  # nosec B608  # schema names come from information_schema, not input; values are bound
         ).fetchall()
         for _id, topic, key, payload in rows:
             # Continue the trace of whatever wrote the outbox row, when it
@@ -63,7 +63,7 @@ def relay_once(conn, producer: Producer, schema: str) -> int:
         ids = [r[0] for r in rows]
         if ids:
             conn.execute(
-                f"UPDATE {schema}.outbox SET published_at=now() WHERE id = ANY(%s)", (ids,)
+                f"UPDATE {schema}.outbox SET published_at=now() WHERE id = ANY(%s)", (ids,)  # nosec B608  # schema names come from information_schema, not input; values are bound
             )
     return len(rows)
 

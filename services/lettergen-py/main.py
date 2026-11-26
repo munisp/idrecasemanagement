@@ -90,7 +90,7 @@ def load_citations(tenant: str, case_id: str) -> dict:
             (tenant, case_id),
         ).fetchone()
         row = c.execute(
-            f"SELECT details FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),
+            f"SELECT details FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),  # nosec B608  # tenant checked by TENANT_RE when the request is read; values are bound
         ).fetchone()
     details = (row[0] if row else {}) or {}
     codes = sorted(set((details.get("cpt_codes") or []) + (details.get("hcpcs_codes") or [])))
@@ -112,7 +112,7 @@ def load_case(tenant: str, case_id: str) -> dict:
     with psycopg.connect(DSN) as c:
         row = c.execute(
             f"""SELECT case_number, provider_id, payer_id, qpa_cents, details
-                FROM tenant_{tenant}.cases WHERE id=%s""",
+                FROM tenant_{tenant}.cases WHERE id=%s""",  # nosec B608  # tenant checked by TENANT_RE when the request is read; values are bound
             (case_id,),
         ).fetchone()
     if not row:
@@ -292,6 +292,10 @@ INTERNAL_RECORDS = {
 }
 
 
+# A tenant as it names a schema (tenant_<x>): lower-case letters, digits and "_", as case-api provisions them.
+TENANT_RE = re.compile(r"[a-z][a-z0-9_]{0,40}")
+
+
 def handle(evt: dict) -> None:
     tenant, case_id, key = evt["tenant"], evt["case_id"], evt["template"]
     requested_by = evt.get("requested_by", "system")
@@ -331,13 +335,13 @@ def handle(evt: dict) -> None:
             f"""INSERT INTO tenant_{tenant}.documents
                   (case_id, object_key, size_bytes, content_type, sealed,
                    uploaded_by, version, scan_status, filename, folder)
-                VALUES (%s,%s,%s,'application/pdf',false,%s,1,'CLEAN',%s,%s)""",
+                VALUES (%s,%s,%s,'application/pdf',false,%s,1,'CLEAN',%s,%s)""",  # nosec B608  # tenant checked by TENANT_RE when the request is read; values are bound
             (case_id, object_key, len(pdf), f"lettergen:{requested_by}", filename,
              tpl.get("folder", "CORRESPONDENCE")),
         )
         if internal:
             c.execute(
-                f"""INSERT INTO public.case_activities (tenant, case_id, type, body)
+                """INSERT INTO public.case_activities (tenant, case_id, type, body)
                     VALUES (%s,%s,'RECORD_GENERATED',%s)""",
                 (tenant, case_id, f"{filename} kept on the case (Intake)"),
             )
@@ -363,7 +367,7 @@ def handle(evt: dict) -> None:
             (tenant, f"Letter {key} generated for case {fields['case_number']} — awaiting QA", tenant, str(case_id)),
         )
         c.execute(
-            f"""INSERT INTO public.case_activities (tenant, case_id, type, body)
+            """INSERT INTO public.case_activities (tenant, case_id, type, body)
                 VALUES (%s,%s,'LETTER_GENERATED',%s)""",
             (tenant, case_id, f"{filename} generated from template {key}, sealed, queued for QA"),
         )
@@ -404,6 +408,9 @@ def main() -> None:
             continue
         try:
             evt = json.loads(msg.value())
+            # The tenant names a schema (tenant_<x>) in this service's SQL: only a well-formed name gets past here.
+            if not TENANT_RE.fullmatch(str(evt.get("tenant") or "")):
+                raise ValueError(f"letter request with a malformed tenant {str(evt.get('tenant'))[:40]!r} refused")
             with otel_setup.span("letter.requested process", traceparent=evt.get("traceparent"), consumer=True,
                                  **{"idre.tenant": evt.get("tenant"), "idre.case_id": evt.get("case_id"),
                                     "idre.template": evt.get("template"), "messaging.system": "kafka"}):

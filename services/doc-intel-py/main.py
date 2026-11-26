@@ -42,7 +42,7 @@ def is_blocked(evt: dict, kind: str, subj_id: str) -> bool:
     try:
         with psycopg.connect(DSN) as c:
             row = c.execute(
-                f"SELECT analysis_status FROM {table} WHERE id=%s",
+                f"SELECT analysis_status FROM {table} WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                 (evt["doc_id"],),
             ).fetchone()
         return bool(row and row[0] == "BLOCKED")
@@ -96,7 +96,7 @@ def fire_doc_rules(evt: dict, kind: str, subj_id: str, ctx: dict) -> None:
                 )
             elif atype == "flag_review" and kind == "case":
                 c.execute(
-                    f"UPDATE tenant_{evt['tenant']}.documents SET analysis_status='NEEDS_REVIEW' WHERE id=%s",
+                    f"UPDATE tenant_{evt['tenant']}.documents SET analysis_status='NEEDS_REVIEW' WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                     (evt["doc_id"],),
                 )
             elif atype == "set_detail" and kind == "case":
@@ -105,7 +105,7 @@ def fire_doc_rules(evt: dict, kind: str, subj_id: str, ctx: dict) -> None:
                     c.execute(
                         f"""UPDATE tenant_{evt['tenant']}.cases
                             SET details = jsonb_set(details, %s, to_jsonb(%s::text), true), updated_at=now()
-                            WHERE id=%s""",
+                            WHERE id=%s""",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                         ("{" + key + "}", expand_template(str(params.get("value", "")), facts), subj_id),
                     )
         if fired:
@@ -163,10 +163,14 @@ def fetch_and_decrypt(tenant: str, object_key: str) -> bytes:
 def load_case(tenant: str, case_id: str) -> dict | None:
     with psycopg.connect(DSN) as c:
         row = c.execute(
-            f"SELECT case_number, qpa_cents FROM tenant_{tenant}.cases WHERE id=%s",
+            f"SELECT case_number, qpa_cents FROM tenant_{tenant}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (case_id,),
         ).fetchone()
     return {"case_number": row[0], "qpa_cents": row[1]} if row else None
+
+
+# A tenant as it names a schema (tenant_<x>): lower-case letters, digits and "_", as case-api provisions them.
+TENANT_RE = re.compile(r"[a-z][a-z0-9_]{0,40}")
 
 
 def unwrap_cloudevent(raw: dict) -> dict:
@@ -180,9 +184,12 @@ def unwrap_cloudevent(raw: dict) -> dict:
     (just skipped, no exception raised), so document analysis -- and the
     DOCS_VERIFIED/DOC_ANALYZED signals that unblock onboarding and offer
     workflows -- was dead with zero trace anywhere."""
-    if raw.get("specversion") and isinstance(raw.get("data"), dict):
-        return raw["data"]
-    return raw
+    evt = raw["data"] if raw.get("specversion") and isinstance(raw.get("data"), dict) else raw
+    # The tenant names a schema (tenant_<x>) in this service's SQL: only a well-formed name gets past here
+    # (2026-11-26). An event without one is left as it is (it names no schema); a malformed one is refused.
+    if "tenant" in evt and not TENANT_RE.fullmatch(str(evt.get("tenant") or "")):
+        raise ValueError(f"event with a malformed tenant {str(evt.get('tenant'))[:40]!r} refused")
+    return evt
 
 
 def subject(evt: dict) -> tuple[str, str]:
@@ -633,7 +640,7 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
             f"SELECT qpa_cents, service_line, details, disputed_amount_cents "
-            f"FROM tenant_{tenant}.cases WHERE id=%s",
+            f"FROM tenant_{tenant}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (case_id,),
         ).fetchone()
         if not row:
@@ -643,13 +650,13 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
             details = {}
 
         def set_details(values: dict) -> None:
-            c.execute(f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",
+            c.execute(f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                       (json.dumps(values), case_id))
 
         def fill_qpa():
             cents = round(qpa_usd * 100) if qpa_usd and not cur_qpa else 0
             if cents > 0:
-                c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))
+                c.execute(f"UPDATE tenant_{tenant}.cases SET qpa_cents=%s WHERE id=%s", (cents, case_id))  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                 changed.append(f"QPA ${cents / 100:,.2f}")
 
         # billed_amount_usd is the provider's own charge. A claim form prints
@@ -659,7 +666,7 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
         def fill_disputed():
             cents = round(billed_amount_usd * 100) if billed_amount_usd and not cur_disputed else 0
             if cents > 0:
-                c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s", (cents, case_id))
+                c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s", (cents, case_id))  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                 changed.append(f"disputed amount ${cents / 100:,.2f}")
 
         def fill_service_line():
@@ -669,7 +676,7 @@ def backfill_case_fields(tenant: str, case_id: str, extracted: dict, source: str
             if not service_line and service_lines:
                 service_line = _service_line_from_text(service_lines[0])
             if service_line:
-                c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (service_line, case_id))
+                c.execute(f"UPDATE tenant_{tenant}.cases SET service_line=%s WHERE id=%s", (service_line, case_id))  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                 changed.append(f"service line {service_line}")
 
         def fill_provider_type():
@@ -840,7 +847,7 @@ def fill_from_claim_docs(tenant: str, case_id: str, ex: dict, source: str = "") 
     claims = [cl for k in CLAIM_DOC_KEYS for cl in (((ex or {}).get(k) or {}).get("claims") or [])]
     changed: list[str] = []
     with psycopg.connect(DSN, autocommit=True) as c:
-        row = c.execute(f"SELECT details, disputed_amount_cents FROM tenant_{tenant}.cases WHERE id=%s",
+        row = c.execute(f"SELECT details, disputed_amount_cents FROM tenant_{tenant}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                         (case_id,)).fetchone()
         if not row:
             return changed
@@ -868,10 +875,10 @@ def fill_from_claim_docs(tenant: str, case_id: str, ex: dict, source: str = "") 
                     f"CONFLICT on claim {cf['claim_number']} {cf['field'].replace('_', ' ')}: claims table has "
                     f"{cf['case_value']}, {cf['document']} says {cf['document_value']} (kept)" for cf in fresh)
         if updates:
-            c.execute(f"UPDATE tenant_{tenant}.cases SET details = coalesce(details,'{{}}'::jsonb) || %s::jsonb WHERE id=%s",
+            c.execute(f"UPDATE tenant_{tenant}.cases SET details = coalesce(details,'{{}}'::jsonb) || %s::jsonb WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                       (json.dumps(updates), case_id))
         if set_disputed:
-            c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s AND coalesce(disputed_amount_cents,0)=0",
+            c.execute(f"UPDATE tenant_{tenant}.cases SET disputed_amount_cents=%s WHERE id=%s AND coalesce(disputed_amount_cents,0)=0",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                       (set_disputed, case_id))
         added = filled = 0
         for r in rows:
@@ -880,7 +887,7 @@ def fill_from_claim_docs(tenant: str, case_id: str, ex: dict, source: str = "") 
             cur = c.execute(
                 f"INSERT INTO public.case_claims (tenant, case_id, claim_number{''.join(', ' + k for k in cols)}) "
                 f"VALUES (%s, %s, %s{', %s' * len(cols)}) ON CONFLICT (tenant, case_id, claim_number) DO UPDATE SET {sets} "
-                f"RETURNING (xmax = 0)",
+                f"RETURNING (xmax = 0)",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                 (tenant, case_id, r["claim_number"], *[r[k] for k in cols])).fetchone()
             if cur and cur[0]:
                 added += 1
@@ -930,7 +937,7 @@ def merge_case_codes(tenant: str, case_id: str, ex: dict) -> None:
         return
     with psycopg.connect(DSN, autocommit=True) as c:
         row = c.execute(
-            f"SELECT details FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),
+            f"SELECT details FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
         ).fetchone()
         if not row:
             return
@@ -949,7 +956,7 @@ def merge_case_codes(tenant: str, case_id: str, ex: dict) -> None:
         if bundling:
             details["bundling_suspected"] = True
         c.execute(
-            f"UPDATE tenant_{tenant}.cases SET details=%s, updated_at=now() WHERE id=%s",
+            f"UPDATE tenant_{tenant}.cases SET details=%s, updated_at=now() WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (json.dumps(details), case_id),
         )
 
@@ -966,7 +973,7 @@ def _case_activity(tenant: str, case_id: str, typ: str, body: str) -> None:
 def _set_details(tenant: str, case_id: str, patch: dict) -> None:
     with psycopg.connect(DSN, autocommit=True) as c:
         c.execute(
-            f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb, updated_at=now() WHERE id=%s",
+            f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb, updated_at=now() WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (json.dumps(patch), case_id),
         )
 
@@ -1003,7 +1010,7 @@ def deadline_verification(tenant: str, case_id: str, doc_type: str, ex: dict) ->
         return
     with psycopg.connect(DSN) as c:
         row = c.execute(
-            f"SELECT opened_at::date, details->>'eob_denial_date' FROM tenant_{tenant}.cases WHERE id=%s",
+            f"SELECT opened_at::date, details->>'eob_denial_date' FROM tenant_{tenant}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (case_id,),
         ).fetchone()
     if not row:
@@ -1034,7 +1041,7 @@ def duplicate_detection(tenant: str, case_id: str, ex: dict) -> None:
         dupes = c.execute(
             f"""SELECT id, case_number FROM tenant_{tenant}.cases
                 WHERE id <> %s AND details->>'claim_number' = %s
-                  AND status NOT LIKE 'CLOSED%%' LIMIT 10""",
+                  AND status NOT LIKE 'CLOSED%%' LIMIT 10""",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (case_id, claim_no),
         ).fetchall()
         if not dupes:
@@ -1043,24 +1050,24 @@ def duplicate_detection(tenant: str, case_id: str, ex: dict) -> None:
         _case_activity(tenant, case_id, "DUPLICATE_CLAIM_DETECTED",
                        f"Claim {claim_no} also appears on open case(s): {', '.join(nums)}")
         c.execute(
-            f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb, updated_at=now() WHERE id=%s",
+            f"UPDATE tenant_{tenant}.cases SET details = details || %s::jsonb, updated_at=now() WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
             (json.dumps({"duplicate_claim_with": nums}), case_id),
         )
         # Mirror the flag onto each duplicate case so it surfaces from either side.
         me = c.execute(
-            f"SELECT case_number FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),
+            f"SELECT case_number FROM tenant_{tenant}.cases WHERE id=%s", (case_id,),  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
         ).fetchone()
         my_num = me[0] if me else str(case_id)
         for dup_id, _ in dupes:
             cur = c.execute(
-                f"SELECT details->'duplicate_claim_with' FROM tenant_{tenant}.cases WHERE id=%s",
+                f"SELECT details->'duplicate_claim_with' FROM tenant_{tenant}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                 (dup_id,),
             ).fetchone()
             lst = list(cur[0] or []) if cur else []
             if my_num not in lst:
                 lst.append(my_num)
                 c.execute(
-                    f"UPDATE tenant_{tenant}.cases SET details = jsonb_set(details, '{{duplicate_claim_with}}', %s::jsonb), updated_at=now() WHERE id=%s",
+                    f"UPDATE tenant_{tenant}.cases SET details = jsonb_set(details, '{{duplicate_claim_with}}', %s::jsonb), updated_at=now() WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                     (json.dumps(lst), dup_id),
                 )
 
@@ -1159,7 +1166,7 @@ def persist(evt: dict, ctx: dict) -> None:
     source, uploaded_by, folder = "", "", ""
     try:
         with psycopg.connect(DSN, autocommit=True) as c:
-            row = c.execute(f"SELECT filename, coalesce(uploaded_by,''), coalesce(folder,'') FROM tenant_{evt['tenant']}.documents WHERE id=%s",
+            row = c.execute(f"SELECT filename, coalesce(uploaded_by,''), coalesce(folder,'') FROM tenant_{evt['tenant']}.documents WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in unwrap_cloudevent; values are bound
                             (evt["doc_id"],)).fetchone()
             if row:
                 source, uploaded_by, folder = (row[0] or ""), row[1], row[2]

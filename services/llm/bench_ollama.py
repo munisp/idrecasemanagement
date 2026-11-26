@@ -78,7 +78,9 @@ def chat(endpoint, model, shape):
     req = urllib.request.Request(endpoint.rstrip("/") + "/chat/completions",
                                  data=body, headers={"Content-Type": "application/json"})
     t0 = time.monotonic()
-    with urllib.request.urlopen(req, timeout=120) as r:
+    if not endpoint.lower().startswith(("http://", "https://")):
+        raise SystemExit("the endpoint must be an http(s) URL")
+    with urllib.request.urlopen(req, timeout=120) as r:  # nosec B310  # http(s) only, checked above
         out = json.load(r)
     dt = time.monotonic() - t0
     usage = out.get("usage") or {}

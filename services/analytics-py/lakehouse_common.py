@@ -88,7 +88,7 @@ def validate_readonly_sql(sql: str) -> str | None:
 def wrap_with_row_cap(sql: str, max_rows: int) -> str:
     """Hard row cap enforced by the engine, not the client."""
     inner = sql.strip().rstrip(";")
-    return f"SELECT * FROM ({inner}) AS _capped LIMIT {int(max_rows) + 1}"
+    return f"SELECT * FROM ({inner}) AS _capped LIMIT {int(max_rows) + 1}"  # nosec B608  # the caller SQL is checked read-only, one SELECT, by validate_sql before this wrap
 
 
 # ---------------------------------------------------------------------------

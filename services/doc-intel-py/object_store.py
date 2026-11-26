@@ -40,6 +40,8 @@ class _ReadResult:
 
 class _GatewayStore:
     def __init__(self, base: str, token: str):
+        if not base.lower().startswith(("http://", "https://")):
+            raise ValueError("the storage gateway must be an http(s) URL")
         self.base = base.rstrip("/")
         self.token = token
 
@@ -51,7 +53,8 @@ class _GatewayStore:
         for k, v in (headers or {}).items():
             req.add_header(k, v)
         try:
-            return urllib.request.urlopen(req, timeout=300)
+            # self.base is the storage gateway from config, checked to be http(s) when the store is made.
+            return urllib.request.urlopen(req, timeout=300)  # nosec B310  # http(s) gateway from config
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 raise NotFoundError(path) from e
