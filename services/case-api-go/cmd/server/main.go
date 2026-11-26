@@ -763,6 +763,7 @@ func main() {
 		r.Put("/program/label", s.setTenantLabel)                     // FEDERAL_ADMIN/PLATFORM_ADMIN: rename "FL" -> "AHCA" etc.
 		r.Put("/program/brand", s.setTenantBrand)                     // program admins: the portal's brand name for this tenant
 		r.Get("/admin/tenant-labels", s.listTenantLabels)             // cross-tenant switcher label map
+		r.Put("/cases/{caseId}/opened-date", s.setOpenedDate)         // correct the filed date (change log #21)
 		r.Post("/cases/{caseId}/program-date", s.setProgramDate)      // record clock-basis events
 		r.Post("/cases/{caseId}/status", s.setDualStatus)             // dual internal/agency status (G5)
 		r.Post("/cases/{caseId}/time", s.addTimeEntry)                // per-role effort on the dispute

@@ -339,6 +339,7 @@ const Api = (() => {
       qaDraftQuality: (days = 90) => req("GET", `${t()}/qa/draft-quality?days=${days}`),
       corrPreview: (id, body) => req("POST", `${t()}/cases/${id}/correspondence/preview`, body),
       setDetails: (id, details) => req("PATCH", `${t()}/cases/${id}/details`, details),
+      setOpenedDate: (id, date, reason) => req("PUT", `${t()}/cases/${id}/opened-date`, { date, reason }), // change log #21
       filingPacket: (id, packet) => req("PUT", `${t()}/cases/${id}/filing-packet`, packet),
       respondent: (id) => req("GET", `${t()}/cases/${id}/respondent`),
       aorCheck: (id) => req("GET", `${t()}/cases/${id}/aor-check`),
