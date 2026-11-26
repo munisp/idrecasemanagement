@@ -74,6 +74,42 @@ async def recommendation_days_left(tenant: str, case_id: str) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+# Who hears a case's alerts (2026-11-26, as case-api's role_notify.go): the Tenant Admin, the Admin and the PM hear
+# every one; the Coder, the Nurse Reviewer, the Attorney and QA only on cases they are named on (case_helpers) -- QA
+# falls back to every QA while none is named; roles outside the case team (Finance) hear by role.
+ALWAYS_ALERTED = ("TENANT_ADMIN", "CASE_MANAGER", "PM")
+CASE_TEAM_ROLES = {"CODER", "NURSE_PHYSICIAN", "ATTORNEY", "QA", "ARBITRATOR"}
+
+
+def alert_targets(helpers: dict, roles) -> list:
+    """[(user_sub target, role)] for an alert meant for roles, given the case's named team (role -> user id)."""
+    out, seen = [], set()
+    def add(t, role):
+        if t and t not in seen:
+            seen.add(t)
+            out.append((t, role))
+    for r in ALWAYS_ALERTED:
+        add(f"role:{r}", r)
+    for role in roles:
+        role = "NURSE_PHYSICIAN" if role in ("DOCTOR", "NURSE") else role
+        if role in ALWAYS_ALERTED:
+            continue
+        if role in CASE_TEAM_ROLES:
+            if helpers.get(role):
+                add(helpers[role], role)
+            elif role == "QA":
+                add("role:QA", role)
+        else:
+            add(f"role:{role}", role)
+    return out
+
+
+def case_alert_targets(c, tenant: str, case_id: str, roles) -> list:
+    rows = c.execute("SELECT role, user_id FROM public.case_helpers WHERE tenant=%s AND case_id::text=%s",
+                     (tenant, str(case_id))).fetchall()
+    return alert_targets({r[0]: r[1] for r in rows}, roles)
+
+
 @activity.defn
 async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, body: str) -> None:
     """Tell the people who must act, not the whole tenant: one notification
@@ -85,12 +121,12 @@ async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, bo
             "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,%s,%s)",
             (tenant, case_id, typ, body),
         )
-        for role in roles:
+        for target, role in case_alert_targets(c, tenant, case_id, roles):
             # Finance acts on a due refund from Financials' "Refunds due" list, not from the case page.
             link = "#/finance" if typ == "REFUND_DUE" and role == "FINANCE" else f"#/cases/{case_id}"
             c.execute(
                 "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,%s,%s,%s,%s)",
-                (tenant, f"role:{role}", typ, f"Case {case_id}: {body}", link),
+                (tenant, target, typ, f"Case {case_id}: {body}", link),
             )
 
 
@@ -173,10 +209,11 @@ async def record_followup_action(tenant: str, case_id: str, action: str, detail:
             "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,'FOLLOWUP_ACTION',%s)",
             (tenant, case_id, f"{action}: {detail}"),
         )
-        c.execute(
-            "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,'role:CASE_MANAGER','FOLLOWUP_ACTION',%s,%s)",
-            (tenant, f"Case {case_number or case_id}: {detail}", f"#/cases/{case_id}"),
-        )
+        for target, _role in case_alert_targets(c, tenant, case_id, ["CASE_MANAGER"]):  # the Tenant Admin, the Admin and the PM
+            c.execute(
+                "INSERT INTO public.notifications (tenant, user_sub, type, body, link) VALUES (%s,%s,'FOLLOWUP_ACTION',%s,%s)",
+                (tenant, target, f"Case {case_number or case_id}: {detail}", f"#/cases/{case_id}"),
+            )
         c.execute(
             "INSERT INTO public.tasks (tenant, subject, case_id, assignee, due_date, created_by) "
             "VALUES (%s,%s,%s,%s,current_date,'system:deadlines')",

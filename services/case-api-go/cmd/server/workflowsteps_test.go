@@ -79,6 +79,14 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Generated["invoice_health_plan"] = false // rejected in QA: generate it again
 	expect("report_plan_invoice", "Admin")
 	f.Generated["invoice_health_plan"] = true
+	// Each generated document passes QA before the package that carries them (2026-11-26).
+	f.GeneratedPassed = map[string]bool{}
+	expect("qa:final_order_rationale", "PM")
+	f.GeneratedPassed["final_order_rationale"] = true
+	expect("qa:cover_letter_final_notice", "PM")
+	f.GeneratedPassed["cover_letter_final_notice"] = true
+	expect("qa:invoice_health_plan", "PM")
+	f.GeneratedPassed["invoice_health_plan"] = true
 	expect("letter:final_order", "Admin")
 	f.Letter["final_order"] = "SENT"
 	// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.

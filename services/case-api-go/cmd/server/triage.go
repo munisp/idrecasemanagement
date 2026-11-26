@@ -365,6 +365,26 @@ func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
 	if in.ProviderType == "" {
 		if v := packetProviderType(d); v != "" {
 			in.ProviderType, from["provider_type"] = v, "filing packet"
+		} else if pt, _ := d["packet_provider_type"].(string); pt == "Hospital" {
+			// A hospital whose packet's type of service doesn't say inpatient or outpatient (2026-11-26): the claim
+			// lines' type of service, then what the documents read (a UB-04's type of bill), else the reviewer chooses.
+			var svc, docs string
+			_ = s.db.QueryRow(r.Context(), `SELECT coalesce(string_agg(lower(type_of_service), ' '), '') FROM public.case_claims
+				WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&svc)
+			_ = s.db.QueryRow(r.Context(), `SELECT coalesce(string_agg(result->'normalized'->>'provider_type', ' '), '') FROM public.doc_analysis
+				WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'`, tenant, caseID).Scan(&docs)
+			switch {
+			case strings.Contains(svc, "inpatient") && !strings.Contains(svc, "outpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_inpatient", "filing packet (Hospital; the claims say inpatient)"
+			case strings.Contains(svc, "outpatient") && !strings.Contains(svc, "inpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_outpatient", "filing packet (Hospital; the claims say outpatient)"
+			case strings.Contains(docs, "hospital_inpatient") && !strings.Contains(docs, "hospital_outpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_inpatient", "filing packet (Hospital) and the documents (inpatient)"
+			case strings.Contains(docs, "hospital_outpatient") && !strings.Contains(docs, "hospital_inpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_outpatient", "filing packet (Hospital) and the documents (outpatient)"
+			default:
+				from["provider_type_hint"] = "the filing packet says Hospital — choose inpatient or outpatient"
+			}
 		}
 	}
 	if in.ServiceDate == "" {
@@ -373,6 +393,57 @@ func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
 		if in.ServiceDate != "" {
 			from["service_date"] = "filing packet"
 		}
+	}
+	// Network status (2026-11-26): the packet's "Out-of-network provider" Yes/No, else what every analyzed
+	// document that states it agrees on.
+	if in.Contracted == nil {
+		switch strings.ToLower(strings.TrimSpace(fmt.Sprint(d["out_of_network"]))) {
+		case "yes", "true":
+			v := false
+			in.Contracted, from["contracted"] = &v, "filing packet"
+		case "no", "false":
+			v := true
+			in.Contracted, from["contracted"] = &v, "filing packet"
+		default:
+			var docs string
+			_ = s.db.QueryRow(r.Context(), `SELECT coalesce(string_agg(DISTINCT lower(result->'normalized'->>'contracted'), ','), '')
+				FROM public.doc_analysis WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
+				AND lower(result->'normalized'->>'contracted') IN ('true','false')`, tenant, caseID).Scan(&docs)
+			if docs == "true" || docs == "false" {
+				v := docs == "true"
+				in.Contracted = &v
+			}
+		}
+	}
+	// Claim type (2026-11-26): the packet's disputed issue; a denial is "in part" when the plan paid something
+	// on the claims, "in full" when it paid nothing. Without a stated issue, claims with a denial on them say so.
+	if in.DisputeType == "" {
+		var paid, denied int64
+		_ = s.db.QueryRow(r.Context(), `SELECT coalesce(SUM(paid_cents),0),
+			count(*) FILTER (WHERE date_of_denial IS NOT NULL OR coalesce(denial_reason,'') <> '')
+			FROM public.case_claims WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&paid, &denied)
+		issue := strings.ToLower(fmt.Sprint(d["disputed_issue"]))
+		denial := func() string {
+			if paid > 0 {
+				return "denied_in_part"
+			}
+			return "denied_in_full"
+		}
+		switch {
+		case strings.Contains(issue, "underpa"):
+			in.DisputeType, from["dispute_type"] = "underpaid", "filing packet"
+		case strings.Contains(issue, "overpa"):
+			in.DisputeType, from["dispute_type"] = "overpaid", "filing packet"
+		case strings.Contains(issue, "denial") || strings.Contains(issue, "denied"):
+			in.DisputeType, from["dispute_type"] = denial(), "filing packet"
+		case denied > 0:
+			in.DisputeType, from["dispute_type"] = denial(), "filing packet (its claims show a denial)"
+		}
+	}
+	if in.FinalDeterminationAt == "" {
+		from["final_determination_hint"] = "no final determination or denial date is on the filing's claims or read from its documents — enter the last EOB / final determination date"
+	} else if in.DeterminationFrom != "" && in.DeterminationFrom != "the case" {
+		from["final_determination_at"] = in.DeterminationFrom
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"inputs": in, "from_packet": from})
 }

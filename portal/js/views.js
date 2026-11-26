@@ -4215,7 +4215,7 @@ const Views = (() => {
       // the inputs it could not; returns the labels of the fields it filled.
       const eligPrefill = (f, inp, missing) => {
         const filled = [];
-        const put = (el, v, label) => { if (el && v !== undefined && v !== null && v !== "" && !el.value) { el.value = v; filled.push(label); } };
+        const put = (el, v, label) => { if (el && v !== undefined && v !== null && v !== "" && !el.value) { el.value = v; if (el.value === String(v)) filled.push(label); } };
         put(f.provider_type, inp.provider_type, "provider type");
         if (inp.contracted === true || inp.contracted === false) { f.contracted.value = inp.contracted ? "yes" : "no"; filled.push("network status"); }
         if (inp.disputed_amount_cents) put(f.amount, (inp.disputed_amount_cents / 100).toFixed(2), "disputed amount");
@@ -4234,9 +4234,12 @@ const Views = (() => {
           const f = document.getElementById("p-elig");
           if (!f) return;
           const filled = eligPrefill(f, r.inputs || {}, []);
-          const fromPacket = Object.keys(r.from_packet || {}).map((k) => (ELIG_INPUT_LABELS[k] || [k])[0]);
-          if (filled.length) f.insertAdjacentHTML("afterbegin", `<p class="elig-prefill">Filled in from the case and its filing packet:
-            ${filled.map(esc).join(", ")}${fromPacket.length ? ` (${fromPacket.map(esc).join(", ")} as the filer stated it)` : ""} — verify each before you compute.</p>`);
+          const fp = { ...(r.from_packet || {}) }, hint = fp.provider_type_hint, fdHint = fp.final_determination_hint;
+          delete fp.provider_type_hint; delete fp.final_determination_hint;
+          const fromPacket = Object.entries(fp).filter(([, v]) => String(v).startsWith("filing packet")).map(([k]) => (ELIG_INPUT_LABELS[k] || [k === "dispute_type" ? "Claim type" : k])[0]);
+          if (filled.length || hint || fdHint) f.insertAdjacentHTML("afterbegin", `<p class="elig-prefill">${filled.length ? `Filled in from the case, its filing packet and documents:
+            ${filled.map(esc).join(", ")}${fromPacket.length ? ` (${fromPacket.map(esc).join(", ")} as the filer stated it)` : ""} — verify each before you compute.` : ""}
+            ${hint ? `<br><b>Provider type:</b> ${esc(hint)}.` : ""}${fdHint ? `<br><b>Final determination date:</b> ${esc(fdHint)}.` : ""}</p>`);
         }).catch(() => {});
       }
       $("#p-elig")?.addEventListener("submit", async (ev) => {

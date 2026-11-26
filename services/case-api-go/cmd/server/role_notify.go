@@ -43,7 +43,8 @@ func (s *server) caseNumberOf(ctx context.Context, tenant, caseID string) string
 // Who hears a case's alerts (2026-11-25): the Tenant Admin, the Admin and the PM hear every one; the Coder, the
 // Nurse Reviewer, the Attorney and QA hear a case's alerts only when they are on that case (case_helpers, set from
 // the case's Assignment box). An alert for a specialist role nobody holds on the case reaches the three who hear
-// everything, who can then assign someone. Roles outside the case team (Finance) still hear by role.
+// everything, who can then assign someone -- except QA, which falls back to every QA until one is named (so a draft
+// never waits unseen). Roles outside the case team (Finance) still hear by role.
 var (
 	alwaysAlertedRoles = []string{"TENANT_ADMIN", "CASE_MANAGER", "PM"}
 	caseTeamRoles      = map[string]bool{"CODER": true, "NURSE_PHYSICIAN": true, "ATTORNEY": true, "QA": true, "ARBITRATOR": true}
@@ -71,7 +72,11 @@ func caseAlertTargets(helpers map[string]string, roles ...string) []string {
 		switch {
 		case role == "" || contains(alwaysAlertedRoles, role):
 		case caseTeamRoles[role]:
-			add(helpers[role]) // nobody on the case in that role: the three above have it
+			if who := helpers[role]; who != "" {
+				add(who)
+			} else if role == "QA" {
+				add("role:QA") // no QA named on the case yet: every QA hears it, so nothing waits unseen (2026-11-26)
+			} // any other role with nobody named: the three above have it, and can name someone
 		default:
 			add("role:" + role)
 		}

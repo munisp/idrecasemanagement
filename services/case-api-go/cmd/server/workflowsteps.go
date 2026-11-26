@@ -64,6 +64,7 @@ type wfFacts struct {
 	OpenInvoices     int
 	ReportSaved      bool            // the decision report has been saved
 	Generated        map[string]bool // generated letter (lettergen template) -> a draft not rejected in QA
+	GeneratedPassed  map[string]bool // generated letter -> its latest draft passed QA (approved or sent)
 	CopyRequested    bool            // a party asked for the Final Order Rationale Copy (change log 2026-11-25 #19)
 	Reviewers        []wfReviewer    // further reviewers named on the case (SOP step 10, review_team.go)
 }
@@ -147,6 +148,23 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		}
 	}
 
+	// The generated documents pass QA before the Final Order package that carries them (2026-11-26): the package
+	// refuses documents still waiting for QA, so without these steps the list pointed the Admin at a step they
+	// could not do. One QA step per document generated from the steps at and after from.
+	qaGenerated := func(from int) {
+		n := len(steps)
+		for i := from; i < n; i++ {
+			a := steps[i].Action
+			if !strings.HasPrefix(a, "report:") || a == "report:save" {
+				continue
+			}
+			tpl := strings.TrimPrefix(a, "report:")
+			add("qa:"+tpl, "QA the "+strings.TrimPrefix(steps[i].Label, "Generate the "), "PM", "qa:"+tpl, f.GeneratedPassed[tpl],
+				"Approve it in the QA gate; the Final Order package carries only documents that passed QA.")
+			steps[len(steps)-1].OwnerRoles = []string{"QA", "PM"}
+			early["qa:"+tpl] = true
+		}
+	}
 	// The Final Order Rationale Copy goes to the parties only when one asks for it (change log 2026-11-25 #19): an
 	// optional last step, listed once requested on the case (details.final_order_copy_requested) or once begun.
 	finalOrderCopy := func() {
@@ -241,6 +259,7 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
+		qaGenerated(reportFrom)
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
 		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
@@ -301,6 +320,7 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
+		qaGenerated(reportFrom)
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
 		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
@@ -503,6 +523,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 	_ = s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.decision_reports WHERE tenant=$1 AND case_id=$2)`,
 		tenant, caseID).Scan(&f.ReportSaved)
 	f.Generated = map[string]bool{}
+	f.GeneratedPassed = map[string]bool{}
 	if rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT ON (artifact) artifact, status FROM public.qa_reviews
 		WHERE tenant=$1 AND case_id=$2 AND channel='letter' ORDER BY artifact, created_at DESC`, tenant, caseID); err == nil {
@@ -510,6 +531,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 			var tpl, st string
 			if rows.Scan(&tpl, &st) == nil {
 				f.Generated[tpl] = st != "REJECTED"
+				f.GeneratedPassed[tpl] = st == "APPROVED" || st == "SENT"
 			}
 		}
 		rows.Close()

@@ -811,7 +811,7 @@ func (s *server) reconcileOpenFeeCheckouts(ctx context.Context) {
 	srows, err := s.db.Query(ctx, `
 		SELECT tenant, session_id, invoice_id::text, case_id FROM public.payments
 		WHERE status='PENDING' AND session_id LIKE 'cs_%' AND session_id NOT LIKE '%#%' AND created_at > now() - interval '2 days'
-		ORDER BY created_at LIMIT 50`)
+		ORDER BY updated_at LIMIT 50`) // the least recently asked first: each one asked goes to the back (below)
 	if err != nil {
 		return
 	}
@@ -841,6 +841,10 @@ func (s *server) reconcileOpenFeeCheckouts(ctx context.Context) {
 			s.settleSingleSession(r, o.tenant, o.sid, o.inv, o.caseID, pi, email, toInt64(sess["amount_total"]), raw, "", "")
 		case sess["status"] == "expired":
 			_, _ = s.db.Exec(ctx, `UPDATE public.payments SET status='EXPIRED', updated_at=now() WHERE tenant=$1 AND session_id=$2 AND status='PENDING'`, o.tenant, o.sid)
+		default:
+			// Still open: to the back of the queue (2026-11-26). Asking only the 50 oldest each round, a pile of
+			// abandoned checkouts kept a new, paid one from ever being asked about until they expired a day later.
+			_, _ = s.db.Exec(ctx, `UPDATE public.payments SET updated_at=now() WHERE tenant=$1 AND session_id=$2 AND status='PENDING'`, o.tenant, o.sid)
 		}
 	}
 }

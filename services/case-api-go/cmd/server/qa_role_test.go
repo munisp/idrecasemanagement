@@ -47,4 +47,11 @@ func TestCaseAlertTargets(t *testing.T) {
 			t.Fatalf("a specialist role was alerted as a whole: %v", x)
 		}
 	}
+	// …except QA: with no QA named, every QA hears it.
+	if got := caseAlertTargets(nil, "QA", "PM"); !contains(got, "role:QA") {
+		t.Fatalf("no QA named: every QA hears it, got %v", got)
+	}
+	if got := caseAlertTargets(map[string]string{"QA": "quinn"}, "QA"); contains(got, "role:QA") || !contains(got, "quinn") {
+		t.Fatalf("a named QA hears it alone, got %v", got)
+	}
 }
