@@ -173,7 +173,7 @@ class StageLetters(unittest.TestCase):
                 rfi={"side": "PROVIDER", "items": ["Itemized bill", "Medical records"], "message": "", "due_date": "2026-09-16"},
                 details={"withdrawal_dismissed_reason": "Provider No Response"})
         for key, fn in bl.BUILDERS.items():
-            if key in ("final_order_rationale", "cover_letter_final_notice", "filing_record"):  # filing_record reads the claims from the DB
+            if key in ("final_order_rationale", "cover_letter_final_notice", "filing_record", "rebuttal_record"):  # records of a filing: built from what was filed, tested end to end
                 continue
             w = words(fn(c, None))
             self.assertIn("FL26-000216", w, key)
