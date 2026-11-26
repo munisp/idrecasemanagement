@@ -292,6 +292,9 @@ INTERNAL_RECORDS = {
 }
 
 
+# Decision letters: drafted by the Coder or the Nurse Reviewer, checked by the Attorney before QA (change log #14).
+DECISION_LETTERS = {"final_order_rationale"}
+
 # A tenant as it names a schema (tenant_<x>): lower-case letters, digits and "_", as case-api provisions them.
 TENANT_RE = re.compile(r"[a-z][a-z0-9_]{0,40}")
 
@@ -347,25 +350,42 @@ def handle(evt: dict) -> None:
             )
             print(f"[lettergen] {tenant}/{case_id}: {key} -> {filename} (record)", flush=True)
             return
-        # Every letter goes through QA before it is mailed (G4).
+        # Every letter goes through QA before it is mailed (G4). A decision letter is the Attorney's to check first
+        # (change log #14): whether this is its first version or an updated one, said in the Attorney's notice.
+        earlier = c.execute(
+            "SELECT count(*) FROM public.qa_reviews WHERE tenant=%s AND case_id::text=%s AND artifact=%s",
+            (tenant, str(case_id), key)).fetchone()[0]
         body_preview = docx_preview(merged) if merged is not None else "The office's FL Plan Packet (PDF form) for the health plan to complete."
         c.execute(
             """INSERT INTO public.qa_reviews
-                 (tenant, case_id, artifact, channel, subject, body, status, drafted_by)
-               VALUES (%s,%s,%s,'letter',%s,%s,'PENDING',%s)""",
+                 (tenant, case_id, artifact, channel, subject, body, status, drafted_by, requested_by_sub)
+               VALUES (%s,%s,%s,'letter',%s,%s,'PENDING',%s,nullif(%s,''))""",
             (tenant, case_id, key, tpl.get("subject", key).format(**fields),
-             body_preview, requested_by),
+             body_preview, requested_by, evt.get("requested_by_sub") or ""),
         )
-        # Who hears it (2026-11-26): the Tenant Admin, the Admin and the PM always; the case's QA (case_helpers), or
-        # every QA while none is named.
-        c.execute(
-            """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
-               SELECT %s, t, 'QA_REVIEW', %s, '#/qa'
-               FROM (SELECT unnest(ARRAY['role:TENANT_ADMIN','role:CASE_MANAGER','role:PM']) AS t
-                     UNION SELECT coalesce((SELECT user_id FROM public.case_helpers WHERE tenant=%s AND case_id::text=%s AND role='QA'),
-                                           'role:QA')) x""",  # no QA named yet: every QA hears it
-            (tenant, f"Letter {key} generated for case {fields['case_number']} — awaiting QA", tenant, str(case_id)),
-        )
+        if key in DECISION_LETTERS:
+            # The decision letter goes to the Attorney named on the case (with the Tenant Admin, the Admin and the PM,
+            # who hear every case); QA hears of it once the Attorney approves it (case-api).
+            what = "An updated version of the decision letter" if earlier else "A new decision letter"
+            c.execute(
+                """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+                   SELECT %s, t, 'DECISION_LETTER_DRAFTED', %s, '#/qa'
+                   FROM (SELECT unnest(ARRAY['role:TENANT_ADMIN','role:CASE_MANAGER','role:PM']) AS t
+                         UNION SELECT user_id FROM public.case_helpers WHERE tenant=%s AND case_id::text=%s AND role='ATTORNEY') x""",
+                (tenant, f"Case {fields['case_number']}: {what} was submitted by {requested_by} — awaiting your review",
+                 tenant, str(case_id)),
+            )
+        else:
+            # Who hears it (2026-11-26): the Tenant Admin, the Admin and the PM always; the case's QA (case_helpers), or
+            # every QA while none is named.
+            c.execute(
+                """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
+                   SELECT %s, t, 'QA_REVIEW', %s, '#/qa'
+                   FROM (SELECT unnest(ARRAY['role:TENANT_ADMIN','role:CASE_MANAGER','role:PM']) AS t
+                         UNION SELECT coalesce((SELECT user_id FROM public.case_helpers WHERE tenant=%s AND case_id::text=%s AND role='QA'),
+                                               'role:QA')) x""",  # no QA named yet: every QA hears it
+                (tenant, f"Letter {key} generated for case {fields['case_number']} — awaiting QA", tenant, str(case_id)),
+            )
         c.execute(
             """INSERT INTO public.case_activities (tenant, case_id, type, body)
                 VALUES (%s,%s,'LETTER_GENERATED',%s)""",

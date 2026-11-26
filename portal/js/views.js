@@ -146,6 +146,36 @@ const Views = (() => {
       previewCaseDoc(id, pick.id || pick.doc_id, pick.filename);
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
+  // The full review cost estimate (change log #14): the Admin prepares and issues it, from the Estimated Cost Matrix,
+  // when the filer asked for one.
+  function sopEstimateHtml(id, c, cfg) {
+    const ds = (c.details && c.details.dispute_summary) || {};
+    const mine = can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"), ro = mine ? "" : "disabled";
+    const matrix = (cfg.estimate && cfg.estimate.cost_matrix) || [];
+    const preview = (c.details || {}).fee_estimate_preview_cents;
+    const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : preview != null ? (preview / 100).toFixed(2) : "";
+    return `<details class="prog-sec" id="p-estimate-details" data-wf="estimate" data-wf-roles="CASE_MANAGER"><summary>Full review cost estimate (Admin)</summary>
+      <p class="muted">Only when the filer asked for one: the figure from the Estimated Cost Matrix. It goes in the Cost Estimate
+        email, which goes out with the acceptance.${ds.estimate_by ? `<br/><span class="form-stamp">Recorded by ${esc(ds.estimate_by)}, ${fmtDate(ds.estimate_at)}</span>` : ""}</p>
+      <form class="form" onsubmit="event.preventDefault(); Views.saveCostEstimate('${id}',this)">
+        <div class="field-grid">
+          ${matrix.length ? `<label>From the Estimated Cost Matrix
+            <select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
+            <option value="">Choose a row…</option>
+            ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select></label>` : ""}
+          <label>Estimate ($)
+            <input name="estimate" type="number" step="0.01" min="0.01" placeholder="0.00" value="${est}" ${ro} required />
+            ${ds.full_review_estimate_cents == null && preview != null ? `<span class="field-hint">the estimate shown to the filer at filing — confirm or change it</span>` : ""}</label>
+          <label>Basis for the estimate
+            <input name="basis" placeholder="matrix row or reason" value="${esc(ds.estimate_basis || "")}" ${ro} /></label>
+        </div>
+        ${mine ? `<button class="mini">Save the cost estimate</button>` : ""}</form></details>`;
+  }
+  async function saveCostEstimate(id, form) {
+    const cents = Math.round(Number(form.estimate.value) * 100);
+    try { await Api.program.setCostEstimate(id, { full_review_estimate_cents: cents, estimate_basis: form.basis.value }); UI.toast("Cost estimate saved"); App.rerender(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
+  }
   function sopSummaryHtml(id, c, cfg) {
     const ds = (c.details && c.details.dispute_summary) || {};
     const mine = can("CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
@@ -155,8 +185,8 @@ const Views = (() => {
     const preview = (c.details || {}).fee_estimate_preview_cents;
     const est = ds.full_review_estimate_cents != null ? (ds.full_review_estimate_cents / 100).toFixed(2) : preview != null ? (preview / 100).toFixed(2) : "";
     return `<details class="prog-sec" id="p-summary-details" data-wf="summary" data-wf-roles="CODER"><summary>Dispute Summary (Coder)</summary>
-      <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead, the summary of the dispute,
-        and — when the filer asked for one — the full review cost estimate from the Estimated Cost Matrix.${ds.by ? `<br/><span class="form-stamp">Last saved by ${esc(ds.by)}, ${fmtDate(ds.at)}</span>` : ""}</p>
+      <p class="muted">Completed by the Coder: the plan type as verified from the plan's letterhead and the summary of the dispute.
+        (The full review cost estimate is the Admin's, below.)${ds.by ? `<br/><span class="form-stamp">Last saved by ${esc(ds.by)}, ${fmtDate(ds.at)}</span>` : ""}</p>
       <form class="form" onsubmit="event.preventDefault(); Views.saveDisputeSummary('${id}',this)">
         <div class="field-group"><h4>Health plan</h4>
           <div class="field-grid">
@@ -170,18 +200,6 @@ const Views = (() => {
         <div class="field-group"><h4>Dispute</h4>
           <label>Summary of the dispute
             <textarea name="summary" rows="4" placeholder="What is in dispute and why, in a sentence or two" ${mine ? "" : "readonly"}>${esc(ds.summary || "")}</textarea></label></div>
-        <div class="field-group"><h4>Full review cost estimate <span class="field-hint">— only when the filer asked for one</span></h4>
-          <div class="field-grid">
-            ${matrix.length ? `<label>From the Estimated Cost Matrix
-              <select name="matrix" ${ro} onchange="if(this.value){const [c,l]=this.value.split('|');this.form.estimate.value=(c/100).toFixed(2);this.form.basis.value=l;}">
-              <option value="">Choose a row…</option>
-              ${matrix.map((m) => `<option value="${esc(m.cents)}|${esc(m.label)}">${esc(m.label)} — ${usdC(m.cents)}</option>`).join("")}</select></label>` : ""}
-            <label>Estimate ($)
-              <input name="estimate" type="number" step="0.01" min="0" placeholder="0.00" value="${est}" ${ro} />
-              ${ds.full_review_estimate_cents == null && preview != null ? `<span class="field-hint">the estimate shown to the filer at filing — confirm or change it</span>` : ""}</label>
-            <label>Basis for the estimate
-              <input name="basis" placeholder="matrix row or reason" value="${esc(ds.estimate_basis || "")}" ${ro} /></label>
-          </div></div>
         ${mine ? `<button class="mini">Save Dispute Summary</button>` : ""}</form></details>`;
   }
   // Documents that disagree with what the case carries: the case value is
@@ -911,9 +929,8 @@ const Views = (() => {
   }
   async function saveDisputeSummary(id, form) {
     const body = { plan_type: form.plan_type.value, plan_type_verified_from_letterhead: form.verified.checked,
-      coding_review_required: form.coding.checked, summary: form.summary.value, estimate_basis: form.basis.value,
+      coding_review_required: form.coding.checked, summary: form.summary.value,
       packet_verified: Object.fromEntries([...form.querySelectorAll('input[name="pv"]')].map((x) => [x.value, x.checked])) };
-    if (form.estimate.value !== "") body.full_review_estimate_cents = Math.round(Number(form.estimate.value) * 100);
     try { await Api.program.setDisputeSummary(id, body); UI.toast("Dispute Summary saved"); }
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 8000 }); }
   }
@@ -947,7 +964,7 @@ const Views = (() => {
   }
   const WF_STAGE_LETTERS = ["acceptance", "ineligible", "estimate_cost", "plan_notification", "final_order", "final_order_rationale_copy"];
   const WF_BUTTON = (a) => (a.startsWith("signal:") ? "Record it" : a.startsWith("letter:") ? "Draft it" : a.startsWith("qa:") ? "Open the QA gate" : a.startsWith("send:") ? "Send it"
-    : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "aor_confirm" ? "Give the ruling"
+    : a === "eligibility" ? "Run the review" : a === "summary" ? "Open the Dispute Summary" : a === "estimate" ? "Open the cost estimate" : a === "aor_confirm" ? "Give the ruling"
     : a === "invoice" ? "Create the invoice" : a === "settle" ? "Open Financials" : a === "outcome" ? "Record it"
     : a === "report:save" ? "Open the decision report" : a.startsWith("report:") ? "Generate it" : "Open");
   async function wfLoad(id, cfg) {
@@ -1157,6 +1174,7 @@ const Views = (() => {
     if (a.startsWith("qa:") || a.startsWith("send:")) { location.hash = "#/qa"; return; }
     if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
     if (a === "summary") return open("#p-summary-details");
+    if (a === "estimate") return open("#p-estimate-details");
     if (a === "invoice") {
       // The review invoice step bills the full review (or, on a default, the default) -- never the initial fee,
       // which is billed at filing (2026-11-26: an invoice issued as "Initial fee" left this step waiting).
@@ -3998,6 +4016,7 @@ const Views = (() => {
       ${sopFwaHtml(id, c)}
       ${sopNotesHtml(id, c)}
       ${sopSummaryHtml(id, c, cfg)}
+      ${sopEstimateHtml(id, c, cfg)}
 
       <details class="prog-sec" data-tab="activity"><summary>Call log</summary>
       <form id="p-call" class="inline-form">
@@ -4655,7 +4674,7 @@ const Views = (() => {
           `</tbody></table></section>` : "";
       const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
           <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
-          <span class="qa-item-meta">${i.case_id ? `<span class="mono">${esc(i.case_number || i.case_id.slice(0, 8) + "…")}</span>` : ""}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span>${qaDue(i) ? `<span class="badge" title="The statutory date on this case">due ${esc(qaDue(i))}</span>` : ""}</span>
+          <span class="qa-item-meta">${i.case_id ? `<span class="mono">${esc(i.case_number || i.case_id.slice(0, 8) + "…")}</span>` : ""}<span class="kc-tag">${esc(QA_CHANNEL[i.channel] || i.channel || "Email")}</span><span class="qa-tpl">${esc(qaTpl(i.artifact))}</span>${i.awaiting === "ATTORNEY" ? '<span class="badge" title="The Attorney checks the decision letter before QA">with the Attorney</span>' : ""}${qaDue(i) ? `<span class="badge" title="The statutory date on this case">due ${esc(qaDue(i))}</span>` : ""}</span>
           <span class="qa-item-by">drafted by ${esc(i.drafted_by || "—")}${r.own_only ? " · waiting for QA" : ""}</span></button>`).join("")
         : `<p class="kc-empty">Queue empty — no drafts awaiting review.</p>`;
       const detailEmpty = q.length
@@ -4761,8 +4780,15 @@ const Views = (() => {
   // passed QA waits to be sent (by its drafter or an Admin); a decided one just says what happened. Offering
   // Approve on an approved draft sent a second approval the server then refused.
   function qaActionsHtml(d, qaId, isNote, isLetter) {
+    // Change log #14: a decision letter is the Attorney's to check first -- approve it for QA, or send it back to the
+    // Coder or Nurse Reviewer who drafted it; QA then gives the final review.
+    if (d.status === "PENDING" && d.awaiting === "ATTORNEY")
+      return `<p class="muted">The Attorney's review: approve the decision letter for QA's final review, or send it back to its drafter with the revisions needed.</p>
+        <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Send back to the drafter</button>
+        <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">Approve for QA</button>`;
     if (d.status === "PENDING")
-      return `<button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Send back</button>
+      return `${d.pre_approved_by ? `<p class="muted">Approved by the Attorney (${esc(d.pre_approved_by)}) — QA's final review.</p>` : ""}
+        <button class="danger" onclick="Views.qaDecide('${qaId}','REJECT',this)">Send back</button>
         <button onclick="Views.qaDecide('${qaId}','APPROVE',this)">${isNote ? "Approve & file" : isLetter ? "Approve the letter" : "Approve & send"}</button>`;
     const by = d.reviewed_by ? ` by ${esc(d.reviewed_by)}` : "", when = d.reviewed_at ? `, ${esc(fmtDate(d.reviewed_at))}` : "";
     if (d.status === "APPROVED" && !d.sent_at && d.channel === "email") {
@@ -12933,5 +12959,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, intakeFiledWithFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn, reviewerAddFn, reviewerRemoveFn };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, intakeFiledWithFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, saveCostEstimate, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn, reviewerAddFn, reviewerRemoveFn };
 })();

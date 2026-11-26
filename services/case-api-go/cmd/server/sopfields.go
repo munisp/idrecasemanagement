@@ -120,18 +120,12 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 		PlanType             string `json:"plan_type"`
 		VerifiedFromLetter   bool   `json:"plan_type_verified_from_letterhead"`
 		Summary              string `json:"summary"`
-		EstimateCents        *int64 `json:"full_review_estimate_cents"`
-		EstimateBasis        string `json:"estimate_basis"` // the Estimated Cost Matrix row the figure came from
 		CodingReviewRequired *bool  `json:"coding_review_required"`
 		// Which filing-packet facts the Coder checked against the packet itself (change log 2026-11-25 #10).
 		PacketVerified map[string]bool `json:"packet_verified"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-		return
-	}
-	if in.EstimateCents != nil && (*in.EstimateCents < 0 || *in.EstimateCents > maxDisputedAmountCents) {
-		http.Error(w, `{"error":"full_review_estimate_cents is out of range"}`, http.StatusBadRequest)
 		return
 	}
 	if len(in.Summary) > 20000 {
@@ -147,11 +141,12 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := map[string]any{
 		"plan_type": strings.TrimSpace(in.PlanType), "plan_type_verified_from_letterhead": in.VerifiedFromLetter,
-		"summary": strings.TrimSpace(in.Summary), "estimate_basis": strings.TrimSpace(in.EstimateBasis),
-		"by": displayName(p), "at": time.Now().UTC().Format(time.RFC3339),
+		"summary": strings.TrimSpace(in.Summary),
+		"by":      displayName(p), "at": time.Now().UTC().Format(time.RFC3339),
 	}
-	if in.EstimateCents != nil {
-		sum["full_review_estimate_cents"] = *in.EstimateCents
+	// The cost estimate is the Admin's (change log #14, PUT /cost-estimate): the Coder's save keeps what is recorded.
+	for k, v := range s.storedEstimate(r, tenant, caseID) {
+		sum[k] = v
 	}
 	if in.CodingReviewRequired != nil {
 		sum["coding_review_required"] = *in.CodingReviewRequired
@@ -164,29 +159,6 @@ func (s *server) setDisputeSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := "Dispute Summary completed by " + displayName(p)
-	if in.EstimateCents != nil {
-		// The SOP has the estimate recorded where the Admin and PM read it.
-		msg += fmt.Sprintf(" — full review cost estimate $%d.%02d", *in.EstimateCents/100, *in.EstimateCents%100)
-		if b := strings.TrimSpace(in.EstimateBasis); b != "" {
-			msg += " (" + b + ")"
-		}
-	}
-	if in.EstimateCents != nil {
-		// "...records it in Internal Case Review notes": add a dated line to
-		// that field, leaving what the Admin and PM wrote in place.
-		line := fmt.Sprintf("[%s] Full review cost estimate: $%d.%02d", time.Now().UTC().Format("01/02/2006"), *in.EstimateCents/100, *in.EstimateCents%100)
-		if b := strings.TrimSpace(in.EstimateBasis); b != "" {
-			line += " (" + b + ")"
-		}
-		line += " — " + displayName(p) + " (Coder)"
-		_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
-			UPDATE tenant_%s.cases SET details = jsonb_set(details, '{review_notes}',
-			  coalesce(details->'review_notes','{}'::jsonb) || jsonb_build_object('internal_case_review',
-			    coalesce(details->'review_notes'->'internal_case_review','{}'::jsonb) || jsonb_build_object('text',
-			      trim(both E'\n' from coalesce(details->'review_notes'->'internal_case_review'->>'text','') || E'\n' || $2::text))), true)
-			WHERE id::text=$1 AND position($2::text in coalesce(details->'review_notes'->'internal_case_review'->>'text','')) = 0`,
-			sanitizeTenant(tenant)), caseID, line)
-	}
 	s.logActivity(r.Context(), tenant, caseID, "DISPUTE_SUMMARY", msg)
 	s.logAudit(r.Context(), tenant, caseID, "DISPUTE_SUMMARY_UPDATED", map[string]any{"by": p.Subject, "summary": sum})
 	writeJSON(w, http.StatusOK, map[string]any{"dispute_summary": sum})
@@ -295,4 +267,76 @@ td{border:1px solid #999;padding:6px 10px;vertical-align:top}td:first-child{widt
 <p style="margin-top:24px;font-size:12px">Generated from the eligibility review recorded on the case. The review record itself cannot be edited; a correction is a new review.</p>
 </body></html>`, e(caseNumber), e(caseNumber), e(result), e(reason),
 		e(decidedBy), at.UTC().Format("January 2, 2006"), rows.String())
+}
+
+// storedEstimate: the cost estimate recorded on the case's Dispute Summary (full_review_estimate_cents and its basis).
+func (s *server) storedEstimate(r *http.Request, tenant, caseID string) map[string]any {
+	var raw []byte
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT coalesce(details->'dispute_summary','{}'::jsonb) FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&raw)
+	var ds map[string]any
+	_ = json.Unmarshal(raw, &ds)
+	out := map[string]any{}
+	for _, k := range []string{"full_review_estimate_cents", "estimate_basis", "estimate_by", "estimate_at"} {
+		if v, ok := ds[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// setCostEstimate: PUT /cases/{caseId}/cost-estimate {full_review_estimate_cents, estimate_basis} -- the Admin
+// prepares the full review cost estimate (change log #14: "Administrator: prepare and issue cost estimates"), from the
+// Estimated Cost Matrix. Kept with the Dispute Summary, where the letters and the filer's fee read it.
+func (s *server) setCostEstimate(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: the cost estimate is prepared by the Admin"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	if !s.stepGuard(w, r, tenant, caseID, "estimate") {
+		return
+	}
+	var in struct {
+		Cents *int64 `json:"full_review_estimate_cents"`
+		Basis string `json:"estimate_basis"` // the Estimated Cost Matrix row the figure came from
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if in.Cents == nil || *in.Cents <= 0 || *in.Cents > maxDisputedAmountCents {
+		http.Error(w, `{"error":"enter the full review cost estimate (an amount above $0)"}`, http.StatusBadRequest)
+		return
+	}
+	basis := strings.TrimSpace(in.Basis)
+	if len(basis) > 500 {
+		http.Error(w, `{"error":"the basis is too long (500 characters at most)"}`, http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), fmt.Sprintf(`UPDATE tenant_%s.cases SET details = jsonb_set(coalesce(details,'{}'::jsonb), '{dispute_summary}',
+		coalesce(details->'dispute_summary','{}'::jsonb) || jsonb_build_object('full_review_estimate_cents', $2::bigint, 'estimate_basis', $3::text,
+		  'estimate_by', $4::text, 'estimate_at', now()::text), true), updated_at=now() WHERE id::text=$1`, sanitizeTenant(tenant)),
+		caseID, *in.Cents, basis, displayName(p)); err != nil {
+		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)
+		return
+	}
+	line := fmt.Sprintf("[%s] Full review cost estimate: $%d.%02d", time.Now().UTC().Format("01/02/2006"), *in.Cents/100, *in.Cents%100)
+	if basis != "" {
+		line += " (" + basis + ")"
+	}
+	line += " — " + displayName(p) + " (Admin)"
+	// "...records it in Internal Case Review notes": a dated line, leaving what others wrote in place.
+	_, _ = s.db.Exec(r.Context(), fmt.Sprintf(`
+		UPDATE tenant_%s.cases SET details = jsonb_set(details, '{review_notes}',
+		  coalesce(details->'review_notes','{}'::jsonb) || jsonb_build_object('internal_case_review',
+		    coalesce(details->'review_notes'->'internal_case_review','{}'::jsonb) || jsonb_build_object('text',
+		      trim(both E'\n' from coalesce(details->'review_notes'->'internal_case_review'->>'text','') || E'\n' || $2::text))), true)
+		WHERE id::text=$1 AND position($2::text in coalesce(details->'review_notes'->'internal_case_review'->>'text','')) = 0`,
+		sanitizeTenant(tenant)), caseID, line)
+	s.logActivity(r.Context(), tenant, caseID, "COST_ESTIMATE", strings.SplitN(line, "] ", 2)[1])
+	s.logAudit(r.Context(), tenant, caseID, "COST_ESTIMATE_SET", map[string]any{"by": p.Subject, "cents": *in.Cents, "basis": basis})
+	writeJSON(w, http.StatusOK, map[string]any{"full_review_estimate_cents": *in.Cents, "estimate_basis": basis})
 }

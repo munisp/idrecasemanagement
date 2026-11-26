@@ -1,6 +1,6 @@
 package main
 
-// casescope.go — which cases an Admin may see.
+// casescope.go — which cases a person may see (least privilege, change log #14).
 //
 // An Admin (CASE_MANAGER) works the cases assigned to them, and only those: cases are given out by the rotation
 // (autoassign.go) or by the PM, so there is no unassigned pool for an Admin to browse or take from. Any other case
@@ -24,18 +24,30 @@ import (
 	"strings"
 )
 
+// Least privilege (change log #14, 2026-11-26): the PM and the Admin see every case (the Admin does the eligibility
+// review of every incoming dispute), as do the Tenant Admin, Finance (invoices across cases), the state auditor and
+// the platform's admins. The specialists -- Coder, Nurse Reviewer, Attorney, QA (and an arbitrator) -- see only the
+// cases they work: assigned to them, named on the case team (case_helpers), or named as a further reviewer
+// (case_review_team). A QA also sees a case with no QA named yet, since every QA hears of its drafts until one is.
+
 // seeAllCaseRoles: holding any of these, a person sees every case of the tenant.
-// The Admin (CASE_MANAGER) sees every case since 2026-11-25 (it hears every alert, as the Tenant Admin does), so
-// reviewerScoped is now false for everyone; the rule is kept for a program that scopes its Admins again.
 var seeAllCaseRoles = []string{
-	"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole,
-	"CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR", "FINANCE", "QA",
+	"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole, "FINANCE",
 }
 
-// reviewerScoped: the caller is an Admin and nothing that sees every case. Exact role names on purpose —
-// hasAnyRole counts a Tenant Admin as every staff role, which would make every Tenant Admin a scoped Admin.
+// specialistRoles: roles that see only the cases they are named on.
+var specialistRoles = []string{"CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "QA", "ARBITRATOR"}
+
+// reviewerScoped: the caller sees only the cases they work -- they hold a specialist role and nothing that sees every
+// case. Exact role names on purpose: hasAnyRole counts a Tenant Admin as every staff role.
 func reviewerScoped(p principal) bool {
-	if !contains(p.Roles, "CASE_MANAGER") {
+	scoped := false
+	for _, r := range specialistRoles {
+		if contains(p.Roles, r) {
+			scoped = true
+		}
+	}
+	if !scoped {
 		return false
 	}
 	for _, r := range seeAllCaseRoles {
@@ -46,13 +58,38 @@ func reviewerScoped(p principal) bool {
 	return true
 }
 
-// caseVisibleTo is the rule itself, for a case whose assignee is known: assigned to the caller. Pure, so it is
-// tested.
-func caseVisibleTo(p principal, assignedTo string) bool {
+// caseVisibleTo is the rule for a case whose people are known: assigned to the caller, or the caller is one of
+// named (helpers and further reviewers), or the caller is a QA and the case has no QA named. Pure, so it is tested.
+func caseVisibleTo(p principal, assignedTo string, named []string, qaNamed bool) bool {
 	if !reviewerScoped(p) {
 		return true
 	}
-	return assignedTo != "" && assignedTo == p.Subject
+	if assignedTo != "" && assignedTo == p.Subject {
+		return true
+	}
+	if contains(named, p.Subject) {
+		return true
+	}
+	return contains(p.Roles, "QA") && !qaNamed
+}
+
+// scopeSQL: the same rule as an SQL condition over a case id expression (idExpr, as text or uuid) and its assignee
+// (assignedExpr, "" when the rows have none at hand); argN is the placeholder number the caller's subject takes.
+func scopeSQL(p principal, tenant, idExpr, assignedExpr string, argN int) string {
+	t := sanitizeTenant(tenant)
+	cond := fmt.Sprintf(`EXISTS (SELECT 1 FROM public.case_helpers h WHERE h.tenant='%[1]s' AND h.case_id::text=(%[2]s)::text AND h.user_id=$%[3]d)
+		OR EXISTS (SELECT 1 FROM public.case_review_team rt WHERE rt.tenant='%[1]s' AND rt.case_id=(%[2]s)::text AND rt.user_id=$%[3]d)`,
+		t, idExpr, argN)
+	if assignedExpr != "" {
+		cond = fmt.Sprintf(`%s = $%d OR `, assignedExpr, argN) + cond
+	} else {
+		cond = fmt.Sprintf(`EXISTS (SELECT 1 FROM tenant_%s.cases ac WHERE ac.id::text=(%s)::text AND ac.assigned_to=$%d) OR `, t, idExpr, argN) + cond
+	}
+	if contains(p.Roles, "QA") {
+		cond += fmt.Sprintf(` OR NOT EXISTS (SELECT 1 FROM public.case_helpers hq WHERE hq.tenant='%s' AND hq.case_id::text=(%s)::text AND hq.role='QA')`,
+			t, idExpr)
+	}
+	return "(" + cond + ")"
 }
 
 // caseVisible looks the case up. A case that does not exist is "visible": the handler answers its own 404.
@@ -60,34 +97,31 @@ func (s *server) caseVisible(ctx context.Context, p principal, tenant, caseID st
 	if !reviewerScoped(p) {
 		return true
 	}
-	var to *string
-	if err := s.db.QueryRow(ctx, fmt.Sprintf(`SELECT assigned_to FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)),
-		caseID).Scan(&to); err != nil {
-		// Fail closed, like hiddenCaseIDs: if the assignee cannot be read (a
-		// transient error, or no such case), a scoped Admin does not see it.
+	var ok bool
+	if err := s.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM tenant_%s.cases c WHERE c.id::text=$2 AND %s)`,
+		sanitizeTenant(tenant), scopeSQL(p, tenant, "c.id", "c.assigned_to", 1)), p.Subject, caseID).Scan(&ok); err != nil {
+		// Fail closed, like hiddenCaseIDs: if the rule cannot be checked, a scoped specialist does not see the case.
 		return false
 	}
-	return caseVisibleTo(p, deref(to))
+	return ok
 }
 
 // caseScopeSQL is the same rule as an SQL condition on a cases row (alias, e.g. "c"), for lists: "" when the caller
 // sees every case. argN is the placeholder number the caller's subject takes.
-func caseScopeSQL(p principal, alias string, argN int) (string, bool) {
+func caseScopeSQL(p principal, tenant, alias string, argN int) (string, bool) {
 	if !reviewerScoped(p) {
 		return "", false
 	}
-	return fmt.Sprintf(" AND %[1]s.assigned_to = $%[2]d", alias, argN), true
+	return " AND " + scopeSQL(p, tenant, alias+".id", alias+".assigned_to", argN), true
 }
 
 // caseIDScopeSQL: the rule for rows of another table that point at a case (col holds the case id, as text or uuid):
-// rows that point at no case stay; rows that point at a case stay when it is the caller's.
+// rows that point at no case stay; rows that point at a case stay when the caller works it.
 func caseIDScopeSQL(p principal, tenant, col string, argN int) (string, bool) {
 	if !reviewerScoped(p) {
 		return "", false
 	}
-	return fmt.Sprintf(` AND (%[1]s IS NULL OR EXISTS (SELECT 1 FROM tenant_%[2]s.cases sc WHERE sc.id::text = %[1]s::text
-		AND sc.assigned_to = $%[3]d))`,
-		col, sanitizeTenant(tenant), argN), true
+	return fmt.Sprintf(` AND (%s IS NULL OR %s)`, col, scopeSQL(p, tenant, col, "", argN)), true
 }
 
 func deref(s *string) string {
@@ -104,9 +138,9 @@ func (s *server) hiddenCaseIDs(ctx context.Context, p principal, tenant string, 
 		return nil
 	}
 	out := map[string]bool{}
-	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT id::text FROM tenant_%s.cases
-		WHERE id::text = ANY($1) AND assigned_to IS DISTINCT FROM $2`,
-		sanitizeTenant(tenant)), ids, p.Subject)
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`SELECT c.id::text FROM tenant_%s.cases c
+		WHERE c.id::text = ANY($1) AND NOT %s`,
+		sanitizeTenant(tenant), scopeSQL(p, tenant, "c.id", "c.assigned_to", 2)), ids, p.Subject)
 	if err != nil {
 		// Fail closed: if the check cannot run, every named case is hidden from an Admin.
 		for _, id := range ids {

@@ -26,7 +26,7 @@ func (s *server) pipelineCounts(w http.ResponseWriter, r *http.Request) {
 	caller := r.Context().Value(ctxPrincipal{}).(principal)
 	args := []any{tenant}
 	where := " AND $1::text IS NOT NULL"
-	if cond, ok := caseScopeSQL(caller, "c", len(args)+1); ok {
+	if cond, ok := caseScopeSQL(caller, tenant, "c", len(args)+1); ok {
 		args = append(args, caller.Subject)
 		where += cond
 	}

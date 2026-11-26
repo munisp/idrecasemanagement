@@ -144,15 +144,16 @@ func buildDocSteps(f wfFacts, steps []wfStep) wfDoc {
 			add(wfDocStep{Title: "Requests for Information (RFI) issued as needed", State: "optional",
 				Note: map[bool]string{true: "An RFI was sent", false: ""}[rfi]})
 			add(wfDocStep{Title: "Clinical/Coding review completed", Detail: "Target review period: 5-6 days",
-				Keys: []string{"coding_review", "clinical_review"}, Clock: "CLINICAL_CODING_REVIEW"})
+				// Change log #14: the reviews end with the drafter's decision letter.
+				Keys: []string{"coding_review", "clinical_review", "report_save", "report_generate"}, Clock: "CLINICAL_CODING_REVIEW"})
 			attorneyClock := "ATTORNEY_START"
 			if f.Dates["attorney_review_started_at"] != "" {
 				attorneyClock = "ATTORNEY_REVIEW"
 			}
 			add(wfDocStep{Phase: phase3, Title: "Attorney review", Detail: "Begins approximately 30 days after receipt of plan packet; target review period: 5-6 days",
-				Keys: []string{"attorney_review"}, Clock: attorneyClock})
+				Keys: []string{"attorney_review", "qa:final_order_rationale"}, Clock: attorneyClock})
 			add(wfDocStep{Title: "Program Manager (PM) review", Detail: "Target review period: 5 days",
-				Keys: []string{"invoice", "report_save", "report_generate", "report_cover_letter", "report_plan_invoice"}, Clock: "PM_REVIEW"})
+				Keys: []string{"invoice", "report_cover_letter", "report_plan_invoice"}, Clock: "PM_REVIEW"})
 			// Change log 2026-11-25 #20: the outcome and party billed are the last task of submitting the determination.
 			add(wfDocStep{Phase: phase4, Title: "Determination submitted to AHCA", Detail: "Issued on or before the 60-day turnaround time requirement",
 				Keys: keys(letter("final_order"), []string{"outcome"}), Clock: "AGENCY_RECOMMENDATION"})

@@ -50,7 +50,7 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `Workflow signal ESTIMATE_CONFIRMED delivered — {"requested":false}`, At: now}
 	expect("letter:acceptance", "Admin")
 	f.Letter["acceptance"] = "PENDING"
-	expect("qa:acceptance", "PM")
+	expect("qa:acceptance", "QA")
 	f.Letter["acceptance"] = "REJECTED" // back to the Admin
 	expect("letter:acceptance", "Admin")
 	f.Letter["acceptance"] = "SENT"
@@ -64,15 +64,23 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	f.Act["CODING_REVIEW_COMPLETE"] = wfAct{Body: `{"clinical_requested": true}`, At: now}
 	expect("clinical_review", "Nurse Reviewer")
 	f.Act["CLINICAL_REVIEW_COMPLETE"] = wfAct{At: now}
-	expect("attorney_review", "Attorney")
-	f.Act["ATTORNEY_REVIEW_COMPLETE"] = wfAct{At: now}
-	expect("invoice", "PM")
-	f.ReviewInvoice, f.OpenInvoices = true, 1
-	expect("report_save", "Admin")
+	// Change log #14: the Nurse Reviewer (clinical review asked for) writes and generates the decision letter, the
+	// Attorney approves it, QA reviews it; then the invoice and the Admin's documents.
+	expect("report_save", "Nurse Reviewer")
 	f.ReportSaved = true
 	f.Generated = map[string]bool{}
-	expect("report_generate", "Admin")
+	expect("report_generate", "Nurse Reviewer")
 	f.Generated["final_order_rationale"] = true
+	expect("attorney_review", "Attorney")
+	f.Generated["final_order_rationale"] = false // sent back by the Attorney: the drafter generates it again
+	expect("report_generate", "Nurse Reviewer")
+	f.Generated["final_order_rationale"] = true
+	f.AttorneyPassed = map[string]bool{"final_order_rationale": true}
+	f.GeneratedPassed = map[string]bool{}
+	expect("qa:final_order_rationale", "QA")
+	f.GeneratedPassed["final_order_rationale"] = true
+	expect("invoice", "PM")
+	f.ReviewInvoice, f.OpenInvoices = true, 1
 	expect("report_cover_letter", "Admin")
 	f.Generated["cover_letter_final_notice"] = true
 	expect("report_plan_invoice", "Admin")
@@ -80,12 +88,9 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	expect("report_plan_invoice", "Admin")
 	f.Generated["invoice_health_plan"] = true
 	// Each generated document passes QA before the package that carries them (2026-11-26).
-	f.GeneratedPassed = map[string]bool{}
-	expect("qa:final_order_rationale", "PM")
-	f.GeneratedPassed["final_order_rationale"] = true
-	expect("qa:cover_letter_final_notice", "PM")
+	expect("qa:cover_letter_final_notice", "QA")
 	f.GeneratedPassed["cover_letter_final_notice"] = true
-	expect("qa:invoice_health_plan", "PM")
+	expect("qa:invoice_health_plan", "QA")
 	f.GeneratedPassed["invoice_health_plan"] = true
 	expect("letter:final_order", "Admin")
 	f.Letter["final_order"] = "SENT"
@@ -144,13 +149,13 @@ func TestWorkflowStepsBranches(t *testing.T) {
 	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "eligibility_again" {
 		t.Fatalf("AOR hold: next should be the new eligibility review, got %+v", n)
 	}
-	// Estimate requested: Coder's estimate and email, then the provider's permission.
+	// Estimate requested: the Admin's estimate and email (change log #14), then the provider's permission.
 	f = wfBase()
 	f.Act["PACKET_COMPLETE"] = wfAct{Body: `{"estimate_requested":true}`, At: now}
 	f.HasSummary, f.HasElig, f.EligResult = true, true, "ELIGIBLE"
 	f.Letter["acceptance"] = "SENT"
-	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "estimate" || n.Owner != "Coder" {
-		t.Fatalf("estimate: next should be the Coder's estimate, got %+v", n)
+	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "estimate" || n.Owner != "Admin" {
+		t.Fatalf("estimate: next should be the Admin's estimate, got %+v", n)
 	}
 	f.HasEstimate = true
 	f.Letter["estimate_cost"] = "SENT"
@@ -261,7 +266,7 @@ func TestWorkflowLetterHandBack(t *testing.T) {
 	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `{"requested":false}`, At: time.Now()}
 	f.HasElig, f.EligResult = true, "ELIGIBLE"
 	for st, want := range map[string][2]string{
-		"": {"letter:acceptance", "Admin"}, "PENDING": {"qa:acceptance", "PM"},
+		"": {"letter:acceptance", "Admin"}, "PENDING": {"qa:acceptance", "QA"},
 		"APPROVED": {"send:acceptance", "Admin"}, "REJECTED": {"letter:acceptance", "Admin"},
 		"SENT": {"letter:plan_notification", "Admin"},
 	} {
@@ -325,13 +330,22 @@ func TestWorkflowDecisionReportEarly(t *testing.T) {
 		if st.Key == "report_save" && st.State != "done" {
 			t.Fatalf("the saved report shows as done, got %s", st.State)
 		}
-		if (st.Key == "attorney_review" || st.Key == "invoice") && st.State != "upcoming" {
+		if (st.Key == "attorney_review" || st.Key == "invoice") && st.State == "done" {
 			t.Fatalf("%s must not be skipped by an early report, got %s", st.Key, st.State)
 		}
 	}
+	// Change log #14: the decision letter is its drafter's (the Coder here: no clinical review asked for); the cover
+	// letter and the invoices stay the Admin's.
 	for _, st := range steps {
-		if strings.HasPrefix(st.Key, "report_") && strings.Join(st.OwnerRoles, ",") != "CASE_MANAGER,PM" {
-			t.Fatalf("%s is the Admin's or the PM's, got %v", st.Key, st.OwnerRoles)
+		switch st.Key {
+		case "report_save", "report_generate":
+			if strings.Join(st.OwnerRoles, ",") != "CODER" {
+				t.Fatalf("%s is the Coder's, got %v", st.Key, st.OwnerRoles)
+			}
+		case "report_cover_letter", "report_plan_invoice":
+			if strings.Join(st.OwnerRoles, ",") != "CASE_MANAGER" {
+				t.Fatalf("%s is the Admin's, got %v", st.Key, st.OwnerRoles)
+			}
 		}
 	}
 }
