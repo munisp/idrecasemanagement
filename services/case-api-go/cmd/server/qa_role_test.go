@@ -6,7 +6,7 @@ func TestQAAcceptRoles(t *testing.T) {
 	for _, c := range []struct {
 		role string
 		want []string
-	}{{"PM", []string{"QA", "PM"}}, {"QA", []string{"QA", "PM"}}, {"ATTORNEY", []string{"ATTORNEY"}}, {"", nil}} {
+	}{{"PM", []string{"QA"}}, {"QA", []string{"QA"}}, {"ATTORNEY", []string{"ATTORNEY"}}, {"", nil}} {
 		got := qaAcceptRoles(c.role)
 		if len(got) != len(c.want) {
 			t.Fatalf("%q: %v", c.role, got)
@@ -21,8 +21,11 @@ func TestQAAcceptRoles(t *testing.T) {
 	if !hasAnyRole(qa, qaAcceptRoles("PM")...) {
 		t.Fatal("a QA may decide a step the templates give the PM")
 	}
-	if reviewerScoped(qa) {
-		t.Fatal("QA sees every case")
+	if hasAnyRole(principal{Roles: []string{"PM"}}, qaAcceptRoles("PM")...) {
+		t.Fatal("change log #14: the PM oversees QA but no longer approves in its place")
+	}
+	if !reviewerScoped(qa) {
+		t.Fatal("QA sees only the cases it is named on, or that have no QA yet (least privilege)")
 	}
 	if !hasAnyRole(qa, qaReadRoles...) || !hasAnyRole(qa, caseStaffRoles...) {
 		t.Fatal("QA reads the QA gate and the cases")

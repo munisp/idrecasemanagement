@@ -135,7 +135,8 @@ func TestPageDataFollowsThePage(t *testing.T) {
 	}
 	for _, c := range cases {
 		d, _, _ := accessDecision(who(c.role), http.MethodGet, c.path)
-		if (d == "allow") != c.allowed {
+		// "assigned-case": a specialist reaches a case it works (least privilege, casescope.go) -- the page is theirs.
+		if (d == "allow" || d == "assigned-case") != c.allowed {
 			t.Errorf("%s GET %s: got %q, want allowed=%v", c.role, c.path, d, c.allowed)
 		}
 	}

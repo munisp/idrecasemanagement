@@ -590,13 +590,14 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 	// draft (shown as its "due" badge), so an urgent one is visible without reordering the queue.
 	rows, err := s.queryRows(r, fmt.Sprintf(`
 		SELECT q.id, q.case_id, q.artifact, q.channel, q.subject, q.status, q.drafted_by, q.created_at,
-		       c.open_negotiation_end, c.offer_window_ends_at
+		       c.open_negotiation_end, c.offer_window_ends_at,
+		       CASE WHEN q.artifact='final_order_rationale' AND coalesce(q.pre_approved_by,'')='' THEN 'ATTORNEY' ELSE '' END AS awaiting
 		FROM public.qa_reviews q
 		LEFT JOIN tenant_%s.cases c ON c.id::text = q.case_id
-		WHERE q.tenant=$1 AND q.status='PENDING'
+		WHERE q.tenant=$1 AND q.status='PENDING' %s
 		ORDER BY q.created_at DESC -- the latest on top; each draft shows its case's statutory date
 		`,
-		sanitizeTenant(tenant)), tenant)
+		sanitizeTenant(tenant), qaQueueScope(p)), tenant)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -638,7 +639,25 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 // qaDraftOnlyRoles draft a gated letter without reviewing any: the Coder
 // drafts the Full Review Estimated Cost email, the PM approves it, and the
 // Coder sends it. They see only their own drafts in the QA gate.
-var qaDraftOnlyRoles = []string{"CODER"}
+var qaDraftOnlyRoles = []string{"CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE"}
+
+// qaQueueScope (change log #14): an Attorney's queue is the decision letters waiting for their check; QA's leaves
+// out the decision letters still with the Attorney. The PM, the Admin and the admins see every pending draft.
+func qaQueueScope(p principal) string {
+	if hasAnyRole(p, "PM", "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN") || contains(p.Roles, "TENANT_ADMIN") {
+		return ""
+	}
+	attorney, qa := contains(p.Roles, "ATTORNEY"), contains(p.Roles, "QA")
+	switch {
+	case attorney && qa:
+		return ""
+	case attorney:
+		return "AND q.artifact='final_order_rationale' AND coalesce(q.pre_approved_by,'')=''"
+	case qa:
+		return "AND NOT (q.artifact='final_order_rationale' AND coalesce(q.pre_approved_by,'')='')"
+	}
+	return ""
+}
 
 // qaQueueOwn: the QA gate for a drafter -- their own drafts awaiting review, the approved ones waiting for them to
 // send, and their recent decisions; and the same for every case they are now the specialist on, so a draft made
@@ -677,7 +696,9 @@ func (s *server) qaGet(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.queryRows(r, `
 		SELECT id, case_id, artifact, channel, subject, body, to_recipients, cc_recipients, status, drafted_by, created_at,
 		       coalesce(reviewed_by,'') AS reviewed_by, reviewed_at, sent_at, coalesce(review_note,'') AS review_note,
-		       coalesce(requested_by_sub,'') AS requested_by_sub
+		       coalesce(requested_by_sub,'') AS requested_by_sub,
+		       CASE WHEN artifact='final_order_rationale' AND status='PENDING' AND coalesce(pre_approved_by,'')='' THEN 'ATTORNEY' ELSE '' END AS awaiting,
+		       coalesce(pre_approved_by,'') AS pre_approved_by
 		FROM public.qa_reviews WHERE tenant=$1 AND id=$2`, tenant, qid)
 	if err != nil || len(rows) == 0 {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
@@ -855,8 +876,10 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	// the Arbitrator approves it -- named here instead of falling through to "any case staff" -- and every decision is
 	// audited with the role it was made in.
 	var extraQARoles []string
+	// Change log #14: the decision letter is checked by the Attorney (approve, or back to its drafter for revisions),
+	// then reviewed by QA before release.
 	if qaRole == "" && artifact == "final_order_rationale" {
-		qaRole, extraQARoles = "PM", []string{"ATTORNEY", "ARBITRATOR"}
+		qaRole, qaPreRole = "QA", "ATTORNEY"
 	}
 	// What every QA audit entry carries: which draft, of what kind, whose, the role the step needed and the role the
 	// decider acted in.
@@ -873,6 +896,19 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	if adminSelf {
 		s.logAudit(r.Context(), tenant, caseID, "QA_SELF_DECIDED", withQA(map[string]any{"by": p.Subject, "decision": in.Decision}))
+	}
+	preDone := ""
+	if qaPreRole != "" {
+		_ = s.db.QueryRow(r.Context(),
+			`SELECT coalesce(pre_approved_by,'') FROM public.qa_reviews WHERE tenant=$1 AND id=$2`, tenant, qid).Scan(&preDone)
+	}
+	// Until the first check is done, only the first role decides: it approves (below) or sends the draft back to its
+	// drafter; the second role waits for it.
+	firstCheck := qaPreRole != "" && status == "PENDING" && preDone == ""
+	if firstCheck && !hasAnyRole(p, append(qaAcceptRoles(qaPreRole), "FEDERAL_ADMIN", "PLATFORM_ADMIN")...) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": fmt.Sprintf("forbidden: the %s checks this draft first, then the %s approves it", wfOwnerLabels[qaPreRole], wfOwnerLabels[qaRole])})
+		return
 	}
 	// Two-stage QA: until the first role has checked the draft, an APPROVE
 	// from that role records the check and leaves the draft pending for the
@@ -892,8 +928,19 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			s.logActivity(r.Context(), tenant, caseID, "QA_FIRST_CHECK",
 				fmt.Sprintf("%s checked by %s — now with the %s for approval", subject, displayName(p), wfOwnerLabels[qaRole]))
 			s.logAudit(r.Context(), tenant, caseID, "QA_FIRST_CHECK", withQA(map[string]any{"by": p.Subject, "decided_as": qaPreRole}))
-			s.notifyQA(r, tenant, caseID, qaRole, "QA_REVIEW",
-				fmt.Sprintf("%s draft on case %s has passed the %s's check and awaits your approval", artifact, caseID, wfOwnerLabels[qaPreRole]), "#/qa")
+			if artifact == "final_order_rationale" {
+				// The Attorney approved the decision letter: QA is told, and the workflow hears the Attorney's review
+				// is complete (it waits for this signal to move the case to its determination).
+				cn := s.caseNumberOf(r.Context(), tenant, caseID)
+				s.notifyQA(r, tenant, caseID, qaRole, "DECISION_LETTER_APPROVED",
+					fmt.Sprintf("Case %s: the Attorney approved the decision letter — ready for your final review", cn), "#/qa")
+				_ = s.sigCase(r.Context(), tenant, caseID, fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), cn),
+					"ATTORNEY_REVIEW_COMPLETE", map[string]any{"note": "Decision letter approved by " + displayName(p), "qa_id": qid})
+				s.logActivity(r.Context(), tenant, caseID, "ATTORNEY_REVIEW_COMPLETE", "Decision letter approved by the Attorney ("+displayName(p)+")")
+			} else {
+				s.notifyQA(r, tenant, caseID, qaRole, "QA_REVIEW",
+					fmt.Sprintf("%s draft on case %s has passed the %s's check and awaits your approval", artifact, caseID, wfOwnerLabels[qaPreRole]), "#/qa")
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"status": "PENDING", "first_check": "recorded",
 				"next": "awaiting " + wfOwnerLabels[qaRole] + " approval"})
 			return
@@ -903,7 +950,7 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if qaRole != "" {
+	if qaRole != "" && !(firstCheck && in.Decision == "REJECT") { // the first role's send-back was allowed above
 		if !hasAnyRole(p, append(append(qaAcceptRoles(qaRole), "FEDERAL_ADMIN", "PLATFORM_ADMIN"), extraQARoles...)...) {
 			who := strings.Join(append([]string{qaRole}, extraQARoles...), ", ")
 			http.Error(w, fmt.Sprintf(`{"error":"forbidden: requires %s, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, who), http.StatusForbidden)
@@ -992,7 +1039,12 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 			s.notify(r, tenant, requestedBySub, "DRAFT_APPROVED",
 				fmt.Sprintf("The letter %q passed QA.", subject), "#/cases/"+caseID)
 		}
+		if firstCheck && in.Decision == "REJECT" { // the Attorney's send-back: the PM hears of it (its drafter was told above)
+		s.notifyRoles(r, tenant, caseID, "REVISIONS_REQUESTED", fmt.Sprintf("Case %s: the %s sent the %s back to its drafter%s",
+			s.caseNumberOf(r.Context(), tenant, caseID), wfOwnerLabels[qaPreRole], templateWords(artifact), orDash(" — "+in.Note)))
+	} else {
 		s.notifyOnQA(r, tenant, caseID, artifact, in.Decision, in.Note) // change log #24d
+	}
 		writeJSON(w, http.StatusOK, map[string]any{"status": newStatus, "letter": true})
 		return
 	}
@@ -1086,11 +1138,15 @@ func (s *server) qaDecision(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.releaseCaseFromQA(r, tenant, caseID, qid)
 		s.settleHeldMail(r, tenant, qid, "REJECTED", "rejected in QA"+orDash(": "+in.Note), body, to, cc)
+		by := "QA"
+		if firstCheck { // the first role (the Attorney, on a decision letter) sent it back before QA saw it
+			by = "the " + wfOwnerLabels[qaPreRole]
+		}
 		s.logActivity(r.Context(), tenant, caseID, "QA_REJECTED",
-			fmt.Sprintf("Draft rejected in QA by %s: %s%s", p.Subject, subject, orDash(" — "+in.Note)))
-		if requestedBySub != "" {
+			fmt.Sprintf("Draft sent back for revisions by %s (%s): %s%s", displayName(p), by, subject, orDash(" — "+in.Note)))
+		if requestedBySub != "" { // the document's owner: its drafter
 			s.notify(r, tenant, requestedBySub, "DRAFT_REJECTED",
-				fmt.Sprintf("Your correspondence draft %q was rejected%s", subject, orDash(" — "+in.Note)), "#/cases/"+caseID)
+				fmt.Sprintf("%s sent your draft %q back for revisions%s", by, subject, orDash(" — "+in.Note)), "#/cases/"+caseID)
 		}
 	}
 	s.logAudit(r.Context(), tenant, caseID, "QA_DECISION", withQA(map[string]any{

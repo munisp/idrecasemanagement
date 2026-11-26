@@ -110,12 +110,28 @@ def case_alert_targets(c, tenant: str, case_id: str, roles) -> list:
     return alert_targets({r[0]: r[1] for r in rows}, roles)
 
 
+# Change log #14 (each role's notifications): who an alert from the workflow reaches, by its type, where the
+# workflow's own call names someone else. Kept here, in the activity, so cases already running pick it up without a
+# change to the workflow's history. (roles, body) -- a body of "" keeps the workflow's own text.
+ROLES_BY_SPEC: dict[str, tuple[list[str], str]] = {
+    # The Admin prepares and issues the cost estimate.
+    "ESTIMATE_DUE": (["CASE_MANAGER"], "The filer asked for a cost estimate — prepare it (Full review cost estimate) and "
+                                       "draft the Full Review Estimated Cost email, which goes out with the acceptance letter."),
+    # The Coder hears the case is ready for coding review; the Attorney's part starts with the decision letter.
+    "PLAN_RESPONDED": (["CODER"], ""),
+    "DEFAULT_DETERMINATION": (["PM", "CASE_MANAGER"], "The health plan did not respond by day 15 — default determination "
+                              "for the provider. Admin: draft the Default Determination; QA reviews it; PM: create the default invoice."),
+}
+
+
 @activity.defn
 async def notify_roles(tenant: str, case_id: str, roles: list[str], typ: str, body: str) -> None:
     """Tell the people who must act, not the whole tenant: one notification
     per role (user_sub 'role:<ROLE>', which case-api shows to holders of that
     role), plus a line on the case timeline."""
     await ensure_case(DSN, tenant, case_id)
+    if typ in ROLES_BY_SPEC:
+        roles, body = ROLES_BY_SPEC[typ][0], ROLES_BY_SPEC[typ][1] or body
     with _conn() as c:
         c.execute(
             "INSERT INTO public.case_activities (tenant, case_id, type, body) VALUES (%s,%s,%s,%s)",

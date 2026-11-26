@@ -65,6 +65,7 @@ type wfFacts struct {
 	ReportSaved      bool            // the decision report has been saved
 	Generated        map[string]bool // generated letter (lettergen template) -> a draft not rejected in QA
 	GeneratedPassed  map[string]bool // generated letter -> its latest draft passed QA (approved or sent)
+	AttorneyPassed   map[string]bool // generated letter -> its latest draft passed the Attorney's check (or QA itself)
 	CopyRequested    bool            // a party asked for the Final Order Rationale Copy (change log 2026-11-25 #19)
 	Reviewers        []wfReviewer    // further reviewers named on the case (SOP step 10, review_team.go)
 }
@@ -89,9 +90,11 @@ var wfStatusReached = map[string]string{
 	"Plan Notification Packet Issued":   "qa:plan_notification",
 	"Review In Progress":                "plan_response",
 	"Plan - No Response":                "plan_response",
-	"QA Final Determination":            "attorney_review",
-	"Determination Sent to FL":          "qa:final_order",
-	"Final Order Issued":                "final_order_issued",
+	// The reviews are done by then; the decision letter's own steps (drafted, the Attorney's check, QA) are read from
+	// its record -- a letter sent back by QA goes round them again (change log #14 / #24d).
+	"QA Final Determination":   "coding_review",
+	"Determination Sent to FL": "qa:final_order",
+	"Final Order Issued":       "final_order_issued",
 }
 
 // buildWorkflowSteps is the pure core: facts in, ordered steps out, with at
@@ -116,6 +119,9 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 	// A letter is two steps: its owner drafts it, then the QA role approves
 	// it, which is what sends it.
 	letter := func(tpl, label, drafter, qaRole string) bool {
+		if qaRole == "PM" { // change log #14: QA reviews the letters (the PM oversees, no longer approves)
+			qaRole = "QA"
+		}
 		st := f.Letter[tpl]
 		sent := st == "SENT"
 		add("letter:"+tpl, "Draft the "+label, drafter, "letter:"+tpl, sent || st == "PENDING" || st == "APPROVED",
@@ -159,9 +165,8 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 				continue
 			}
 			tpl := strings.TrimPrefix(a, "report:")
-			add("qa:"+tpl, "QA the "+strings.TrimPrefix(steps[i].Label, "Generate the "), "PM", "qa:"+tpl, f.GeneratedPassed[tpl],
+			add("qa:"+tpl, "QA the "+strings.TrimPrefix(steps[i].Label, "Generate the "), "QA", "qa:"+tpl, f.GeneratedPassed[tpl],
 				"Approve it in the QA gate; the Final Order package carries only documents that passed QA.")
-			steps[len(steps)-1].OwnerRoles = []string{"QA", "PM"}
 			early["qa:"+tpl] = true
 		}
 	}
@@ -218,8 +223,8 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			letter("acceptance", "Acceptance letter", "CASE_MANAGER", "PM")
 		}
 		if estimate {
-			add("estimate", "Record the full review cost estimate", "CODER", "summary", f.HasEstimate,
-				"Pick the figure from the Estimated Cost Matrix (Dispute Summary).")
+			add("estimate", "Prepare the full review cost estimate", "CASE_MANAGER", "estimate", f.HasEstimate,
+				"Pick the figure from the Estimated Cost Matrix (change log #14: the Admin prepares and issues the estimate).")
 			// Change log 2026-11-25 #13: the Cost Estimate, then the acceptance -- both drafted, both through QA, and
 			// sent together (estimate first) once the second has passed. Approving the first holds it for the second.
 			estimatePair(f, add)
@@ -302,26 +307,40 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			// Accounts made before NURSE_PHYSICIAN existed hold DOCTOR or NURSE.
 			steps[len(steps)-1].OwnerRoles = []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE"}
 		}
-		add("attorney_review", "Final rationale and Final Order package", "ATTORNEY", "signal:ATTORNEY_REVIEW_COMPLETE",
-			has("ATTORNEY_REVIEW_COMPLETE"), "Enter the rationale; record the outcome.")
-		add("invoice", "Create the review invoice", "PM", "invoice", f.ReviewInvoice, "")
-		// The decision report, then the documents made from it, before the
-		// Final Order package that carries them.
+		// The decision letter (change log #14): drafted by the Coder for a coding determination, by the Nurse Reviewer
+		// for a clinical one; reviewed and approved by the Attorney (or sent back to its drafter); then QA.
+		drafter, drafterRoles := "CODER", []string{"CODER"}
+		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") {
+			drafter, drafterRoles = "NURSE_PHYSICIAN", []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE"}
+			if strings.Contains(strings.ReplaceAll(f.Act["CODING_REVIEW_COMPLETE"].Body, " ", ""), `"review_scenario":"med_nec_coding"`) {
+				drafterRoles = append(drafterRoles, "CODER") // medical necessity and coding: written with the Coder
+			}
+		}
 		reportFrom := len(steps)
-		add("report_save", "Save the decision report", "CASE_MANAGER", "report:save", f.ReportSaved,
-			"Enter the outcome and amounts, paste or upload the report, and save.")
-		add("report_generate", "Generate the decision report", "CASE_MANAGER", "report:final_order_rationale",
-			f.Generated["final_order_rationale"], "Generate the pasted report, or upload the finished one; it goes under Documents and to the QA gate.")
+		add("report_save", "Write the decision letter", drafter, "report:save", f.ReportSaved,
+			"The outcome, the amounts and the rationale -- or upload the finished letter -- and save.")
+		add("report_generate", "Generate the decision letter", drafter, "report:final_order_rationale",
+			f.Generated["final_order_rationale"], "It goes to the Attorney for review, then to QA.")
+		for i := reportFrom; i < len(steps); i++ {
+			early[steps[i].Key] = true
+			steps[i].OwnerRoles = drafterRoles
+		}
+		add("attorney_review", "Review and approve the decision letter", "ATTORNEY", "qa:final_order_rationale",
+			f.AttorneyPassed["final_order_rationale"],
+			"Approve it for QA's final review, or send it back to its drafter with the revisions needed.")
+		qaGenerated(reportFrom) // QA's final review of the decision letter
+		add("invoice", "Create the review invoice", "PM", "invoice", f.ReviewInvoice, "")
+		// The Admin's documents that go with the decision, before the Final Order package that carries them.
+		docsFrom := len(steps)
 		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
 			f.Generated["cover_letter_final_notice"], "")
 		invoiceLetters()
-		// The Admin and the PM may both edit the whole report.
-		for i := reportFrom; i < len(steps); i++ {
+		for i := docsFrom; i < len(steps); i++ {
 			early[steps[i].Key] = true
-			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
+		reportFrom = docsFrom
 		qaGenerated(reportFrom)
-		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
+		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "QA")
 		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
 			"Case Outcome, Number of Claims Reviewed, Final Amount Awarded, Party Billed.")
@@ -524,12 +543,14 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 		tenant, caseID).Scan(&f.ReportSaved)
 	f.Generated = map[string]bool{}
 	f.GeneratedPassed = map[string]bool{}
+	f.AttorneyPassed = map[string]bool{}
 	if rows, err := s.db.Query(ctx, `
-		SELECT DISTINCT ON (artifact) artifact, status FROM public.qa_reviews
+		SELECT DISTINCT ON (artifact) artifact, status, coalesce(pre_approved_by,'') FROM public.qa_reviews
 		WHERE tenant=$1 AND case_id=$2 AND channel='letter' ORDER BY artifact, created_at DESC`, tenant, caseID); err == nil {
 		for rows.Next() {
-			var tpl, st string
-			if rows.Scan(&tpl, &st) == nil {
+			var tpl, st, pre string
+			if rows.Scan(&tpl, &st, &pre) == nil {
+				f.AttorneyPassed[tpl] = st == "APPROVED" || st == "SENT" || (st == "PENDING" && pre != "")
 				f.Generated[tpl] = st != "REJECTED"
 				f.GeneratedPassed[tpl] = st == "APPROVED" || st == "SENT"
 			}
@@ -692,21 +713,21 @@ func estimatePair(f wfFacts, add func(key, label, owner, action string, done boo
 	est, acc := f.Letter["estimate_cost"], f.Letter["acceptance"]
 	drafted := func(st string) bool { return st == "SENT" || st == "PENDING" || st == "APPROVED" }
 	passed := func(st string) bool { return st == "SENT" || st == "APPROVED" }
-	add("letter:estimate_cost", "Draft the Full Review Estimated Cost email", "CODER", "letter:estimate_cost", drafted(est),
+	add("letter:estimate_cost", "Draft the Full Review Estimated Cost email", "CASE_MANAGER", "letter:estimate_cost", drafted(est),
 		"Compose it in Correspondence; it is held for QA and goes out with the acceptance.")
 	add("letter:acceptance", "Draft the Acceptance letter", "CASE_MANAGER", "letter:acceptance", drafted(acc),
 		"Compose it in Correspondence; it goes out right after the Cost Estimate.")
 	if f.ReviewerSends {
-		add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "PM", "qa:estimate_cost", passed(est), "")
-		add("qa:acceptance", "QA the Acceptance letter", "PM", "qa:acceptance", passed(acc), "")
+		add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "QA", "qa:estimate_cost", passed(est), "")
+		add("qa:acceptance", "QA the Acceptance letter", "QA", "qa:acceptance", passed(acc), "")
 		// One send from the QA gate sends both, the Cost Estimate first (2026-11-26).
 		add("send:estimate_acceptance", "Send the Cost Estimate and the Acceptance letter together", "CASE_MANAGER", "send:acceptance",
 			est == "SENT" && acc == "SENT", "From the QA gate, once both have passed QA: one Send, the Cost Estimate first, then the acceptance.")
 		return
 	}
-	add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "PM", "qa:estimate_cost", passed(est),
+	add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "QA", "qa:estimate_cost", passed(est),
 		"Approving it holds it until the acceptance has passed QA too.")
-	add("qa:acceptance", "QA the Acceptance letter — both go out together", "PM", "qa:acceptance", acc == "SENT",
+	add("qa:acceptance", "QA the Acceptance letter — both go out together", "QA", "qa:acceptance", acc == "SENT",
 		"Approving it sends the Cost Estimate, then the acceptance.")
 }
 

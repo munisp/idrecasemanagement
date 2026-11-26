@@ -73,7 +73,7 @@ const Letters = (() => {
       <p class="muted">The decision (outcome, amounts, who reviewed it), which the cover letter and the invoices print, and
         the Review Rationale and Letter itself: pasted here, or uploaded as the finished document. Both go to the QA queue.</p>
       <div id="dr-body"><p class="muted">Loading…</p></div>
-      ${can("ATTORNEY", "PM") ? `<form class="inline-form dr-revise" onsubmit="event.preventDefault(); Letters.askRevisions('${esc(id)}', this)">
+      ${can("ATTORNEY", "QA") ? `<form class="inline-form dr-revise" onsubmit="event.preventDefault(); Letters.askRevisions('${esc(id)}', this)">
         <label>Ask for revisions from <select name="to"><option value="CODER">the Coder</option><option value="NURSE_PHYSICIAN">the Nurse / Physician</option>
           <option value="BOTH">both</option></select></label>
         <label class="wide">What to change <input name="note" required maxlength="4000" placeholder="e.g. the coding table misses the 99285 line" /></label>

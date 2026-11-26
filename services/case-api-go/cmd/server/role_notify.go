@@ -120,23 +120,20 @@ func (s *server) notifyOnSignal(r *http.Request, tenant, caseID, signal string, 
 	case "PLAN_RESPONSE_RECEIVED":
 		s.notifyRoles(r, tenant, caseID, "REVIEW_ASSIGNED", fmt.Sprintf("Case %s is ready for coding review", cn), "CODER")
 	case "CODING_REVIEW_COMPLETE":
-		s.notifyRoles(r, tenant, caseID, "DECISION_LETTER_DRAFTED",
-			fmt.Sprintf("Case %s: the Coder finished the coding review — the decision letter is ready for the Attorney", cn), "ATTORNEY", "PM")
+		// Change log #14: the review done, its drafter writes the decision letter; the Attorney hears of the letter
+		// itself once it is drafted (lettergen), not of the review.
 		if v, _ := data["clinical_requested"].(bool); v {
 			s.notifyRoles(r, tenant, caseID, "REVIEW_ASSIGNED", fmt.Sprintf("Case %s is assigned for clinical review", cn), "NURSE_PHYSICIAN")
 		}
 	case "CLINICAL_REVIEW_COMPLETE":
-		s.notifyRoles(r, tenant, caseID, "DECISION_LETTER_DRAFTED",
-			fmt.Sprintf("Case %s: the Nurse / Physician finished the clinical review — the decision letter is ready for the Attorney", cn), "ATTORNEY", "PM")
 		if v, _ := data["medical_reviewer_required"].(bool); v { // change log #15: the external Medical Reviewer was involved
 			mr, _ := data["medical_reviewer"].(string)
 			s.notifyRoles(r, tenant, caseID, "MEDICAL_REVIEWER_INVOLVED",
 				fmt.Sprintf("Case %s: the external Medical Reviewer (%s) reviewed medical necessity", cn, mr), "PM")
 		}
-	case "ATTORNEY_REVIEW_COMPLETE":
-		s.notifyRoles(r, tenant, caseID, "DECISION_LETTER_APPROVED",
-			fmt.Sprintf("Case %s: the Attorney approved the decision letter — ready for final QA review", cn), "QA", "PM")
 	case "FINAL_ORDER_ISSUED":
+		// Change log #24e: Final Order released -- notify the PM and the appropriate case team members (the Coder,
+		// Nurse Reviewer, Attorney and QA named on the case), and archive the case documentation (below).
 		s.notifyCaseTeam(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: AHCA's Final Order is recorded — the case moves to invoicing", cn))
 		s.archiveCaseLater(r, tenant, caseID) // #24e.ii: archive the case documentation (case_archive.go)
 	}
@@ -165,16 +162,32 @@ func (s *server) notifyOnQA(r *http.Request, tenant, caseID, artifact, decision,
 		return
 	}
 	what := templateWords(artifact)
-	if decision == "REJECT" { // the PM hears of significant revisions and quality issues
+	// Change log #14, least privilege: QA's verdict goes to the document's owner -- whoever drafted it -- and the PM
+	// (who hears of significant revisions and quality issues), not to every specialist on the case.
+	owner := s.draftOwner(r, tenant, caseID, artifact)
+	if decision == "REJECT" {
+		// Change log #24d.i: QA's revisions on a decision letter or the Final Order go to the Coder / Nurse Reviewer and
+		// the Attorney named on the case (with the PM); the draft's own author was also told with the decision.
 		s.notifyRoles(r, tenant, caseID, "REVISIONS_REQUESTED",
-			fmt.Sprintf("Case %s: QA sent the %s back for revisions%s", cn, what, orDash(" — "+note)), "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "PM")
+			fmt.Sprintf("Case %s: QA sent the %s back for revisions%s", cn, what, orDash(" — "+note)), "CODER", "NURSE_PHYSICIAN", "ATTORNEY")
 		return
 	}
-	// "Notify PM when approved"; the Coder, Nurse Reviewer and Attorney hear the final review is complete.
-	s.notifyRoles(r, tenant, caseID, "QA_PASSED", fmt.Sprintf("Case %s: the %s passed QA", cn, what), "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY")
-	if artifact == "final_order" {
-		s.notifyCaseTeam(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: the Final Order package went to AHCA", cn))
+	if artifact == "final_order" { // "QA: notify PM when Final Orders are completed and ready for release"
+		s.notifyRoles(r, tenant, caseID, "FINAL_ORDER_READY", fmt.Sprintf("Case %s: the Final Order package passed QA and is ready for release", cn))
+		return
 	}
+	s.notifyRoles(r, tenant, caseID, "QA_PASSED", fmt.Sprintf("Case %s: the %s passed QA", cn, what))
+	if owner != "" { // the Coder or Nurse Reviewer who drafted the decision letter hears its final review is complete
+		s.notify(r, tenant, owner, "QA_PASSED", fmt.Sprintf("Case %s: your %s passed QA", cn, what), "#/cases/"+caseID)
+	}
+}
+
+// draftOwner: who drafted the latest version of artifact on the case (requested_by_sub), "" when unknown.
+func (s *server) draftOwner(r *http.Request, tenant, caseID, artifact string) string {
+	var sub string
+	_ = s.db.QueryRow(r.Context(), `SELECT coalesce(requested_by_sub,'') FROM public.qa_reviews
+		WHERE tenant=$1 AND case_id::text=$2 AND artifact=$3 ORDER BY created_at DESC LIMIT 1`, tenant, caseID, artifact).Scan(&sub)
+	return sub
 }
 
 // notifyEligibilityIssue: an ineligible dispute or an AOR hold goes to the PM (the change log's escalation).
@@ -204,7 +217,7 @@ func templateWords(key string) string {
 // to change (change log 2026-11-25 #24c). Recorded on the case; the specialists are told.
 func (s *server) requestRevisions(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "ATTORNEY", "QA", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, "ATTORNEY", "QA", "FEDERAL_ADMIN", "PLATFORM_ADMIN") { // change log #14: the Attorney and QA, not the PM
 		http.Error(w, `{"error":"forbidden: the Attorney or QA asks for revisions"}`, http.StatusForbidden)
 		return
 	}
@@ -236,8 +249,10 @@ func (s *server) requestRevisions(w http.ResponseWriter, r *http.Request) {
 // qaAcceptRoles: who may decide a QA step the program assigns to role. The QA role and the PM stand in for each
 // other (the templates name the PM; the change log's QA role does the review).
 func qaAcceptRoles(role string) []string {
+	// Change log #14 (least privilege): QA reviews the letters; the PM oversees them but no longer approves in QA's
+	// place. Templates that name the PM as their reviewer are QA's to review.
 	if role == "PM" || role == "QA" {
-		return []string{"QA", "PM"}
+		return []string{"QA"}
 	}
 	if role == "" {
 		return nil

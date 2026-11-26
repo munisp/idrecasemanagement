@@ -30,11 +30,13 @@ const (
 )
 
 var (
-	drAdminRoles    = []string{"TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
-	drReviewerRoles = []string{"CASE_MANAGER", "PM", "ATTORNEY"}
-	drClinicalRoles = []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE", "CASE_MANAGER", "PM"}
-	drCodingRoles   = []string{"CODER", "CASE_MANAGER", "PM"}
-	drLegalRoles    = []string{"ATTORNEY", "CASE_MANAGER", "PM"}
+	drAdminRoles = []string{"TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
+	// Change log #14 (least privilege): the decision letter is drafted by the Coder (coding) or the Nurse Reviewer
+	// (clinical), and reviewed, edited and approved by the Attorney. The Admin and the PM read it; they no longer write it.
+	drReviewerRoles = []string{"CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY"}
+	drClinicalRoles = []string{"NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY"}
+	drCodingRoles   = []string{"CODER", "ATTORNEY"}
+	drLegalRoles    = []string{"ATTORNEY"}
 	drReadRoles     = append(append([]string{}, caseStaffRoles...), "TENANT_ADMIN", "FINANCE")
 )
 
@@ -652,7 +654,7 @@ func (s *server) putLetterSettings(w http.ResponseWriter, r *http.Request) {
 func (s *server) attachDecisionReport(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !drCan(p, drReviewerRoles) {
-		http.Error(w, `{"error":"forbidden: the Admin or the PM uploads the decision report"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the decision letter is uploaded by its drafter (the Coder or the Nurse Reviewer) or the Attorney"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
