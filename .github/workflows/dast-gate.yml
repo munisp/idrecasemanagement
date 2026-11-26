@@ -48,6 +48,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Rate limits and the public email check need Redis; without it they fail closed (every request refused),
+      # so the checks that exercise them could never see the real answer (2026-11-26).
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       PGPASSWORD: idre
       PSQL: psql -h 127.0.0.1 -U idre -d idre
