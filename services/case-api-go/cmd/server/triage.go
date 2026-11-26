@@ -418,10 +418,11 @@ func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
 	// Claim type (2026-11-26): the packet's disputed issue; a denial is "in part" when the plan paid something
 	// on the claims, "in full" when it paid nothing. Without a stated issue, claims with a denial on them say so.
 	if in.DisputeType == "" {
-		var paid, denied int64
+		var paid, denied, billed, claims, unpaid int64
 		_ = s.db.QueryRow(r.Context(), `SELECT coalesce(SUM(paid_cents),0),
-			count(*) FILTER (WHERE date_of_denial IS NOT NULL OR coalesce(denial_reason,'') <> '')
-			FROM public.case_claims WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&paid, &denied)
+			count(*) FILTER (WHERE date_of_denial IS NOT NULL OR coalesce(denial_reason,'') <> ''),
+			coalesce(SUM(billed_cents),0), count(*), count(*) FILTER (WHERE coalesce(paid_cents,0) = 0)
+			FROM public.case_claims WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&paid, &denied, &billed, &claims, &unpaid)
 		issue := strings.ToLower(fmt.Sprint(d["disputed_issue"]))
 		denial := func() string {
 			if paid > 0 {
@@ -438,6 +439,12 @@ func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
 			in.DisputeType, from["dispute_type"] = denial(), "filing packet"
 		case denied > 0:
 			in.DisputeType, from["dispute_type"] = denial(), "filing packet (its claims show a denial)"
+		// No issue or denial stated: the amounts on the claim lines. Every claim paid something, less than billed:
+		// underpaid. Nothing paid on any claim: denied in full.
+		case claims > 0 && billed > 0 && unpaid == 0 && paid < billed:
+			in.DisputeType, from["dispute_type"] = "underpaid", "filing packet (its claims were paid less than billed)"
+		case claims > 0 && billed > 0 && paid == 0:
+			in.DisputeType, from["dispute_type"] = "denied_in_full", "filing packet (nothing was paid on its claims)"
 		}
 	}
 	if in.FinalDeterminationAt == "" {
