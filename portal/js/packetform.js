@@ -201,7 +201,12 @@ window.PacketForm = (() => {
       <fieldset class="pf-sec"><legend>Supporting documentation being submitted${R}</legend>
         <p class="pf-hint">* Required for all disputes. If a required document can't be filed, upload an explanation in its place.</p>
         <div class="pf-checks">${DOCUMENTS.map(([k, label, req]) => `<label class="pf-choice"><input type="checkbox" name="doc" value="${k}" ${docs.includes(k) ? "checked" : ""} /> ${req ? "* " : ""}${esc(label)}</label>`).join("")}</div>
-        ${text(d, "documents_other", "Other documentation")}</fieldset>
+        ${text(d, "documents_other", "Other documentation")}
+        ${opts.filer ? `<div class="pf-uploads">
+          <label class="pf-file">Upload your supporting documents <span class="pf-hint">— PDF, Word, Excel or images, up to 10 MB each and 30 MB in all.
+            Say what each one is and its box above is ticked for you. You can also send documents later with the upload link we email you.</span>
+            <input type="file" name="support_files" multiple accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg,.tif,.tiff,application/pdf,image/*" /></label>
+          <ul class="pf-upload-list"></ul></div>` : ""}</fieldset>
       <fieldset class="pf-sec"><legend>Eligibility attestation</legend>
         <p class="pf-hint">To be completed by the owner, officer, director or other legally authorized representative of the filing party. Tick every criterion this claim meets.</p>
         <div class="pf-checks">${ATTESTATION.map(([k, label]) => `<label class="pf-choice"><input type="checkbox" name="att" value="${k}" ${att[k] ? "checked" : ""} /> ${esc(label)}</label>`).join("")}</div>
@@ -250,6 +255,60 @@ window.PacketForm = (() => {
     pf.addEventListener("change", touch);
     sync();
     bindEstimate(pf);
+    bindUploads(pf);
+  }
+
+  // Supporting documents uploaded on the form (2026-11-26): each file says what it is, which ticks its box in the
+  // checklist; taking the file off unticks a box it ticked. The files live on the form's host, so they survive a
+  // refill of the form (reading a packet PDF into it).
+  const SUPPORT_EXT = /\.(pdf|docx|xlsx|png|jpe?g|tiff?)$/i;
+  function bindUploads(pf) {
+    const host = pf.parentElement, input = pf.querySelector('input[name="support_files"]'), list = pf.querySelector(".pf-upload-list");
+    if (!input || !list) return;
+    host._supportFiles = host._supportFiles || [];
+    const box = (k) => pf.querySelector(`input[name="doc"][value="${k}"]`);
+    const kb = (n) => (n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
+    const render = () => {
+      list.innerHTML = host._supportFiles.map((x, i) => `<li class="pf-upload${x.type ? "" : " pf-upload-need"}">
+        <span class="pf-upload-name">${esc(x.file.name)} <span class="pf-hint">(${kb(x.file.size)})</span></span>
+        <select data-i="${i}" aria-label="What is ${esc(x.file.name)}?"><option value="">What is this document?</option>
+          ${DOCUMENTS.map(([k, label]) => `<option value="${k}" ${x.type === k ? "selected" : ""}>${esc(label)}</option>`).join("")}</select>
+        <button type="button" class="pf-upload-remove" data-i="${i}" aria-label="Remove ${esc(x.file.name)}">Remove</button></li>`).join("");
+    };
+    // A box the uploads ticked is unticked when no upload of that type is left (a box the filer ticked stays).
+    // Which boxes the uploads ticked is kept on the host with the files, so it survives a refill too.
+    host._autoTicked = host._autoTicked || new Set();
+    const retick = (prev) => {
+      const used = new Set(host._supportFiles.map((x) => x.type).filter(Boolean));
+      used.forEach((k) => { const b = box(k); if (b && !b.checked) { b.checked = true; host._autoTicked.add(k); } });
+      if (prev && !used.has(prev) && host._autoTicked.has(prev)) { const b = box(prev); if (b) b.checked = false; host._autoTicked.delete(prev); }
+      pf.dataset.touched = "1";
+    };
+    input.addEventListener("change", () => {
+      const bad = [];
+      for (const f of input.files) {
+        if (!SUPPORT_EXT.test(f.name)) bad.push(`${f.name}: not a PDF, Word or Excel file, or an image`);
+        else if (f.size > 10 << 20) bad.push(`${f.name}: over 10 MB`);
+        else host._supportFiles.push({ file: f, type: "" });
+      }
+      input.value = "";
+      render();
+      if (bad.length) alert("Not added:\n" + bad.join("\n"));
+    });
+    list.addEventListener("change", (ev) => {
+      if (ev.target.tagName !== "SELECT") return;
+      const x = host._supportFiles[Number(ev.target.dataset.i)], prev = x.type;
+      x.type = ev.target.value;
+      ev.target.closest("li").classList.toggle("pf-upload-need", !x.type);
+      retick(prev);
+    });
+    list.addEventListener("click", (ev) => {
+      if (!ev.target.classList.contains("pf-upload-remove")) return;
+      const [x] = host._supportFiles.splice(Number(ev.target.dataset.i), 1);
+      render(); retick(x && x.type);
+    });
+    // Refilled form: show the files again, with their boxes ticked.
+    render(); if (host._supportFiles.length) retick();
   }
 
   // The full review fee estimate (change log #4): shown under "Do you want an estimate?" when the filer answers Yes
@@ -589,6 +648,8 @@ window.PacketForm = (() => {
       claims.push(c);
     });
     if (pf.dataset.filer === "1") problems.push(...requiredProblems(details, amt, claims));
+    (pf.parentElement?._supportFiles || []).filter((x) => !x.type)
+      .forEach((x) => problems.push(`Supporting documents: choose what ${x.file.name} is`));
     const remove = (pf.dataset.removed || "").split("\n").filter((x) => x && !claims.some((c) => c.claim_number === x));
     return { packet: { details, disputed_amount_cents: amt, claims, remove_claims: remove }, problems };
   }
@@ -626,11 +687,17 @@ window.PacketForm = (() => {
     };
     await add("filing_packet", host._packetFile, "The packet PDF");
     await add("aor_letter", host.querySelector('input[name="aor_letter_file"]')?.files?.[0], "The appointment of representative letter");
+    const support = host._supportFiles || [];
+    if (support.reduce((n, x) => n + x.file.size, 0) > 30 << 20)
+      throw new Error("The supporting documents are over 30 MB in all — remove some here and send them with the upload link we email you.");
+    for (const x of support) out.push({ kind: "supporting", doc_type: x.type, filename: x.file.name, data_b64: await b64(x.file) });
     return out;
   }
   function clearFiles(root) {
     const host = root.querySelector(".pf")?.parentElement || root;
     delete host._packetFile;
+    host._supportFiles = []; host._autoTicked = new Set();
+    const list = host.querySelector(".pf-upload-list"); if (list) list.innerHTML = "";
     const f = host.querySelector('input[name="aor_letter_file"]'); if (f) f.value = "";
   }
 

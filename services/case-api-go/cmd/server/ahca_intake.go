@@ -46,7 +46,7 @@ func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 30<<20) // the packet form, plus its attached PDFs (packet, AOR letter) in base64
+	r.Body = http.MaxBytesReader(w, r.Body, maxFilingBodyBytes) // the packet form, its attached PDFs and supporting documents in base64
 	var in struct {
 		Tenant              string        `json:"tenant"`
 		Email               string        `json:"email"`

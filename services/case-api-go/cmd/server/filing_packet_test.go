@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -179,5 +180,35 @@ func TestSignatureProblem(t *testing.T) {
 		if signatureProblem(bad) == "" {
 			t.Errorf("accepted %q", bad[:min(len(bad), 30)])
 		}
+	}
+}
+
+// Supporting documents uploaded on the form (2026-11-26): typed, checked, and ticking their own box.
+func TestFilingSupportingDocuments(t *testing.T) {
+	pdf := base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 eob"))
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nlicense"))
+	pk := &filingPacket{Details: map[string]any{"packet_documents_submitted": []any{"claim_forms"}}, Attachments: []filingAttachment{
+		{Kind: "supporting", DocType: "denials_eobs", Filename: "eob.pdf", DataB64: pdf},
+		{Kind: "supporting", DocType: "florida_license", Filename: "license.png", DataB64: png},
+		{Kind: "supporting", DocType: "denials_eobs", Filename: "eob2.pdf", DataB64: pdf}, // more than one of a type is fine
+	}}
+	if p := pk.attachmentProblems(); len(p) != 0 {
+		t.Fatalf("good supporting documents refused: %v", p)
+	}
+	out, _, _, _ := pk.normalize()
+	got := out["packet_documents_submitted"].([]string)
+	for _, want := range []string{"claim_forms", "denials_eobs", "florida_license"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("an uploaded %s did not tick its box: %v", want, got)
+		}
+	}
+	bad := &filingPacket{Attachments: []filingAttachment{
+		{Kind: "supporting", DocType: "", Filename: "what.pdf", DataB64: pdf},
+		{Kind: "supporting", DocType: "contract", Filename: "page.html", DataB64: pdf},
+		{Kind: "supporting", DocType: "contract", Filename: "big.pdf", DataB64: base64.StdEncoding.EncodeToString(make([]byte, maxFilingAttachmentBytes+1))},
+	}}
+	p := bad.attachmentProblems()
+	if len(p) != 3 || !strings.Contains(p[0], "what.pdf: choose what this document is") || !strings.Contains(p[1], "page.html: must be") || !strings.Contains(p[2], "over 10 MB") {
+		t.Fatalf("problems = %v", p)
 	}
 }

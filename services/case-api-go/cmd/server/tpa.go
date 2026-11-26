@@ -38,7 +38,7 @@ import (
 // and the whole filing body is capped so an unbounded payload cannot be posted.
 const (
 	maxFilingNoteBytes = 5 << 20  // 5 MB of free-text notes
-	maxFilingBodyBytes = 30 << 20 // the whole filing: note, packet, fields and the packet's attached PDFs (base64)
+	maxFilingBodyBytes = 72 << 20 // the whole filing: note, packet, fields, the attached PDFs and up to 30 MB of supporting documents (base64)
 )
 
 type tpaOrg struct {
