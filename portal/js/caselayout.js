@@ -20,6 +20,16 @@ const CaseLayout = (() => {
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   // ---- header ----------------------------------------------------------------------------------------------
+  // How a dispute was filed (2026-11-26): the filer's uploaded packet PDF, the packet typed into the online form, or no
+  // packet; and how many supporting documents came with the filing. One chip for the intake list and the case page.
+  function filedWithChip(src, docs) {
+    const n = Number(docs) || 0;
+    const main = src === "pdf" ? `<span class="chip chip-pdf" title="The filer uploaded their filled packet PDF; it is kept under Documents › Intake">📎 Uploaded packet PDF</span>`
+      : src === "form" ? `<span class="chip chip-form" title="The filer typed the packet into the online form; a PDF of what they entered is kept under Documents › Intake">⌨ Typed on the form</span>`
+      : src === "none" ? `<span class="chip chip-none" title="Filed without a filing packet (opened by staff, by e-mail, or before the packet form)">No packet</span>` : "";
+    return main + (n ? ` <span class="chip chip-docs" title="Supporting documents sent with the filing (Documents › Intake)">+ ${n} document${n === 1 ? "" : "s"}</span>` : "");
+  }
+
   function header(c, prog, clocks) {
     const d = c.details || {};
     const programmed = !!(prog && prog.config);
@@ -48,7 +58,8 @@ const CaseLayout = (() => {
         <!--case-more-->
       </div>
       <p class="case-parties"><b>${esc(provider)}</b> <span class="case-v">v.</span> <b>${esc(plan)}</b>
-        ${d.filing_party_type ? `<span class="chip">Filed by the ${d.filing_party_type === "HEALTH_PLAN" ? "health plan" : "provider"}</span>` : ""}</p>
+        ${d.filing_party_type ? `<span class="chip">Filed by the ${d.filing_party_type === "HEALTH_PLAN" ? "health plan" : "provider"}</span>` : ""}
+        ${filedWithChip(c.filed_with, c.filing_docs)}</p>
       <div class="case-main">
         <div class="case-main-left">
           <div class="case-story" id="case-story" data-case="${esc(c.id)}" aria-live="polite"><p class="muted">Summarising the case…</p></div>
@@ -338,5 +349,5 @@ const CaseLayout = (() => {
     }
   }
 
-  return { header, story, moreMenu, nextStep, showSteps, documents, toggleUpload, timeline, tabs, select, reveal, distribute, markTabs, bind };
+  return { header, filedWithChip, story, moreMenu, nextStep, showSteps, documents, toggleUpload, timeline, tabs, select, reveal, distribute, markTabs, bind };
 })();

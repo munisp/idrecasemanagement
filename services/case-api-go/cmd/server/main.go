@@ -1760,6 +1760,11 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.Tenant = tenant
+	// How it was filed (2026-11-26): uploaded packet PDF, typed on the form, or no packet; and the documents sent with it.
+	var filedWith string
+	var filingDocs int
+	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT %s FROM tenant_%s.cases c WHERE c.id=$1`, filedWithSQL(tenant), sanitizeTenant(tenant)), id).
+		Scan(&filedWith, &filingDocs)
 	var dj map[string]any
 	_ = json.Unmarshal(details, &dj)
 	var pd map[string]any
@@ -1774,6 +1779,7 @@ func (s *server) getCase(w http.ResponseWriter, r *http.Request) {
 		// "" | AWAITING_PAYMENT | INELIGIBLE -- the portal freezes everything
 		// but correspondence on a locked case (caselock.go).
 		"lock": s.caseLock(r.Context(), c.Tenant, c.ID),
+		"filed_with": filedWith, "filing_docs": filingDocs,
 	})
 }
 

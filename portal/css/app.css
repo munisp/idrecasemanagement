@@ -1664,3 +1664,7 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .who-staff,.who-auto,.who-gen{background:var(--surface-sunken,#f1f3f5);color:var(--text-secondary,#4b5563)}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .who-health-plan,:root:not([data-theme="light"]) .who-tpa,:root:not([data-theme="light"]) .who-filer,:root:not([data-theme="light"]) .who-provider,:root:not([data-theme="light"]) .who-party,:root:not([data-theme="light"]) .who-respondent,:root:not([data-theme="light"]) .who-sharebox,:root:not([data-theme="light"]) .who-requested{filter:brightness(.85) saturate(.9)}}
 .human-check{margin:10px 0 6px}
+/* How a dispute was filed (2026-11-26) */
+.chip-none{background:#f1f0ec;color:#6b6760}
+.chip-docs{background:#fff4e0;color:#8a5a00}
+.intake-fw{display:inline-flex;align-items:center;gap:6px;margin-left:12px;font-size:14px}
