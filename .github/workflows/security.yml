@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
+        with: { go-version-file: services/case-api-go/go.mod, cache-dependency-path: services/case-api-go/go.sum }
       - uses: securego/gosec@master
         with:
           args: -no-fail -fmt sarif -out gosec.sarif ./...
@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
+        with: { go-version-file: services/case-api-go/go.mod, cache-dependency-path: services/case-api-go/go.sum }
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: cd services/case-api-go && govulncheck ./...
 
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           severity: CRITICAL,HIGH
@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scanners: vuln

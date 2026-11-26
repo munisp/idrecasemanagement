@@ -1,0 +1,4 @@
+# The Flink streaming job only (flink run -py flink_stream.py): apache-flink caps pyarrow below 21 and, through
+# apache-beam, httplib2 below the fixed 0.32 -- so it is kept out of requirements.txt, which the rest of the service
+# (Spark, Ray, DataFusion, Sedona) installs with the patched pyarrow. Build the Flink image with --build-arg FLINK=1.
+apache-flink>=1.19

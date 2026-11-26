@@ -56,7 +56,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: services/case-api-go/go.mod
           cache-dependency-path: services/case-api-go/go.sum
 
       - uses: actions/setup-python@v5

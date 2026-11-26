@@ -1157,7 +1157,13 @@ const Views = (() => {
     if (a.startsWith("qa:") || a.startsWith("send:")) { location.hash = "#/qa"; return; }
     if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
     if (a === "summary") return open("#p-summary-details");
-    if (a === "invoice") return open("#p-inv-details");
+    if (a === "invoice") {
+      // The review invoice step bills the full review (or, on a default, the default) -- never the initial fee,
+      // which is billed at filing (2026-11-26: an invoice issued as "Initial fee" left this step waiting).
+      const kind = document.querySelector('#p-inv select[name="kind"]');
+      if (kind) kind.value = /default/i.test(st?.label || "") ? "DEFAULT" : "FULL_REVIEW";
+      return open("#p-inv-details");
+    }
     if (a === "report:save") return open("#p-dr-details");
     if (a.startsWith("report:")) {
       // Generating is quick to ask for and takes a few seconds to land: the
@@ -3962,7 +3968,7 @@ const Views = (() => {
           <label>Provider (%) <input name="pct_provider" type="number" min="0" max="100" step="0.01" placeholder="e.g. 10"
             oninput="Views.invSplit(this.form, 'provider')" /></label>
           <span class="muted inv-split-out"></span></span>
-        <label>Invoice for <select name="kind"><option value="INITIAL_FEE">Initial fee</option><option value="FULL_REVIEW">Full review</option><option value="DEFAULT">Default</option></select></label>
+        <label>Invoice for <select name="kind" title="The review invoice is Full review (Default on a default determination). The initial fee is billed at filing."><option value="FULL_REVIEW" selected>Full review</option><option value="DEFAULT">Default</option><option value="INITIAL_FEE">Initial fee (normally billed at filing)</option></select></label>
         <label>Amount ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required oninput="Views.invSplit(this.form)" /></label>
         <button>Issue invoice</button></form>` : `<p class="muted">Invoices are created by the PM.</p>`}<div id="p-inv-list" data-case-id="${esc(id)}"></div>
       <div class="claims-csv">
@@ -4623,6 +4629,10 @@ const Views = (() => {
       const q = r.queue || [];
       const recent = r.recent || [];
       const toSend = r.to_send || [];
+      // The Cost Estimate and the acceptance go out together, the estimate first (change log #13, 2026-11-26).
+      const qaPairNote = (i) => !i.sends_with ? "" : i.sends_with.ready
+        ? `<span class="cell-sub qa-pair">Goes out together with the ${esc(i.sends_with.label)}: one Send sends both, the Cost Estimate first.</span>`
+        : `<span class="cell-sub qa-pair">Goes out together with the ${esc(i.sends_with.label)}, which hasn't passed QA yet.</span>`;
       const me = Auth.claims()?.sub;
       // A drafter's own view (Coder) lists only what is theirs: their drafts and those on cases they're now named on.
       const maySend = (i) => r.own_only || i.requested_by_sub === me || can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
@@ -4637,9 +4647,11 @@ const Views = (() => {
         ? `<section class="panel"><h2>Passed QA — ready to send <span class="n">${toSend.length}</span></h2>
           <p class="panel-sub">Approved and back with the person who drafted them. Check the addresses and send; the send is logged and the case's dates are set.</p>
           <table class="qa-tbl"><thead><tr><th>Subject</th><th>Case</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
-          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span></td><td data-label="Case">${qaCase(i)}</td>
+          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span>${qaPairNote(i)}</td><td data-label="Case">${qaCase(i)}</td>
             <td data-label="Approved by">${esc(i.reviewed_by || "—")}</td><td class="muted" data-label="To">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
-            <td class="qa-tbl-act">${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Admin</span>`}</td></tr>`).join("") +
+            <td class="qa-tbl-act">${!maySend(i) ? `<span class="muted">with the Admin</span>`
+              : i.sends_with && !i.sends_with.ready ? `<span class="muted">waits for the ${esc(i.sends_with.label)}</span>`
+              : `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">${i.sends_with ? "Send both…" : "Send…"}</button>`}</td></tr>`).join("") +
           `</tbody></table></section>` : "";
       const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
           <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>
@@ -4885,9 +4897,12 @@ const Views = (() => {
     const box = document.getElementById("intake-segs");
     if (!box) return;
     const sts = ["", ...INTAKE_STATUSES];
-    const counts = await Promise.all(sts.map((st) => Api.program.intake({ limit: 1, status: st, ...SrvSearch.params("intake") }).then((r) => r.total ?? null).catch(() => null)));
+    const counts = await Promise.all(sts.map((st) => Api.program.intake({ limit: 1, status: st, ...(intakeFiledWith ? { filed_with: intakeFiledWith } : {}), ...SrvSearch.params("intake") }).then((r) => r.total ?? null).catch(() => null)));
     const label = (st) => st ? st.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase()) : "All";
-    box.innerHTML = ListUI.segs("Intake status", sts.map((st, i) => ({ value: st, label: label(st), count: counts[i] })), intakeStatus, "Views.intakeFilter");
+    box.innerHTML = ListUI.segs("Intake status", sts.map((st, i) => ({ value: st, label: label(st), count: counts[i] })), intakeStatus, "Views.intakeFilter") +
+      `<label class="intake-fw">Filed with <select onchange="Views.intakeFiledWithFilter(this.value)">
+        ${[["", "Any way"], ["pdf", "Uploaded packet PDF"], ["form", "Typed on the form"], ["none", "No packet"]]
+          .map(([v, l]) => `<option value="${v}" ${intakeFiledWith === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`;
   }
 
   async function intakeBox(status) {
@@ -4895,7 +4910,7 @@ const Views = (() => {
     if (!box) return;
     box.innerHTML = `<p class="muted">Loading…</p>`;
     try {
-      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status, ...SrvSearch.params("intake") }), Api.program.get().catch(() => null)]);
+      const [r, prog] = await Promise.all([Api.program.intake({ limit: Pager.size(), status, ...(intakeFiledWith ? { filed_with: intakeFiledWith } : {}), ...SrvSearch.params("intake") }), Api.program.get().catch(() => null)]);
       const rows = r.intake || [];
       const intakeTotal = r.total ?? rows.length;
       // Federal NSA intakes price on QPA; programmed tenants (FL AHCA) have
@@ -4909,7 +4924,7 @@ const Views = (() => {
           `</tbody></table>` : `<p class="muted">${SrvSearch.q("intake") ? `No intake request matches “${esc(SrvSearch.q("intake"))}”` : `No intake requests${status ? ` with status ${status}` : ""}`}.</p>`) +
         (rows.length ? `<div id="intake-pg"></div>` : "");
       Pager.server(document.getElementById("intake-pg"), { total: intakeTotal, shown: rows.length }, async (limit, offset) => {
-        const pr = await Api.program.intake({ limit, offset, status, ...SrvSearch.params("intake") });
+        const pr = await Api.program.intake({ limit, offset, status, ...(intakeFiledWith ? { filed_with: intakeFiledWith } : {}), ...SrvSearch.params("intake") });
         const prows = pr.intake || [];
         document.querySelector("#intake-tb tbody").innerHTML = prows.map(intakeRowHtml).join("");
         return { total: pr.total ?? intakeTotal, shown: prows.length };
@@ -4923,6 +4938,9 @@ const Views = (() => {
   }
 
   function intakeFilter(status) { intakeStatus = status; intakeSegs(); intakeBox(status); }
+  // How the dispute was filed (2026-11-26): uploaded packet PDF, typed on the form, or no packet.
+  let intakeFiledWith = "";
+  function intakeFiledWithFilter(v) { intakeFiledWith = v; intakeSegs(); intakeBox(intakeStatus); }
 
   // Shared by intake()'s initial render and every later page --
   // a real-case row (origin:"case", from startAhcaCase) has no intake
@@ -4937,9 +4955,7 @@ const Views = (() => {
         `<span class="muted">—</span>`}</td>
       <td>${esc(i.email)}</td><td>${esc(i.org || "")}</td>
       <td>${i.filing_party_type === "HEALTH_PLAN" ? badge("HEALTH_PLAN") : `<span class="muted">Provider</span>`}</td>
-      <td>${i.packet_source === "pdf" ? `<span class="chip chip-pdf" title="The filer uploaded the filled packet PDF; it is kept under Intake">Packet PDF</span>`
-        : i.packet_source === "form" ? `<span class="chip chip-form" title="The filer typed the packet into the online form; a PDF of it is kept under Intake">Online form</span>`
-        : `<span class="muted">—</span>`}</td>
+      <td>${CaseLayout.filedWithChip(i.packet_source, i.filing_docs) || `<span class="muted">—</span>`}</td>
       <td>${i.service_line ? esc(i.service_line) : `<span class="muted">—</span>`}</td>
       <td>${amtCents ? `$${(amtCents / 100).toFixed(2)}` : `<span class="muted">—</span>`}</td>
       <td>${badge(i.status)} ${i.origin === "legacy" ? day13Countdown(i) : ""}</td>
@@ -12917,5 +12933,5 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn, reviewerAddFn, reviewerRemoveFn };
+  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, intakeFiledWithFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn, reviewerAddFn, reviewerRemoveFn };
 })();

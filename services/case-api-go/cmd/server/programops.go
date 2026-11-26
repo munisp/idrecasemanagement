@@ -800,10 +800,10 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 			       qpa_cents,
 			       'case' AS origin,
 			       service_line,
-			       details->>'packet_source' AS packet_source -- pdf | form (change log #12)
-			FROM tenant_%s.cases
+			       %s
+			FROM tenant_%s.cases c
 			WHERE details->>'requester_email' IS NOT NULL
-			ORDER BY opened_at DESC LIMIT 200`, sanitizeTenant(tenant)))
+			ORDER BY opened_at DESC LIMIT 200`, filedWithSQL(tenant), sanitizeTenant(tenant)))
 		if cerr == nil {
 			rows = append(rows, caseRows...)
 		}
@@ -819,6 +819,16 @@ func (s *server) listIntake(w http.ResponseWriter, r *http.Request) {
 		filtered := rows[:0]
 		for _, row := range rows {
 			if str(row["status"]) == status {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+	// ?filed_with=pdf|form|none: how the dispute was filed (2026-11-26).
+	if fw := r.URL.Query().Get("filed_with"); fw != "" {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if str(row["packet_source"]) == fw {
 				filtered = append(filtered, row)
 			}
 		}
@@ -1361,4 +1371,18 @@ func claimDBError(err error) string {
 		return "an amount is too large"
 	}
 	return "it could not be saved"
+}
+
+// filedWithSQL: how a case was filed, for the intake list and the case page (2026-11-26) -- "pdf" (the filer
+// uploaded their filled packet PDF), "form" (the packet was typed into the online form), "none" (no packet) -- from
+// the case itself, so cases filed before details.packet_source was recorded read right too; and filing_docs, how
+// many documents the filing side sent with it (supporting documents, by the filer or their TPA/plan login).
+func filedWithSQL(tenant string) string {
+	t := sanitizeTenant(tenant)
+	return fmt.Sprintf(`coalesce(c.details->>'packet_source',
+			         CASE WHEN EXISTS (SELECT 1 FROM tenant_%[1]s.documents d WHERE d.case_id=c.id AND d.filename='Filing packet (as uploaded by the filer).pdf') THEN 'pdf'
+			              WHEN c.details ? 'packet_provider_type' THEN 'form' ELSE 'none' END) AS packet_source,
+			       (SELECT count(*) FROM tenant_%[1]s.documents d WHERE d.case_id=c.id AND d.folder='INTAKE'
+			          AND coalesce(d.uploaded_by,'') NOT LIKE 'lettergen:%%' AND d.filename NOT LIKE 'Eligibility Checklist%%'
+			          AND d.filename NOT LIKE 'Filing packet%%' AND d.filename <> 'Appointment of representative letter.pdf') AS filing_docs`, t)
 }
