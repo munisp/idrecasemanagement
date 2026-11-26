@@ -55,3 +55,12 @@ func turnstilePassed(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
+
+// portalTurnstilePassed: the check for the signed-in TPA and health plan filing forms (2026-11-26). A partner's own
+// system calling with an API key is never asked -- it cannot solve a visual check, and the key is its proof.
+func portalTurnstilePassed(w http.ResponseWriter, r *http.Request) bool {
+	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && isAPIKeyPrincipal(p) {
+		return true
+	}
+	return turnstilePassed(w, r)
+}

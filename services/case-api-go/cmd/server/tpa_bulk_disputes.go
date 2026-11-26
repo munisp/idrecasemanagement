@@ -444,6 +444,9 @@ func parseDollars(v string) (int64, bool) {
 
 // tpaBulkDisputes: POST /tpa/disputes/bulk (multipart: file=ZIP, batch_ref).
 func (s *server) tpaBulkDisputes(w http.ResponseWriter, r *http.Request) {
+	if !portalTurnstilePassed(w, r) { // "I am human" on the portal filing forms, not for API keys (turnstile.go)
+		return
+	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	if !s.featureGate(w, r, tenant, "tpa_onboarding") {
 		return

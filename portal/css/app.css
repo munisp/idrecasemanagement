@@ -1663,3 +1663,4 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .who-sharebox,.who-requested{background:#fff4e5;color:#8a4b00}
 .who-staff,.who-auto,.who-gen{background:var(--surface-sunken,#f1f3f5);color:var(--text-secondary,#4b5563)}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .who-health-plan,:root:not([data-theme="light"]) .who-tpa,:root:not([data-theme="light"]) .who-filer,:root:not([data-theme="light"]) .who-provider,:root:not([data-theme="light"]) .who-party,:root:not([data-theme="light"]) .who-respondent,:root:not([data-theme="light"]) .who-sharebox,:root:not([data-theme="light"]) .who-requested{filter:brightness(.85) saturate(.9)}}
+.human-check{margin:10px 0 6px}

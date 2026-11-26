@@ -9470,6 +9470,7 @@ const Views = (() => {
             <p class="muted">Provider type and network status decide the minimum amount a dispute must reach. If you're not sure, leave them: we read them from the documents where they say, and the reviewer confirms.</p>
             <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all). Once the reviewer finds it eligible, the health plan is emailed that the dispute is against it and sees it on its dashboard.</p>
             <div id="tpa-file-result" aria-live="assertive"></div>
+            ${HumanCheck.box("tpa-file-btn")}
             <p><button class="btn-primary" id="tpa-file-btn" type="submit" form="tpa-file-form">File dispute</button></p></div>
         </section>
 
@@ -9506,6 +9507,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
             <form class="inline-form" data-task="bulk_filing" onsubmit="event.preventDefault(); Views.tpaBulkDisputesFn(this)">
               <input name="batch_ref" placeholder="your batch name, e.g. BATCH-2026-10-14" required style="min-width:16em" />
               <input name="file" type="file" accept=".zip,application/zip,.csv,text/csv" required />
+              ${HumanCheck.box("tpa-bd-btn")}
               <button class="mini">Upload ZIP or CSV</button></form>
             <div id="tpa-bd-result"></div></div>
           <div class="card"><h2>Your bulk filings</h2>
@@ -10027,6 +10029,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
             restore: () => { const f = document.querySelector("#hp-file-form"), pk = f.package_id.value; filingPackagesFilter("hp-file-party", "hp-file-package", "party"); f.package_id.value = pk; } }); }, 0), "")}
           <p class="muted">You pay the fee in the portal (Pay now on the dispute, or Pay all above) and manage documents on behalf of the party. Once the reviewer finds it eligible, the provider is emailed that the dispute is against it, with a secure link to send its response.</p>
           <div id="hp-file-result" aria-live="assertive"></div>
+          ${HumanCheck.box("hp-file-btn")}
           <p><button class="btn-primary" id="hp-file-btn" type="submit" form="hp-file-form">Submit dispute</button></p></div>
         </section>
         <section data-hp-panel="docreq" style="display:none"><div id="hp-senders"></div><div class="card"><h2>Document requests</h2>
@@ -10334,6 +10337,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = "Filing…"; }
     try {
       packet.attachments = await PacketForm.attachments(document.getElementById("hp-packet"));
+      HumanCheck.use("hp-file-btn");
       const r = await Api.program.hpIntake({
         packet, party_id: form.party_id.value, package_id: form.package_id ? form.package_id.value : "",
         disputed_amount_cents: amount, notes: "",
@@ -10348,7 +10352,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       out.scrollIntoView({ behavior: "smooth", block: "center" });
       UI.toast(`Dispute ${r.case_number} filed`);
     } catch (e) { if (window.Telemetry) Telemetry.taskError("file_dispute", e.message); fileAlert(form, out, "This dispute wasn't filed.", e.message, e.problems); }
-    finally { if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || "Submit dispute"; } }
+    finally { HumanCheck.reset("hp-file-btn"); if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || "Submit dispute"; } }
   }
 
   async function hpAdminBox() {
@@ -10869,6 +10873,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     if (btn) { btn.disabled = true; btn.textContent = "Filing…"; }
     try {
       packet.attachments = await PacketForm.attachments(document.getElementById("tpa-packet"));
+      HumanCheck.use("tpa-file-btn");
       const r = await Api.program.tpaIntake({
         packet, client_id: form.client_id.value, package_id: form.package_id ? form.package_id.value : "",
         contact_name: d.provider_contact || "", disputed_amount_cents: amount, notes: "",
@@ -10884,7 +10889,7 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
       out.scrollIntoView({ behavior: "smooth", block: "center" });
       UI.toast(`Dispute ${r.case_number} filed`);
     } catch (e) { if (window.Telemetry) Telemetry.taskError("file_dispute", e.message); fileAlert(form, out, "This dispute wasn't filed.", e.message, e.problems); }
-    finally { if (btn) { btn.disabled = false; btn.textContent = "File dispute"; } }
+    finally { HumanCheck.reset("tpa-file-btn"); if (btn) { btn.disabled = false; btn.textContent = "File dispute"; } }
   }
 
   // The TPA's disputes, grouped under the provider (client) they were filed
@@ -11154,7 +11159,9 @@ CLAIM-002,,Bay Imaging,2450.00,Bay Health Plan,claims@bayhealth.test,,,,,</pre>
     const btn = form.querySelector("button"); btn.disabled = true;
     out.innerHTML = '<p class="muted">Uploading and reading the file…</p>';
     try {
+      HumanCheck.use("tpa-bd-btn");
       const r = await Api.program.tpaBulkDisputes(form.batch_ref.value.trim(), form.file.files[0]);
+      HumanCheck.reset("tpa-bd-btn");
       if (r.idempotent_replay) { out.innerHTML = `<p class="muted">${esc(r.note)}</p>`; tpaBdToggle(r.batch_id, true); return; }
       out.innerHTML = `<p>${r.filed ? `<b>${r.filed} dispute(s) filed</b> without documents — add them on each dispute` : `${r.waiting_for_documents} dispute(s) accepted and waiting for their documents to be checked`}${r.refused ? `, <b>${r.refused} refused</b>` : ""}.</p>
         <table class="tbl"><thead><tr><th>Row</th><th>Dispute</th><th>Client</th><th>Documents</th><th>Result</th></tr></thead><tbody>

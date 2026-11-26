@@ -495,6 +495,9 @@ func (s *server) tpaSetClientStatus(w http.ResponseWriter, r *http.Request) {
 // standard gated intake (payment link + upload link go to the TPA contact);
 // the case_origin row ties the dispute to both the TPA and the client.
 func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
+	if !portalTurnstilePassed(w, r) { // "I am human" on the portal filing forms, not for API keys (turnstile.go)
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)

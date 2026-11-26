@@ -1252,6 +1252,9 @@ func (s *server) hpUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 // hpIntake: file a dispute on behalf of a rostered party. Gated on a READY
 // package + verified payment once the party has started onboarding.
 func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
+	if !portalTurnstilePassed(w, r) { // "I am human" on the portal filing forms, not for API keys (turnstile.go)
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "HEALTH_PLAN", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)

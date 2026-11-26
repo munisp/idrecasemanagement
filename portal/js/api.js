@@ -18,6 +18,8 @@ const Api = (() => {
     }
     const headers = { Authorization: `Bearer ${tok}` };
     if (body && !isForm) headers["Content-Type"] = "application/json";
+    // The "I am human" token a filing form handed over (humancheck.js), sent once.
+    if (window.__humanToken) { headers["X-Turnstile-Token"] = window.__humanToken; window.__humanToken = ""; }
     const resp = await fetch(window.IDRE_CONFIG.apiBase + path, {
       method, headers,
       body: isForm ? body : body ? JSON.stringify(body) : undefined,
