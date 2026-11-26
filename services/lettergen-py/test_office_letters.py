@@ -23,6 +23,7 @@ def text_of(docx_bytes: bytes) -> str:
 
 def ctx(outcome="OVERTURNED", claims=2, paid=None, report=True):
     rep = {"report_type": "CLAIM_DISPUTE", "outcome": outcome, "awarded_cents": 125000, "already_paid_cents": paid,
+           "owed_cents": 125000 - (paid or 0),  # entered by hand on the decision report (2026-11-26)
            "percent_awarded": None, "reviewers": ["attorney", "coding consultant"], "disallowed": [],
            "sections": {"claim_summary": "This case concerns two (2) claims.", "dispute_issue": "The plan denied the claims.",
                         "provider_position": "The provider says the codes are right.", "analysis": "The codes are right.",
