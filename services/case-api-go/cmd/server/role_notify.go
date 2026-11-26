@@ -132,9 +132,9 @@ func (s *server) notifyOnSignal(r *http.Request, tenant, caseID, signal string, 
 				fmt.Sprintf("Case %s: the external Medical Reviewer (%s) reviewed medical necessity", cn, mr), "PM")
 		}
 	case "FINAL_ORDER_ISSUED":
-		// The PM (with the Tenant Admin and the Admin) hears of the Final Order's completion; the specialists' work on
-		// the case is done (change log #14).
-		s.notifyRoles(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: AHCA's Final Order is recorded — the case moves to invoicing", cn))
+		// Change log #24e: Final Order released -- notify the PM and the appropriate case team members (the Coder,
+		// Nurse Reviewer, Attorney and QA named on the case), and archive the case documentation (below).
+		s.notifyCaseTeam(r, tenant, caseID, "FINAL_ORDER_RELEASED", fmt.Sprintf("Case %s: AHCA's Final Order is recorded — the case moves to invoicing", cn))
 		s.archiveCaseLater(r, tenant, caseID) // #24e.ii: archive the case documentation (case_archive.go)
 	}
 }
@@ -165,9 +165,11 @@ func (s *server) notifyOnQA(r *http.Request, tenant, caseID, artifact, decision,
 	// Change log #14, least privilege: QA's verdict goes to the document's owner -- whoever drafted it -- and the PM
 	// (who hears of significant revisions and quality issues), not to every specialist on the case.
 	owner := s.draftOwner(r, tenant, caseID, artifact)
-	if decision == "REJECT" { // its drafter was told with the decision (DRAFT_REJECTED)
+	if decision == "REJECT" {
+		// Change log #24d.i: QA's revisions on a decision letter or the Final Order go to the Coder / Nurse Reviewer and
+		// the Attorney named on the case (with the PM); the draft's own author was also told with the decision.
 		s.notifyRoles(r, tenant, caseID, "REVISIONS_REQUESTED",
-			fmt.Sprintf("Case %s: QA sent the %s back for revisions%s", cn, what, orDash(" — "+note)))
+			fmt.Sprintf("Case %s: QA sent the %s back for revisions%s", cn, what, orDash(" — "+note)), "CODER", "NURSE_PHYSICIAN", "ATTORNEY")
 		return
 	}
 	if artifact == "final_order" { // "QA: notify PM when Final Orders are completed and ready for release"

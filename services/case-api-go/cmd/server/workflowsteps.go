@@ -90,9 +90,11 @@ var wfStatusReached = map[string]string{
 	"Plan Notification Packet Issued":   "qa:plan_notification",
 	"Review In Progress":                "plan_response",
 	"Plan - No Response":                "plan_response",
-	"QA Final Determination":            "attorney_review",
-	"Determination Sent to FL":          "qa:final_order",
-	"Final Order Issued":                "final_order_issued",
+	// The reviews are done by then; the decision letter's own steps (drafted, the Attorney's check, QA) are read from
+	// its record -- a letter sent back by QA goes round them again (change log #14 / #24d).
+	"QA Final Determination":   "coding_review",
+	"Determination Sent to FL": "qa:final_order",
+	"Final Order Issued":       "final_order_issued",
 }
 
 // buildWorkflowSteps is the pure core: facts in, ordered steps out, with at

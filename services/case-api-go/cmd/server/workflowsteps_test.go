@@ -448,3 +448,41 @@ func TestWorkflowEstimatePairReviewerSends(t *testing.T) {
 		t.Fatal("both sent, the send step is still next")
 	}
 }
+
+// Change log #24d: QA sends the decision letter back while the case reads "QA Final Determination": the drafter
+// generates it again (the status does not count the letter's steps as passed), then the Attorney, then QA.
+func TestDecisionLetterSentBackByQA(t *testing.T) {
+	now := time.Now()
+	f := wfBase()
+	f.Status, f.Internal = "PENDING_INTAKE", "QA Final Determination"
+	f.Act["PACKET_COMPLETE"] = wfAct{Body: `{"estimate_requested":false}`, At: now}
+	f.HasElig, f.EligResult, f.EligAt, f.HasSummary = true, "ELIGIBLE", now, true
+	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `{"requested":false}`, At: now}
+	f.Letter["acceptance"], f.Letter["plan_notification"] = "SENT", "SENT"
+	f.Act["PLAN_RESPONSE_RECEIVED"] = wfAct{At: now}
+	f.Act["FULL_REVIEW_INITIATED"] = wfAct{At: now}
+	f.Act["CODING_REVIEW_COMPLETE"] = wfAct{Body: `{"clinical_requested": true}`, At: now}
+	f.Act["CLINICAL_REVIEW_COMPLETE"] = wfAct{At: now}
+	f.Act["ATTORNEY_REVIEW_COMPLETE"] = wfAct{At: now} // from the first version's approval
+	f.ReportSaved = true
+	f.Generated = map[string]bool{"final_order_rationale": false} // QA sent it back
+	f.AttorneyPassed = map[string]bool{"final_order_rationale": false}
+	f.GeneratedPassed = map[string]bool{}
+	next := func() string {
+		if n := wfNext(buildWorkflowSteps(f)); n != nil {
+			return n.Key
+		}
+		return ""
+	}
+	if got := next(); got != "report_generate" {
+		t.Fatalf("after QA sent it back: next %s, want report_generate (the drafter)", got)
+	}
+	f.Generated["final_order_rationale"] = true
+	if got := next(); got != "attorney_review" {
+		t.Fatalf("new version: next %s, want attorney_review", got)
+	}
+	f.AttorneyPassed["final_order_rationale"] = true
+	if got := next(); got != "qa:final_order_rationale" {
+		t.Fatalf("Attorney approved: next %s, want QA", got)
+	}
+}
