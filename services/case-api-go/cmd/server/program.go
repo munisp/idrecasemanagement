@@ -1077,3 +1077,49 @@ func (s *server) peekCaseNumber(r *http.Request, tenant string, cfg *ProgramConf
 	out := strings.ReplaceAll(cfg.CaseNumber.Pattern, "{yy}", yy)
 	return strings.ReplaceAll(out, "{seq}", fmt.Sprintf("%0*d", cfg.CaseNumber.SeqPad, last+1))
 }
+
+// setOpenedDate: PUT /cases/{caseId}/opened-date {"date":"YYYY-MM-DD","reason":"..."} -- corrects the date the case
+// was filed / opened (change log #21: "allow case dates to be updated"). The Admin, the PM and the Tenant Admin may;
+// a reason is required and kept with the old and new dates. Deadlines that fall back to it re-project; the case number
+// is never changed (an issued number is not re-issued).
+func (s *server) setOpenedDate(w http.ResponseWriter, r *http.Request) {
+	p := r.Context().Value(ctxPrincipal{}).(principal)
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+		http.Error(w, `{"error":"forbidden: the Admin, the PM or the Tenant Admin corrects a case's filed date"}`, http.StatusForbidden)
+		return
+	}
+	tenant := r.Context().Value(ctxTenant{}).(string)
+	caseID := chi.URLParam(r, "caseId")
+	var in struct {
+		Date   string `json:"date"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&in); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	d, err := time.Parse("2006-01-02", strings.TrimSpace(in.Date))
+	in.Reason = strings.TrimSpace(in.Reason)
+	switch {
+	case err != nil:
+		http.Error(w, `{"error":"enter the date as YYYY-MM-DD"}`, http.StatusBadRequest)
+		return
+	case d.After(time.Now().UTC()) || d.Year() < 2000:
+		http.Error(w, `{"error":"the filed date cannot be in the future"}`, http.StatusBadRequest)
+		return
+	case in.Reason == "" || len(in.Reason) > 1000:
+		http.Error(w, `{"error":"say why the filed date is being changed"}`, http.StatusBadRequest)
+		return
+	}
+	var old time.Time
+	// The date changes; the time of day it was opened is kept.
+	if err := s.db.QueryRow(r.Context(), fmt.Sprintf(`UPDATE tenant_%[1]s.cases c SET opened_at = ($2::date + (o.opened_at - o.opened_at::date)), updated_at=now()
+		FROM tenant_%[1]s.cases o WHERE c.id::text=$1 AND o.id = c.id RETURNING o.opened_at`, sanitizeTenant(tenant)), caseID, in.Date).Scan(&old); err != nil {
+		http.Error(w, `{"error":"case not found"}`, http.StatusNotFound)
+		return
+	}
+	msg := fmt.Sprintf("Filed date changed from %s to %s by %s — %s", old.Format("01/02/2006"), d.Format("01/02/2006"), displayName(p), in.Reason)
+	s.logActivity(r.Context(), tenant, caseID, "OPENED_DATE_CHANGED", msg)
+	s.logAudit(r.Context(), tenant, caseID, "OPENED_DATE_CHANGED", map[string]any{"by": p.Subject, "from": old.Format("2006-01-02"), "to": in.Date, "reason": in.Reason})
+	writeJSON(w, http.StatusOK, map[string]any{"opened_at": in.Date, "previous": old.Format("2006-01-02")})
+}
