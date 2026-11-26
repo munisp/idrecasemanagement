@@ -11,6 +11,7 @@ const (
 )
 
 func TestReviewerScoped(t *testing.T) {
+	defer scopedAdmins()() // the scoping rule, as a program that scopes its Admins uses it
 	for _, c := range []struct {
 		roles []string
 		want  bool
@@ -32,6 +33,7 @@ func TestReviewerScoped(t *testing.T) {
 }
 
 func TestCaseVisibleTo(t *testing.T) {
+	defer scopedAdmins()() // the scoping rule, as a program that scopes its Admins uses it
 	rev := principal{Subject: "me", Roles: []string{"CASE_MANAGER"}}
 	pm := principal{Subject: "pm", Roles: []string{"PM"}}
 	for _, c := range []struct {
@@ -49,6 +51,7 @@ func TestCaseVisibleTo(t *testing.T) {
 }
 
 func TestAccessDecisionScopesReviewers(t *testing.T) {
+	defer scopedAdmins()() // the scoping rule, as a program that scopes its Admins uses it
 	rev := principal{Subject: "me", Roles: []string{"CASE_MANAGER"}}
 	pm := principal{Subject: "pm", Roles: []string{"PM"}}
 	for _, c := range []struct {
@@ -99,11 +102,31 @@ func TestPruneHiddenCases(t *testing.T) {
 }
 
 func TestCaseScopeSQL(t *testing.T) {
+	defer scopedAdmins()() // the scoping rule, as a program that scopes its Admins uses it
 	if cond, ok := caseScopeSQL(principal{Roles: []string{"PM"}}, "c", 3); ok || cond != "" {
 		t.Fatal("a PM's lists are not scoped")
 	}
 	cond, ok := caseScopeSQL(principal{Roles: []string{"CASE_MANAGER"}}, "c", 3)
 	if !ok || cond != " AND c.assigned_to = $3" {
 		t.Fatalf("reviewer scope: %q", cond)
+	}
+}
+
+// scopedAdmins: seeAllCaseRoles without the Admin, for the tests of the scoping rule itself; returns the undo.
+func scopedAdmins() func() {
+	saved := seeAllCaseRoles
+	var out []string
+	for _, r := range saved {
+		if r != "CASE_MANAGER" {
+			out = append(out, r)
+		}
+	}
+	seeAllCaseRoles = out
+	return func() { seeAllCaseRoles = saved }
+}
+
+func TestAdminsSeeEveryCase(t *testing.T) {
+	if reviewerScoped(principal{Roles: []string{"CASE_MANAGER"}}) {
+		t.Fatal("since 2026-11-25 the Admin sees every case")
 	}
 }

@@ -64,7 +64,7 @@ func TestStepRules(t *testing.T) {
 		t.Error("step order off: every step not done is open")
 	}
 	if strict.mayAct(reviewer, next) {
-		t.Error("step owners on: a Reviewer may not take Finance's step")
+		t.Error("step owners on: an Admin may not take Finance's step")
 	}
 	if !loose.mayAct(reviewer, next) {
 		t.Error("step owners off: anyone may take it")

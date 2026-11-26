@@ -487,7 +487,7 @@ func (s *server) completeTask(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID := chi.URLParam(r, "taskId")
 	// Anyone on staff could close anyone's task -- a Coder could mark the
-	// PM's escalation done. The Reviewer and the PM run the task list and
+	// PM's escalation done. The Admin and the PM run the task list and
 	// may close any task; everyone else closes the ones that are theirs
 	// (assigned to them, or raised by them).
 	p := r.Context().Value(ctxPrincipal{}).(principal)
@@ -776,7 +776,7 @@ func (s *server) globalSearch(w http.ResponseWriter, r *http.Request) {
 			out = append(out, hit{Kind: "document", ID: d.DocID, Label: docHitLabel(n[0], n[1], d.DocType), Detail: d.Snippet, CaseID: d.CaseID})
 		}
 	}
-	// A Reviewer finds nothing of a case assigned to someone else: not the case, its documents, tasks or invoices.
+	// An Admin finds nothing of a case assigned to someone else: not the case, its documents, tasks or invoices.
 	if p, ok := r.Context().Value(ctxPrincipal{}).(principal); ok && reviewerScoped(p) {
 		var ids []string
 		for _, h := range out {

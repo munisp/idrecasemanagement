@@ -38,7 +38,7 @@ import (
 // and the whole filing body is capped so an unbounded payload cannot be posted.
 const (
 	maxFilingNoteBytes = 5 << 20  // 5 MB of free-text notes
-	maxFilingBodyBytes = 30 << 20 // the whole filing: note, packet, fields and the packet's attached PDFs (base64)
+	maxFilingBodyBytes = 72 << 20 // the whole filing: note, packet, fields, the attached PDFs and up to 30 MB of supporting documents (base64)
 )
 
 type tpaOrg struct {
@@ -104,6 +104,9 @@ func tpaUsernameFromEmail(email string) string {
 // returns the credentials directly, the same way staff account creation
 // does, since a brand-new registrant has no other way to get one.
 func (s *server) registerTPA(w http.ResponseWriter, r *http.Request) {
+	if !turnstilePassed(w, r) { // the "I am human" check, when switched on (turnstile.go)
+		return
+	}
 	var in struct {
 		Tenant       string `json:"tenant"`
 		Name         string `json:"name"`
@@ -492,6 +495,9 @@ func (s *server) tpaSetClientStatus(w http.ResponseWriter, r *http.Request) {
 // standard gated intake (payment link + upload link go to the TPA contact);
 // the case_origin row ties the dispute to both the TPA and the client.
 func (s *server) tpaIntake(w http.ResponseWriter, r *http.Request) {
+	if !portalTurnstilePassed(w, r) { // "I am human" on the portal filing forms, not for API keys (turnstile.go)
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "TPA", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)

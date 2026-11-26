@@ -505,7 +505,7 @@ func (s *server) executeCopilotAction(r *http.Request, tenant, caseID, approvedB
 		body := fmt.Sprintf("Copilot flagged missing eligibility input(s) — %s (batch approved by %s)",
 			strings.Join(names, ", "), approvedBy)
 		s.logActivity(r.Context(), tenant, caseID, "COPILOT_MISSING_INPUT_FLAG", body)
-		s.notify(r, tenant, "*", "ELIGIBILITY_INPUT", body, "#/cases/"+caseID)
+		s.caseAlertAll(r, tenant, caseID, "ELIGIBILITY_INPUT", body, "#/cases/"+caseID)
 		return "flagged: " + strings.Join(names, ", "), nil
 
 	case "draft_followup_correspondence":
@@ -523,7 +523,7 @@ func (s *server) executeCopilotAction(r *http.Request, tenant, caseID, approvedB
 		if err != nil {
 			return "", fmt.Errorf("qa insert: %w", err)
 		}
-		s.notify(r, tenant, "*", "QA_REVIEW",
+		s.caseAlertAll(r, tenant, caseID, "QA_REVIEW",
 			fmt.Sprintf("Copilot follow-up draft on case %s awaiting QA approval", caseID), "#/qa")
 		return "QA draft queued: " + qid, nil
 	}

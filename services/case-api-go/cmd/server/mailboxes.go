@@ -536,9 +536,9 @@ func (s *server) sendFromMailbox(name, addr string, to, cc []string, subject, te
 	}
 	b.WriteString("MIME-Version: 1.0\r\n")
 	if len(atts) == 0 {
-		writeAlternative(&b, text)
+		writeAlternative(&b, text, name)
 	} else {
-		writeMixed(&b, text, atts)
+		writeMixed(&b, text, name, atts)
 	}
 	return msgID, s.deliver(addr, to, cc, []byte(b.String()))
 }

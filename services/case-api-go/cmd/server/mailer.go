@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -64,7 +65,7 @@ func (s *server) sendMailID(tenant string, to, cc []string, subject, body string
 	var b strings.Builder
 	writeMailHeaders(&b, header, to, cc, subject, id)
 	b.WriteString("MIME-Version: 1.0\r\n")
-	writeAlternative(&b, body) // plain text + the same text as HTML (mailbody.go)
+	writeAlternative(&b, body, s.tenantBrand(context.Background(), tenant)) // plain text + the same text as HTML (mailbody.go)
 	return id, s.deliver(envelope, to, cc, []byte(b.String()))
 }
 
@@ -82,17 +83,17 @@ func (s *server) sendMailWithAttachment(tenant string, to, cc []string, subject,
 	var b strings.Builder
 	writeMailHeaders(&b, header, to, cc, subject, messageID(from))
 	b.WriteString("MIME-Version: 1.0\r\n")
-	writeMixed(&b, body, []outAttachment{{Name: filename, ContentType: "text/csv", Content: content}})
+	writeMixed(&b, body, s.tenantBrand(context.Background(), tenant), []outAttachment{{Name: filename, ContentType: "text/csv", Content: content}})
 	return s.deliver(from, to, cc, []byte(b.String()))
 }
 
 // writeMixed writes a multipart/mixed body: the text (plain + HTML, writeAlternative), then each file in base64
 // (RFC 2045 lines of 76).
-func writeMixed(b *strings.Builder, body string, atts []outAttachment) {
+func writeMixed(b *strings.Builder, body, brand string, atts []outAttachment) {
 	boundary := "idre-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	fmt.Fprintf(b, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary)
 	fmt.Fprintf(b, "--%s\r\n", boundary)
-	writeAlternative(b, body)
+	writeAlternative(b, body, brand)
 	for _, a := range atts {
 		name := strings.NewReplacer(`"`, "", "\r", "", "\n", "").Replace(a.Name)
 		fmt.Fprintf(b, "--%s\r\nContent-Type: %s; name=%q\r\nContent-Disposition: attachment; filename=%q\r\nContent-Transfer-Encoding: base64\r\n\r\n",

@@ -1,19 +1,19 @@
 package main
 
-// casescope.go — which cases a Reviewer may see.
+// casescope.go — which cases an Admin may see.
 //
-// A Reviewer (CASE_MANAGER) works the cases assigned to them, and only those: cases are given out by the rotation
-// (autoassign.go) or by the PM, so there is no unassigned pool for a Reviewer to browse or take from. Any other case
+// An Admin (CASE_MANAGER) works the cases assigned to them, and only those: cases are given out by the rotation
+// (autoassign.go) or by the PM, so there is no unassigned pool for an Admin to browse or take from. Any other case
 // — someone else's, or nobody's yet — does not exist for them: the case list, search, the calendar, the per-case
 // routes, everything answers as if it were not there (404, never 403: a reviewer must not learn which case ids
 // exist).
 //
 // The PM, Tenant Admin and the platform's admins see every case of the tenant, and so do the specialist roles
 // (coder, clinician, attorney, arbitrator, finance, auditor), whose own queues are built across every case. The
-// rule is on the role a person holds, not on the menu: a Reviewer who also holds one of those roles sees every case.
+// rule is on the role a person holds, not on the menu: an Admin who also holds one of those roles sees every case.
 //
 // One place decides (reviewerScoped / caseVisible / caseScopeSQL); accessGuard applies it to every route that names a
-// case in its path (accesspolicy.go), and each list that a Reviewer can reach adds caseScopeSQL to its query.
+// case in its path (accesspolicy.go), and each list that an Admin can reach adds caseScopeSQL to its query.
 
 import (
 	"bytes"
@@ -25,13 +25,15 @@ import (
 )
 
 // seeAllCaseRoles: holding any of these, a person sees every case of the tenant.
+// The Admin (CASE_MANAGER) sees every case since 2026-11-25 (it hears every alert, as the Tenant Admin does), so
+// reviewerScoped is now false for everyone; the rule is kept for a program that scopes its Admins again.
 var seeAllCaseRoles = []string{
-	"PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole,
-	"CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR", "FINANCE",
+	"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR", serviceRole,
+	"CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR", "FINANCE", "QA",
 }
 
-// reviewerScoped: the caller is a Reviewer and nothing that sees every case. Exact role names on purpose —
-// hasAnyRole counts a Tenant Admin as every staff role, which would make every Tenant Admin a scoped Reviewer.
+// reviewerScoped: the caller is an Admin and nothing that sees every case. Exact role names on purpose —
+// hasAnyRole counts a Tenant Admin as every staff role, which would make every Tenant Admin a scoped Admin.
 func reviewerScoped(p principal) bool {
 	if !contains(p.Roles, "CASE_MANAGER") {
 		return false
@@ -62,7 +64,7 @@ func (s *server) caseVisible(ctx context.Context, p principal, tenant, caseID st
 	if err := s.db.QueryRow(ctx, fmt.Sprintf(`SELECT assigned_to FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)),
 		caseID).Scan(&to); err != nil {
 		// Fail closed, like hiddenCaseIDs: if the assignee cannot be read (a
-		// transient error, or no such case), a scoped Reviewer does not see it.
+		// transient error, or no such case), a scoped Admin does not see it.
 		return false
 	}
 	return caseVisibleTo(p, deref(to))
@@ -106,7 +108,7 @@ func (s *server) hiddenCaseIDs(ctx context.Context, p principal, tenant string, 
 		WHERE id::text = ANY($1) AND assigned_to IS DISTINCT FROM $2`,
 		sanitizeTenant(tenant)), ids, p.Subject)
 	if err != nil {
-		// Fail closed: if the check cannot run, every named case is hidden from a Reviewer.
+		// Fail closed: if the check cannot run, every named case is hidden from an Admin.
 		for _, id := range ids {
 			out[id] = true
 		}
@@ -122,9 +124,9 @@ func (s *server) hiddenCaseIDs(ctx context.Context, p principal, tenant string, 
 	return out
 }
 
-// scopedResponse buffers a read's JSON answer for a Reviewer and removes from it every object that names a case they
+// scopedResponse buffers a read's JSON answer for an Admin and removes from it every object that names a case they
 // may not see (by its "case_id"), wherever it sits. Lists across cases (the calendar, deadline clocks, journals,
-// tasks, intake, the QA queue, account and entity pages) are then right for a Reviewer without each having its own
+// tasks, intake, the QA queue, account and entity pages) are then right for an Admin without each having its own
 // filter, and a list added later is covered too. Non-JSON answers (downloads) pass through untouched.
 type scopedResponse struct {
 	http.ResponseWriter

@@ -19,8 +19,8 @@ import (
 
 // assignableRoles: who a case can be assigned to, as which role.
 var assignableRoles = map[string]string{
-	"CASE_MANAGER": "Reviewer", "ARBITRATOR": "Arbitrator", "CODER": "Coder",
-	"NURSE_PHYSICIAN": "Clinical reviewer", "ATTORNEY": "Attorney",
+	"CASE_MANAGER": "Admin", "ARBITRATOR": "Arbitrator", "CODER": "Coder",
+	"NURSE_PHYSICIAN": "Nurse Reviewer", "ATTORNEY": "Attorney", "QA": "QA",
 }
 
 type assigneeView struct {
@@ -82,7 +82,7 @@ func (s *server) staffWithRole(ctx context.Context, tenant, role string) ([]staf
 const openCaseCond = `coalesce(status,'') NOT LIKE 'CLOSED%%' AND coalesce(internal_status,'') NOT IN
 	('Closed','Closed-Refunded','Dismissed','Withdrawn','Ineligible','Plan Opt-Out','Decided - Invoice Paid','Provider Closure Letter Issued')`
 
-// openCaseCounts: user id → number of the tenant's open cases they hold, as Reviewer or as a specialist.
+// openCaseCounts: user id → number of the tenant's open cases they hold, as Admin or as a specialist.
 func (s *server) openCaseCounts(ctx context.Context, tenant string) map[string]int {
 	out := map[string]int{}
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
@@ -127,7 +127,8 @@ func (s *server) assigneesFor(ctx context.Context, tenant, role string) ([]assig
 
 // listAssignees: GET /cases/assignees?role=CASE_MANAGER — the picker: eligible staff, least loaded first.
 func (s *server) listAssignees(w http.ResponseWriter, r *http.Request) {
-	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	// The Admin reads it too since 2026-11-26: it names further reviewers (review_team.go).
+	if p := r.Context().Value(ctxPrincipal{}).(principal); !hasAnyRole(p, "PM", "CASE_MANAGER", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: cases are assigned by the PM"}`, http.StatusForbidden)
 		return
 	}
@@ -136,7 +137,7 @@ func (s *server) listAssignees(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = "CASE_MANAGER"
 	}
-	if _, ok := assignableRoles[role]; !ok {
+	if _, ok := assignableRoles[role]; !ok || !s.programAllowsRole(r, tenant, role) {
 		http.Error(w, `{"error":"unknown role"}`, http.StatusBadRequest)
 		return
 	}
@@ -167,7 +168,7 @@ func (s *server) caseAssignment(w http.ResponseWriter, r *http.Request) {
 	if role != nil && *role != "" {
 		out["assigned_role"], out["role_label"] = *role, assignableRoles[*role]
 	}
-	out["helpers"] = s.helperView(r.Context(), tenant, caseID) // the specialists alongside the Reviewer
+	out["helpers"] = s.helperView(r.Context(), tenant, caseID) // the specialists alongside the Admin
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -187,7 +188,7 @@ func (s *server) validAssignee(ctx context.Context, tenant, role, userID string)
 
 // assignCase: POST /cases/{caseId}/assign {role, assignee?, reason?, expected?, action?: "unassign" | "claim"}
 // The PM and the Tenant Admin assign and reassign (SOP), to eligible staff or (Tenant Admin) to themselves. A
-// Reviewer claims an unassigned case for themselves ("claim") and can do nothing else here: they cannot route cases
+// Admin claims an unassigned case for themselves ("claim") and can do nothing else here: they cannot route cases
 // to others or take a case someone holds. Every write is conditional on the assignment the caller saw, so two people
 // acting at once cannot both win: the second gets 409 with who holds the case now.
 func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
@@ -205,27 +206,27 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	assigner := hasAnyRole(p, "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole)
 	if in.Action == "claim" {
-		if reviewerScoped(p) { // a Reviewer sees only their own cases: cases reach them by the rotation or the PM
+		if reviewerScoped(p) { // an Admin sees only their own cases: cases reach them by the rotation or the PM
 			http.Error(w, `{"error":"cases are given out in turn or by the PM — ask the PM for this one"}`, http.StatusForbidden)
 			return
 		}
 		if !assigner && !hasAnyRole(p, "CASE_MANAGER") {
-			http.Error(w, `{"error":"forbidden: only a Reviewer (or the PM / Tenant Admin) can take a case"}`, http.StatusForbidden)
+			http.Error(w, `{"error":"forbidden: only an Admin (or the PM / Tenant Admin) can take a case"}`, http.StatusForbidden)
 			return
 		}
 		s.claimCase(w, r, p, tenant, caseID, in.Reason)
 		return
 	}
 	if !assigner {
-		http.Error(w, `{"error":"forbidden: cases are assigned by the PM or the Tenant Admin; a Reviewer can take an unassigned case for themselves"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: cases are assigned by the PM or the Tenant Admin; an Admin can take an unassigned case for themselves"}`, http.StatusForbidden)
 		return
 	}
 	in.Role, in.Reason = strings.ToUpper(strings.TrimSpace(in.Role)), strings.TrimSpace(in.Reason)
 	if in.Role == "" {
 		in.Role = "CASE_MANAGER"
 	}
-	if _, ok := assignableRoles[in.Role]; !ok && in.Action != "unassign" {
-		http.Error(w, `{"error":"a case is assigned as Reviewer, Arbitrator, Coder, Clinical reviewer or Attorney"}`, http.StatusBadRequest)
+	if _, ok := assignableRoles[in.Role]; (!ok || !s.programAllowsRole(r, tenant, in.Role)) && in.Action != "unassign" {
+		http.Error(w, `{"error":"a case is assigned as Admin, Arbitrator, Coder, Nurse Reviewer or Attorney"}`, http.StatusBadRequest)
 		return
 	}
 	t := sanitizeTenant(tenant)
@@ -236,7 +237,7 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
-	if isHelperRole(in.Role) { // a specialist is named alongside the Reviewer, who keeps the case (helpers.go)
+	if isHelperRole(in.Role) { // a specialist is named alongside the Admin, who keeps the case (helpers.go)
 		s.assignHelper(w, r, p, tenant, caseID, cn, in.Role, in.Assignee, in.Reason, in.Action, in.Next, in.Expected)
 		return
 	}
@@ -327,7 +328,7 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if assignee == p.Subject && contains(p.Roles, "TENANT_ADMIN") || assignee == p.Subject && hasAnyRole(p, "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		// Taking ownership: a Tenant Admin (or a platform admin) may hold a case themselves, as its Reviewer.
+		// Taking ownership: a Tenant Admin (or a platform admin) may hold a case themselves, as its Admin.
 		assigneeName = displayName(p)
 	} else if !hasAnyRole(p, serviceRole) {
 		name, err := s.validAssignee(r.Context(), tenant, in.Role, assignee)
@@ -377,7 +378,7 @@ func (s *server) assignCase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"assigned_to": assignee, "name": assigneeName, "role": in.Role, "previous": prev})
 }
 
-// claimCase: a person takes an unassigned case for themselves, as its Reviewer. The update only applies while the
+// claimCase: a person takes an unassigned case for themselves, as its Admin. The update only applies while the
 // case is still unassigned, so of two people claiming at once exactly one gets it.
 func (s *server) claimCase(w http.ResponseWriter, r *http.Request, p principal, tenant, caseID, reason string) {
 	t := sanitizeTenant(tenant)
@@ -396,7 +397,7 @@ func (s *server) claimCase(w http.ResponseWriter, r *http.Request, p principal, 
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
 		}
-		// A Reviewer is not told who: the case is someone else's now, and out of their view.
+		// An Admin is not told who: the case is someone else's now, and out of their view.
 		msg := "Someone else took this case a moment ago."
 		out := map[string]any{"error": msg, "taken": true}
 		if !reviewerScoped(p) {
@@ -407,7 +408,7 @@ func (s *server) claimCase(w http.ResponseWriter, r *http.Request, p principal, 
 		return
 	}
 	who := displayName(p)
-	s.logActivity(r.Context(), tenant, caseID, "MILESTONE", fmt.Sprintf("Taken by %s (Reviewer)%s", who, withReason(reason)))
+	s.logActivity(r.Context(), tenant, caseID, "MILESTONE", fmt.Sprintf("Taken by %s (Admin)%s", who, withReason(reason)))
 	s.logAudit(r.Context(), tenant, caseID, "CASE_ASSIGNED", map[string]any{
 		"by": p.Subject, "assigned_to": p.Subject, "previous": "", "role": "CASE_MANAGER", "claim": true, "reason": reason,
 	})

@@ -19,7 +19,7 @@ func (s *server) setClaimEligibility(w http.ResponseWriter, r *http.Request) {
 	tenant := r.Context().Value(ctxTenant{}).(string)
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
-		http.Error(w, `{"error":"forbidden: the Reviewer or the PM decides which claims are eligible"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the Admin or the PM decides which claims are eligible"}`, http.StatusForbidden)
 		return
 	}
 	caseID := chi.URLParam(r, "caseId")

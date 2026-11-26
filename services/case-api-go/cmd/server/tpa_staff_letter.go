@@ -1,7 +1,7 @@
 // tpa_staff_letter.go — a TPA's staff authorization letter (2026-11-25; scripts/tpa_staff_letters.sql): the TPA's
 // officer naming the staff who may act for it on Florida claim disputes (HaloMD's is the model). Kept on the TPA's
 // profile like a client's letter of authorization (tpa_client_letter.go), and attached to every dispute the TPA files,
-// where document analysis reads the people it names (doc-intel aor_docs.py) for the Reviewer's AOR check.
+// where document analysis reads the people it names (doc-intel aor_docs.py) for the Admin's AOR check.
 package main
 
 import (
@@ -173,7 +173,7 @@ func (s *server) attachStaffLetter(r *http.Request, tenant, tpaID, caseID, uploa
 
 // aorCheck: GET /cases/{caseId}/aor-check -- what the case's AOR / staff authorization letters say (doc-intel's
 // reading: who authorizes, the people named) beside who filed the dispute, and whether that person is named. For
-// the Reviewer's AOR check; it decides nothing.
+// the Admin's AOR check; it decides nothing.
 func (s *server) aorCheck(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {

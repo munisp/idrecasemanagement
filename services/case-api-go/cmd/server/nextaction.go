@@ -408,7 +408,7 @@ func calibrateConfidence(prior float64, shown, accepts int) (float64, string) {
 // needs me most right now". Runs the same rule engine as the per-case
 // endpoint across the tenant's open cases (statutory-date-first scan,
 // capped), drops the generic fallbacks, and returns the top few with their
-// reasons. Reviewers see the whole open docket; other roles see only cases
+// reasons. Admins see the whole open docket; other roles see only cases
 // assigned to them. No model — the same priors, ranked; the accept telemetry
 // these clicks emit calibrates them the same way.
 // attentionItem is one ranked case in the needs-attention set.

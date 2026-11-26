@@ -37,7 +37,7 @@ func unfilled(texts ...string) []string {
 
 func (s *server) previewCorrespondence(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
-	if !hasAnyRole(p, "CASE_MANAGER", "PM", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
+	if !hasAnyRole(p, "CASE_MANAGER", "PM", "QA", "CODER", "NURSE_PHYSICIAN", "ATTORNEY", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden: requires case staff role"}`, http.StatusForbidden)
 		return
 	}

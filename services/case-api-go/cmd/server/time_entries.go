@@ -61,13 +61,13 @@ func timeEntryRole(p principal) string {
 }
 
 // billedRoleFor is the role an entry is recorded and billed under: the role asked for, or def when none was.
-// FL's Reviewer is CASE_MANAGER. Nurse and Physician time bill at their own rates (AHCA price sheet), so a
+// FL's Admin is CASE_MANAGER. Nurse and Physician time bill at their own rates (AHCA price sheet), so a
 // Nurse/Physician records each entry as a Nurse (utilization nursing review) or a Physician (DOCTOR, physician
 // expert review), never as both. The second result says why the role is refused.
 func billedRoleFor(p principal, asked, def string) (string, string) {
 	want := strings.ToUpper(strings.TrimSpace(asked))
 	switch want {
-	case "REVIEWER":
+	case "REVIEWER", "ADMIN": // the Admin was called the Reviewer before 2026-11-25
 		want = "CASE_MANAGER"
 	case "PHYSICIAN":
 		want = "DOCTOR"

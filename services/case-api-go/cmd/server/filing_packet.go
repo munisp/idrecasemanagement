@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +39,9 @@ var (
 	packetExhausted    = []string{"Yes", "No", "Unknown"}
 	packetDocuments    = []string{"claim_forms", "denials_eobs", "florida_license", "final_determination_letter", "contract",
 		"waiver_of_payment", "notice_of_overpayment", "overpayment_response", "medical_records", "coding_rules", "other"}
+	// packetDocumentLabels: what each of packetDocuments is called, in the same order (stored file names).
+	packetDocumentLabels = []string{"Claim form", "Denial / EOB", "Florida license", "Final determination letter", "Contract",
+		"Waiver of payment", "Notice of overpayment", "Overpayment response", "Medical records", "Coding rules", "Other document"}
 	packetAttestations = []string{"interest_only", "late_payment_only", "medicare_grievance", "medicaid_fair_hearing",
 		"pending_court_action", "pre_2000_binding_process", "internal_process_not_exhausted", "over_12_months", "rural_hospital"}
 	// Free-text fields and their longest accepted length.
@@ -75,13 +80,27 @@ type filingPacket struct {
 }
 
 type filingAttachment struct {
-	Kind     string `json:"kind"` // filing_packet | aor_letter
+	Kind     string `json:"kind"`               // filing_packet | aor_letter | supporting
+	DocType  string `json:"doc_type,omitempty"` // supporting: which of the packet's documents it is (packetDocuments)
 	Filename string `json:"filename"`
 	DataB64  string `json:"data_b64"`
 	raw      []byte
 }
 
-const maxFilingAttachmentBytes = 10 << 20
+const (
+	maxFilingAttachmentBytes = 10 << 20
+	// Supporting documents uploaded on the form (2026-11-26): any number up to maxSupportingFiles, each within
+	// maxFilingAttachmentBytes, all of them within maxSupportingBytes.
+	maxSupportingFiles = 20
+	maxSupportingBytes = 30 << 20
+)
+
+// supportingExts: what a supporting document may be (the case's own upload rules, less text files).
+var supportingExts = map[string]string{
+	".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".png":  "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".tif": "image/tiff", ".tiff": "image/tiff",
+}
 
 // filingAttachmentNames: what each kind is filed as on the case (folder INTAKE).
 var filingAttachmentNames = map[string]string{
@@ -96,8 +115,45 @@ func (pk *filingPacket) attachmentProblems() []string {
 	}
 	var out []string
 	seen := map[string]bool{}
+	supporting, supportingBytes := 0, 0
 	for i := range pk.Attachments {
 		a := &pk.Attachments[i]
+		if a.Kind == "supporting" {
+			supporting++
+			what := strings.TrimSpace(a.Filename)
+			if what == "" {
+				what = fmt.Sprintf("supporting document %d", supporting)
+			}
+			raw, err := base64.StdEncoding.DecodeString(a.DataB64)
+			_, okType := oneOf(a.DocType, packetDocuments)
+			switch {
+			case supporting > maxSupportingFiles:
+				if supporting == maxSupportingFiles+1 {
+					out = append(out, fmt.Sprintf("Supporting documents: up to %d files on the form; send the rest with the upload link", maxSupportingFiles))
+				}
+			case !okType:
+				out = append(out, what+": choose what this document is")
+			case supportingExts[strings.ToLower(filepath.Ext(a.Filename))] == "":
+				out = append(out, what+": must be a PDF, Word or Excel file, or an image")
+			case err != nil || len(raw) == 0:
+				out = append(out, what+": the file could not be read")
+			case len(raw) > maxFilingAttachmentBytes:
+				out = append(out, what+": the file is over 10 MB")
+			default:
+				supportingBytes += len(raw)
+				if supportingBytes > maxSupportingBytes {
+					out = append(out, "Supporting documents: over 30 MB in all; send the rest with the upload link")
+					supportingBytes = -1 << 40 // say it once
+					continue
+				}
+				if err := contentPolicy(a.Filename, raw); err != nil {
+					out = append(out, what+": "+err.Error())
+					continue
+				}
+				a.raw = raw
+			}
+			continue
+		}
 		name := filingAttachmentNames[a.Kind]
 		if name == "" {
 			out = append(out, fmt.Sprintf("attachment %d: unknown kind %q", i+1, a.Kind))
@@ -152,12 +208,24 @@ func (pk *filingPacket) requiredProblems() []string {
 		}
 	}
 	need(claims > 0, "Claim(s) information: enter at least one claim")
+	// The 12-month filing window runs from the final determination (2026-11-26): every claim states it, or its
+	// denial date, so eligibility can be checked from the filing.
+	for _, c := range pk.Claims {
+		if strings.TrimSpace(c.ClaimNumber) != "" && strings.TrimSpace(c.DateOfFinalDetermination) == "" && strings.TrimSpace(c.DateOfDenial) == "" {
+			out = append(out, "Claim "+strings.TrimSpace(c.ClaimNumber)+": enter the date of final determination (or the date of denial)")
+		}
+	}
 	docs := map[string]bool{}
 	if list, ok := d["packet_documents_submitted"].([]any); ok {
 		for _, x := range list {
 			if v, ok := x.(string); ok {
 				docs[v] = true
 			}
+		}
+	}
+	for _, a := range pk.Attachments { // an uploaded document ticks its box
+		if a.Kind == "supporting" {
+			docs[a.DocType] = true
 		}
 	}
 	for _, k := range packetRequiredDocs {
@@ -384,6 +452,15 @@ func (pk *filingPacket) normalize() (map[string]any, *int64, []packetClaim, []st
 		}
 		out["packet_documents_submitted"] = docs
 	}
+	// A supporting document uploaded on the form ticks its own box (2026-11-26).
+	for _, a := range pk.Attachments {
+		if c, ok := oneOf(a.DocType, packetDocuments); ok && a.Kind == "supporting" {
+			docs, _ := out["packet_documents_submitted"].([]string)
+			if !slices.Contains(docs, c) {
+				out["packet_documents_submitted"] = append(docs, c)
+			}
+		}
+	}
 	if raw, ok := d["packet_attestation"]; ok && raw != nil {
 		m, _ := raw.(map[string]any)
 		att := map[string]bool{}
@@ -587,7 +664,7 @@ func packetRejected(w http.ResponseWriter, pk *filingPacket) bool {
 
 // fileWithPacket is what the three filing paths (public, TPA, health plan) call right after the case exists: save
 // the form the filer completed, fill-only. A packet that does not check out never blocks the filing -- the problems
-// go on the case timeline for the Reviewer, who corrects them from the case page.
+// go on the case timeline for the Admin, who corrects them from the case page.
 func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *filingPacket, by string) {
 	if pk == nil {
 		return
@@ -600,6 +677,17 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 			s.caseNumberOf(r.Context(), tenant, caseID), strings.Join(problems, "; ")), "PM") // change log #14
 		return
 	}
+	amount := int64(0) // change log #4: the full review fee estimate, when the filer asked and it is switched on
+	if disputed != nil {
+		amount = *disputed
+	} else {
+		for _, c := range claims {
+			if c.DisputedCents != nil {
+				amount += *c.DisputedCents
+			}
+		}
+	}
+	s.feeEstimateOnFiling(r.Context(), tenant, details, len(claims), &amount)
 	keys, err := s.applyFilingPacket(r.Context(), tenant, caseID, details, disputed, claims, nil, false)
 	if err != nil {
 		s.logActivity(r.Context(), tenant, caseID, "FILING_PACKET_INCOMPLETE", "The filing form could not be saved; enter it from the case page.")
@@ -611,15 +699,29 @@ func (s *server) fileWithPacket(r *http.Request, tenant, caseID string, pk *fili
 	s.keepFilingCopies(r, tenant, caseID, pk, by)
 }
 
-// keepFilingCopies (change log #6, #8, #12): the attachments are filed on the case under Intake; the filer's own
-// packet PDF when they uploaded one, otherwise a PDF of what they typed is generated (lettergen filing_record).
-// details.packet_source says which, for the intake list.
+// keepFilingCopies (change log #6, #8, #12): the attachments are filed on the case under Intake, the filer's own
+// packet PDF among them when they uploaded one, and a PDF of the form as filled in is always generated (lettergen
+// filing_record). details.packet_source says how it was filed, for the intake list.
 func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *filingPacket, by string) {
 	ctx := r.Context()
 	_ = pk.attachmentProblems() // decodes; filers were checked already
 	source := "form"
+	labels := map[string]string{}
+	for i, k := range packetDocuments {
+		labels[k] = packetDocumentLabels[i]
+	}
 	for _, a := range pk.Attachments {
 		if a.raw == nil {
+			continue
+		}
+		if a.Kind == "supporting" {
+			// Filed under Intake as "<what it is> — <its own name>", read by the document reader like any upload.
+			orig := filepath.Base(a.Filename)
+			name := labels[a.DocType] + " — " + orig
+			if _, code, msg := s.storeCaseFile(ctx, tenant, caseID, "filer:"+by, orig, name,
+				supportingExts[strings.ToLower(filepath.Ext(orig))], a.raw, "INTAKE"); code != 0 {
+				s.logActivity(ctx, tenant, caseID, "FILING_ATTACHMENT_NOT_STORED", fmt.Sprintf("%s could not be kept: %s", name, msg))
+			}
 			continue
 		}
 		name := filingAttachmentNames[a.Kind]
@@ -637,12 +739,12 @@ func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *fi
 	}
 	_, _ = s.db.Exec(ctx, fmt.Sprintf(`UPDATE tenant_%s.cases SET details = coalesce(details,'{}'::jsonb) || jsonb_build_object('packet_source', $2::text) WHERE id::text=$1`,
 		sanitizeTenant(tenant)), caseID, source)
-	if source == "form" {
-		var caseNumber string
-		_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
-		if err := s.enqueueLetter(r, tenant, caseID, caseNumber, "filing_record", by); err != nil {
-			slog.Error("filing record", "case", caseID, "err", err)
-		}
+	// The form as filled in is always kept as a PDF too (2026-11-25): beside the filer's own packet PDF when they
+	// uploaded one, so the case has both what they sent and what the form recorded.
+	var caseNumber string
+	_ = s.db.QueryRow(ctx, fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
+	if err := s.enqueueLetter(r, tenant, caseID, caseNumber, "filing_record", by); err != nil {
+		slog.Error("filing record", "case", caseID, "err", err)
 	}
 }
 
@@ -651,7 +753,7 @@ func (s *server) keepFilingCopies(r *http.Request, tenant, caseID string, pk *fi
 func (s *server) putFilingPacket(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: the filing packet is kept by the Reviewer or the PM"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the filing packet is kept by the Admin or the PM"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

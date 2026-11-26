@@ -240,7 +240,7 @@ func (s *server) bulkCases(w http.ResponseWriter, r *http.Request) {
 			var prev *string
 			var cn string
 			_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number, assigned_to FROM tenant_%s.cases WHERE id=$1`, t), id).Scan(&cn, &prev)
-			if isHelperRole(role) { // a specialist is named alongside the Reviewer, who keeps the case (helpers.go)
+			if isHelperRole(role) { // a specialist is named alongside the Admin, who keeps the case (helpers.go)
 				was := s.caseHelpers(r.Context(), tenant, id)[role]
 				_, err = s.db.Exec(r.Context(), upsertHelperSQL, tenant, id, role, assignee, p.Subject)
 				if err == nil && was != assignee {
@@ -304,7 +304,7 @@ func (s *server) grabNext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden: requires CASE_MANAGER, ARBITRATOR, FEDERAL_ADMIN, or PLATFORM_ADMIN"}`, http.StatusForbidden)
 		return
 	}
-	if reviewerScoped(p) { // see casescope.go: a Reviewer does not pick from the unassigned cases
+	if reviewerScoped(p) { // see casescope.go: an Admin does not pick from the unassigned cases
 		http.Error(w, `{"error":"cases are given out in turn or by the PM — there is nothing to grab"}`, http.StatusForbidden)
 		return
 	}

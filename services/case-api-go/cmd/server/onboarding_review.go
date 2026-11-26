@@ -36,7 +36,7 @@ var onboardingKinds = map[string]onboardingKind{
 }
 
 // onboardingReviewRoles decide documents doc-intel left for a person: the
-// Reviewer owns intake, the PM is the QA gate.
+// Admin owns intake, the PM is the QA gate.
 var onboardingReviewRoles = []string{"CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // refreshOnboardingPackage recomputes a package's status from its documents
@@ -49,7 +49,7 @@ func (s *server) refreshOnboardingPackage(r *http.Request, tenant string, k onbo
 		tenant, pkgID).Scan(&owner, &current); err != nil || current == "FILED" {
 		return current
 	}
-	// READY once every document has been read (packageFileable): a flagged one is the Reviewer's to look at, and
+	// READY once every document has been read (packageFileable): a flagged one is the Admin's to look at, and
 	// never holds the set back.
 	var docs, reading int
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`

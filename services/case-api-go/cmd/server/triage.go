@@ -43,7 +43,7 @@ type eligibilityInput struct {
 	FinalDeterminationAt string   `json:"final_determination_at"` // YYYY-MM-DD
 	Flags                []string `json:"flags"`
 	AORValid             *bool    `json:"aor_valid"`
-	AORReason            string   `json:"aor_reason"`   // why the Reviewer found the AOR valid or not
+	AORReason            string   `json:"aor_reason"`   // why the Admin found the AOR valid or not
 	ServiceDate          string   `json:"service_date"` // YYYY-MM-DD, earliest date of service in dispute
 	DisputeType          string   `json:"dispute_type"` // denied_in_full | denied_in_part | underpaid | overpaid
 	// FiledOn is when the dispute was filed (YYYY-MM-DD): the filing window is about that day, not the day the
@@ -54,7 +54,7 @@ type eligibilityInput struct {
 }
 
 // computedIneligibilityReasons: the reasons evalEligibility itself can give (beside the program's own
-// eligibility.ineligibility_reasons, which a Reviewer ticks). GET /program publishes them, so every reason a review
+// eligibility.ineligibility_reasons, which an Admin ticks). GET /program publishes them, so every reason a review
 // can carry is one the program lists.
 var computedIneligibilityReasons = []string{"below_threshold", "over_filing_window", "service_before_program_start",
 	"not_an_eligible_dispute_type", "unrecognized_provider_type", "aor_invalid_pending_attorney"}
@@ -280,7 +280,7 @@ func (s *server) deriveEligibilityInput(r *http.Request, tenant, caseID string) 
 	// determination date counts: a date of service is not one (it comes before
 	// the plan decides, often by months), and using it made disputes filed in
 	// time look late. The filing packet's claim table states the same dates (final determination, else denial),
-	// so the latest of those and the documents' counts too. No determination date anywhere = the Reviewer enters it.
+	// so the latest of those and the documents' counts too. No determination date anywhere = the Admin enters it.
 	if in.FinalDeterminationAt == "" {
 		var fromDocs, fromClaims string
 		// Any analyzed document's labelled decision date counts, whatever type it was read as: a final
@@ -365,6 +365,26 @@ func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
 	if in.ProviderType == "" {
 		if v := packetProviderType(d); v != "" {
 			in.ProviderType, from["provider_type"] = v, "filing packet"
+		} else if pt, _ := d["packet_provider_type"].(string); pt == "Hospital" {
+			// A hospital whose packet's type of service doesn't say inpatient or outpatient (2026-11-26): the claim
+			// lines' type of service, then what the documents read (a UB-04's type of bill), else the reviewer chooses.
+			var svc, docs string
+			_ = s.db.QueryRow(r.Context(), `SELECT coalesce(string_agg(lower(type_of_service), ' '), '') FROM public.case_claims
+				WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&svc)
+			_ = s.db.QueryRow(r.Context(), `SELECT coalesce(string_agg(result->'normalized'->>'provider_type', ' '), '') FROM public.doc_analysis
+				WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'`, tenant, caseID).Scan(&docs)
+			switch {
+			case strings.Contains(svc, "inpatient") && !strings.Contains(svc, "outpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_inpatient", "filing packet (Hospital; the claims say inpatient)"
+			case strings.Contains(svc, "outpatient") && !strings.Contains(svc, "inpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_outpatient", "filing packet (Hospital; the claims say outpatient)"
+			case strings.Contains(docs, "hospital_inpatient") && !strings.Contains(docs, "hospital_outpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_inpatient", "filing packet (Hospital) and the documents (inpatient)"
+			case strings.Contains(docs, "hospital_outpatient") && !strings.Contains(docs, "hospital_inpatient"):
+				in.ProviderType, from["provider_type"] = "hospital_outpatient", "filing packet (Hospital) and the documents (outpatient)"
+			default:
+				from["provider_type_hint"] = "the filing packet says Hospital — choose inpatient or outpatient"
+			}
 		}
 	}
 	if in.ServiceDate == "" {
@@ -373,6 +393,64 @@ func (s *server) eligibilityInputs(w http.ResponseWriter, r *http.Request) {
 		if in.ServiceDate != "" {
 			from["service_date"] = "filing packet"
 		}
+	}
+	// Network status (2026-11-26): the packet's "Out-of-network provider" Yes/No, else what every analyzed
+	// document that states it agrees on.
+	if in.Contracted == nil {
+		switch strings.ToLower(strings.TrimSpace(fmt.Sprint(d["out_of_network"]))) {
+		case "yes", "true":
+			v := false
+			in.Contracted, from["contracted"] = &v, "filing packet"
+		case "no", "false":
+			v := true
+			in.Contracted, from["contracted"] = &v, "filing packet"
+		default:
+			var docs string
+			_ = s.db.QueryRow(r.Context(), `SELECT coalesce(string_agg(DISTINCT lower(result->'normalized'->>'contracted'), ','), '')
+				FROM public.doc_analysis WHERE tenant=$1 AND case_id=$2 AND status LIKE 'ANALYZED%'
+				AND lower(result->'normalized'->>'contracted') IN ('true','false')`, tenant, caseID).Scan(&docs)
+			if docs == "true" || docs == "false" {
+				v := docs == "true"
+				in.Contracted = &v
+			}
+		}
+	}
+	// Claim type (2026-11-26): the packet's disputed issue; a denial is "in part" when the plan paid something
+	// on the claims, "in full" when it paid nothing. Without a stated issue, claims with a denial on them say so.
+	if in.DisputeType == "" {
+		var paid, denied, billed, claims, unpaid int64
+		_ = s.db.QueryRow(r.Context(), `SELECT coalesce(SUM(paid_cents),0),
+			count(*) FILTER (WHERE date_of_denial IS NOT NULL OR coalesce(denial_reason,'') <> ''),
+			coalesce(SUM(billed_cents),0), count(*), count(*) FILTER (WHERE coalesce(paid_cents,0) = 0)
+			FROM public.case_claims WHERE tenant=$1 AND case_id=$2`, tenant, caseID).Scan(&paid, &denied, &billed, &claims, &unpaid)
+		issue := strings.ToLower(fmt.Sprint(d["disputed_issue"]))
+		denial := func() string {
+			if paid > 0 {
+				return "denied_in_part"
+			}
+			return "denied_in_full"
+		}
+		switch {
+		case strings.Contains(issue, "underpa"):
+			in.DisputeType, from["dispute_type"] = "underpaid", "filing packet"
+		case strings.Contains(issue, "overpa"):
+			in.DisputeType, from["dispute_type"] = "overpaid", "filing packet"
+		case strings.Contains(issue, "denial") || strings.Contains(issue, "denied"):
+			in.DisputeType, from["dispute_type"] = denial(), "filing packet"
+		case denied > 0:
+			in.DisputeType, from["dispute_type"] = denial(), "filing packet (its claims show a denial)"
+		// No issue or denial stated: the amounts on the claim lines. Every claim paid something, less than billed:
+		// underpaid. Nothing paid on any claim: denied in full.
+		case claims > 0 && billed > 0 && unpaid == 0 && paid < billed:
+			in.DisputeType, from["dispute_type"] = "underpaid", "filing packet (its claims were paid less than billed)"
+		case claims > 0 && billed > 0 && paid == 0:
+			in.DisputeType, from["dispute_type"] = "denied_in_full", "filing packet (nothing was paid on its claims)"
+		}
+	}
+	if in.FinalDeterminationAt == "" {
+		from["final_determination_hint"] = "no final determination or denial date is on the filing's claims or read from its documents — enter the last EOB / final determination date"
+	} else if in.DeterminationFrom != "" && in.DeterminationFrom != "the case" {
+		from["final_determination_at"] = in.DeterminationFrom
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"inputs": in, "from_packet": from})
 }
@@ -396,7 +474,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 				caseID, result, strings.Join(opts.borderlineReasons, "; ")), "#/cases/"+caseID)
 	}
 	if opts.override {
-		s.notify(r, tenant, "*", "ELIGIBILITY_OVERRIDE",
+		s.caseAlertAll(r, tenant, caseID, "ELIGIBILITY_OVERRIDE",
 			fmt.Sprintf("Case %s: INELIGIBLE overridden to ELIGIBLE by %s — reason: %s",
 				caseID, decidedBy, opts.overrideReason), "#/cases/"+caseID)
 	}
@@ -411,7 +489,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 	case "HOLD_AOR":
 		_, _ = s.db.Exec(r.Context(),
 			fmt.Sprintf(`UPDATE tenant_%s.cases SET internal_status='Hold', agency_status='Other', updated_at=now() WHERE id=$1`, sanitizeTenant(tenant)), caseID)
-		s.notify(r, tenant, "role:ATTORNEY", "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — please confirm (case page, Eligibility review)", caseID), "#/cases/"+caseID)
+		s.caseAlert(r, tenant, caseID, "AOR_REVIEW", fmt.Sprintf("Case %s: AOR flagged invalid — please confirm (case page, Eligibility review)", caseID), "", "ATTORNEY")
 	case "INELIGIBLE":
 		// Nothing to set here any more: "Provider Closure Letter Issued" is a
 		// fact about a letter, so the status is taken when the Ineligible
@@ -426,15 +504,13 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 		wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), caseNumber)
 		_ = s.sigCase(r.Context(), tenant, caseID, wfID, "ELIGIBILITY_RESULT", map[string]any{"result": result, "reason": reason})
 	}
-	// The SOP has the Reviewer tell the PM and the Coder the result.
+	// The SOP has the Admin tell the PM and the Coder the result.
 	reasonSuffix := ""
 	if reason != "" {
 		reasonSuffix = " — " + strings.ReplaceAll(reason, "_", " ")
 	}
-	for _, role := range []string{"PM", "CODER"} {
-		s.notify(r, tenant, "role:"+role, "ELIGIBILITY_RESULT",
-			fmt.Sprintf("Case %s: eligibility %s%s", orDash(caseNumber), result, reasonSuffix), "#/cases/"+caseID)
-	}
+	s.caseAlert(r, tenant, caseID, "ELIGIBILITY_RESULT",
+		fmt.Sprintf("Case %s: eligibility %s%s", orDash(caseNumber), result, reasonSuffix), "", "PM", "CODER")
 	if caseNumber != "" {
 		s.fileEligibilityChecklist(r, tenant, caseID, caseNumber, result, reason, decidedBy, evidence)
 	}
@@ -456,7 +532,7 @@ func (s *server) persistEligibilityOutcome(r *http.Request, tenant, caseID, deci
 func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole) {
-		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Reviewer"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the eligibility review is done by the Admin"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -487,7 +563,7 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 	}
 	if missing := missingEligibilityInputs(cfg, in); len(missing) > 0 {
 		// What was found goes back too, so the form can be filled with it
-		// and only the blanks are left to the Reviewer.
+		// and only the blanks are left to the Admin.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"result": "NEEDS_HUMAN", "missing": missing, "inputs": in,
 			"detail": "rule-required inputs are not derivable from the case record or analyzed documents",

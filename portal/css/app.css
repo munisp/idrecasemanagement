@@ -1655,3 +1655,12 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .pv-table td{padding:4px 8px;border-bottom:1px solid var(--border,#e5e7eb)}
 .pv-table td:first-child{color:var(--text-secondary,#4a5160);width:38%}
 .ok-box{padding:8px 10px;border-radius:8px;background:#e6f4ea;border:1px solid #b7dfc2;margin:6px 0}.aor-check p{margin:4px 0}
+/* Who sent a document (case Documents, 2026-11-26) */
+.who-health-plan{background:#e8f1fb;color:#1d4f86}
+.who-tpa{background:#f3ecfb;color:#5b2d91}
+.who-filer,.who-provider,.who-party{background:#eef2ff;color:#3730a3}
+.who-respondent{background:#e6f4ea;color:#1e6b34}
+.who-sharebox,.who-requested{background:#fff4e5;color:#8a4b00}
+.who-staff,.who-auto,.who-gen{background:var(--surface-sunken,#f1f3f5);color:var(--text-secondary,#4b5563)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .who-health-plan,:root:not([data-theme="light"]) .who-tpa,:root:not([data-theme="light"]) .who-filer,:root:not([data-theme="light"]) .who-provider,:root:not([data-theme="light"]) .who-party,:root:not([data-theme="light"]) .who-respondent,:root:not([data-theme="light"]) .who-sharebox,:root:not([data-theme="light"]) .who-requested{filter:brightness(.85) saturate(.9)}}
+.human-check{margin:10px 0 6px}

@@ -105,7 +105,7 @@ func (s *server) lookupRoutingNumber(w http.ResponseWriter, r *http.Request) {
 var paymentAccountRoles = []string{"FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}
 
 // paymentReadRoles may look at the Payments screen: bank accounts, payment
-// files, screening. The Reviewer has no money screens, so it is not here.
+// files, screening. The Admin has no money screens, so it is not here.
 var paymentReadRoles = []string{"PM", "FINANCE", "FEDERAL_ADMIN", "PLATFORM_ADMIN", serviceRole}
 
 func (s *server) createPaymentAccount(w http.ResponseWriter, r *http.Request) {

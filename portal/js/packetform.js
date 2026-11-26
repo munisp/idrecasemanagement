@@ -62,7 +62,7 @@ window.PacketForm = (() => {
   const CLAIM_COLS = [["claim_number", "Claim #", "text"], ["patient_name", "Patient name", "text"], ["type_of_service", "Type of service", "text"],
     ["date_of_service", "Date of service", "date"], ["billed", "Amount billed", "money"], ["paid", "Amount paid", "money"],
     ["disputed", "Amount in dispute", "money"], ["date_claim_submitted", "Date claim submitted", "date"],
-    ["date_of_denial", "Date of denial", "date"], ["date_of_final_determination", "Date of final determination", "date"]];
+    ["date_of_denial", "Date of denial", "date"], ["date_of_final_determination", "Date of final determination *", "date"]];
   const PDF_CLAIM_COLS = ["Claim Row", "Patient NameRow", "Type of ServiceRow", "Date of ServiceRow", "Amount BilledRow", "Amount PaidRow",
     "Amount in DisputeRow", "Date Claim SubmittedRow", "Date of DenialRow", "Date of Final DeterminationRow"];
 
@@ -188,7 +188,8 @@ window.PacketForm = (() => {
       <fieldset class="pf-sec"><legend>Full review fee</legend>
         <p class="pf-q">Do you want an estimate of the full review fee for this case?</p>
         ${radios(d, "fee_estimate_requested", [["true", "Yes — if the case is eligible, Capitol Bridge provides an estimate before accepting the case for review"],
-          ["false", "No — if the case is eligible, Capitol Bridge accepts the case, issues a recommendation and includes an invoice for the full review"]])}</fieldset>
+          ["false", "No — if the case is eligible, Capitol Bridge accepts the case, issues a recommendation and includes an invoice for the full review"]])}
+        <div class="pf-estimate" role="status" aria-live="polite" hidden></div></fieldset>
       <fieldset class="pf-sec pf-pos-provider"><legend>If the filing party is a provider: your position</legend>
         ${area(d, "provider_position_basis", "1. Describe with all appropriate technical detail the basis for and amount of payment you believe you should have received for these services.")}
         ${area(d, "provider_position_references", "2. Provide specific references to the contract, provider manual and other supporting documentation to support your position.")}
@@ -200,7 +201,12 @@ window.PacketForm = (() => {
       <fieldset class="pf-sec"><legend>Supporting documentation being submitted${R}</legend>
         <p class="pf-hint">* Required for all disputes. If a required document can't be filed, upload an explanation in its place.</p>
         <div class="pf-checks">${DOCUMENTS.map(([k, label, req]) => `<label class="pf-choice"><input type="checkbox" name="doc" value="${k}" ${docs.includes(k) ? "checked" : ""} /> ${req ? "* " : ""}${esc(label)}</label>`).join("")}</div>
-        ${text(d, "documents_other", "Other documentation")}</fieldset>
+        ${text(d, "documents_other", "Other documentation")}
+        ${opts.filer ? `<div class="pf-uploads">
+          <label class="pf-file">Upload your supporting documents <span class="pf-hint">— PDF, Word, Excel or images, up to 10 MB each and 30 MB in all.
+            Say what each one is and its box above is ticked for you. You can also send documents later with the upload link we email you.</span>
+            <input type="file" name="support_files" multiple accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg,.tif,.tiff,application/pdf,image/*" /></label>
+          <ul class="pf-upload-list"></ul></div>` : ""}</fieldset>
       <fieldset class="pf-sec"><legend>Eligibility attestation</legend>
         <p class="pf-hint">To be completed by the owner, officer, director or other legally authorized representative of the filing party. Tick every criterion this claim meets.</p>
         <div class="pf-checks">${ATTESTATION.map(([k, label]) => `<label class="pf-choice"><input type="checkbox" name="att" value="${k}" ${att[k] ? "checked" : ""} /> ${esc(label)}</label>`).join("")}</div>
@@ -248,6 +254,111 @@ window.PacketForm = (() => {
     bindSigPads(pf);
     pf.addEventListener("change", touch);
     sync();
+    bindEstimate(pf);
+    bindUploads(pf);
+  }
+
+  // Supporting documents uploaded on the form (2026-11-26): each file says what it is, which ticks its box in the
+  // checklist; taking the file off unticks a box it ticked. The files live on the form's host, so they survive a
+  // refill of the form (reading a packet PDF into it).
+  const SUPPORT_EXT = /\.(pdf|docx|xlsx|png|jpe?g|tiff?)$/i;
+  function bindUploads(pf) {
+    const host = pf.parentElement, input = pf.querySelector('input[name="support_files"]'), list = pf.querySelector(".pf-upload-list");
+    if (!input || !list) return;
+    host._supportFiles = host._supportFiles || [];
+    const box = (k) => pf.querySelector(`input[name="doc"][value="${k}"]`);
+    const kb = (n) => (n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
+    const render = () => {
+      list.innerHTML = host._supportFiles.map((x, i) => `<li class="pf-upload${x.type ? "" : " pf-upload-need"}">
+        <span class="pf-upload-name">${esc(x.file.name)} <span class="pf-hint">(${kb(x.file.size)})</span></span>
+        <select data-i="${i}" aria-label="What is ${esc(x.file.name)}?"><option value="">What is this document?</option>
+          ${DOCUMENTS.map(([k, label]) => `<option value="${k}" ${x.type === k ? "selected" : ""}>${esc(label)}</option>`).join("")}</select>
+        <button type="button" class="pf-upload-remove" data-i="${i}" aria-label="Remove ${esc(x.file.name)}">Remove</button></li>`).join("");
+    };
+    // A box the uploads ticked is unticked when no upload of that type is left (a box the filer ticked stays).
+    // Which boxes the uploads ticked is kept on the host with the files, so it survives a refill too.
+    host._autoTicked = host._autoTicked || new Set();
+    const retick = (prev) => {
+      const used = new Set(host._supportFiles.map((x) => x.type).filter(Boolean));
+      used.forEach((k) => { const b = box(k); if (b && !b.checked) { b.checked = true; host._autoTicked.add(k); } });
+      if (prev && !used.has(prev) && host._autoTicked.has(prev)) { const b = box(prev); if (b) b.checked = false; host._autoTicked.delete(prev); }
+      pf.dataset.touched = "1";
+    };
+    input.addEventListener("change", () => {
+      const bad = [];
+      for (const f of input.files) {
+        if (!SUPPORT_EXT.test(f.name)) bad.push(`${f.name}: not a PDF, Word or Excel file, or an image`);
+        else if (f.size > 10 << 20) bad.push(`${f.name}: over 10 MB`);
+        else host._supportFiles.push({ file: f, type: "" });
+      }
+      input.value = "";
+      render();
+      if (bad.length) alert("Not added:\n" + bad.join("\n"));
+    });
+    list.addEventListener("change", (ev) => {
+      if (ev.target.tagName !== "SELECT") return;
+      const x = host._supportFiles[Number(ev.target.dataset.i)], prev = x.type;
+      x.type = ev.target.value;
+      ev.target.closest("li").classList.toggle("pf-upload-need", !x.type);
+      retick(prev);
+    });
+    list.addEventListener("click", (ev) => {
+      if (!ev.target.classList.contains("pf-upload-remove")) return;
+      const [x] = host._supportFiles.splice(Number(ev.target.dataset.i), 1);
+      render(); retick(x && x.type);
+    });
+    // Refilled form: show the files again, with their boxes ticked.
+    render(); if (host._supportFiles.length) retick();
+  }
+
+  // The full review fee estimate (change log #4): shown under "Do you want an estimate?" when the filer answers Yes
+  // and the program has switched it on (Settings → Fee estimate). The server works out the same figure at filing.
+  const estCfg = {};
+  function estTenant(pf) {
+    const el = pf.closest("[data-tenant]");
+    if (el) return el.dataset.tenant;
+    const st = document.getElementById("f-state");
+    if (st && st.value) return st.value;
+    return (window.Api && Api.getTenant && Api.getTenant()) || "fl";
+  }
+  function estimateFor(cfg, claims, cents) {
+    if (!cfg || !cfg.enabled) return null;
+    let fee = null;
+    if (cfg.method === "flat") fee = cfg.flat_cents || 0;
+    else if (cfg.method === "per_claim") fee = (cfg.per_claim_cents || 0) * Math.max(1, claims);
+    else if (cfg.method === "tiered") { const t = (cfg.tiers || []).find((x) => !x.up_to_cents || cents <= x.up_to_cents); fee = t ? t.fee_cents : null; }
+    if (fee == null) return null;
+    if (cfg.min_cents && fee < cfg.min_cents) fee = cfg.min_cents;
+    if (cfg.max_cents && fee > cfg.max_cents) fee = cfg.max_cents;
+    return fee;
+  }
+  const dollars = (c) => "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function bindEstimate(pf) {
+    const box = pf.querySelector(".pf-estimate");
+    if (!box) return;
+    let timer = null;
+    const show = async () => {
+      const yes = pf.querySelector('[name="d.fee_estimate_requested"][value="true"]');
+      if (!yes || !yes.checked) { box.hidden = true; return; }
+      const tenant = estTenant(pf);
+      try {
+        if (!estCfg[tenant]) estCfg[tenant] = fetch(`/api/public/fee-estimate?tenant=${encodeURIComponent(tenant)}`).then((r) => r.ok ? r.json() : { enabled: false });
+        const cfg = await estCfg[tenant];
+        if (!cfg.enabled) { box.hidden = true; return; }
+        const { packet } = read(pf);
+        const cents = packet.disputed_amount_cents || packet.claims.reduce((n, c) => n + Number(c.disputed_cents || 0), 0);
+        const fee = estimateFor(cfg, packet.claims.length, cents);
+        box.innerHTML = fee == null
+          ? `<p><b>Estimated full review fee:</b> given in the Cost Estimate letter.</p><p class="muted">${esc(cfg.note || "")}</p>`
+          : `<p><b>Estimated full review fee: ${dollars(fee)}</b>${cfg.method === "per_claim" ? ` <span class="muted">(${packet.claims.length || 1} claim${packet.claims.length === 1 ? "" : "s"})</span>` : ""}</p><p class="muted">${esc(cfg.note || "")}</p>`;
+        box.hidden = false;
+      } catch { delete estCfg[tenant]; box.hidden = true; }
+    };
+    const soon = () => { clearTimeout(timer); timer = setTimeout(show, 300); };
+    pf.addEventListener("change", soon);
+    pf.addEventListener("input", soon);
+    pf.addEventListener("packetclaims", soon);
+    show();
   }
   const touched = (root) => (root.querySelector(".pf") || root).dataset.touched === "1";
   function addRow(btn) {
@@ -259,6 +370,7 @@ window.PacketForm = (() => {
     const tr = btn.closest("tr"), pf = btn.closest(".pf");
     if (tr.dataset.orig) pf.dataset.removed = [...(pf.dataset.removed ? pf.dataset.removed.split("\n") : []), tr.dataset.orig].join("\n");
     tr.remove();
+    pf.dispatchEvent(new CustomEvent("packetclaims"));
   }
 
   // Claims from an Excel workbook (.xlsx), read in the browser (nothing is uploaded) -- the change log asks for
@@ -467,6 +579,7 @@ window.PacketForm = (() => {
         if (any) { amount.value = money(sum); amount.dataset.fromCsv = amount.value; }
       }
       pf.dataset.touched = "1";
+      pf.dispatchEvent(new CustomEvent("packetclaims"));
       const notes = [`Added ${added} claim${added === 1 ? "" : "s"} from ${file.name}.`];
       if (dup) notes.push(`${dup} already in the table, skipped.`);
       if (over) notes.push(`${over} over the ${MAX_CLAIMS}-claim limit, not added — file the rest as a separate dispute.`);
@@ -535,6 +648,8 @@ window.PacketForm = (() => {
       claims.push(c);
     });
     if (pf.dataset.filer === "1") problems.push(...requiredProblems(details, amt, claims));
+    (pf.parentElement?._supportFiles || []).filter((x) => !x.type)
+      .forEach((x) => problems.push(`Supporting documents: choose what ${x.file.name} is`));
     const remove = (pf.dataset.removed || "").split("\n").filter((x) => x && !claims.some((c) => c.claim_number === x));
     return { packet: { details, disputed_amount_cents: amt, claims, remove_claims: remove }, problems };
   }
@@ -550,6 +665,9 @@ window.PacketForm = (() => {
     if (!(Number(d.claims_submitted) >= 1)) out.push("Number of claims is required");
     if (!(amt > 0)) out.push("Aggregated disputed amount is required");
     if (!claims.length) out.push("Claim(s) information: enter at least one claim");
+    // The 12-month filing window runs from the final determination: every claim states it, or its denial date.
+    claims.filter((c) => !c.date_of_final_determination && !c.date_of_denial)
+      .forEach((c) => out.push(`Claim ${c.claim_number}: enter the date of final determination (or the date of denial)`));
     if (REQUIRED_DOCS.some((k) => !(d.packet_documents_submitted || []).includes(k))) out.push("Supporting documents: tick every required document (*) you are submitting");
     if (!d.certification_agreed || !d.certified_by_name || !d.certified_by_title || !d.certified_on) out.push("Certification: tick it and enter your name, title and the date");
     if (!d.certified_signature) out.push("Certification: sign in the signature box");
@@ -569,11 +687,17 @@ window.PacketForm = (() => {
     };
     await add("filing_packet", host._packetFile, "The packet PDF");
     await add("aor_letter", host.querySelector('input[name="aor_letter_file"]')?.files?.[0], "The appointment of representative letter");
+    const support = host._supportFiles || [];
+    if (support.reduce((n, x) => n + x.file.size, 0) > 30 << 20)
+      throw new Error("The supporting documents are over 30 MB in all — remove some here and send them with the upload link we email you.");
+    for (const x of support) out.push({ kind: "supporting", doc_type: x.type, filename: x.file.name, data_b64: await b64(x.file) });
     return out;
   }
   function clearFiles(root) {
     const host = root.querySelector(".pf")?.parentElement || root;
     delete host._packetFile;
+    host._supportFiles = []; host._autoTicked = new Set();
+    const list = host.querySelector(".pf-upload-list"); if (list) list.innerHTML = "";
     const f = host.querySelector('input[name="aor_letter_file"]'); if (f) f.value = "";
   }
 
@@ -674,5 +798,5 @@ window.PacketForm = (() => {
   }
 
   return { html, bind, read, fill, touched, sides, fromPdf, pdfPicker, fillFromPicker, addRow, removeRow, FORM_FIELDS,
-    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles, sigPad, bindSigPads };
+    claimsFromXlsx, claimsFromRows, xlsxRows, xlsxBytes, xlsxTemplate, attachments, clearFiles, sigPad, bindSigPads, estimateFor };
 })();

@@ -77,8 +77,8 @@ func (s *server) requestReview(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logActivity(r.Context(), tenant, caseID, in.Discipline+"_REVIEW_REQUESTED",
 		fmt.Sprintf("%s review requested by %s — %s", in.Discipline, p.Subject, truncate(in.Note, 200)))
-	s.notify(r, tenant, "*", "REVIEW_REQUESTED",
-		fmt.Sprintf("Case %s needs a %s review.", caseNumber, in.Discipline), "#/queues/"+in.Discipline)
+	s.caseAlert(r, tenant, caseID, "REVIEW_REQUESTED",
+		fmt.Sprintf("Case %s needs a %s review.", caseNumber, in.Discipline), "#/queues/"+in.Discipline, disciplineRole[in.Discipline])
 	_ = meta
 	writeJSON(w, http.StatusCreated, map[string]any{"review_id": id, "discipline": in.Discipline, "status": "REQUESTED"})
 }
@@ -305,13 +305,8 @@ func (s *server) openReview(r *http.Request, tenant, caseID, caseNumber, discipl
 		return
 	}
 	s.logActivity(r.Context(), tenant, caseID, discipline+"_REVIEW_REQUESTED", note)
-	for _, role := range disciplineMeta[discipline].roles {
-		if role == "FEDERAL_ADMIN" || role == "PLATFORM_ADMIN" {
-			continue
-		}
-		s.notify(r, tenant, "role:"+role, "REVIEW_REQUESTED",
-			fmt.Sprintf("Case %s needs a %s review.", caseNumber, strings.ToLower(discipline)), "#/queues/"+discipline)
-	}
+	s.caseAlert(r, tenant, caseID, "REVIEW_REQUESTED",
+		fmt.Sprintf("Case %s needs a %s review.", caseNumber, strings.ToLower(discipline)), "#/queues/"+discipline, disciplineMeta[discipline].roles...)
 }
 
 // reviewStartedKey / reviewDoneKey: the program dates a specialty review's start and end are recorded under.

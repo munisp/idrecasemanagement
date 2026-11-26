@@ -1,6 +1,6 @@
 // refunds_due.go — the refunds the case workflow has ordered and Finance has not made yet.
 //
-// When no complete filing packet arrives within 7 days of the Reviewer's outreach, the AHCA workflow flags a
+// When no complete filing packet arrives within 7 days of the Admin's outreach, the AHCA workflow flags a
 // potential refund (REFUND_REVIEW_DUE) and waits. Only when a person chooses Close and refund (REFUND_APPROVED) does
 // it close the case "Closed-Refunded", tell the filer and notify Finance (REFUND_DUE on the case timeline). The money only moves
 // when Finance refunds the initial-fee invoice (settleInvoice REFUND -> refunds.go: a Stripe refund of the fee for a

@@ -38,12 +38,15 @@ import (
 )
 
 func (s *server) publicAhcaIntake(w http.ResponseWriter, r *http.Request) {
+	if !turnstilePassed(w, r) { // the "I am human" check, when switched on (turnstile.go)
+		return
+	}
 	ip := clientIP(r)
 	if !s.rateLimit("ahca-intake:"+ip, 10, 3600) {
 		http.Error(w, `{"error":"rate limited — try again later"}`, http.StatusTooManyRequests)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 30<<20) // the packet form, plus its attached PDFs (packet, AOR letter) in base64
+	r.Body = http.MaxBytesReader(w, r.Body, maxFilingBodyBytes) // the packet form, its attached PDFs and supporting documents in base64
 	var in struct {
 		Tenant              string        `json:"tenant"`
 		Email               string        `json:"email"`
@@ -179,7 +182,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 	s.recordTransition(r.Context(), tenant, caseID, axisLifecycle, "", "PENDING_INTAKE", "", "intake")
 
 	s.ensureChecklist(r, tenant, caseID)
-	// The next Reviewer in turn, on every intake path (autoassign.go) -- run on the way out, once the case is either open
+	// The next Admin in turn, on every intake path (autoassign.go) -- run on the way out, once the case is either open
 	// or waiting on its fee: an unpaid one is skipped here and assigned when the payment opens it (activatePaidIntakeFor).
 	defer s.autoAssignNewCase(r, tenant, caseID, caseNumber)
 
@@ -230,7 +233,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 			"basis": "bulk invoicing arrangement", "org": org,
 		})
 		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
-		s.notify(r, tenant, "*", "AHCA_INTAKE",
+		s.caseAlert(r, tenant, caseID, "AHCA_INTAKE",
 			fmt.Sprintf("Bulk-accepted intake (fee invoiced): %s (%s)", org, email), "#/cases/"+caseID)
 		return caseID, caseNumber, nil
 	}
@@ -285,7 +288,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 					}
 					s.logActivity(r.Context(), tenant, caseID, typ, fmt.Sprintf("Payment-required email: %s", merr))
 				}
-				s.notify(r, tenant, "*", "AHCA_INTAKE",
+				s.caseAlert(r, tenant, caseID, "AHCA_INTAKE",
 					fmt.Sprintf("Intake awaiting fee payment: %s (%s)", org, email), "#/cases/"+caseID)
 				return caseID, caseNumber, nil
 			}
@@ -299,7 +302,7 @@ func (s *server) startAhcaCaseFull(r *http.Request, tenant string, cfg *ProgramC
 	// the intake completes immediately, links included, exactly as before.
 	s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
 
-	s.notify(r, tenant, "*", "AHCA_INTAKE",
+	s.caseAlert(r, tenant, caseID, "AHCA_INTAKE",
 		fmt.Sprintf("New filing instructions request: %s (%s)", org, email), "#/cases/"+caseID)
 	return caseID, caseNumber, nil
 }
@@ -348,7 +351,7 @@ func (s *server) activatePaidIntakeFor(r *http.Request, tenant, caseID string, t
 		s.sendIntakeLinks(r, tenant, caseID, caseNumber, email)
 	}
 	s.autoAssignNewCase(r, tenant, caseID, caseNumber) // paid, so it now takes its turn in the rotation (autoassign.go)
-	// The Reviewer is told the case now exists.
+	// The Admin is told the case now exists.
 	s.notify(r, tenant, "role:CASE_MANAGER", "AHCA_INTAKE",
 		fmt.Sprintf("Fee paid — case %s opened: confirm the filing packet", caseNumber), "#/cases/"+caseID)
 	if tellFiler {

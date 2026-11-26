@@ -105,9 +105,10 @@ const Auth = (() => {
       (roles.includes("TENANT_ADMIN") && rs.some((r) => STAFF_ROLES.includes(r)));
   }
 
-  // A Reviewer with nothing that sees every case: they see only unassigned cases and their own. Mirrors the
+  // An Admin with nothing that sees every case: they see only unassigned cases and their own. Mirrors the
   // backend's reviewerScoped (cmd/server/casescope.go) — exact roles, so a Tenant Admin is never scoped.
-  const SEE_ALL_ROLES = ["PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR",
+  // The Admin (CASE_MANAGER) sees every case since 2026-11-25, like the Tenant Admin: nobody is scoped any more.
+  const SEE_ALL_ROLES = ["CASE_MANAGER", "PM", "QA", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN", "STATE_AUDITOR",
     "CODER", "NURSE_PHYSICIAN", "DOCTOR", "NURSE", "ATTORNEY", "ARBITRATOR", "FINANCE"];
   function reviewerScoped() {
     const roles = Auth.claims()?.roles || [];

@@ -141,7 +141,7 @@ func (s *server) extensionTarget(r *http.Request, tenant, caseID, clock string) 
 	return rule, caseNumber, 0, ""
 }
 
-// applyExtension records an extension and tells the case's workflow, the case record and the Reviewers.
+// applyExtension records an extension and tells the case's workflow, the case record and the Admins.
 func (s *server) applyExtension(r *http.Request, tenant, caseID, caseNumber string, rule *ClockRule, days int, reason, by, bySub, agencyApproval string) (string, bool, error) {
 	clock := rule.Name
 	// Record first, then tell the workflow: a failed insert must never leave the workflow extended with no record.

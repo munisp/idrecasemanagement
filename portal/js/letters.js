@@ -3,7 +3,7 @@
 //
 // Each section of the report is written by the people who own it: the physician's review by the clinical
 // reviewers, the coding review and the claims tables by the coder, the applicable law by the attorney; the
-// Reviewer and the PM may edit all of it. The server says which parts the caller may edit (can_edit) and refuses
+// Admin and the PM may edit all of it. The server says which parts the caller may edit (can_edit) and refuses
 // the rest regardless. Letters are built by lettergen from what is saved here and go to the QA queue.
 const Letters = (() => {
   const afterRender = (fn) => setTimeout(fn, 0);
@@ -19,31 +19,31 @@ const Letters = (() => {
 
   // [key, label, who writes it, hint, kind]
   const CLAIM_SECTIONS = [
-    ["claim_summary", "Claim summary", "Reviewer", "Left blank, the report says: “This case concerns N claims brought by the provider for services rendered to N patients enrolled in the plan.”"],
-    ["dispute_issue", "What the dispute is about", "Reviewer", "For example: “This dispute is regarding the appropriate reimbursement amount for the emergent surgical procedures provided to five (5) patients.”"],
-    ["provider_position", "Provider’s position", "Reviewer"],
-    ["plan_position", "Health Plan’s position", "Reviewer"],
+    ["claim_summary", "Claim summary", "Admin", "Left blank, the report says: “This case concerns N claims brought by the provider for services rendered to N patients enrolled in the plan.”"],
+    ["dispute_issue", "What the dispute is about", "Admin", "For example: “This dispute is regarding the appropriate reimbursement amount for the emergent surgical procedures provided to five (5) patients.”"],
+    ["provider_position", "Provider’s position", "Admin"],
+    ["plan_position", "Health Plan’s position", "Admin"],
     ["applicable_law", "Applicable law", "Attorney"],
-    ["analysis", "Analysis and conclusion", "Reviewer", "Printed at the end of the Rationale, before the reviews."],
+    ["analysis", "Analysis and conclusion", "Admin", "Printed at the end of the Rationale, before the reviews."],
     ["physician_review", "Independent Physician Review", "Nurse / Physician"],
     ["coding_review", "Coding Consultant Review", "Coder"],
     ["pricing_method", "How the claims were priced", "Coder", "For example: “Capitol Bridge used FAIR Health (80th percentile) to price all claims per Florida Statute § 641.513(5).”"],
-    ["closing_note", "Closing note", "Reviewer", "Optional — printed after “Based on the foregoing…”."],
-    ["case_file_summary", "Case File Summary (cover letter)", "Reviewer", "Left blank, the cover letter uses the claim summary."],
+    ["closing_note", "Closing note", "Admin", "Optional — printed after “Based on the foregoing…”."],
+    ["case_file_summary", "Case File Summary (cover letter)", "Admin", "Left blank, the cover letter uses the claim summary."],
     ["standard_of_review", "Standard of review", "Attorney", "Only to change the program’s standard wording."],
   ];
   const IRO_SECTIONS = [
-    ["iro_program_title", "Program line", "Reviewer", "Printed under the organization’s name, e.g. the state’s external review program."],
-    ["agency_case_no", "Agency case number", "Reviewer"],
-    ["iro_number", "IRO number", "Reviewer"],
-    ["plan_reference_no", "Plan reference number", "Reviewer"],
-    ["review_received_from", "Assignment received from", "Reviewer", "For example: “the Department of Insurance”."],
-    ["date_received", "Date received", "Reviewer", "", "date"],
-    ["records_received", "Case documentation received", "Reviewer", "", "date"],
-    ["decision_date", "Decision date", "Reviewer", "", "date"],
-    ["dates_of_service", "Date(s) of service", "Reviewer", "", "line"],
-    ["denial_reason", "Denial reason", "Reviewer", "", "line"],
-    ["claim_summary", "Claim summary", "Reviewer"],
+    ["iro_program_title", "Program line", "Admin", "Printed under the organization’s name, e.g. the state’s external review program."],
+    ["agency_case_no", "Agency case number", "Admin"],
+    ["iro_number", "IRO number", "Admin"],
+    ["plan_reference_no", "Plan reference number", "Admin"],
+    ["review_received_from", "Assignment received from", "Admin", "For example: “the Department of Insurance”."],
+    ["date_received", "Date received", "Admin", "", "date"],
+    ["records_received", "Case documentation received", "Admin", "", "date"],
+    ["decision_date", "Decision date", "Admin", "", "date"],
+    ["dates_of_service", "Date(s) of service", "Admin", "", "line"],
+    ["denial_reason", "Denial reason", "Admin", "", "line"],
+    ["claim_summary", "Claim summary", "Admin"],
     ["reviewer_credentials", "Who reviewed it", "Nurse / Physician", "For example: “A Capitol Bridge Medical Oncologist has reviewed this appeal… has more than five years of relevant practice experience.”"],
     ["determination_reason", "Because…", "Nurse / Physician", "Completes “…be overturned because …”.", "line"],
     ["evidence", "Evidence supporting the determination", "Nurse / Physician", "One reference per line."],
@@ -109,6 +109,9 @@ const Letters = (() => {
     const dis = (k) => (ce[k] ? "" : " disabled");
     const by = (k) => (authors[k] ? `<span class="muted"> — last edited by ${esc(authors[k])}</span>` : "");
     const outcome = r.outcome || "";
+    const rec = data.recommendation;
+    const recLine = rec ? `<p class="dr-rec"><b>Recommended by the ${esc(rec.role || "reviewer")}</b> (${esc(rec.by || "")}): ${esc(OUTCOMES.find((o) => o[0] === rec.outcome)?.[1] || rec.outcome)}
+      — ${rec.report_type === "IRO" ? "medical-necessity letter" : "claim dispute letter"}.${r.outcome && r.outcome !== rec.outcome ? ` <span class="muted">The report now says otherwise.</span>` : " Confirm or change it below."}</p>` : "";
     const startOutcome = !r.outcome && c.outcome ? `<p class="muted">The recorded case outcome (“${esc(c.case_outcome)}”) suggests <b>${esc(OUTCOMES.find((o) => o[0] === c.outcome)?.[1] || c.outcome)}</b>.</p>` : "";
     const aw = r.awarded_cents ?? null, paid = r.already_paid_cents ?? null;
     box.innerHTML = `
@@ -119,10 +122,12 @@ const Letters = (() => {
         <label>Outcome<select data-f="outcome"${dis("decision")}>${OUTCOMES.map(([v, l]) => `<option value="${v}"${v === outcome ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
         ${iro ? "" : `<label>Amount awarded ($)<input data-f="awarded_cents" inputmode="decimal" value="${esc(dollars(aw))}" placeholder="${esc(dollars(c.awarded_cents))}"${dis("decision")} /></label>
         <label>Already paid to the provider ($)<input data-f="already_paid_cents" inputmode="decimal" value="${esc(dollars(paid))}" placeholder="${esc(dollars(c.already_paid_cents))}"${dis("decision")} /></label>
-        <label>Amount owed to the provider ($)<input id="dr-owed" value="${esc(owedText(aw, paid))}" readonly tabindex="-1" title="The amount awarded less what was already paid" /></label>`}
+        <label>Amount owed to the provider ($)<input data-f="owed_cents" inputmode="decimal" value="${esc(dollars(r.owed_cents ?? null))}" placeholder="enter it"${dis("decision")}
+          title="Entered by the reviewer; the letters print exactly this amount" /></label>`}
       </div>
-      ${startOutcome}
-      ${iro ? "" : `<p class="muted" id="dr-balance">${balanceText(aw, paid, c.disputed_cents)}</p>`}
+      ${recLine}${(data.reviews || []).length ? `<details class="dr-reviews"><summary>Every reviewer's review (${data.reviews.length})</summary><ul>${data.reviews.map((x) =>
+        `<li><b>${esc(x.user_name)}</b> <span class="muted">(${esc(x.role === "CODER" ? "Coder" : "Nurse Reviewer")}, ${esc(new Date(x.created_at).toLocaleDateString())})</span> — recommends ${esc(OUTCOMES.find((o) => o[0] === x.recommended_outcome)?.[1] || x.recommended_outcome)}<div class="muted">${esc(x.findings)}</div></li>`).join("")}</ul></details>` : ""}${startOutcome}
+      ${iro ? "" : `<p class="muted" id="dr-balance">${balanceText(aw, paid, c.disputed_cents, r.owed_cents ?? null)}</p>`}
       <fieldset class="dr-reviewers"><legend>Reviewed by (named in the cover letter)</legend>
         ${(data.reviewer_kinds || []).map((k) => `<label><input type="checkbox" data-rev="${esc(k)}"${(r.reviewers || []).includes(k) ? " checked" : ""}${dis("decision")} /> ${esc(REVIEWER_LABEL[k] || k)}</label>`).join("")}
       </fieldset>
@@ -151,7 +156,7 @@ const Letters = (() => {
         <label><input type="radio" name="dr-mode" value="paste"${m === "paste" ? " checked" : ""}${dis} onchange="Letters.setMode('paste')" /> Paste the report</label>
         <label><input type="radio" name="dr-mode" value="upload"${m === "upload" ? " checked" : ""}${dis} onchange="Letters.setMode('upload')" /> Upload the finished report</label>
       </fieldset>
-      ${m === "paste" ? `<label class="dr-sec dr-full"><span><b>Review Rationale and Letter</b> <span class="chip">Reviewer</span>${(r.section_authors || {}).full_report ? `<span class="muted"> — last edited by ${esc(r.section_authors.full_report)}</span>` : ""}</span>
+      ${m === "paste" ? `<label class="dr-sec dr-full"><span><b>Review Rationale and Letter</b> <span class="chip">Admin</span>${(r.section_authors || {}).full_report ? `<span class="muted"> — last edited by ${esc(r.section_authors.full_report)}</span>` : ""}</span>
           <textarea data-sec="full_report" rows="${text.length > 2000 ? 24 : 14}" maxlength="200000"${dis} placeholder="Paste the whole report as it should read: the summary, the rationale, the reviews and the claims.">${esc(text)}</textarea>
           <span class="muted dr-hint">Blank lines start new paragraphs. “Generate the decision report” prints it on the letterhead, files it under Documents and sends it to the QA gate.</span></label>`
         : `<div class="dr-upload">
@@ -182,12 +187,11 @@ const Letters = (() => {
     }, "Uploading…");
   }
 
-  // The amount owed: the award less what the plan already paid (never below zero).
-  const owedCents = (aw, paid) => (aw == null ? null : Math.max(aw - (paid || 0), 0));
-  const owedText = (aw, paid) => (aw == null ? "" : dollars(owedCents(aw, paid)));
-  function balanceText(aw, paid, disputed) {
-    if (aw == null) return "Enter the amount awarded; the amount owed is the award less what was already paid.";
-    return `Amount owed to the provider: <b>${usd(owedCents(aw, paid))}</b>${disputed ? ` · of the ${usd(disputed)} in dispute` : ""}.`;
+  // The amount owed to the provider is entered by the reviewer (2026-11-26), never worked out; the letters print
+  // exactly what is entered, and a letter that states it waits until it is.
+  function balanceText(aw, paid, disputed, owed) {
+    if (owed == null) return "Enter the amount owed to the provider yourself — it is not worked out from the award.";
+    return `Amount owed to the provider: <b>${usd(owed)}</b>${disputed ? ` · of the ${usd(disputed)} in dispute` : ""}.`;
   }
 
   function gridHtml(name, cols, rows, editable) {
@@ -230,9 +234,7 @@ const Letters = (() => {
     else r[f] = cents(el.value);
     markDirty(f);
     const b = document.getElementById("dr-balance");
-    if (b) b.innerHTML = balanceText(r.awarded_cents, r.already_paid_cents, state.data.case?.disputed_cents);
-    const o = document.getElementById("dr-owed");
-    if (o) o.value = owedText(r.awarded_cents, r.already_paid_cents);
+    if (b) b.innerHTML = balanceText(r.awarded_cents, r.already_paid_cents, state.data.case?.disputed_cents, r.owed_cents ?? null);
   }
 
   function markDirty(part) {
@@ -253,7 +255,7 @@ const Letters = (() => {
   // The parts that changed and that the caller may write: the server refuses anything else.
   function body() {
     const ce = state.data.can_edit || {}, r = state.report, ch = state.changed || new Set(), out = {};
-    for (const f of ["report_type", "outcome", "awarded_cents", "already_paid_cents", "reviewers"])
+    for (const f of ["report_type", "outcome", "awarded_cents", "already_paid_cents", "owed_cents", "reviewers"])
       if (ch.has(f) && ce.decision) out[f] = r[f] ?? null;
     if (ch.has("sections")) {
       const secs = {};
@@ -357,6 +359,76 @@ const Letters = (() => {
     catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
   }
 
+  // ---- the full review fee estimate shown at filing (change log #4; case-api fee_estimate.go) ----------------------
+  // Off until an administrator switches it on; everyone who handles fees can see it.
+  function feeEstimateCardHtml() {
+    if (!can("PM", "FINANCE", "CASE_MANAGER", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN")) return "";
+    afterRender(feLoad);
+    return `<details class="card" id="fe-card"><summary><b>Fee estimate at filing</b> <span class="muted" id="fe-state">— loading…</span></summary>
+      <div id="fe-body"><p class="muted">Loading…</p></div></details>`;
+  }
+  const feMoney = (c) => (c ? (c / 100).toFixed(2) : "");
+  const feCents = (v) => { v = String(v || "").replace(/[$,\s]/g, ""); if (!v) return 0; const n = Number(v); return Number.isFinite(n) ? Math.round(n * 100) : NaN; };
+  function feTierRow(t = {}) {
+    return `<tr class="fe-tier"><td><input name="up_to" inputmode="decimal" placeholder="no limit" value="${feMoney(t.up_to_cents)}" aria-label="Disputed amount up to ($)" /></td>
+      <td><input name="fee" inputmode="decimal" value="${feMoney(t.fee_cents)}" aria-label="Estimated fee ($)" /></td>
+      <td><button type="button" class="mini ghost" onclick="this.closest('tr').remove()">Remove</button></td></tr>`;
+  }
+  async function feLoad() {
+    const box = document.getElementById("fe-body");
+    if (!box) return;
+    let d;
+    try { d = await Api.letters.feeEstimate(); }
+    catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const c = d.settings || {}, ro = d.can_edit ? "" : " disabled", m = c.method || "";
+    const st = document.getElementById("fe-state");
+    if (st) st.textContent = c.enabled ? "— on: filers who ask see an estimate" : "— off: filers who ask get the Cost Estimate letter only";
+    box.innerHTML = `<p class="muted">When this is on, a filer who answers <b>Yes</b> to “Do you want an estimate of the full review fee?” sees the estimate on the filing form, and the case keeps it. The Admin’s Cost Estimate letter stays the official figure, and the case page offers this estimate as its starting value.${d.can_edit ? "" : " Only an administrator can change it."}</p>
+      <form id="fe-form" class="ls-form" onsubmit="event.preventDefault(); Letters.feSave(this)">
+        <label class="fe-switch"><input type="checkbox" name="enabled"${c.enabled ? " checked" : ""}${ro} /> Show the estimate on the filing forms</label>
+        <fieldset class="ls-group"><legend>How it is worked out</legend>
+          <label><input type="radio" name="method" value="flat"${m === "flat" ? " checked" : ""}${ro} onchange="Letters.feShow(this.form)" /> One flat fee</label>
+          <label><input type="radio" name="method" value="per_claim"${m === "per_claim" ? " checked" : ""}${ro} onchange="Letters.feShow(this.form)" /> A fee per claim line</label>
+          <label><input type="radio" name="method" value="tiered"${m === "tiered" ? " checked" : ""}${ro} onchange="Letters.feShow(this.form)" /> By the aggregated disputed amount (bands)</label>
+          <label data-for="flat">Flat fee ($)<input name="flat" inputmode="decimal" value="${feMoney(c.flat_cents)}"${ro} /></label>
+          <label data-for="per_claim">Fee per claim ($)<input name="per_claim" inputmode="decimal" value="${feMoney(c.per_claim_cents)}"${ro} /></label>
+          <div data-for="tiered"><table class="fe-tiers"><thead><tr><th>Disputed amount up to ($)</th><th>Estimated fee ($)</th><th></th></tr></thead>
+            <tbody>${(c.tiers || []).map(feTierRow).join("") || feTierRow()}</tbody></table>
+            ${d.can_edit ? `<button type="button" class="mini" onclick="Letters.feAddTier(this)">Add a band</button>` : ""}
+            <p class="muted">Leave “up to” blank on the last band to cover every larger amount; otherwise disputes above it get no estimate.</p></div>
+        </fieldset>
+        <fieldset class="ls-group"><legend>Limits and wording</legend>
+          <label>Minimum ($, optional)<input name="min" inputmode="decimal" value="${feMoney(c.min_cents)}"${ro} /></label>
+          <label>Maximum ($, optional)<input name="max" inputmode="decimal" value="${feMoney(c.max_cents)}"${ro} /></label>
+          <label class="fe-note">Note shown with the figure<textarea name="note" rows="2" maxlength="600" placeholder="${esc(d.default_note || "")}"${ro}>${esc(c.note || "")}</textarea></label>
+        </fieldset>
+        ${d.can_edit ? `<div class="actions"><button>Save fee estimate</button></div>` : ""}
+      </form>
+      ${d.updated_by ? `<p class="muted">Last changed by ${esc(d.updated_by)}, ${new Date(d.updated_at).toLocaleString()}.</p>` : ""}`;
+    feShow(document.getElementById("fe-form"));
+  }
+  function feShow(form) {
+    const m = (form.querySelector('[name="method"]:checked') || {}).value || "";
+    form.querySelectorAll("[data-for]").forEach((el) => { el.hidden = el.dataset.for !== m; });
+  }
+  function feAddTier(btn) { btn.parentElement.querySelector("tbody").insertAdjacentHTML("beforeend", feTierRow()); }
+  async function feSave(form) {
+    const bad = [];
+    const cents = (name, label) => { const v = feCents(form.elements[name].value); if (Number.isNaN(v)) { bad.push(`${label}: enter an amount like 450.00`); return 0; } return v; };
+    const body = { enabled: form.enabled.checked, method: (form.querySelector('[name="method"]:checked') || {}).value || "",
+      flat_cents: cents("flat", "Flat fee"), per_claim_cents: cents("per_claim", "Fee per claim"),
+      min_cents: cents("min", "Minimum"), max_cents: cents("max", "Maximum"), note: form.note.value.trim(), tiers: [] };
+    form.querySelectorAll("tr.fe-tier").forEach((tr, i) => {
+      const up = feCents(tr.querySelector('[name="up_to"]').value), fee = feCents(tr.querySelector('[name="fee"]').value);
+      if (Number.isNaN(up) || Number.isNaN(fee)) { bad.push(`Band ${i + 1}: enter amounts like 5000.00`); return; }
+      if (!up && !fee) return;
+      body.tiers.push({ up_to_cents: up, fee_cents: fee });
+    });
+    if (bad.length) { UI.toast(bad.join("; "), { kind: "warn", duration: 9000 }); return; }
+    try { await Api.letters.saveFeeEstimate(body); UI.toast(body.enabled ? "Fee estimate saved — filers who ask now see it" : "Fee estimate saved (off)"); feLoad(); }
+    catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
+
   // ---- template variables (Templates page) --------------------------------------------------------------------
   // Named values set once for the whole tenant and used as {name} in any email template or uploaded letter:
   // the office's own (organization name, contact details, the Agency's salutation) and any the office adds,
@@ -427,5 +499,6 @@ const Letters = (() => {
       UI.toast("Sent back for revisions — they have been notified"); form.note.value = "";
     } catch (e) { UI.toast(e.message, { kind: "warn" }); }
   }
-  return { askRevisions, caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave };
+  return { askRevisions, caseSecHtml, gen, save, setMode, upload, addRow, delRow, fromCase, settingsCardHtml, saveSettings, variablesCardHtml, tvAdd, tvDel, tvReset, tvSave,
+    feeEstimateCardHtml, feShow, feAddTier, feSave };
 })();

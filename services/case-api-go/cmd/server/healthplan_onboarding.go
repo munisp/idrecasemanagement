@@ -85,6 +85,9 @@ func (s *server) healthPlanForPrincipal(r *http.Request, tenant string) (*health
 // registered mailbox only. FEIN is required, and NAIC for every line of
 // business but ASO (a self-funded group has none).
 func (s *server) registerHealthPlan(w http.ResponseWriter, r *http.Request) {
+	if !turnstilePassed(w, r) { // the "I am human" check, when switched on (turnstile.go)
+		return
+	}
 	var in struct {
 		Tenant         string `json:"tenant"`
 		Name           string `json:"name"`
@@ -1249,6 +1252,9 @@ func (s *server) hpUploadBulkZip(w http.ResponseWriter, r *http.Request) {
 // hpIntake: file a dispute on behalf of a rostered party. Gated on a READY
 // package + verified payment once the party has started onboarding.
 func (s *server) hpIntake(w http.ResponseWriter, r *http.Request) {
+	if !portalTurnstilePassed(w, r) { // "I am human" on the portal filing forms, not for API keys (turnstile.go)
+		return
+	}
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, "HEALTH_PLAN", "CASE_MANAGER", "PM", "FEDERAL_ADMIN", "PLATFORM_ADMIN") {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)

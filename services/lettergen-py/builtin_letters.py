@@ -166,7 +166,7 @@ def load_context(dsn: str, tenant: str, case_id: str) -> dict:
         ls = c.execute("SELECT settings FROM public.letter_settings WHERE tenant=%s", (tenant,)).fetchone()
         rep = c.execute(
             """SELECT report_type, outcome, awarded_cents, already_paid_cents, percent_awarded, sections, claims,
-                      disallowed, reviewers
+                      disallowed, reviewers, owed_cents
                FROM public.decision_reports WHERE tenant=%s AND case_id=%s""",
             (tenant, case_id),
         ).fetchone()
@@ -218,7 +218,7 @@ def load_context(dsn: str, tenant: str, case_id: str) -> dict:
     if rep:
         report = {"report_type": rep[0], "outcome": rep[1], "awarded_cents": rep[2], "already_paid_cents": rep[3],
                   "percent_awarded": float(rep[4]) if rep[4] is not None else None, "sections": rep[5] or {},
-                  "claims": rep[6] or [], "disallowed": rep[7] or [], "reviewers": rep[8] or []}
+                  "claims": rep[6] or [], "disallowed": rep[7] or [], "reviewers": rep[8] or [], "owed_cents": rep[9]}
     patients = {(cl[5] or "", cl[6] or "") for cl in claims if (cl[5] or cl[6])}
     pd = row[4] or {}
     return {
@@ -481,6 +481,10 @@ def _decision(ctx: dict, need_amount=True) -> dict:
                                 "overturned, partially overturned or upheld, and save")
     if need_amount and rep.get("report_type") != "IRO" and rep.get("awarded_cents") is None:
         raise LetterDataMissing("the decision report has no amount awarded yet: enter it on the case's Decision report")
+    # The amount owed is entered by hand (2026-11-26), never worked out: a letter that states it waits for it.
+    states_owed = rep.get("outcome") != "UPHELD" and (rep.get("already_paid_cents") or rep.get("outcome") == "PARTIALLY_OVERTURNED")
+    if need_amount and rep.get("report_type") != "IRO" and states_owed and rep.get("owed_cents") is None:
+        raise LetterDataMissing("the decision report has no amount owed to the provider yet: enter it on the case's Decision report")
     return rep
 
 
@@ -497,7 +501,7 @@ def recommendation(ctx: dict, rep: dict, verb="recommends", short=False) -> str:
             "the Health Plan’s denial of payment for these services be partially overturned")
     s = f"{org} {verb} {what} and the amount of {money(aw)} be awarded to the Provider"
     if paid:
-        bal = max((aw or 0) - paid, 0)
+        bal = rep.get("owed_cents")  # entered by the reviewer, not worked out
         s += (f", of which {money(paid)} was already paid to the Provider. Therefore, the balance of {money(bal)} "
               f"is owed to the Provider.")
     else:
@@ -621,8 +625,8 @@ def build_decision_report(ctx: dict, logo: bytes | None) -> Letter:
     closing = "Based on the foregoing, " + rec
     aw = rep.get("awarded_cents")
     if rep["outcome"] == "PARTIALLY_OVERTURNED" and aw is not None:
-        # The amount owed: the award less what the health plan already paid.
-        owed = max(aw - (rep.get("already_paid_cents") or 0), 0)
+        # The amount owed, as the reviewer entered it on the decision report.
+        owed = rep.get("owed_cents")
         closing += f" {org} is awarding {money(aw)} of the disputed charge; {money(owed)} is owed to the Provider."
     elif rep["outcome"] == "OVERTURNED":
         closing += f" 100% of the {counted(ctx['num_claims'], 'claim')} reviewed have been overturned." \

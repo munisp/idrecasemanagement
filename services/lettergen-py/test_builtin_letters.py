@@ -43,6 +43,9 @@ def report(**over):
          "already_paid_cents": 1_000_000, "percent_awarded": None, "sections": {}, "claims": [], "disallowed": [],
          "reviewers": []}
     r.update(over)
+    # The amount owed is entered by hand on the decision report (2026-11-26); the fixtures enter awarded - paid.
+    if "owed_cents" not in over and r.get("awarded_cents") is not None:
+        r["owed_cents"] = r["awarded_cents"] - (r.get("already_paid_cents") or 0)
     return r
 
 
@@ -170,7 +173,7 @@ class StageLetters(unittest.TestCase):
                 rfi={"side": "PROVIDER", "items": ["Itemized bill", "Medical records"], "message": "", "due_date": "2026-09-16"},
                 details={"withdrawal_dismissed_reason": "Provider No Response"})
         for key, fn in bl.BUILDERS.items():
-            if key in ("final_order_rationale", "cover_letter_final_notice"):
+            if key in ("final_order_rationale", "cover_letter_final_notice", "filing_record", "rebuttal_record"):  # records of a filing: built from what was filed, tested end to end
                 continue
             w = words(fn(c, None))
             self.assertIn("FL26-000216", w, key)

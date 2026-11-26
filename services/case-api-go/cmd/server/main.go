@@ -667,8 +667,12 @@ func main() {
 		// calendar, notifications, saved views, letters.
 		r.Post("/cases/{caseId}/assign", s.assignCase)
 		r.Get("/cases/{caseId}/assignment", s.caseAssignment) // who holds the case, by name
-		r.Get("/cases/assignees", s.listAssignees)            // the PM's picker: eligible staff, least loaded first
-		r.Get("/assignment/auto", s.getAutoAssign)            // new cases to Reviewers in turn: on/off, the rotation, who is next
+		r.Get("/cases/{caseId}/review-team", s.getReviewTeam) // further reviewers (SOP step 10, review_team.go)
+		r.Post("/cases/{caseId}/review-team", s.addReviewer)
+		r.Delete("/cases/{caseId}/review-team/{userId}", s.removeReviewer)
+		r.Post("/cases/{caseId}/review-records", s.recordReview) // a further reviewer's own review
+		r.Get("/cases/assignees", s.listAssignees)               // the PM's picker: eligible staff, least loaded first
+		r.Get("/assignment/auto", s.getAutoAssign)               // new cases to Admins in turn: on/off, the rotation, who is next
 		r.Put("/assignment/auto", s.setAutoAssign)
 		r.Post("/assignment/auto/assign-open", s.assignOpenCases) // the unassigned backlog, in turn (autoassign.go)
 		r.Post("/cases/{caseId}/escalate", s.escalateCase)
@@ -852,20 +856,23 @@ func main() {
 		r.Put("/tpa/disputes/{caseId}/filing", s.tpaFilingPut)                                     // edit it directly while the fee is unpaid
 		r.Post("/tpa/disputes/{caseId}/change-requests", s.tpaChangeRequest)                       // ask for a change once paid
 		r.Delete("/tpa/disputes/{caseId}/change-requests/{requestId}", s.tpaChangeRequestWithdraw) // withdraw my open request
+		r.Post("/tpa/disputes/{caseId}/withdraw", s.tpaWithdrawRequest)                            // ask to withdraw the dispute, any time before it closes (tpa_withdraw.go)
 		r.Get("/admin/tpas", s.adminListTPAs)                                                      // state oversight
 		r.Post("/admin/tpas/{tpaId}/status", s.adminSetTPAStatus)                                  // suspend|reactivate
 		r.Post("/cases/{caseId}/eligibility", s.checkEligibility)                                  // threshold matrix + filing window (G2)
 		r.Get("/cases/{caseId}/eligibility", s.eligibilityHistory)                                 // past reviews (G2)
-		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote)               // notes on a review (Reviewer, PM, Attorney)
+		r.Post("/cases/{caseId}/eligibility/{reviewId}/notes", s.addEligibilityNote)               // notes on a review (Admin, PM, Attorney)
 		r.Get("/cases/{caseId}/eligibility/checklist", s.eligibilityChecklist)                     // printable Eligibility Checklist
 		r.Get("/cases/{caseId}/workflow", s.caseWorkflow)                                          // the SOP steps: done, next, upcoming
-		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Reviewer: outcome, claims reviewed, award, party billed
+		r.Post("/cases/{caseId}/outcome", s.recordOutcome)                                         // Admin: outcome, claims reviewed, award, party billed
 		r.Get("/cases/{caseId}/decision-report", s.getDecisionReport)                              // the written decision: sections, amounts, claims tables
 		r.Put("/cases/{caseId}/decision-report", s.putDecisionReport)
 		r.Post("/cases/{caseId}/revision-request", s.requestRevisions)         // the Attorney (or QA) asks the Coder / Nurse for revisions (role_notify.go)
 		r.Post("/cases/{caseId}/decision-report/file", s.attachDecisionReport) // the finished report, uploaded
 		r.Get("/letter-settings", s.getLetterSettings)                         // letterhead, Agency addressee, invoice terms, remit-to
 		r.Put("/letter-settings", s.putLetterSettings)
+		r.Get("/fee-estimate-settings", s.getFeeEstimateSettings) // change log #4: the estimate shown at filing (fee_estimate.go)
+		r.Put("/fee-estimate-settings", s.putFeeEstimateSettings)
 		r.Get("/template-variables", s.getTemplateVariables) // the office's values and its own {variables}
 		r.Put("/template-variables", s.putTemplateVariables)
 		r.Post("/cases/{caseId}/fwa", s.fwaAction)           // fraud/waste/abuse: report, assign reviewer, conclude
@@ -1182,8 +1189,10 @@ func main() {
 	r.Post("/api/public/ahca-intake", s.publicAhcaIntake)
 	r.Post("/api/public/tpa/register", s.registerTPA)
 	r.Get("/api/public/brand", s.publicBrand)
-	r.Get("/api/public/docs/{audience}", s.publicAPIDoc) // TPA and health plan API references (apidocs.go)
-	r.Get("/api/public/email-check", s.emailCheck)       // does this address take mail (emailcheck.go)
+	r.Get("/api/public/turnstile", s.publicTurnstile)      // the "I am human" check's site key (turnstile.go)
+	r.Get("/api/public/fee-estimate", s.publicFeeEstimate) // what the filing forms show for "Yes, estimate the fee"
+	r.Get("/api/public/docs/{audience}", s.publicAPIDoc)   // TPA and health plan API references (apidocs.go)
+	r.Get("/api/public/email-check", s.emailCheck)         // does this address take mail (emailcheck.go)
 	r.Post("/api/public/healthplan/register", s.registerHealthPlan)
 
 	// Day-13 intake completeness gate (AHCA 2026): hourly sweep flips stale
@@ -1462,7 +1471,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 	}
 	// Case-management enrichment: stage checklists + duplicate detection + timeline.
 	s.ensureChecklist(r, tenant, caseID)
-	s.autoAssignNewCase(r, tenant, caseID, req.CaseNumber) // the next Reviewer in turn (autoassign.go)
+	s.autoAssignNewCase(r, tenant, caseID, req.CaseNumber) // the next Admin in turn (autoassign.go)
 	s.logActivity(r.Context(), tenant, caseID, "CASE_INITIATED",
 		fmt.Sprintf("Dispute %s initiated (%s) — %s / %s, QPA $%d.%02d, workflow %s",
 			req.CaseNumber, initialStatus, req.ServiceLine, req.PlanType, req.QPACents/100, req.QPACents%100, wfID))
@@ -1479,7 +1488,7 @@ func (s *server) initiateCase(w http.ResponseWriter, r *http.Request) {
 				INSERT INTO public.sla_breaches (tenant, case_id, clock, detail)
 				VALUES ($1,$2,'INITIATION_4BD',$3)`, tenant, caseID, detail)
 			s.logActivity(r.Context(), tenant, caseID, "LATE_INITIATION_FLAGGED", detail)
-			s.notify(r, tenant, "*", "LATE_INITIATION",
+			s.caseAlert(r, tenant, caseID, "LATE_INITIATION",
 				fmt.Sprintf("Case %s %s — flagged for compliance review", req.CaseNumber, detail),
 				fmt.Sprintf("#/cases/%s", caseID))
 		}
@@ -1628,7 +1637,7 @@ func (s *server) listCases(w http.ResponseWriter, r *http.Request) {
 	if q.Get("mine") == "true" {
 		add("c.assigned_to = $%d", caller.Subject)
 	}
-	// A Reviewer sees only unassigned cases and their own (casescope.go).
+	// An Admin sees only unassigned cases and their own (casescope.go).
 	if cond, ok := caseScopeSQL(caller, "c", len(args)+1); ok {
 		args = append(args, caller.Subject)
 		where += cond
@@ -1798,6 +1807,7 @@ var signalRoleFloors = map[string][]string{
 	"CLINICAL_REVIEW_COMPLETE": {"NURSE_PHYSICIAN", "DOCTOR", "NURSE", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ATTORNEY_REVIEW_COMPLETE": {"ATTORNEY", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"PACKET_COMPLETE":          {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
+	"FULL_REVIEW_INITIATED":    {"CODER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"}, // SOP step 7, recorded by the Coder (2026-11-26)
 	"AOR_REVISED":              {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"ESTIMATE_PERMISSION":      {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
 	"PLAN_RESPONSE_RECEIVED":   {"CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN"},
@@ -1821,7 +1831,7 @@ var knownCaseSignals = map[string]bool{
 	"OFFER_SUBMITTED": true, "OUTREACH_DONE": true, "PACKET_COMPLETE": true, "PAYMENT_RECORDED": true, "PLAN_OPT_OUT": true,
 	"PLAN_RESPONSE_RECEIVED": true, "PROVIDER_WITHDRAW": true, "REFUND_APPROVED": true, "RESPONSE_FILED": true,
 	"RFI_RESPONSE_RECEIVED": true, "RFI_SENT": true, "SELECTION_FINALIZED": true, "SETTLED_OR_WITHDRAWN": true,
-	"WITHDRAWAL_CONFIRMED": true,
+	"WITHDRAWAL_CONFIRMED": true, "FULL_REVIEW_INITIATED": true,
 }
 
 func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
@@ -1867,7 +1877,7 @@ func (s *server) signalCase(w http.ResponseWriter, r *http.Request) {
 // response and returns false when it refuses.
 func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenant, id, signal string, data map[string]any, reviewNote string) bool {
 	// Only the events the case workflows know. Any other name used to be accepted and written to the case's
-	// timeline under that name -- a Reviewer could post a "QA_APPROVED" or "INVOICE_PAID" entry.
+	// timeline under that name -- an Admin could post a "QA_APPROVED" or "INVOICE_PAID" entry.
 	if !knownCaseSignals[signal] {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown case event %q", signal)})
 		return false
@@ -1901,6 +1911,13 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		}
 	}
 	// SOP: a dispute is withdrawn after acceptance and before the final determination.
+	// SOP step 10 (2026-11-26): the main Coding / Clinical review waits for every further reviewer of its kind.
+	if role := map[string]string{"CODING_REVIEW_COMPLETE": "CODER", "CLINICAL_REVIEW_COMPLETE": "NURSE_PHYSICIAN"}[signal]; role != "" {
+		if left := pendingReviewers(s.caseReviewTeam(r.Context(), tenant, id), role); len(left) > 0 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "still waiting for the review of " + strings.Join(left, ", ") + " — each named reviewer records theirs first"})
+			return false
+		}
+	}
 	if signal == "PROVIDER_WITHDRAW" {
 		if f, err := s.workflowFacts(r.Context(), tenant, id); err == nil {
 			if msg := withdrawalRefusal(f.Letter["acceptance"], f.Letter["final_order"]); msg != "" {
@@ -1969,13 +1986,14 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 		return false
 	}
 	s.notifyOnSignal(r, tenant, id, signal, data) // change log 2026-11-25 #14/#24 (role_notify.go)
-	// The Reviewer tells the Coder and the Attorney the packet is in: the
+	if signal == "CODING_REVIEW_COMPLETE" || signal == "CLINICAL_REVIEW_COMPLETE" {
+		s.recordRecommendation(r, tenant, id, signal, data) // the reviewer's recommended outcome starts the report (review_recommendation.go)
+	}
+	// The Admin tells the Coder and the Attorney the packet is in: the
 	// Coder's Dispute Summary is next, and the Attorney may be needed on the AOR.
 	if signal == "PACKET_COMPLETE" {
-		for _, role := range []string{"CODER", "ATTORNEY"} {
-			s.notify(r, tenant, "role:"+role, "PACKET_COMPLETE",
-				fmt.Sprintf("Case %s: the filing packet is complete and has been checked by the Reviewer", caseNumber), "#/cases/"+id)
-		}
+		s.caseAlert(r, tenant, id, "PACKET_COMPLETE",
+			fmt.Sprintf("Case %s: the filing packet is complete and has been checked by the Admin", caseNumber), "", "CODER", "ATTORNEY")
 	}
 	// The filing packet's claim count is recorded with the step that
 	// confirms the packet (report column E).
@@ -1989,7 +2007,7 @@ func (s *server) deliverCaseSignal(w http.ResponseWriter, r *http.Request, tenan
 	if signal == "RFI_RESPONSE_RECEIVED" {
 		s.setProgramDateOn(r.Context(), tenant, id, "rfi_response_received_at", stepDay)
 	}
-	if signal == "ESTIMATE_PERMISSION" { // recorded by the Reviewer: the portal request is answered
+	if signal == "ESTIMATE_PERMISSION" { // recorded by the Admin: the portal request is answered
 		s.closePermissionRequests(r.Context(), tenant, id, "COMPLETE")
 	}
 	// The answer is the case's too: the acceptance letter and email drop the estimate language without one.

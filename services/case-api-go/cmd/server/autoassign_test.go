@@ -16,7 +16,7 @@ func TestNextInRotation(t *testing.T) {
 	if got := nextInRotation(nil, "a"); got != "" {
 		t.Errorf("nobody to assign: got %q", got)
 	}
-	// Round robin is even: 9 cases over 3 Reviewers is 3 each.
+	// Round robin is even: 9 cases over 3 Admins is 3 each.
 	n, last := map[string]int{}, ""
 	for i := 0; i < 9; i++ {
 		last = nextInRotation(ids, last)

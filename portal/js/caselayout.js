@@ -188,14 +188,19 @@ const CaseLayout = (() => {
   // ---- documents -------------------------------------------------------------------------------------------
   const FOLDERS = ["GENERAL", "INTAKE", "EVIDENCE", "CORRESPONDENCE", "OFFERS", "DETERMINATION", "INVOICES", "PARTY_UPLOADS"];
   const folderName = (f) => sentence(f || "GENERAL");
+  // Who sent a document, at a glance (2026-11-26): the kind of party as a chip, then the name.
+  const WHO_KIND = { "health-plan": "Health plan", tpa: "TPA", provider: "Provider", party: "Party", filer: "Provider (filing form)",
+    respondent: "Responding party", sharebox: "Secure upload link", requested: "Secure upload link", auto: "System" };
   function who(by) {
     const b = String(by || "");
     if (!b) return "—";
-    if (b.startsWith("lettergen:")) return `Generated for ${esc(b.slice(10))}`;
-    if (UUID.test(b)) return "Staff";
-    const m = b.match(/^(health-plan|tpa|provider|party):(.+)$/);
-    if (m) return `${esc(sentence(m[1]))} · ${esc(m[2])}`;
-    return esc(b);
+    const chip = (k, cls) => `<span class="chip who-${cls}">${esc(k)}</span>`;
+    if (b.startsWith("lettergen:")) return `${chip("Generated letter", "gen")} <span class="muted">for ${esc(b.slice(10))}</span>`;
+    if (UUID.test(b)) return chip("Staff", "staff");
+    const m = b.match(/^([a-z-]+):(.*)$/);
+    if (m && WHO_KIND[m[1]]) return `${chip(WHO_KIND[m[1]], m[1])}${m[2] ? ` ${esc(m[2])}` : ""}`;
+    if (WHO_KIND[b]) return chip(WHO_KIND[b], b);
+    return `${chip("Staff", "staff")} ${esc(b)}`;
   }
   const size = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
   function documents(id, docs) {

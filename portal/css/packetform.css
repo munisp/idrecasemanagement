@@ -47,3 +47,14 @@
 .sig-pad .sig-clear{align-self:flex-start}
 .sig-label{font-size:14px}
 .sig-ro canvas{pointer-events:none;border-style:solid}.sig-ro .sig-clear{display:none}
+.pf-estimate{margin:10px 0 2px;padding:10px 12px;border:1px solid var(--border-default,#c9cdd3);border-left:4px solid var(--accent,#2f6f5e);border-radius:6px;background:var(--surface-raised,#fff);max-width:640px}
+.pf-estimate p{margin:0 0 4px}.pf-estimate p:last-child{margin:0}
+/* Supporting documents uploaded on the form (2026-11-26) */
+.pf-uploads{margin-top:10px}
+.pf-upload-list{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.pf-upload{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 8px;border:1px solid var(--line,#d9d6cf);border-radius:6px;font-size:14px}
+.pf-upload-name{flex:1 1 220px;overflow-wrap:anywhere}
+.pf-upload select{flex:0 1 340px;max-width:100%}
+.pf-upload-need{border-color:#c0392b}
+.pf-upload-need select{outline:2px solid #c0392b}
+.pf-upload-remove{background:none;border:1px solid var(--line,#d9d6cf);border-radius:4px;padding:3px 8px;cursor:pointer}

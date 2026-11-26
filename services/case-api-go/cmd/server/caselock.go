@@ -71,7 +71,7 @@ func caseLockMessage(lock string) string {
 	return ""
 }
 
-// lockNotVisible is not a lock but the same refusal: a Reviewer naming, in a request body, a case assigned to
+// lockNotVisible is not a lock but the same refusal: an Admin naming, in a request body, a case assigned to
 // someone else (casescope.go). Answered as "not found", like the routes that name it in their path.
 const lockNotVisible = "NOT_VISIBLE"
 

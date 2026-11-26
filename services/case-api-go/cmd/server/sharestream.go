@@ -291,7 +291,7 @@ func (s *server) shareCompleteUpload(w http.ResponseWriter, r *http.Request) {
 	s.logActivity(r.Context(), up.tenant, up.caseID, "DOCUMENT_UPLOADED",
 		fmt.Sprintf("%q (%d bytes, %d sealed parts) received via resumable secure link — analysis queued",
 			up.filename, up.size, len(up.parts)))
-	s.notify(r, up.tenant, "*", "DOC_RECEIVED",
+	s.caseAlertAll(r, up.tenant, up.caseID, "DOC_RECEIVED",
 		fmt.Sprintf("Document %q arrived via secure link on case %s", up.filename, up.caseID), "#/cases/"+up.caseID)
 	s.logAudit(r.Context(), up.tenant, up.caseID, "DOCUMENT_UPLOADED", map[string]any{
 		"by": "sharebox:" + token[:8], "via": "sharebox-multipart", "doc_id": docID,

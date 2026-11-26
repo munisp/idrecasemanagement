@@ -119,7 +119,7 @@ func TestResendKey(t *testing.T) {
 
 func TestIsStaff(t *testing.T) {
 	if !isStaff(principal{Subject: "s", Username: "u", Roles: []string{"CASE_MANAGER"}}) {
-		t.Error("a Reviewer is staff")
+		t.Error("an Admin is staff")
 	}
 	for _, roles := range [][]string{{"TPA"}, {"HEALTH_PLAN"}, {"PARTY"}} {
 		if isStaff(principal{Subject: "s", Username: "u", Roles: roles}) {
@@ -251,7 +251,7 @@ func TestWriteMixedParses(t *testing.T) {
 	var b strings.Builder
 	writeMailHeaders(&b, "Pat <pat@mail-dev.upi.dev>", []string{"a@b.test"}, nil, "Records", "<x@y>")
 	b.WriteString("MIME-Version: 1.0\r\n")
-	writeMixed(&b, "See attached.", []outAttachment{{Name: "eob.pdf", ContentType: "application/pdf", Content: []byte("%PDF-1.4 fake")}, {Name: "notes.txt", Content: []byte("hello")}})
+	writeMixed(&b, "See attached.", "", []outAttachment{{Name: "eob.pdf", ContentType: "application/pdf", Content: []byte("%PDF-1.4 fake")}, {Name: "notes.txt", Content: []byte("hello")}})
 	msg, err := mail.ReadMessage(strings.NewReader(b.String()))
 	if err != nil {
 		t.Fatal(err)

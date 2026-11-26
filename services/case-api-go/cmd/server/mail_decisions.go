@@ -5,7 +5,7 @@ package main
 //   - its attachments become documents of the dispute (scanned, sealed, read by doc-intel), as an upload would;
 //   - a permission to proceed, an extension agreed or declined, the documents an RFI asked for, or a withdrawal is
 //     read from the words the sender wrote (not the letter they quote) and recorded through the same code the portal
-//     and the Reviewer's step use -- the request closed, the workflow signalled, the right people told.
+//     and the Admin's step use -- the request closed, the workflow signalled, the right people told.
 // It acts only when it can be sure: the sender is the party's registered address or one of its portal team, the mail
 // passed its sender checks (DMARC, or SPF and DKIM), and the answer is unambiguous. Otherwise nothing is recorded and
 // the dispute's holder is asked to read the mail and record it.
@@ -256,7 +256,7 @@ func (s *server) actOnFiledMail(ctx context.Context, in inboundMail, m caseMatch
 					}
 				}
 			}
-			// No portal request (a filer without a portal account answers the estimate email): the Reviewer's step.
+			// No portal request (a filer without a portal account answers the estimate email): the Admin's step.
 			data := map[string]any{"granted": ans == "PROCEED", "date": time.Now().UTC().Format("2006-01-02"), "source": "email", "by": from}
 			wfID := fmt.Sprintf("AHCA-%s-%s", strings.ToUpper(tenant), m.CaseNumber)
 			if _, err := s.signalCaseWorkflow(ctx, tenant, caseID, wfID, "ESTIMATE_PERMISSION", data); err != nil {
@@ -353,7 +353,7 @@ func (s *server) awaitingPermission(ctx context.Context, tenant, caseID string) 
 	return sent && !recorded
 }
 
-// withdrawByMail: the filer asks to withdraw -- recorded as the Reviewer's step records it; the workflow then asks
+// withdrawByMail: the filer asks to withdraw -- recorded as the Admin's step records it; the workflow then asks
 // the office to confirm the withdrawal (it never closes a case on an email alone).
 func (s *server) withdrawByMail(ctx context.Context, r *http.Request, tenant, caseID, caseNumber, side, orgName, from string,
 	recorded func(string, string) mailDecision) mailDecision {
@@ -375,6 +375,7 @@ func (s *server) withdrawByMail(ctx context.Context, r *http.Request, tenant, ca
 	s.setProgramDateOn(ctx, tenant, caseID, "withdrawal_requested_at", day)
 	s.setCaseDetail(ctx, tenant, caseID, "withdrawal_requested_by", by)
 	s.logActivity(ctx, tenant, caseID, "WITHDRAWAL_REQUESTED_BY_MAIL", fmt.Sprintf("%s asked by email to withdraw the dispute — the office confirms it", orgName))
+	s.logActivity(ctx, tenant, caseID, "PROVIDER_WITHDRAW", fmt.Sprintf(`Withdrawal requested by email from %s — {"by":%q,"source":"email"}`, orgName, by)) // the step the workflow reads
 	holder := orWord(s.currentAssignee(ctx, tenant, caseID), "role:CASE_MANAGER")
 	s.notifyCtx(ctx, tenant, holder, "WITHDRAWAL_REQUESTED", fmt.Sprintf("%s asked by email to withdraw %s — confirm the withdrawal", orgName, caseNumber), "#/cases/"+caseID)
 	d := recorded("REQUESTED", "withdrawal requested — waiting for the office's confirmation")

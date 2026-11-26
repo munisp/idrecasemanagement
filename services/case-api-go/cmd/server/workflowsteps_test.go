@@ -40,49 +40,59 @@ func TestWorkflowStepsWalk(t *testing.T) {
 	now := time.Now()
 	expect("fee", "Finance")
 	f.Status = "PENDING_INTAKE"
-	expect("packet", "Reviewer")
+	expect("packet", "Admin")
 	f.Act["PACKET_COMPLETE"] = wfAct{Body: `Workflow signal PACKET_COMPLETE delivered — {"estimate_requested":false}`, At: now}
-	expect("eligibility", "Reviewer")
+	expect("eligibility", "Admin")
 	f.HasElig, f.EligResult, f.EligAt = true, "ELIGIBLE", now
 	expect("dispute_summary", "Coder")
 	f.HasSummary = true
-	expect("estimate_confirm", "Reviewer")
+	expect("estimate_confirm", "Admin")
 	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `Workflow signal ESTIMATE_CONFIRMED delivered — {"requested":false}`, At: now}
-	expect("letter:acceptance", "Reviewer")
+	expect("letter:acceptance", "Admin")
 	f.Letter["acceptance"] = "PENDING"
 	expect("qa:acceptance", "PM")
-	f.Letter["acceptance"] = "REJECTED" // back to the Reviewer
-	expect("letter:acceptance", "Reviewer")
+	f.Letter["acceptance"] = "REJECTED" // back to the Admin
+	expect("letter:acceptance", "Admin")
 	f.Letter["acceptance"] = "SENT"
-	expect("letter:plan_notification", "Reviewer")
+	expect("letter:plan_notification", "Admin")
 	f.Letter["plan_notification"] = "SENT"
-	expect("plan_response", "Reviewer")
+	expect("plan_response", "Admin")
 	f.Act["PLAN_RESPONSE_RECEIVED"] = wfAct{At: now}
+	expect("full_review", "Coder") // SOP step 7, recorded by the Coder (2026-11-26)
+	f.Act["FULL_REVIEW_INITIATED"] = wfAct{At: now}
 	expect("coding_review", "Coder")
 	f.Act["CODING_REVIEW_COMPLETE"] = wfAct{Body: `{"clinical_requested": true}`, At: now}
-	expect("clinical_review", "Nurse / Physician")
+	expect("clinical_review", "Nurse Reviewer")
 	f.Act["CLINICAL_REVIEW_COMPLETE"] = wfAct{At: now}
 	expect("attorney_review", "Attorney")
 	f.Act["ATTORNEY_REVIEW_COMPLETE"] = wfAct{At: now}
 	expect("invoice", "PM")
 	f.ReviewInvoice, f.OpenInvoices = true, 1
-	expect("report_save", "Reviewer")
+	expect("report_save", "Admin")
 	f.ReportSaved = true
 	f.Generated = map[string]bool{}
-	expect("report_generate", "Reviewer")
+	expect("report_generate", "Admin")
 	f.Generated["final_order_rationale"] = true
-	expect("report_cover_letter", "Reviewer")
+	expect("report_cover_letter", "Admin")
 	f.Generated["cover_letter_final_notice"] = true
-	expect("report_plan_invoice", "Reviewer")
+	expect("report_plan_invoice", "Admin")
 	f.Generated["invoice_health_plan"] = false // rejected in QA: generate it again
-	expect("report_plan_invoice", "Reviewer")
+	expect("report_plan_invoice", "Admin")
 	f.Generated["invoice_health_plan"] = true
-	expect("letter:final_order", "Reviewer")
+	// Each generated document passes QA before the package that carries them (2026-11-26).
+	f.GeneratedPassed = map[string]bool{}
+	expect("qa:final_order_rationale", "PM")
+	f.GeneratedPassed["final_order_rationale"] = true
+	expect("qa:cover_letter_final_notice", "PM")
+	f.GeneratedPassed["cover_letter_final_notice"] = true
+	expect("qa:invoice_health_plan", "PM")
+	f.GeneratedPassed["invoice_health_plan"] = true
+	expect("letter:final_order", "Admin")
 	f.Letter["final_order"] = "SENT"
 	// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
-	expect("outcome", "Reviewer")
+	expect("outcome", "Admin")
 	f.HasOutcome = true
-	expect("final_order_issued", "Reviewer")
+	expect("final_order_issued", "Admin")
 	f.Act["FINAL_ORDER_ISSUED"] = wfAct{At: now}
 	expect("payment", "Finance")
 	// #19: the Final Order Rationale Copy is not a step unless a party asks for it.
@@ -121,7 +131,7 @@ func TestWorkflowStepsBranches(t *testing.T) {
 	if strings.Contains(keys(steps), "plan_notification") {
 		t.Error("an ineligible case has no plan notification step")
 	}
-	// AOR hold: Attorney confirms, Reviewer records the revision, then re-review.
+	// AOR hold: Attorney confirms, Admin records the revision, then re-review.
 	f.EligResult = "HOLD_AOR"
 	if n := wfNext(buildWorkflowSteps(f)); n == nil || n.Key != "aor_confirm" || n.Owner != "Attorney" {
 		t.Fatalf("AOR hold: next should be the Attorney's confirmation, got %+v", n)
@@ -181,7 +191,7 @@ func TestWorkflowDecide(t *testing.T) {
 	now := time.Now()
 	f := wfBase()
 	f.Act["PACKET_COMPLETE"] = wfAct{At: now}
-	steps := buildWorkflowSteps(f) // next: the Reviewer's eligibility review
+	steps := buildWorkflowSteps(f) // next: the Admin's eligibility review
 	for action, wantOK := range map[string]bool{
 		"eligibility":                   true,  // the next step
 		"summary":                       false, // a later step
@@ -251,9 +261,9 @@ func TestWorkflowLetterHandBack(t *testing.T) {
 	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `{"requested":false}`, At: time.Now()}
 	f.HasElig, f.EligResult = true, "ELIGIBLE"
 	for st, want := range map[string][2]string{
-		"": {"letter:acceptance", "Reviewer"}, "PENDING": {"qa:acceptance", "PM"},
-		"APPROVED": {"send:acceptance", "Reviewer"}, "REJECTED": {"letter:acceptance", "Reviewer"},
-		"SENT": {"letter:plan_notification", "Reviewer"},
+		"": {"letter:acceptance", "Admin"}, "PENDING": {"qa:acceptance", "PM"},
+		"APPROVED": {"send:acceptance", "Admin"}, "REJECTED": {"letter:acceptance", "Admin"},
+		"SENT": {"letter:plan_notification", "Admin"},
 	} {
 		f.Letter["acceptance"] = st
 		n := wfNext(buildWorkflowSteps(f))
@@ -304,6 +314,7 @@ func TestWorkflowDecisionReportEarly(t *testing.T) {
 	f.HasElig, f.EligResult, f.EligAt, f.HasSummary = true, "ELIGIBLE", now, true
 	f.Letter["acceptance"], f.Letter["plan_notification"] = "SENT", "SENT"
 	f.Act["PLAN_RESPONSE_RECEIVED"] = wfAct{At: now}
+	f.Act["FULL_REVIEW_INITIATED"] = wfAct{At: now}
 	f.ReportSaved = true
 	f.Generated = map[string]bool{"final_order_rationale": true}
 	steps := buildWorkflowSteps(f)
@@ -320,7 +331,7 @@ func TestWorkflowDecisionReportEarly(t *testing.T) {
 	}
 	for _, st := range steps {
 		if strings.HasPrefix(st.Key, "report_") && strings.Join(st.OwnerRoles, ",") != "CASE_MANAGER,PM" {
-			t.Fatalf("%s is the Reviewer's or the PM's, got %v", st.Key, st.OwnerRoles)
+			t.Fatalf("%s is the Admin's or the PM's, got %v", st.Key, st.OwnerRoles)
 		}
 	}
 }

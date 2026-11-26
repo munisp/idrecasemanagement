@@ -83,7 +83,7 @@ var docFolders = map[string]bool{
 var tenantStaffRoles = map[string]bool{
 	"CASE_MANAGER": true, "PM": true, "FINANCE": true, "ARBITRATOR": true,
 	"ATTORNEY": true, "CODER": true, "NURSE_PHYSICIAN": true, "DOCTOR": true,
-	"NURSE": true, "TENANT_ADMIN": true,
+	"NURSE": true, "TENANT_ADMIN": true, "QA": true,
 }
 
 // hasAnyRole reports whether the principal holds any of the listed roles.

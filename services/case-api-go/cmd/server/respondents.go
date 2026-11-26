@@ -20,7 +20,7 @@ package main
 //
 // The responding side opens the filer's documents, adds its own, and submits
 // its response. Submitting counts as the response at once (the user's call):
-// the workflow gets PLAN_RESPONSE_RECEIVED and the Reviewer is told. A health
+// the workflow gets PLAN_RESPONSE_RECEIVED and the Admin is told. A health
 // plan can also ask for an opt-out; the Attorney decides it as before.
 
 import (
@@ -476,10 +476,8 @@ func (s *server) respondingSubmit(actor string) http.HandlerFunc {
 		s.logActivity(r.Context(), tenant, caseID, "PLAN_RESPONSE_RECEIVED",
 			fmt.Sprintf("Response submitted by %s on their dashboard (%d document(s)) — %s", sc.label, docs, string(detail)))
 		s.logAudit(r.Context(), tenant, caseID, "RESPONDENT_RESPONDED", map[string]any{"by": sc.subject, "as": sc.label, "documents": docs, "workflow_signalled": signalled})
-		for _, role := range []string{"CASE_MANAGER", "ATTORNEY"} {
-			s.notify(r, tenant, "role:"+role, "RESPONDENT_RESPONDED",
-				fmt.Sprintf("%s responded to %s (%d document(s))", sc.label, caseNumber, docs), "#/cases/"+caseID)
-		}
+		s.caseAlert(r, tenant, caseID, "RESPONDENT_RESPONDED",
+			fmt.Sprintf("%s responded to %s (%d document(s))", sc.label, caseNumber, docs), "", "CASE_MANAGER", "ATTORNEY")
 		s.tellFiler(r.Context(), tenant, caseID, "RESPONDENT_RESPONDED",
 			fmt.Sprintf("%s responded to %s (%d document(s))", sc.label, caseNumber, docs))
 		writeJSON(w, http.StatusOK, map[string]any{"status": "SUBMITTED", "workflow_signalled": signalled})
@@ -514,8 +512,8 @@ func (s *server) respondingOptOut(w http.ResponseWriter, r *http.Request) {
 	var caseNumber string
 	_ = s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT case_number FROM tenant_%s.cases WHERE id::text=$1`, sanitizeTenant(tenant)), caseID).Scan(&caseNumber)
 	s.logActivity(r.Context(), tenant, caseID, "PLAN_OPT_OUT_REQUESTED", fmt.Sprintf("%s asked to opt out: %s", sc.label, strings.TrimSpace(in.Reason)))
-	s.notify(r, tenant, "role:ATTORNEY", "PLAN_OPT_OUT_REQUESTED",
-		fmt.Sprintf("%s asks to opt out of %s — decide it on the case", sc.label, caseNumber), "#/cases/"+caseID)
+	s.caseAlert(r, tenant, caseID, "PLAN_OPT_OUT_REQUESTED",
+		fmt.Sprintf("%s asks to opt out of %s — decide it on the case", sc.label, caseNumber), "", "ATTORNEY")
 	s.tellFiler(r.Context(), tenant, caseID, "PLAN_OPT_OUT_REQUESTED",
 		fmt.Sprintf("%s asked to opt out of %s; the office decides", sc.label, caseNumber))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "OPT_OUT_REQUESTED"})
@@ -615,7 +613,7 @@ func (s *server) getRespondentContact(w http.ResponseWriter, r *http.Request) {
 func (s *server) setRespondentContact(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !hasAnyRole(p, respondentStaff...) {
-		http.Error(w, `{"error":"forbidden: the Reviewer, the PM or an admin keeps the other side's contact"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the Admin, the PM or an admin keeps the other side's contact"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)

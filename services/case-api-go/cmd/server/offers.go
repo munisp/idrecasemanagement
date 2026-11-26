@@ -372,7 +372,7 @@ func (s *server) issueDetermination(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("Determination issued: $%d.%02d — %s", amount/100, amount%100, truncate(in.Rationale, 200)))
 	s.logAudit(r.Context(), tenant, caseID, "DETERMINATION_ISSUED", map[string]any{
 		"by": p.Subject, "amount_cents": amount, "selected_offer_id": in.SelectedOfferID})
-	s.notify(r, tenant, "*", "DETERMINATION",
+	s.caseAlertAll(r, tenant, caseID, "DETERMINATION",
 		fmt.Sprintf("Determination issued on case %s: $%d.%02d.", caseNumber, amount/100, amount%100),
 		"#/cases/"+caseID)
 	writeJSON(w, http.StatusCreated, map[string]any{

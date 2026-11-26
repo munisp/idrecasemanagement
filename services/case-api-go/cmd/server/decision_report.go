@@ -16,7 +16,7 @@ import (
 // The decision report (scripts/decision_reports.sql): what the reviewers write for the Review Rationale and
 // Letter, the cover letter and the invoices. Each part is written by the people who own it -- the physician's
 // review by the clinical reviewers, the coding review and the claims tables by the coder, the applicable law by
-// the attorney -- and the Reviewer and the PM may edit all of it. lettergen builds the letters from it.
+// the attorney -- and the Admin and the PM may edit all of it. lettergen builds the letters from it.
 //
 // The letterhead and invoice details (public.letter_settings) are per tenant: the program config carries the
 // standard wording ("letters"), the table carries what an office changes, and the remit-to bank details, which
@@ -180,7 +180,7 @@ func (s *server) getDecisionReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.queryRows(r, `
-		SELECT report_type, outcome, awarded_cents, already_paid_cents, percent_awarded::float8 AS percent_awarded,
+		SELECT report_type, outcome, awarded_cents, already_paid_cents, owed_cents, percent_awarded::float8 AS percent_awarded,
 		       sections, claims, disallowed, reviewers, section_authors, updated_by, updated_at
 		FROM public.decision_reports WHERE tenant=$1 AND case_id=$2`, tenant, caseID)
 	if err != nil {
@@ -226,7 +226,8 @@ func (s *server) getDecisionReport(w http.ResponseWriter, r *http.Request) {
 			"awarded_cents": awarded, "already_paid_cents": paid, "accepted_on": accepted,
 			"outcome": drOutcomeFromCase(caseOutcome), "claims": claims,
 		},
-		"can_edit": canEdit, "reviewer_kinds": drReviewerKinds,
+		"can_edit": canEdit, "reviewer_kinds": drReviewerKinds, "recommendation": s.reviewRecommendation(r, tenant, caseID),
+		"reviews": s.caseReviewRecords(r, tenant, caseID),
 	})
 }
 
@@ -288,7 +289,7 @@ func (s *server) putDecisionReport(w http.ResponseWriter, r *http.Request) {
 				o = nil
 			}
 			cols[k] = &part{true, o}
-		case "awarded_cents", "already_paid_cents":
+		case "awarded_cents", "already_paid_cents", "owed_cents": // owed: entered by hand (2026-11-26), never worked out
 			if !drCan(p, decisionRoles) {
 				forbid(k)
 				return
@@ -426,6 +427,7 @@ func (s *server) putDecisionReport(w http.ResponseWriter, r *http.Request) {
 	setOut, vOut := get("outcome")
 	setAw, vAw := get("awarded_cents")
 	setPd, vPd := get("already_paid_cents")
+	setOw, vOw := get("owed_cents")
 	setPct, vPct := get("percent_awarded")
 	setSec, vSec := get("sections")
 	setCl, vCl := get("claims")
@@ -438,9 +440,9 @@ func (s *server) putDecisionReport(w http.ResponseWriter, r *http.Request) {
 	// the decision are replaced whole.
 	_, err := s.db.Exec(r.Context(), `
 		INSERT INTO public.decision_reports AS d (tenant, case_id, report_type, outcome, awarded_cents, already_paid_cents,
-		       percent_awarded, sections, claims, disallowed, reviewers, section_authors, updated_by)
+		       percent_awarded, sections, claims, disallowed, reviewers, section_authors, updated_by, owed_cents)
 		VALUES ($1,$2, coalesce($4::text,'CLAIM_DISPUTE'), $6::text, $8::bigint, $10::bigint, $12::numeric, $14::jsonb,
-		        coalesce($16::jsonb,'[]'), coalesce($18::jsonb,'[]'), coalesce($20::jsonb,'[]'), $21::jsonb, $22)
+		        coalesce($16::jsonb,'[]'), coalesce($18::jsonb,'[]'), coalesce($20::jsonb,'[]'), $21::jsonb, $22, $24::bigint)
 		ON CONFLICT (tenant, case_id) DO UPDATE SET
 		  report_type        = CASE WHEN $3 THEN $4::text ELSE d.report_type END,
 		  outcome            = CASE WHEN $5 THEN $6::text ELSE d.outcome END,
@@ -452,9 +454,10 @@ func (s *server) putDecisionReport(w http.ResponseWriter, r *http.Request) {
 		  disallowed         = CASE WHEN $17 THEN $18::jsonb ELSE d.disallowed END,
 		  reviewers          = CASE WHEN $19 THEN $20::jsonb ELSE d.reviewers END,
 		  section_authors    = d.section_authors || $21::jsonb,
+		  owed_cents         = CASE WHEN $23 THEN $24::bigint ELSE d.owed_cents END,
 		  updated_by = $22, updated_at = now()`,
 		tenant, caseID, setType, vType, setOut, vOut, setAw, vAw, setPd, vPd, setPct, vPct,
-		setSec, vSec, setCl, vCl, setDis, vDis, setRev, vRev, string(authorsJ), displayName(p))
+		setSec, vSec, setCl, vCl, setDis, vDis, setRev, vRev, string(authorsJ), displayName(p), setOw, vOw)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, http.StatusInternalServerError)
 		return
@@ -649,7 +652,7 @@ func (s *server) putLetterSettings(w http.ResponseWriter, r *http.Request) {
 func (s *server) attachDecisionReport(w http.ResponseWriter, r *http.Request) {
 	p := r.Context().Value(ctxPrincipal{}).(principal)
 	if !drCan(p, drReviewerRoles) {
-		http.Error(w, `{"error":"forbidden: the Reviewer or the PM uploads the decision report"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: the Admin or the PM uploads the decision report"}`, http.StatusForbidden)
 		return
 	}
 	tenant := r.Context().Value(ctxTenant{}).(string)
@@ -693,7 +696,7 @@ func (s *server) attachDecisionReport(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1,$2,'final_order_rationale','letter',$3,$4,'PENDING',$5,$6) RETURNING id`,
 		tenant, caseID, "Review Rationale and Letter "+caseNumber,
 		fmt.Sprintf("Uploaded by %s: %s", displayName(p), name), displayName(p), p.Subject).Scan(&qid)
-	s.notify(r, tenant, "role:PM", "QA_REVIEW",
+	s.notifyQA(r, tenant, caseID, "PM", "QA_REVIEW",
 		fmt.Sprintf("Decision report uploaded for case %s — awaiting QA", caseNumber), "#/qa")
 	s.logActivity(r.Context(), tenant, caseID, "DECISION_REPORT_UPLOADED",
 		fmt.Sprintf("Decision report uploaded by %s: %s, queued for QA", displayName(p), name))
@@ -712,4 +715,18 @@ func drReportFileName(caseNumber, uploaded string) string {
 		ext = strings.ToLower(uploaded[i:])
 	}
 	return base + ext
+}
+
+// reviewRecommendation: the Coder's / Nurse Reviewer's recommendation on the case (review_recommendation.go), or nil.
+func (s *server) reviewRecommendation(r *http.Request, tenant, caseID string) any {
+	var raw []byte
+	if s.db.QueryRow(r.Context(), fmt.Sprintf(`SELECT details->'review_recommendation' FROM tenant_%s.cases WHERE id::text=$1`,
+		sanitizeTenant(tenant)), caseID).Scan(&raw) != nil || len(raw) == 0 {
+		return nil
+	}
+	var v map[string]any
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	return v
 }

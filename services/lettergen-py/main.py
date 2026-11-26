@@ -352,11 +352,15 @@ def handle(evt: dict) -> None:
             (tenant, case_id, key, tpl.get("subject", key).format(**fields),
              body_preview, requested_by),
         )
+        # Who hears it (2026-11-26): the Tenant Admin, the Admin and the PM always; the case's QA (case_helpers), or
+        # every QA while none is named.
         c.execute(
             """INSERT INTO public.notifications (tenant, user_sub, type, body, link)
-               VALUES (%s,'*','QA_REVIEW',%s,%s)""",
-            (tenant, f"Letter {key} generated for case {fields['case_number']} — awaiting QA",
-             f"#/qa"),
+               SELECT %s, t, 'QA_REVIEW', %s, '#/qa'
+               FROM (SELECT unnest(ARRAY['role:TENANT_ADMIN','role:CASE_MANAGER','role:PM']) AS t
+                     UNION SELECT coalesce((SELECT user_id FROM public.case_helpers WHERE tenant=%s AND case_id::text=%s AND role='QA'),
+                                           'role:QA')) x""",  # no QA named yet: every QA hears it
+            (tenant, f"Letter {key} generated for case {fields['case_number']} — awaiting QA", tenant, str(case_id)),
         )
         c.execute(
             f"""INSERT INTO public.case_activities (tenant, case_id, type, body)

@@ -18,6 +18,8 @@ const Api = (() => {
     }
     const headers = { Authorization: `Bearer ${tok}` };
     if (body && !isForm) headers["Content-Type"] = "application/json";
+    // The "I am human" token a filing form handed over (humancheck.js), sent once.
+    if (window.__humanToken) { headers["X-Turnstile-Token"] = window.__humanToken; window.__humanToken = ""; }
     const resp = await fetch(window.IDRE_CONFIG.apiBase + path, {
       method, headers,
       body: isForm ? body : body ? JSON.stringify(body) : undefined,
@@ -460,11 +462,15 @@ const Api = (() => {
         req("POST", `${t()}/cases/${caseId}/assign`, { role, next: true, reason, ...(expected !== undefined ? { expected } : {}) }),
       claim: (caseId, reason = "") => req("POST", `${t()}/cases/${caseId}/assign`, { action: "claim", reason }),
       assignment: (caseId) => req("GET", `${t()}/cases/${caseId}/assignment`),
+      reviewTeam: (caseId) => req("GET", `${t()}/cases/${caseId}/review-team`),
+      reviewerAdd: (caseId, userId, role) => req("POST", `${t()}/cases/${caseId}/review-team`, { user_id: userId, role }),
+      reviewerRemove: (caseId, userId) => req("DELETE", `${t()}/cases/${caseId}/review-team/${encodeURIComponent(userId)}`),
+      reviewRecord: (caseId, body) => req("POST", `${t()}/cases/${caseId}/review-records`, body),
       assignees: (role) => req("GET", `${t()}/cases/assignees?role=${encodeURIComponent(role || "CASE_MANAGER")}`),
-      // A role's rotation (Reviewer when none): { role, role_label, new_cases, enabled, people: [{id, username, open_cases, in_rotation}], next }.
+      // A role's rotation (Admin when none): { role, role_label, new_cases, enabled, people: [{id, username, open_cases, in_rotation}], next }.
       autoAssign: (role = "CASE_MANAGER") => req("GET", `${t()}/assignment/auto?role=${encodeURIComponent(role)}`),
       setAutoAssign: (body) => req("PUT", `${t()}/assignment/auto`, body),
-      // The open cases nobody holds, to the Reviewers in turn (500 a call): { assigned, people: [{username, cases}], remaining }.
+      // The open cases nobody holds, to the Admins in turn (500 a call): { assigned, people: [{username, cases}], remaining }.
       assignOpen: () => req("POST", `${t()}/assignment/auto/assign-open`),
       escalate: (caseId, clock, detail) => req("POST", `${t()}/cases/${caseId}/escalate`, { clock, detail }),
       relate: (p) => req("POST", `${t()}/cases/relate`, p),
@@ -625,6 +631,7 @@ const Api = (() => {
       tpaFilingSave: (caseId, packet) => req("PUT", `${t()}/tpa/disputes/${caseId}/filing`, packet),
       tpaChangeRequest: (caseId, packet, reason) => req("POST", `${t()}/tpa/disputes/${caseId}/change-requests`, { packet, reason }),
       tpaChangeWithdraw: (caseId, reqId) => req("DELETE", `${t()}/tpa/disputes/${caseId}/change-requests/${reqId}`),
+      tpaWithdraw: (caseId, reason) => req("POST", `${t()}/tpa/disputes/${caseId}/withdraw`, { reason }),
       caseChangeRequests: (caseId) => req("GET", `${t()}/cases/${caseId}/change-requests`),
       caseChangeDecide: (caseId, reqId, approve, note) => req("POST", `${t()}/cases/${caseId}/change-requests/${reqId}/decide`, { approve, note }),
       draftList: (form) => req("GET", `${t()}/drafts${form ? `?form=${encodeURIComponent(form)}` : ""}`),
@@ -868,6 +875,8 @@ const Api = (() => {
       attachReport: (caseId, docId) => req("POST", `${t()}/cases/${caseId}/decision-report/file`, { doc_id: docId }),
       settings: () => req("GET", `${t()}/letter-settings`),
       saveSettings: (body) => req("PUT", `${t()}/letter-settings`, body),
+      feeEstimate: () => req("GET", `${t()}/fee-estimate-settings`),
+      saveFeeEstimate: (body) => req("PUT", `${t()}/fee-estimate-settings`, body),
       variables: () => req("GET", `${t()}/template-variables`),
       saveVariables: (body) => req("PUT", `${t()}/template-variables`, body),
     },

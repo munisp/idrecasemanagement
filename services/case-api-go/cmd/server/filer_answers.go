@@ -12,7 +12,7 @@ import (
 // questions documents often leave out -- the provider type and whether the
 // provider is in the plan's network -- and returns them as case details.
 // Either may be left blank ("not sure"): the documents decide then, or the
-// Reviewer does.
+// Admin does.
 func (s *server) filerEligibilityAnswers(r *http.Request, tenant, providerType, inNetwork string) (map[string]any, string) {
 	out := map[string]any{}
 	if pt := strings.TrimSpace(providerType); pt != "" {

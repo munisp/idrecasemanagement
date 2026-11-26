@@ -151,7 +151,7 @@ func (s *server) outlookSendFrom(ctx context.Context, tenant, sub string, to, cc
 		}
 		return out
 	}
-	msg := map[string]any{"subject": subject, "body": map[string]string{"contentType": "Text", "content": text}, "toRecipients": rcpt(to)}
+	msg := map[string]any{"subject": subject, "body": map[string]string{"contentType": "HTML", "content": mailHTML(text, s.tenantBrand(ctx, tenant))}, "toRecipients": rcpt(to)}
 	if len(cc) > 0 {
 		msg["ccRecipients"] = rcpt(cc)
 	}

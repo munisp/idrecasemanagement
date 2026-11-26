@@ -58,17 +58,19 @@ type wfFacts struct {
 	AORConfirmedAt   time.Time
 	Act              map[string]wfAct  // latest timeline entry per type (signals)
 	Letter           map[string]string // template -> status of its latest draft
-	HasOutcome       bool              // the Reviewer recorded the outcome and party billed
+	HasOutcome       bool              // the Admin recorded the outcome and party billed
 	ReviewerSends    bool              // an approved draft goes back to its drafter to send
 	ReviewInvoice    bool              // an invoice other than the initial fee exists
 	OpenInvoices     int
 	ReportSaved      bool            // the decision report has been saved
 	Generated        map[string]bool // generated letter (lettergen template) -> a draft not rejected in QA
+	GeneratedPassed  map[string]bool // generated letter -> its latest draft passed QA (approved or sent)
 	CopyRequested    bool            // a party asked for the Final Order Rationale Copy (change log 2026-11-25 #19)
+	Reviewers        []wfReviewer    // further reviewers named on the case (SOP step 10, review_team.go)
 }
 
 var wfOwnerLabels = map[string]string{
-	"CASE_MANAGER": "Reviewer", "PM": "PM", "CODER": "Coder", "NURSE_PHYSICIAN": "Nurse / Physician",
+	"CASE_MANAGER": "Admin", "PM": "PM", "QA": "QA", "CODER": "Coder", "NURSE_PHYSICIAN": "Nurse Reviewer",
 	"ATTORNEY": "Attorney", "FINANCE": "Finance",
 }
 
@@ -146,6 +148,23 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		}
 	}
 
+	// The generated documents pass QA before the Final Order package that carries them (2026-11-26): the package
+	// refuses documents still waiting for QA, so without these steps the list pointed the Admin at a step they
+	// could not do. One QA step per document generated from the steps at and after from.
+	qaGenerated := func(from int) {
+		n := len(steps)
+		for i := from; i < n; i++ {
+			a := steps[i].Action
+			if !strings.HasPrefix(a, "report:") || a == "report:save" {
+				continue
+			}
+			tpl := strings.TrimPrefix(a, "report:")
+			add("qa:"+tpl, "QA the "+strings.TrimPrefix(steps[i].Label, "Generate the "), "PM", "qa:"+tpl, f.GeneratedPassed[tpl],
+				"Approve it in the QA gate; the Final Order package carries only documents that passed QA.")
+			steps[len(steps)-1].OwnerRoles = []string{"QA", "PM"}
+			early["qa:"+tpl] = true
+		}
+	}
 	// The Final Order Rationale Copy goes to the parties only when one asks for it (change log 2026-11-25 #19): an
 	// optional last step, listed once requested on the case (details.final_order_copy_requested) or once begun.
 	finalOrderCopy := func() {
@@ -240,6 +259,7 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
+		qaGenerated(reportFrom)
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
 		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
@@ -253,9 +273,25 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		closing = true
 	}
 	if !withdrawn && !closing {
+		// SOP step 7 (2026-11-26): the Coder records that the full review has started, once the plan's packet is in.
+		add("full_review", "Record that the full review has started", "CODER", "signal:FULL_REVIEW_INITIATED",
+			has("FULL_REVIEW_INITIATED") || has("CODING_REVIEW_COMPLETE") || f.Dates["coding_review_started_at"] != "" ||
+				f.Internal == "Review In Progress", // a case already in review before this step existed is not asked again
+			"The review clock starts on receipt of the health plan's complete packet.")
+		// Further reviewers (SOP step 10, 2026-11-26): each records their own review before the main one completes.
+		furtherReview := func(role, kind string) {
+			for _, x := range f.Reviewers {
+				if x.Role == role {
+					add("review:"+x.ID, kind+" review — "+x.Name, role, "review:"+x.ID, x.Done, "Your own review: findings and the outcome you recommend.")
+				}
+			}
+		}
+		furtherReview("CODER", "Coding")
 		add("coding_review", "Coding review", "CODER", "signal:CODING_REVIEW_COMPLETE", has("CODING_REVIEW_COMPLETE"),
 			"Decide whether clinical review is needed.")
-		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") {
+		if flag("CODING_REVIEW_COMPLETE", "clinical_requested") || len(pendingReviewers(f.Reviewers, "NURSE_PHYSICIAN")) > 0 ||
+			hasReviewerRole(f.Reviewers, "NURSE_PHYSICIAN") {
+			furtherReview("NURSE_PHYSICIAN", "Clinical")
 			// Change log 2026-11-25 #15: the Coder's call on the scenario says who reviews with the Nurse / Physician.
 			hint := "Medical necessity: review it, and decide whether the external Medical Reviewer (a physician) is needed."
 			if strings.Contains(strings.ReplaceAll(f.Act["CODING_REVIEW_COMPLETE"].Body, " ", ""), `"review_scenario":"med_nec_coding"`) {
@@ -279,11 +315,12 @@ func buildWorkflowSteps(f wfFacts) []wfStep {
 		add("report_cover_letter", "Generate the cover letter", "CASE_MANAGER", "report:cover_letter_final_notice",
 			f.Generated["cover_letter_final_notice"], "")
 		invoiceLetters()
-		// The Reviewer and the PM may both edit the whole report.
+		// The Admin and the PM may both edit the whole report.
 		for i := reportFrom; i < len(steps); i++ {
 			early[steps[i].Key] = true
 			steps[i].OwnerRoles = []string{"CASE_MANAGER", "PM"}
 		}
+		qaGenerated(reportFrom)
 		letter("final_order", "Final Order package to AHCA", "CASE_MANAGER", "PM")
 		// Change log 2026-11-25 #20: the outcome and party billed close the Final Order package step.
 		add("outcome", "Record the outcome and party billed", "CASE_MANAGER", "outcome", f.HasOutcome,
@@ -340,7 +377,7 @@ func wfFlag(f wfFacts, typ, field string) bool {
 	return strings.Contains(strings.ReplaceAll(f.Act[typ].Body, " ", ""), `"`+field+`":true`)
 }
 
-// wfEstimateRequested: what the Reviewer confirmed (Confirm if Cost Estimate requested), or for a case from
+// wfEstimateRequested: what the Admin confirmed (Confirm if Cost Estimate requested), or for a case from
 // before that step, the answer recorded with the filing packet.
 func wfEstimateRequested(f wfFacts) bool {
 	if _, ok := f.Act["ESTIMATE_CONFIRMED"]; ok {
@@ -486,6 +523,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 	_ = s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.decision_reports WHERE tenant=$1 AND case_id=$2)`,
 		tenant, caseID).Scan(&f.ReportSaved)
 	f.Generated = map[string]bool{}
+	f.GeneratedPassed = map[string]bool{}
 	if rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT ON (artifact) artifact, status FROM public.qa_reviews
 		WHERE tenant=$1 AND case_id=$2 AND channel='letter' ORDER BY artifact, created_at DESC`, tenant, caseID); err == nil {
@@ -493,6 +531,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 			var tpl, st string
 			if rows.Scan(&tpl, &st) == nil {
 				f.Generated[tpl] = st != "REJECTED"
+				f.GeneratedPassed[tpl] = st == "APPROVED" || st == "SENT"
 			}
 		}
 		rows.Close()
@@ -514,6 +553,7 @@ func (s *server) workflowFacts(ctx context.Context, tenant, caseID string) (wfFa
 		}
 		rows.Close()
 	}
+	f.Reviewers = s.caseReviewTeam(ctx, tenant, caseID) // further reviewers (SOP step 10)
 	return f, nil
 }
 
@@ -571,6 +611,9 @@ func (s *server) caseWorkflow(w http.ResponseWriter, r *http.Request) {
 	rules := s.stepRules(r, tenant)
 	for i := range steps {
 		steps[i].CanAct = rules.open(steps[i]) && rules.mayAct(p, steps[i])
+		if id, ok := strings.CutPrefix(steps[i].Action, "review:"); ok { // a further reviewer's own review: theirs to record
+			steps[i].CanAct = !wfClosedStatuses[f.Internal] && p.Subject == id
+		}
 	}
 	out := map[string]any{"steps": steps, "programmed": true, "closed": wfClosedStatuses[f.Internal], "is_admin": wfIsAdmin(p),
 		"step_order": rules.order, "step_owner": rules.owner}
@@ -642,7 +685,7 @@ func (s *server) stepGuard(w http.ResponseWriter, r *http.Request, tenant, caseI
 }
 
 // estimatePair: the Cost Estimate and the acceptance as one pair (change log 2026-11-25 #13): the Coder drafts the
-// estimate, the Reviewer the acceptance; the PM passes each in QA -- the first approval holds it -- and the second
+// estimate, the Admin the acceptance; the PM passes each in QA -- the first approval holds it -- and the second
 // approval sends both, the estimate first. Where the drafter sends (ReviewerSends), the estimate goes before the
 // acceptance.
 func estimatePair(f wfFacts, add func(key, label, owner, action string, done bool, hint string)) {
@@ -665,4 +708,13 @@ func estimatePair(f wfFacts, add func(key, label, owner, action string, done boo
 		"Approving it holds it until the acceptance has passed QA too.")
 	add("qa:acceptance", "QA the Acceptance letter — both go out together", "PM", "qa:acceptance", acc == "SENT",
 		"Approving it sends the Cost Estimate, then the acceptance.")
+}
+
+func hasReviewerRole(team []wfReviewer, role string) bool {
+	for _, x := range team {
+		if x.Role == role {
+			return true
+		}
+	}
+	return false
 }
