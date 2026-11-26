@@ -1157,7 +1157,13 @@ const Views = (() => {
     if (a.startsWith("qa:") || a.startsWith("send:")) { location.hash = "#/qa"; return; }
     if (a === "eligibility" || a === "aor_confirm") return open("#p-elig-details");
     if (a === "summary") return open("#p-summary-details");
-    if (a === "invoice") return open("#p-inv-details");
+    if (a === "invoice") {
+      // The review invoice step bills the full review (or, on a default, the default) -- never the initial fee,
+      // which is billed at filing (2026-11-26: an invoice issued as "Initial fee" left this step waiting).
+      const kind = document.querySelector('#p-inv select[name="kind"]');
+      if (kind) kind.value = /default/i.test(st?.label || "") ? "DEFAULT" : "FULL_REVIEW";
+      return open("#p-inv-details");
+    }
     if (a === "report:save") return open("#p-dr-details");
     if (a.startsWith("report:")) {
       // Generating is quick to ask for and takes a few seconds to land: the
@@ -3962,7 +3968,7 @@ const Views = (() => {
           <label>Provider (%) <input name="pct_provider" type="number" min="0" max="100" step="0.01" placeholder="e.g. 10"
             oninput="Views.invSplit(this.form, 'provider')" /></label>
           <span class="muted inv-split-out"></span></span>
-        <label>Invoice for <select name="kind"><option value="INITIAL_FEE">Initial fee</option><option value="FULL_REVIEW">Full review</option><option value="DEFAULT">Default</option></select></label>
+        <label>Invoice for <select name="kind" title="The review invoice is Full review (Default on a default determination). The initial fee is billed at filing."><option value="FULL_REVIEW" selected>Full review</option><option value="DEFAULT">Default</option><option value="INITIAL_FEE">Initial fee (normally billed at filing)</option></select></label>
         <label>Amount ($) <input name="amount" type="number" step="0.01" min="0" placeholder="0.00" required oninput="Views.invSplit(this.form)" /></label>
         <button>Issue invoice</button></form>` : `<p class="muted">Invoices are created by the PM.</p>`}<div id="p-inv-list" data-case-id="${esc(id)}"></div>
       <div class="claims-csv">
