@@ -4623,6 +4623,10 @@ const Views = (() => {
       const q = r.queue || [];
       const recent = r.recent || [];
       const toSend = r.to_send || [];
+      // The Cost Estimate and the acceptance go out together, the estimate first (change log #13, 2026-11-26).
+      const qaPairNote = (i) => !i.sends_with ? "" : i.sends_with.ready
+        ? `<span class="cell-sub qa-pair">Goes out together with the ${esc(i.sends_with.label)}: one Send sends both, the Cost Estimate first.</span>`
+        : `<span class="cell-sub qa-pair">Goes out together with the ${esc(i.sends_with.label)}, which hasn't passed QA yet.</span>`;
       const me = Auth.claims()?.sub;
       // A drafter's own view (Coder) lists only what is theirs: their drafts and those on cases they're now named on.
       const maySend = (i) => r.own_only || i.requested_by_sub === me || can("CASE_MANAGER", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
@@ -4637,9 +4641,11 @@ const Views = (() => {
         ? `<section class="panel"><h2>Passed QA — ready to send <span class="n">${toSend.length}</span></h2>
           <p class="panel-sub">Approved and back with the person who drafted them. Check the addresses and send; the send is logged and the case's dates are set.</p>
           <table class="qa-tbl"><thead><tr><th>Subject</th><th>Case</th><th>Approved by</th><th>To</th><th></th></tr></thead><tbody>` +
-          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span></td><td data-label="Case">${qaCase(i)}</td>
+          toSend.map((i) => `<tr><td class="qa-tbl-main"><span class="cell-main">${esc(i.subject)}${i.send_overdue ? ' <span class="badge warn">unsent 24h+</span>' : ""}</span><span class="cell-sub">${esc(qaTpl(i.artifact))}</span>${qaPairNote(i)}</td><td data-label="Case">${qaCase(i)}</td>
             <td data-label="Approved by">${esc(i.reviewed_by || "—")}</td><td class="muted" data-label="To">${esc(list(i.to_recipients)) || "<i>none yet</i>"}</td>
-            <td class="qa-tbl-act">${maySend(i) ? `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">Send…</button>` : `<span class="muted">with the Admin</span>`}</td></tr>`).join("") +
+            <td class="qa-tbl-act">${!maySend(i) ? `<span class="muted">with the Admin</span>`
+              : i.sends_with && !i.sends_with.ready ? `<span class="muted">waits for the ${esc(i.sends_with.label)}</span>`
+              : `<button class="mini" onclick="Views.qaSendFn('${i.id}','${esc(list(i.to_recipients))}','${esc(list(i.cc_recipients))}')">${i.sends_with ? "Send both…" : "Send…"}</button>`}</td></tr>`).join("") +
           `</tbody></table></section>` : "";
       const items = q.length ? q.map((i) => `<button type="button" class="qa-item" data-qa="${esc(i.id)}" onclick="Views.qaReview('${esc(i.id)}')">
           <span class="qa-item-top"><span class="qa-subj">${esc(i.subject || "(no subject)")}${i.aging ? ' <span class="badge warn">aging 24h+</span>' : ""}</span><span class="qa-age" title="waiting since ${esc(fmtDate(i.created_at))}">${qaAge(i.created_at)}</span></span>

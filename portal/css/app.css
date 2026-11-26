@@ -290,7 +290,11 @@ body.density-compact td,body.density-compact th{font-size:12.5px}
 .modal-wide{width:min(720px,94vw)}
 .modal-h{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-subtle)}
 .modal-h h2{margin:0;font-size:15px}
-.modal-b{padding:16px 18px;overflow-y:auto;display:grid;gap:13px}
+.modal-b{padding:16px 18px;overflow-y:auto;overflow-x:hidden;display:grid;grid-template-columns:minmax(0,1fr);gap:13px}
+/* A field never grows past the dialog: a long option in a dropdown is cut off in the box, shown in full when open (2026-11-26). */
+.mfield{min-width:0}
+.mfield select,.mfield input:not([type=checkbox]):not([type=radio]),.mfield textarea{width:100%;max-width:100%;min-width:0;box-sizing:border-box;text-overflow:ellipsis}
+.modal-f{flex-wrap:wrap}
 .modal-body{font-size:13px;color:var(--text-secondary);margin:0}
 .mfield{display:grid;gap:5px;font-size:12.5px;font-weight:550;color:var(--text-secondary)}
 .mfield .req{color:var(--danger-fg)}
@@ -1668,3 +1672,4 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .chip-none{background:#f1f0ec;color:#6b6760}
 .chip-docs{background:#fff4e0;color:#8a5a00}
 .intake-fw{display:inline-flex;align-items:center;gap:6px;margin-left:12px;font-size:14px}
+.qa-pair{color:#8a5a00}

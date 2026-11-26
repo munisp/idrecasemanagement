@@ -699,9 +699,9 @@ func estimatePair(f wfFacts, add func(key, label, owner, action string, done boo
 	if f.ReviewerSends {
 		add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "PM", "qa:estimate_cost", passed(est), "")
 		add("qa:acceptance", "QA the Acceptance letter", "PM", "qa:acceptance", passed(acc), "")
-		add("send:estimate_cost", "Send the Full Review Estimated Cost email", "CODER", "send:estimate_cost", est == "SENT",
-			"The Cost Estimate goes first, then the acceptance.")
-		add("send:acceptance", "Send the Acceptance letter", "CASE_MANAGER", "send:acceptance", acc == "SENT", "")
+		// One send from the QA gate sends both, the Cost Estimate first (2026-11-26).
+		add("send:estimate_acceptance", "Send the Cost Estimate and the Acceptance letter together", "CASE_MANAGER", "send:acceptance",
+			est == "SENT" && acc == "SENT", "From the QA gate, once both have passed QA: one Send, the Cost Estimate first, then the acceptance.")
 		return
 	}
 	add("qa:estimate_cost", "QA the Full Review Estimated Cost email", "PM", "qa:estimate_cost", passed(est),

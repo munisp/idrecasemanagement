@@ -630,6 +630,7 @@ func (s *server) qaQueue(w http.ResponseWriter, r *http.Request) {
 			row["send_overdue"] = true
 		}
 	}
+	s.markEstimatePairs(r, tenant, toSend)
 	s.withCaseNumbers(r, tenant, rows, recent, toSend)
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend})
 }
@@ -661,6 +662,7 @@ func (s *server) qaQueueOwn(w http.ResponseWriter, r *http.Request, p principal)
 		FROM public.qa_reviews WHERE tenant=$1 AND status='APPROVED' AND sent_at IS NULL AND coalesce(channel,'email')='email'
 		  AND (requested_by_sub=$2 OR case_id IN (SELECT h.case_id FROM public.case_helpers h WHERE h.tenant=$1 AND h.user_id=$2))
 		ORDER BY reviewed_at DESC`, tenant, p.Subject)
+	s.markEstimatePairs(r, tenant, toSend)
 	s.withCaseNumbers(r, tenant, rows, recent, toSend)
 	writeJSON(w, http.StatusOK, map[string]any{"queue": rows, "recent": recent, "to_send": toSend, "own_only": true})
 }
@@ -1444,12 +1446,32 @@ func (s *server) qaSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": msg})
 		return
 	}
-	// Change log 2026-11-25 #13: the Cost Estimate goes before the acceptance.
-	if partner, ok := s.estimatePartner(r, tenant, caseID, artifact); ok && artifact == "acceptance" && partner.status != "SENT" {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "Send the Cost Estimate first — the acceptance goes right after it."})
-		return
+	// Change log 2026-11-25 #13 (2026-11-26): with a cost estimate requested, the Cost Estimate and the acceptance go
+	// out together from the QA gate once both have passed QA -- one Send, the estimate first, each to its own
+	// recipients. Neither goes alone.
+	var deliveryError string
+	if partner, ok := s.estimatePartner(r, tenant, caseID, artifact); ok && partner.status != "SENT" {
+		if partner.status != "APPROVED" {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "The Cost Estimate and the acceptance go out together: the " +
+				partner.label + " has not passed QA yet. Send them both once it has."})
+			return
+		}
+		this := qaPairItem{qid: qid, artifact: artifact, subject: subject, body: body, rfiTo: rfiTo, to: to, cc: cc}
+		first, second := this, partner
+		if artifact == "acceptance" {
+			first, second = partner, this
+		}
+		deliveryError = s.deliverApproved(r, p, tenant, first.qid, caseID, first.artifact, first.subject, first.body, first.rfiTo, "", first.to, first.cc)
+		if deliveryError == "" {
+			deliveryError = s.deliverApproved(r, p, tenant, second.qid, caseID, second.artifact, second.subject, second.body, second.rfiTo, "", second.to, second.cc)
+		} else {
+			deliveryError = "the Cost Estimate could not be sent, so the acceptance was held too: " + deliveryError
+		}
+		s.logAudit(r.Context(), tenant, caseID, "QA_SENT", map[string]any{"by": p.Subject, "qa_id": partner.qid, "subject": partner.subject,
+			"to": partner.to, "cc": partner.cc, "sent_with": qid, "email_delivery_error": deliveryError})
+	} else {
+		deliveryError = s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, "", to, cc)
 	}
-	deliveryError := s.deliverApproved(r, p, tenant, qid, caseID, artifact, subject, body, rfiTo, "", to, cc)
 	s.logAudit(r.Context(), tenant, caseID, "QA_SENT", map[string]any{
 		"by": p.Subject, "qa_id": qid, "subject": subject, "to": to, "cc": cc, "email_delivery_error": deliveryError,
 	})
@@ -1623,4 +1645,19 @@ func (s *server) estimatePartner(r *http.Request, tenant, caseID, artifact strin
 	_ = json.Unmarshal(toJ, &it.to)
 	_ = json.Unmarshal(ccJ, &it.cc)
 	return it, true
+}
+
+// markEstimatePairs (2026-11-26): on the QA gate's "to send" list, the Cost Estimate and the acceptance of a case whose
+// filer asked for an estimate say that they go out together, and whether the other one has passed QA yet.
+func (s *server) markEstimatePairs(r *http.Request, tenant string, toSend []map[string]any) {
+	for _, row := range toSend {
+		art, _ := row["artifact"].(string)
+		cid := fmt.Sprint(row["case_id"])
+		if art != "estimate_cost" && art != "acceptance" {
+			continue
+		}
+		if partner, ok := s.estimatePartner(r, tenant, cid, art); ok && partner.status != "SENT" {
+			row["sends_with"] = map[string]any{"label": partner.label, "ready": partner.status == "APPROVED", "first": art == "estimate_cost"}
+		}
+	}
 }

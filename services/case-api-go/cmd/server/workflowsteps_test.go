@@ -399,3 +399,38 @@ func TestWorkflowEstimatePair(t *testing.T) {
 		t.Fatalf("both sent, still on %s", next())
 	}
 }
+
+// With approved drafts handed back to be sent (Florida), both pass QA, then one Send from the QA gate sends the
+// Cost Estimate and then the acceptance (2026-11-26).
+func TestWorkflowEstimatePairReviewerSends(t *testing.T) {
+	now := time.Now()
+	f := wfBase()
+	f.ReviewerSends = true
+	f.Status = "PENDING_INTAKE"
+	f.Act["PACKET_COMPLETE"] = wfAct{Body: `{"estimate_requested":true}`, At: now}
+	f.HasElig, f.EligResult, f.EligAt, f.HasSummary, f.HasEstimate = true, "ELIGIBLE", now, true, true
+	f.Act["ESTIMATE_CONFIRMED"] = wfAct{Body: `Workflow signal ESTIMATE_CONFIRMED delivered — {"requested":true}`, At: now}
+	next := func() *wfStep { return wfNext(buildWorkflowSteps(f)) }
+	f.Letter["estimate_cost"], f.Letter["acceptance"] = "PENDING", "PENDING"
+	if n := next(); n.Key != "qa:estimate_cost" {
+		t.Fatalf("next %s, want the estimate's QA first", n.Key)
+	}
+	f.Letter["estimate_cost"] = "APPROVED"
+	if n := next(); n.Key != "qa:acceptance" {
+		t.Fatalf("next %s, want the acceptance's QA", n.Key)
+	}
+	f.Letter["acceptance"] = "APPROVED"
+	n := next()
+	if n.Key != "send:estimate_acceptance" || n.Action != "send:acceptance" || !strings.Contains(n.Label, "together") {
+		t.Fatalf("next %+v, want one send for both", n)
+	}
+	for _, s := range buildWorkflowSteps(f) {
+		if s.Key == "send:estimate_cost" || s.Key == "send:acceptance" {
+			t.Fatalf("a separate send step is still listed: %s", s.Key)
+		}
+	}
+	f.Letter["estimate_cost"], f.Letter["acceptance"] = "SENT", "SENT"
+	if n := next(); n != nil && n.Key == "send:estimate_acceptance" {
+		t.Fatal("both sent, the send step is still next")
+	}
+}
