@@ -1682,3 +1682,6 @@ th.has-tip{text-decoration:underline dotted;text-decoration-color:var(--border-s
 .chip-docs{background:#fff4e0;color:#8a5a00}
 .intake-fw{display:inline-flex;align-items:center;gap:6px;margin-left:12px;font-size:14px}
 .qa-pair{color:#8a5a00}
+/* Claims on this dispute (change log 2026-11-28): an ineligible claim's row is shaded so it stands apart. */
+.claims-elig td { vertical-align: top; }
+.claims-elig tr.claim-out td { background: var(--danger-bg); }

@@ -1096,11 +1096,13 @@ func main() {
 		r.Post("/cases/{caseId}/claims", s.importClaims) // bulk claim lines (G10)
 		r.Get("/cases/{caseId}/claims", s.listClaims)
 		r.Put("/cases/{caseId}/claims/eligibility", s.setClaimEligibility) // a partially accepted case's ineligible claims
-		r.Post("/intake/converse", s.intakeConverse)                       // conversational intake (step 5): extraction only — filing stays on /intake
-		r.Post("/intake", s.createIntake)                                  // pre-case intake (G12)
-		r.Post("/intake/bulk", s.bulkIntake)                               // third-party batch filing (idempotent by batch_ref)
-		r.Get("/intake/bulk", s.listIntakeBatches)                         // filer status board (own batches; staff may filter)
-		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch)                  // batch receipt / reconciliation
+		// one claim: ineligible (with its own reason) or accepted again
+		r.Put("/cases/{caseId}/claims/{claimNumber}/eligibility", s.setOneClaimEligibility)
+		r.Post("/intake/converse", s.intakeConverse)      // conversational intake (step 5): extraction only — filing stays on /intake
+		r.Post("/intake", s.createIntake)                 // pre-case intake (G12)
+		r.Post("/intake/bulk", s.bulkIntake)              // third-party batch filing (idempotent by batch_ref)
+		r.Get("/intake/bulk", s.listIntakeBatches)        // filer status board (own batches; staff may filter)
+		r.Get("/intake/bulk/{batchId}", s.getIntakeBatch) // batch receipt / reconciliation
 		r.Get("/intake", s.listIntake)
 		r.Post("/intake/{intakeId}/advance", s.advanceIntake) // refund window enforced
 

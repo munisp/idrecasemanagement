@@ -183,6 +183,7 @@ var genRouteNotes = map[string]string{
 	"reviewQueue":                 "specialist worklist",
 	"screeningChecks":             "the record of past screenings",
 	"setClaimEligibility":         "a partially accepted case's ineligible claims",
+	"setOneClaimEligibility":      "one claim marked ineligible (with its reason) or accepted again",
 	"setContractDates":            "admin: contract execution/effective/end dates",
 	"setCorrespondenceRecipients": "admin",
 	"setDisputeSummary":           "Coder's Dispute Summary + cost estimate",

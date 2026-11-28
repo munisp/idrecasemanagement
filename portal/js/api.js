@@ -810,6 +810,7 @@ const Api = (() => {
       checkout: (invId) => req("POST", `${t()}/invoices/${invId}/checkout`),
       claims: (caseId) => req("GET", `${t()}/cases/${caseId}/claims`),
       claimEligibility: (caseId, body) => req("PUT", `${t()}/cases/${caseId}/claims/eligibility`, body),
+      claimMark: (caseId, claim, body) => req("PUT", `${t()}/cases/${caseId}/claims/${encodeURIComponent(claim)}/eligibility`, body),
       importClaims: (caseId, claims) => req("POST", `${t()}/cases/${caseId}/claims`, { claims }),
       qaQueue: (caseId) => req("GET", `${t()}/qa${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
       qaGet: (id) => req("GET", `${t()}/qa/${id}`),
