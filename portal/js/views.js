@@ -3933,7 +3933,9 @@ const Views = (() => {
         determination + 12 months) is checked; <b>3)</b> the disputed amount is tested against the provider-type
         threshold matrix (contracted status included); <b>4)</b> an invalid AOR puts the case on attorney hold.
         Result is ELIGIBLE, INELIGIBLE (with reason code), or HOLD_AOR — and INELIGIBLE/HOLD move the case status
-        automatically.</p>
+        automatically. With two or more claims, <b>each claim</b> is also checked on its own dates (filing window,
+        service date; a claim without its own final determination date uses the case's): if some fail, the dispute is
+        <b>PARTIALLY ELIGIBLE</b> and goes on with the others, the minimum amount tested on the eligible claims.</p>
       <div id="p-elig-history"></div>
       <div class="actions"><button type="button" class="mini" onclick="Views.eligChecklist('${id}')">Download Eligibility Checklist</button></div>
       ${sopConflictsHtml(c)}
@@ -4210,8 +4212,21 @@ const Views = (() => {
           <form onsubmit="event.preventDefault(); const t=this.reason.value.trim(); if(t.length<10){UI.toast('Give a substantive reason (min 10 chars)',{kind:'warn'});return;} resubmit(t);">
             <textarea name="reason" rows="2" style="width:100%" placeholder="Why is the computed INELIGIBLE wrong? (facts, citations)"></textarea>
             <button class="mini">Override to ELIGIBLE</button></form></details>` : "";
-        out.innerHTML = `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""}
-          <span class="muted">review ${esc(r.review_id || "")}${r.rule_version ? " · rules " + esc(r.rule_version) : ""}</span></p>${bl}${ov}`;
+        // Partial eligibility (change log 2026-11-28): some claims out, the dispute goes on with the others.
+        const cl = r.evidence?.claims || [];
+        const amt = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+        const part = r.reason === "partially_eligible" ? `<div class="warn-box"><p><b>Partially eligible</b> — ${cl.filter((c) => c.eligible).length} of ${cl.length} claims go on to review.
+            Send the <b>Partial Acceptance letter</b> (Generate → Partial acceptance letter) with the acceptance, not the Acceptance letter.</p>
+          <ul>${cl.filter((c) => !c.eligible).map((c) => `<li><span class="mono">${esc(c.claim_number)}</span> — ${esc(c.wording || "")}${c.marked_by ? ` <span class="muted">(marked by ${esc(c.marked_by)})</span>` : ""}</li>`).join("")}</ul>
+          ${r.evidence?.eligible_claims_amount_cents != null ? `<p class="muted">The minimum amount was tested on the eligible claims: ${amt(r.evidence.eligible_claims_amount_cents)}.</p>` : ""}
+          ${cl.some((c) => c.date_from_case) ? `<p class="muted">Claims without a final determination date of their own were measured on the case's date: ${cl.filter((c) => c.date_from_case).map((c) => esc(c.claim_number)).join(", ")}.</p>` : ""}
+          <p class="muted">The claims are marked in “Claims on this dispute” (Review tab); a person can change any of them.</p></div>`
+          : r.evidence?.below_threshold_after_partial ? `<p class="warn-box">Once the ineligible claims are set aside, the eligible claims (${amt(r.evidence.eligible_claims_amount_cents)}) are under the minimum amount.</p>`
+          : r.evidence?.all_claims_ineligible ? `<p class="warn-box">No claim on this dispute is eligible.</p>` : "";
+        const label = r.reason === "partially_eligible" ? `<span class="badge s-awaiting-payment">PARTIALLY ELIGIBLE</span>` : `${badge(r.result)} ${r.reason ? esc(r.reason) : ""}`;
+        out.innerHTML = `<p>${label}
+          <span class="muted">review ${esc(r.review_id || "")}${r.rule_version ? " · rules " + esc(r.rule_version) : ""}</span></p>${part}${bl}${ov}`;
+        if (cl.length) claimsBox(id); // the marks changed: refresh the claims list
       };
       loadElig();
       $("#p-date")?.addEventListener("submit", async (ev) => {

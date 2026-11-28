@@ -778,7 +778,10 @@ func (s *server) checkEligibility(w http.ResponseWriter, r *http.Request) {
 	// shown directly to staff in the review-history table (unlike
 	// logAudit's "by" above, which is an intentionally stable-identity
 	// audit key).
+	// Claim by claim (partial eligibility, claim_level_eligibility.go): some claims out, the others go on.
+	result, reason = s.claimLevelEligibility(r.Context(), tenant, id, cfg, in, result, reason, evidence)
 	reviewID := s.persistEligibilityOutcome(r, tenant, id, displayName(p), result, reason, evidence, opts)
+	s.markReviewedClaims(r.Context(), tenant, id, result, evidence)
 	if notes != "" && reviewID != "" {
 		_, _ = s.insertEligibilityNote(r.Context(), tenant, id, reviewID, notes, p)
 	}
