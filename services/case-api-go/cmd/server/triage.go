@@ -571,6 +571,8 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, reason, evidence := evalEligibility(cfg, in)
+	// Claim by claim (partial eligibility, claim_level_eligibility.go), before the duplicate check below.
+	result, reason = s.claimLevelEligibility(r.Context(), tenant, id, cfg, in, result, reason, evidence)
 	// The same inputs give the same decision: running it again returns the review already on file instead of
 	// recording a duplicate and repeating its side effects (notices, the ineligible letter task, the workflow signal).
 	if inJSON, err := json.Marshal(in); err == nil {
@@ -605,6 +607,7 @@ func (s *server) autoEligibility(w http.ResponseWriter, r *http.Request) {
 			ruleVersion: eligibilityRuleVersion(cfg),
 			borderline:  len(bl) > 0, borderlineReasons: bl,
 		})
+	s.markReviewedClaims(r.Context(), tenant, id, result, evidence)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review_id": reviewID, "result": result, "reason": reason,
 		"evidence": evidence, "auto": true,

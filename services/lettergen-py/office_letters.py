@@ -83,8 +83,9 @@ def _extra(dsn: str, ctx: dict) -> dict:
     with psycopg.connect(dsn) as c:
         st = c.execute(f"SELECT coalesce(internal_status,''), coalesce(details->>'case_outcome','') FROM tenant_{t}.cases WHERE id=%s",  # nosec B608  # tenant checked by TENANT_RE in main.py before any letter is built; values bound
                        (cid,)).fetchone() or ("", "")
-        claims = c.execute("""SELECT coalesce(claim_number,''), coalesce(status,'') FROM public.case_claims
-                              WHERE tenant=%s AND case_id=%s ORDER BY claim_number""", (t, cid)).fetchall()
+        claims = c.execute("""SELECT coalesce(claim_number,''), coalesce(status,''), coalesce(ineligible_reason,'')
+                              FROM public.case_claims WHERE tenant=%s AND case_id=%s ORDER BY claim_number""",
+                           (t, cid)).fetchall()
         rem = c.execute("""SELECT min(created_at) FROM public.case_activities WHERE tenant=%s AND case_id=%s
                              AND type='FOLLOWUP_ACTION' AND body ILIKE '%%reminder%%'""", (t, cid)).fetchone()
         fees = c.execute("SELECT config->'fees'->'late_fee' FROM public.program_rules WHERE tenant=%s", (t,)).fetchone()
@@ -251,15 +252,26 @@ def _stage_fields(key: str, ctx: dict, ex: dict, f: dict) -> dict:
         t = det.get("plan_copy_tracking")
         f["provider_tracking"] = f" (tracking # {t})" if t else ""
     elif key == "partial_acceptance_letter":
-        bad = [n for n, s in ex["claim_status"] if s == "INELIGIBLE" and n]
-        good = [n for n, s in ex["claim_status"] if s != "INELIGIBLE" and n]
+        # Each ineligible claim carries its own reason (case_claims.ineligible_reason, change log 2026-11-28); claims
+        # with the same reason share one sentence. Older marks without one fall back to the case's single reason.
+        rows = [(r[0], r[1], r[2] if len(r) > 2 else "") for r in ex["claim_status"]]
+        bad = [(n, (why or "").strip()) for n, s, why in rows if s == "INELIGIBLE" and n]
+        good = [n for n, s, _ in rows if s != "INELIGIBLE" and n]
         if not bad or not good:
-            raise bl.LetterDataMissing("mark which claims are ineligible (Generate → Partial acceptance letter asks "
-                                       "for them); at least one claim must stay accepted")
+            raise bl.LetterDataMissing("mark which claims are ineligible (the case's Claims list, or Generate → "
+                                       "Partial acceptance letter); at least one claim must stay accepted")
         join = lambda xs: ", ".join(xs[:-1]) + " and " + xs[-1] if len(xs) > 1 else xs[0]  # noqa: E731
-        f["accepted_claims"], f["ineligible_claims"] = join(good), join(bad)
-        f["partial_ineligible_reason"] = (det.get("partial_ineligible_reason") or "").strip() or \
-            "are ineligible for review under the program."
+        fallback = (det.get("partial_ineligible_reason") or "").strip() or "are ineligible for review under the program."
+        sentence = lambda why: (why if why.endswith((".", "!", "?")) else why + ".")  # noqa: E731
+        groups: dict[str, list[str]] = {}
+        for n, why in bad:
+            groups.setdefault(why or fallback, []).append(n)
+        parts = list(groups.items())
+        f["accepted_claims"], f["ineligible_claims"] = join(good), join(parts[0][1])
+        # The template reads "Claim {ineligible_claims} {partial_ineligible_reason}": the first group fills it, the
+        # others follow as sentences of their own.
+        f["partial_ineligible_reason"] = " ".join([sentence(parts[0][0])] +
+                                                  [f"Claim {join(ns)} {sentence(why)}" for why, ns in parts[1:]])
     return f
 
 

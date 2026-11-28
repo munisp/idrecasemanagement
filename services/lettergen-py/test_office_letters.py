@@ -140,6 +140,16 @@ class Fields(unittest.TestCase):
                                                                                 ("C3", "SUBMITTED")]}, ol._common(c))
         self.assertEqual((f["accepted_claims"], f["ineligible_claims"]), ("C1 and C3", "C2"))
 
+    def test_partial_acceptance_reads_each_claims_reason(self):
+        c = ctx()
+        f = ol._stage_fields("partial_acceptance_letter", c, {"claim_status": [
+            ("C1", "SUBMITTED", ""), ("C2", "INELIGIBLE", "were filed more than 12 months after the final determination"),
+            ("C3", "INELIGIBLE", "were filed more than 12 months after the final determination"),
+            ("C4", "INELIGIBLE", "is a duplicate of a claim already decided."), ("C5", "SUBMITTED", "")]}, ol._common(c))
+        self.assertEqual((f["accepted_claims"], f["ineligible_claims"]), ("C1 and C5", "C2 and C3"))
+        self.assertEqual(f["partial_ineligible_reason"], "were filed more than 12 months after the final determination. "
+                                                         "Claim C4 is a duplicate of a claim already decided.")
+
 
 if __name__ == "__main__":
     unittest.main()

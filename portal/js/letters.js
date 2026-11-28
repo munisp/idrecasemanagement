@@ -291,23 +291,26 @@ const Letters = (() => {
     } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
   }
 
+  // The ineligible claims and their reasons are gathered from the claims themselves (the case's "Claims on this
+  // dispute" list, change log 2026-11-28): this only shows what the letter will say, before it is generated.
   async function partialClaims(id) {
     let claims = [];
-    try { const r = await Api.cases.claims(id); claims = r.claims || r || []; } catch (e) { UI.toast(e.message, { kind: "warn" }); return false; }
+    try { const r = await Api.program.claims(id); claims = r.claims || r || []; } catch (e) { UI.toast(e.message, { kind: "warn" }); return false; }
     const nums = claims.map((c) => c.claim_number).filter(Boolean);
     if (nums.length < 2) { UI.toast("A partial acceptance needs at least two claims on the case: one accepted, one not.", { kind: "warn", duration: 8000 }); return false; }
-    const marked = claims.filter((c) => c.status === "INELIGIBLE").map((c) => c.claim_number);
-    const v = await UI.modal({ title: "Partial acceptance", submitLabel: "Save and generate",
-      body: `Claims on this case: <b>${nums.map(esc).join(", ")}</b>. Name the ones that are not eligible; the rest are accepted for review.`,
-      fields: [{ name: "ineligible", label: "Ineligible claims (claim numbers, separated by commas)", required: true, value: marked.join(", ") },
-        { name: "reason", label: "Why they are ineligible", type: "textarea", required: true,
-          value: (claims.find((c) => c.status === "INELIGIBLE") || {}).reason || "",
-          hint: "Goes in the letter after the claim numbers, e.g. “were filed more than 12 months after the final determination.”" }] });
-    if (!v) return false;
-    try {
-      await Api.cases.claimEligibility(id, { ineligible: v.ineligible.split(/[,;\s]+/).filter(Boolean), reason: v.reason.trim() });
-      return true;
-    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); return false; }
+    const bad = claims.filter((c) => c.status === "INELIGIBLE"), good = claims.filter((c) => c.status !== "INELIGIBLE");
+    if (!bad.length || !good.length) {
+      UI.toast(bad.length ? "Every claim is marked ineligible: at least one must stay accepted (otherwise the dispute is ineligible)."
+        : "No claim is marked ineligible yet. Mark them in “Claims on this dispute” on the case (Mark ineligible, with the reason), then generate the letter.",
+        { kind: "warn", duration: 10000 });
+      const tab = document.querySelector('[data-tab-btn="review"]'); if (tab) tab.click(); const sec = document.getElementById("p-claims"); if (sec) { sec.open = true; sec.scrollIntoView({ behavior: "smooth", block: "start" }); }
+      return false;
+    }
+    const v = await UI.modal({ title: "Partial acceptance letter", submitLabel: "Generate",
+      body: `<p><b>Accepted for review:</b> ${good.map((c) => esc(c.claim_number)).join(", ")}</p>
+        <p><b>Not eligible</b> (from the claims list):</p><ul>${bad.map((c) => `<li><span class="mono">${esc(c.claim_number)}</span> — ${esc(c.ineligible_reason || "no reason recorded: the letter uses the general wording")}</li>`).join("")}</ul>
+        <p class="muted">To change these, use “Claims on this dispute” on the case.</p>` });
+    return !!v;
   }
 
   // ---- letterhead & invoice details (Billing and Templates pages) --------------------------------------------

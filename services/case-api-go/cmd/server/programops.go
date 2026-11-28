@@ -485,7 +485,8 @@ func (s *server) listClaims(w http.ResponseWriter, r *http.Request) {
 		SELECT claim_number, cpt, billed_cents, paid_cents, disputed_cents,
 		       patient_first_name, patient_last_name, type_of_service, denial_reason,
 		       date_of_service, date_claim_submitted, date_of_denial, date_of_final_determination,
-		       provider_name, facility_name, evidence_location, created_at, status
+		       provider_name, facility_name, evidence_location, created_at, status,
+		       ineligible_reason, ineligible_by, ineligible_at
 		FROM public.case_claims WHERE tenant=$1 AND case_id=$2 ORDER BY claim_number LIMIT 500`,
 		tenant, caseID)
 	if err != nil {

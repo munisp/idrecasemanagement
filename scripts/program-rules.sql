@@ -157,6 +157,12 @@ ALTER TABLE public.case_claims
     ADD COLUMN IF NOT EXISTS facility_name text,
     ADD COLUMN IF NOT EXISTS evidence_location text;
 CREATE INDEX IF NOT EXISTS case_claims_case ON public.case_claims (tenant, case_id);
+-- Change log 2026-11-28 (partial eligibility letter): a claim found ineligible keeps its own reason, who marked it
+-- and when, on the claim itself. The Partial Acceptance letter reads them from here (no claim numbers typed in).
+ALTER TABLE public.case_claims
+    ADD COLUMN IF NOT EXISTS ineligible_reason text,
+    ADD COLUMN IF NOT EXISTS ineligible_by text,
+    ADD COLUMN IF NOT EXISTS ineligible_at timestamptz;
 
 -- Pre-case intake: instructions requested before any case exists (G9/G12).
 CREATE TABLE IF NOT EXISTS public.intake_requests (

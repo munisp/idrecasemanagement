@@ -1373,7 +1373,7 @@ const Views = (() => {
     const ms = new Date(at) - Date.now(), late = ms < 0, s = Math.floor(Math.abs(ms) / 1000);
     const d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60, sec = s % 60, p = (n) => String(n).padStart(2, "0");
     const span = d ? `${d}d ${p(h)}h ${p(m)}m ${p(sec)}s` : `${p(h)}:${p(m)}:${p(sec)}`;
-    return { text: late ? `late by ${span}` : `${span} left`, cls: late ? "late" : ms <= 3 * 864e5 ? "soon" : "ok" };
+    return { text: late ? `late by ${span}` : `${span} left`, cls: late ? "late" : ms <= 3 * 864e5 ? "soon" : ms <= 7 * 864e5 ? "week" : "ok" };
   };
   const countdown = (due) => {
     if (!due) return "";
@@ -3933,7 +3933,9 @@ const Views = (() => {
         determination + 12 months) is checked; <b>3)</b> the disputed amount is tested against the provider-type
         threshold matrix (contracted status included); <b>4)</b> an invalid AOR puts the case on attorney hold.
         Result is ELIGIBLE, INELIGIBLE (with reason code), or HOLD_AOR — and INELIGIBLE/HOLD move the case status
-        automatically.</p>
+        automatically. With two or more claims, <b>each claim</b> is also checked on its own dates (filing window,
+        service date; a claim without its own final determination date uses the case's): if some fail, the dispute is
+        <b>PARTIALLY ELIGIBLE</b> and goes on with the others, the minimum amount tested on the eligible claims.</p>
       <div id="p-elig-history"></div>
       <div class="actions"><button type="button" class="mini" onclick="Views.eligChecklist('${id}')">Download Eligibility Checklist</button></div>
       ${sopConflictsHtml(c)}
@@ -3961,6 +3963,10 @@ const Views = (() => {
         <label class="elig-notes">Notes <span class="muted">(optional — saved with this review; the PM and Attorney can add to them)</span>
           <textarea name="notes" rows="2" maxlength="4000" placeholder="Your working notes on this review"></textarea></label>
         <button>Compute eligibility</button></form><div id="p-elig-out"></div></details>
+
+      <details class="prog-sec" id="p-claims" data-tab="review" open><summary>Claims on this dispute <span class="muted">— each claim found ineligible is recorded here with its reason; the Partial Acceptance letter takes them from this list</span></summary>
+        <div id="p-claims-box" data-case-id="${esc(id)}"><p class="muted">Loading…</p></div>
+        ${(setTimeout(() => claimsBox(id), 0), "")}</details>
 
       <details class="prog-sec" id="p-mail-track" data-tab="mail" open><summary>Mail tracker <span class="muted">— every email of this dispute: where it is, who got it, what they did with its links</span></summary>
         <div id="p-mail-tracker" data-case-id="${esc(id)}"><p class="muted">Loading…</p></div></details>
@@ -4206,8 +4212,21 @@ const Views = (() => {
           <form onsubmit="event.preventDefault(); const t=this.reason.value.trim(); if(t.length<10){UI.toast('Give a substantive reason (min 10 chars)',{kind:'warn'});return;} resubmit(t);">
             <textarea name="reason" rows="2" style="width:100%" placeholder="Why is the computed INELIGIBLE wrong? (facts, citations)"></textarea>
             <button class="mini">Override to ELIGIBLE</button></form></details>` : "";
-        out.innerHTML = `<p>${badge(r.result)} ${r.reason ? esc(r.reason) : ""}
-          <span class="muted">review ${esc(r.review_id || "")}${r.rule_version ? " · rules " + esc(r.rule_version) : ""}</span></p>${bl}${ov}`;
+        // Partial eligibility (change log 2026-11-28): some claims out, the dispute goes on with the others.
+        const cl = r.evidence?.claims || [];
+        const amt = (c) => "$" + ((Number(c) || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+        const part = r.reason === "partially_eligible" ? `<div class="warn-box"><p><b>Partially eligible</b> — ${cl.filter((c) => c.eligible).length} of ${cl.length} claims go on to review.
+            Send the <b>Partial Acceptance letter</b> (Generate → Partial acceptance letter) with the acceptance, not the Acceptance letter.</p>
+          <ul>${cl.filter((c) => !c.eligible).map((c) => `<li><span class="mono">${esc(c.claim_number)}</span> — ${esc(c.wording || "")}${c.marked_by ? ` <span class="muted">(marked by ${esc(c.marked_by)})</span>` : ""}</li>`).join("")}</ul>
+          ${r.evidence?.eligible_claims_amount_cents != null ? `<p class="muted">The minimum amount was tested on the eligible claims: ${amt(r.evidence.eligible_claims_amount_cents)}.</p>` : ""}
+          ${cl.some((c) => c.date_from_case) ? `<p class="muted">Claims without a final determination date of their own were measured on the case's date: ${cl.filter((c) => c.date_from_case).map((c) => esc(c.claim_number)).join(", ")}.</p>` : ""}
+          <p class="muted">The claims are marked in “Claims on this dispute” (Review tab); a person can change any of them.</p></div>`
+          : r.evidence?.below_threshold_after_partial ? `<p class="warn-box">Once the ineligible claims are set aside, the eligible claims (${amt(r.evidence.eligible_claims_amount_cents)}) are under the minimum amount.</p>`
+          : r.evidence?.all_claims_ineligible ? `<p class="warn-box">No claim on this dispute is eligible.</p>` : "";
+        const label = r.reason === "partially_eligible" ? `<span class="badge s-awaiting-payment">PARTIALLY ELIGIBLE</span>` : `${badge(r.result)} ${r.reason ? esc(r.reason) : ""}`;
+        out.innerHTML = `<p>${label}
+          <span class="muted">review ${esc(r.review_id || "")}${r.rule_version ? " · rules " + esc(r.rule_version) : ""}</span></p>${part}${bl}${ov}`;
+        if (cl.length) claimsBox(id); // the marks changed: refresh the claims list
       };
       loadElig();
       $("#p-date")?.addEventListener("submit", async (ev) => {
@@ -12971,5 +12990,55 @@ ${canAct ? `<p class="muted" style="margin-top:6px">To act on a TPA's behalf, as
     }, "…");
   }
 
-  return { savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, intakeFiledWithFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, saveCostEstimate, setOpenedDateFn, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn, reviewerAddFn, reviewerRemoveFn };
+  // ---- Claims on a dispute: eligible or not, claim by claim (change log 2026-11-28, partial eligibility letter) ----
+  const CLAIM_REASONS = [
+    ["were filed more than 12 months after the final determination.", "Filed more than 12 months after the final determination"],
+    ["were for services provided before the program's start date.", "Services before the program's start date"],
+    ["are not a type of claim the program reviews.", "Not a type of claim the program reviews"],
+    ["were already decided in another dispute.", "Already decided in another dispute"],
+    ["", "Other — write the reason below"]];
+  const claimMarkRoles = () => can("CASE_MANAGER", "PM", "TENANT_ADMIN", "FEDERAL_ADMIN", "PLATFORM_ADMIN");
+  async function claimsBox(id) {
+    const box = document.getElementById("p-claims-box");
+    if (!box) return;
+    let claims = [];
+    try { const r = await Api.program.claims(id); claims = r.claims || r || []; }
+    catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    if (!claims.length) { box.innerHTML = `<p class="muted">No claims are recorded on this dispute yet.</p>`; return; }
+    const bad = claims.filter((c) => c.status === "INELIGIBLE").length, edit = claimMarkRoles();
+    const money = (c) => { const v = c.disputed_cents ?? c.billed_cents;
+      return v == null ? "—" : "$" + (Number(v) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 }); };
+    box.innerHTML = `<p class="muted">${claims.length} claim${claims.length === 1 ? "" : "s"} · <b>${claims.length - bad} accepted</b>${bad ? ` · <b class="error">${bad} ineligible</b>` : ""}</p>
+      <div class="table-wrap"><table class="claims-elig"><thead><tr><th>Claim</th><th>Date of service</th><th>Final determination</th><th>In dispute</th><th>Eligibility</th>${edit ? "<th></th>" : ""}</tr></thead><tbody>` +
+      claims.map((c) => {
+        const no = c.status === "INELIGIBLE";
+        const st = no ? `<span class="badge s-rejected">Ineligible</span> <span>${esc(c.ineligible_reason || "")}</span>
+            ${c.ineligible_by ? `<div class="muted" style="font-size:11.5px">Marked by ${esc(c.ineligible_by)}${c.ineligible_at ? ` on ${esc(fmtDate(c.ineligible_at))}` : ""}</div>` : ""}`
+          : `<span class="badge s-approved">Accepted</span>`;
+        const act = !edit ? "" : `<td>${no
+          ? `<button class="mini ghost" onclick="Views.claimMarkFn('${esc(id)}', '${esc(c.claim_number)}', false)">Accept again</button>`
+          : `<button class="mini" onclick="Views.claimMarkFn('${esc(id)}', '${esc(c.claim_number)}', true)">Mark ineligible</button>`}</td>`;
+        return `<tr${no ? ' class="claim-out"' : ""}><td class="mono">${esc(c.claim_number)}</td><td>${esc(fmtDate(c.date_of_service) || "—")}</td>
+          <td>${esc(fmtDate(c.date_of_final_determination) || "—")}</td><td class="num">${money(c)}</td><td>${st}</td>${act}</tr>`;
+      }).join("") + `</tbody></table></div>`;
+  }
+  async function claimMarkFn(id, claim, ineligible) {
+    let reason = "";
+    if (ineligible) {
+      const v = await UI.modal({ title: `Claim ${claim} is not eligible`, submitLabel: "Mark ineligible",
+        body: "The reason is kept on the claim and goes into the Partial Acceptance letter after the claim number (“Claim 123 <i>were filed more than…</i>”).",
+        fields: [{ name: "pick", label: "Reason", options: CLAIM_REASONS, value: CLAIM_REASONS[0][0] },
+          { name: "other", label: "Or in your own words", type: "textarea", hint: "Used instead of the reason above when filled in, e.g. “were billed under another provider's NPI.”" }] });
+      if (!v) return;
+      reason = (v.other || "").trim() || v.pick;
+      if (!reason) { UI.toast("Say why the claim is not eligible.", { kind: "warn" }); return; }
+    }
+    try {
+      await Api.program.claimMark(id, claim, { ineligible, reason });
+      UI.toast(ineligible ? `Claim ${claim} marked ineligible` : `Claim ${claim} accepted again`);
+      claimsBox(id);
+    } catch (e) { UI.toast(e.message, { kind: "warn", duration: 9000 }); }
+  }
+
+  return { claimMarkFn, savePacketForm, npiReviewDecideFn, claim, assignToMe, exclusionDecideFn, dashboard, cases, caseDetail, newDispute, sortCases, voice, reports, showAnalysis, retryAnalysis, check, assign, unassign, unassignHelper, letter, saveCurrentView, escalate, relate, feeTransfer, peek, askGraph, rptSlaFilter, voiceIntakeFilter, voiceLogFilter, settleInvoice, qaQueue, qaReview, qaDecide, intake, intakeFilter, intakeFiledWithFilter, newIntake, advanceIntake, deliverables, submitDeliverable, requestDeliverable, finance, payInvoice, moveDoc, downloadDoc, downloadZip, rulesAdmin, rulesAuditFilter, ruleEdit, ruleDelete, rulesSave, bindRulesAdmin, uploadCheck, clearCheck, requestRescan, copilotBrief, copilotDraftQA, copilotPropose, copilotDecideBatch, assistant, assistantChip, mountAssistantFab, handleAssistantMessage, asstQaDecide, asstShareAdd, asstShareRemove, assistantTool, asstRequestUpload, asstCheck, asstSendMail, asstClearCheck, corrTemplateBody, timeAdd, inbox, inboxOpen, inboxAttachment, inboxCompose, inboxSend, inboxFilesPicked, inboxOutlookConnect, inboxOutlookSync, inboxOutlookDisconnect, inboxFolder, inboxFilter, inboxMore, myTimesheet, myTimeRange, myTimeListBox, myTimeAdd, myTimeEditStart, myTimeSave, myTimeDel, timeReport, templatesPage, tplShowTab, tplEdit, tplSlug, tplInsert, tplSave, tplDelete, tplPreview, tplHistory, tplUsageDefault, tplUsageAdd, tplUsageRemove, corrTemplatesFor, timeReportRun, timeReportPreset, timeReportDates, timeReportReset, timeReportPick, timeReportTab, timeReportSend, timeReportCsv, timeRateSet, asstTimeAdd, bulkIntakeFile, bulkIntakeSubmit, createTenantFlow, renameTenantFlow, createFederalAdminFlow, addTenantStaffFlow, teamAdmin, autoAssignToggle, autoAssignRotation, autoAssignRole, autoAssignBacklog, staffFilter, staffOpen, setStaffEnabled, deleteStaffMember, auditLog, opsDashboard, billingInvoices, billingGen, billingActFn, billingDetail, billingExportFn, billingPayForm, billingPayRun, billingFilter: (f) => billingList({ status: f.status.value, start: f.start.value, end: f.end.value }), arapView, arapRecord, arapSettle, arapVoid, arapApFilter, arapArFilter, arapNacha, arapNachaFile, reconView, reconImportRun, reconFetchRun, reconMatchRun, reconOpen, reconResolveFn, reconBatchFilter, flReportFn, checksView, checksFilter: (st) => checksBox(st), checkUploadFn, checkOpen, checkClearFn, checkMatchFn, tpaView, tpaClaimFn, tpaUnlinkFn, tpaInviteCodeFn, tpaAddClientFn, tpaTeamAddFn, tpaTeamRoleFn, tpaTeamRemoveFn, tpaGroupAddFn, tpaGroupRenameFn, tpaGroupStatusFn, tpaClientGroupFn, tpaClientStatusFn, tpaFileFn, tpaDashBox, tpaProvClick, tpaCasesFilter, tpaEditDisputeFn, tpaAdminStatusFn, tpaBulkFile, tpaBulkSubmit, tpaBatchesBox, tpaBatchDetail, mailLog, mailLogFilter, mailLogBody, mailFileToCase, mailRejectHeld, orgSendersBox, orgSenderAdd, orgSenderRemove, caseSenderAdd, caseSenderRemove, caseReplyCodeRotate, programSendersBox, programSenderAdd, programSenderRemove, mailLogAttachment, companyOutlookConnect, companyOutlookSync, companyOutlookDisconnect, copyText, mailSetup, systemMailSave, saveReviewNote, saveDisputeSummary, saveCostEstimate, setOpenedDateFn, confirmAor, eligChecklist, wfAct, wfAnytime, fwaAct, saveContractDates, myTimePromptFill, saveCaseInfo, saveMailRecipients, qaSendFn, flAdhocFn, era835Fn, correctField, correctCheck, paymentsView, payTabFn, payHistoryFilter, railRoutingCheck, railAccountAddFn, railAccountDelFn, railDownload, railAchDebitFn, railWireFn, railIclFn, railMetro2Fn, railReturnsFn, railFileDetailFn, railScreenFn, screenListFn, screenMore, railAttachAuthFn, offerForm, determinationForm, caseOffers, queueView, pmQueueView, partyCases, partyCaseDetail, partyInviteForm, batchableModal, insightsView, featuresAdmin, billingFilter: (f) => billingList(f.status.value), tpaLetterUploadFn, tpaLetterGetFn, tpaLetterRemoveFn, tpaFilingOpen, tpaFilingEdit, tpaFilingCancel, tpaFilingSave, tpaFilingWithdraw, caseChangeDecideFn, draftDiscard, draftNewFn, draftOpenFn, draftsTabOpen, draftsTabNew, draftsTabDiscard, docReqFilterFn, tpaPickToggle, tpaPickGroup, tpaPickClear, tpaPickPay, tpaFilePacketClient, disputeDocAddFn, tpaOnboardingBox, tpaClientSelect, tpaFinanceExport, tpaTeamClientFn, moreDocsAdd, docReqPermissionFn, claimsCsvUpload, claimsCsvTemplate, tpaClientAddOpen, tpaGroupAddOpen, tpaClientFilter, tpaClientToggle, tpaFileFor, tpaFileDocsStart, tpaFileDocsUse, tpaFileDocsReset, tpaImportFn, tpaProfileForm, tpaPaymentForm, tpaPackageStart, tpaPackageBox, tpaSlotUpload, tpaSlotRemove, tpaMergedFn, tpaZipFn, hpView, hpBoot, hpClaimFn, hpAddPartyFn, hpOnboardingBox, hpImportFn, hpProfileForm, hpPaymentForm, hpPackageStart, hpPackageBox, hpSlotUpload, hpMergedFn, hpZipFn, hpFileFn, hpAdminBox, hpAdminStatusFn, railShowGenerated, hpUnlinkFn, onbReviewOpen, onbReviewDecide, filingPackagesFilter, tpaBulkDisputesFn, tpaBdBatchesBox, tpaBdReport, tpaTab, tpaPkgClose, tpaBdPay, tpaFeesPay, tpaBdTemplate, tpaBdSample, respondOpen, respondDocOpen, respondUploadFn, respondSubmitFn, respondOptOutFn, hpTab, tpaBdToggle, tpaBdItem, orgAuditBox, payDisputeFn, payClientFn, hpFeesPay, tpaMethodAdd, tpaMethodRemove, tpaProvToggle, orgAuditPage, docReqNew, docReqClose, docReqPage, orgDocReqBox, docReqUploadFn, docReqSubmitFn, rebrandTenantFlow, finChecksFilter, resolveUnappliedFn, tpaPayFilter, respondFilterFor, myActivityPage, auditMineToggle, orgGo, orgDocsDownload, sentRecordOpen, sentDocGetFn, docReqExtensionFn, previewDoc, previewCaseDoc, previewSentDoc, corrPreviewFn, mailTrackerFilter, qaDraftQualityBox, filePrefillFn, corrFillRecipientsFn: corrFillRecipients, intakeStepGo, productivity, productivityDetail, attentionGo, docReview, docAck, saveRespondent, openFilingPacket, finalOrderCopyRequested, archiveCaseFn, tpaStaffLetterAddFn, tpaStaffLetterGetFn, tpaStaffLetterRemoveFn, invSplit, tpaWithdrawFn, reviewerAddFn, reviewerRemoveFn };
 })();

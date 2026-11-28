@@ -247,13 +247,20 @@ func eligibilityChecklistHTML(caseNumber, result, reason, decidedBy string, at t
 	sort.Strings(keys)
 	var rows strings.Builder
 	for _, k := range keys {
+		if k == "claims" { // printed as its own table below
+			continue
+		}
 		v := ev[k]
 		if v == nil {
 			v = "—"
 		}
 		fmt.Fprintf(&rows, "<tr><td>%s</td><td>%s</td></tr>", e(strings.ReplaceAll(k, "_", " ")), e(fmt.Sprint(v)))
 	}
-	if reason != "" {
+	shown := result
+	claimsHTML := checklistClaimsHTML(ev)
+	if reason == "partially_eligible" {
+		shown, reason = "PARTIALLY ELIGIBLE", fmt.Sprintf(" — %v of %v claims go on to review", ev["eligible_claims"], len(checklistClaims(ev)))
+	} else if reason != "" {
 		reason = " — " + strings.ReplaceAll(reason, "_", " ")
 	}
 	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Eligibility Checklist %s</title>
@@ -263,10 +270,58 @@ td{border:1px solid #999;padding:6px 10px;vertical-align:top}td:first-child{widt
 .r{font-weight:bold}</style></head><body>
 <h1>Eligibility Checklist — %s</h1>
 <p>Result: <span class="r">%s</span>%s<br>Reviewed by %s on %s</p>
-<table>%s</table>
+<table>%s</table>%s
 <p style="margin-top:24px;font-size:12px">Generated from the eligibility review recorded on the case. The review record itself cannot be edited; a correction is a new review.</p>
-</body></html>`, e(caseNumber), e(caseNumber), e(result), e(reason),
-		e(decidedBy), at.UTC().Format("January 2, 2006"), rows.String())
+</body></html>`, e(caseNumber), e(caseNumber), e(shown), e(reason),
+		e(decidedBy), at.UTC().Format("January 2, 2006"), rows.String(), claimsHTML)
+}
+
+// checklistClaims reads the review's claim results, whether they come straight from the review ([]claimCheck) or
+// back from the database (JSON).
+func checklistClaims(ev map[string]any) []claimCheck {
+	var out []claimCheck
+	if b, err := json.Marshal(ev["claims"]); err == nil {
+		_ = json.Unmarshal(b, &out)
+	}
+	return out
+}
+
+// checklistClaimsHTML: the claims, accepted and not, with each one's reason (partial eligibility, 2026-11-28).
+func checklistClaimsHTML(ev map[string]any) string {
+	cs := checklistClaims(ev)
+	if len(cs) == 0 {
+		return ""
+	}
+	e := html.EscapeString
+	var b strings.Builder
+	b.WriteString(`<h2 style="font-size:16px;margin-top:22px">Claims</h2><table><tr><td><b>Claim</b></td><td><b>Result</b></td></tr>`)
+	for _, c := range cs {
+		res := "Accepted for review"
+		if !c.Eligible {
+			res = "Not eligible — " + c.Wording
+			if c.MarkedBy != "" {
+				res += " (marked by " + c.MarkedBy + ")"
+			}
+		}
+		var notes []string
+		if c.FinalDetermination != "" {
+			n := "final determination " + c.FinalDetermination
+			if c.DateFromCase {
+				n += " (date taken from the case: the claim has none of its own)"
+			}
+			notes = append(notes, n)
+		}
+		if c.ServiceDate != "" {
+			notes = append(notes, "service "+c.ServiceDate)
+		}
+		small := ""
+		if len(notes) > 0 {
+			small = "<br><small>" + e(strings.Join(notes, "; ")) + "</small>"
+		}
+		fmt.Fprintf(&b, "<tr><td>%s</td><td>%s%s</td></tr>", e(c.Claim), e(res), small)
+	}
+	b.WriteString("</table>")
+	return b.String()
 }
 
 // storedEstimate: the cost estimate recorded on the case's Dispute Summary (full_review_estimate_cents and its basis).
