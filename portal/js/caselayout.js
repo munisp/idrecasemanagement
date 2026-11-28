@@ -47,7 +47,7 @@ const CaseLayout = (() => {
     const chips = (clocks || []).filter((cl) => !["done", "met", "met_late"].includes(cl.state) && !cl.target && cl.remaining !== undefined).map((cl) => {
       const late = cl.remaining < 0;
       const txt = late ? `${Math.abs(cl.remaining)} days overdue` : cl.remaining === 0 ? "due today" : `${cl.remaining} days left`;
-      return `<span class="case-clock ${late ? "late" : cl.remaining <= 3 ? "soon" : ""}" title="${esc(cl.cite || "")} — due ${esc(cl.due || "")}">
+      return `<span class="case-clock ${late ? "late" : cl.remaining <= 3 ? "soon" : cl.remaining <= 7 ? "week" : "ok"}" title="${esc(cl.cite || "")} — due ${esc(cl.due || "")}">
         <b>${esc(txt)}</b> ${esc(cl.label)}</span>`;
     }).join("");
     return `<header class="case-head">

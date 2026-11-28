@@ -857,11 +857,17 @@ button.linkish{background:none;border:0;padding:0;min-height:0;color:var(--accen
 @media (prefers-reduced-motion: reduce) { .upl-bar span { transition: none; } }
 
 /* Live deadline countdowns (views.js countdown) */
-.cdown { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
-.cdown.ok { color: var(--success-fg, inherit); }
-.cdown.soon { color: var(--warning-fg); }
-.cdown.late { color: var(--danger-fg); }
-.sla-card .cdown { display: block; font-size: 12px; margin-top: 2px; }
+/* Change log (2026-11-28, "Due date time color"): the countdown was plain coloured text and hard to spot. It is now a
+   filled pill with a clock mark, banded like the SLA chips: blue > 7 days, amber <= 7 days, red <= 3 days, solid red
+   once overdue. */
+.cdown { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; font-weight: 700;
+  white-space: nowrap; padding: 2px 9px; border-radius: 999px; border: 1px solid transparent; line-height: 1.5; }
+.cdown::before { content: "\25F7"; font-weight: 400; }
+.cdown.ok { background: var(--info-bg); color: var(--info-fg); border-color: color-mix(in srgb, var(--info-fg) 25%, transparent); }
+.cdown.week { background: var(--warning-bg); color: var(--warning-fg); border-color: color-mix(in srgb, var(--warning-fg) 35%, transparent); }
+.cdown.soon { background: var(--danger-bg); color: var(--danger-fg); border-color: var(--danger-fg); }
+.cdown.late { background: var(--red-700, #9C2B1F); color: #fff; border-color: var(--red-700, #9C2B1F); }
+.sla-card .cdown { display: inline-flex; align-self: flex-start; font-size: 12px; margin-top: 4px; }
 .rsp-due { display: grid; gap: 4px; margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border-default); background: var(--surface-raised); border-radius: 8px; }
 .rsp-due .lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .rsp-due-cd .cdown { font-size: 22px; }
@@ -971,8 +977,11 @@ tr.sf-out{display:none !important}
 .case-clocks{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .case-clock{font-size:12.5px;padding:4px 10px;border-radius:var(--radius-chip);background:var(--surface-sunken);color:var(--text-secondary)}
 .case-clock b{color:var(--text-primary)}
-.case-clock.soon{background:var(--warning-bg)} .case-clock.soon b{color:var(--warning-fg)}
-.case-clock.late{background:var(--danger-bg)} .case-clock.late b{color:var(--danger-fg)}
+.case-clock.ok{background:var(--info-bg)} .case-clock.ok b{color:var(--info-fg)}
+.case-clock.week{background:var(--warning-bg)} .case-clock.week b{color:var(--warning-fg)}
+.case-clock.soon{background:var(--danger-bg);box-shadow:inset 0 0 0 1px var(--danger-fg)} .case-clock.soon b{color:var(--danger-fg)}
+.case-clock.late{background:var(--red-700,#9C2B1F);color:#fff} .case-clock.late b{color:#fff}
+.case-clock b::before{content:"\25F7  ";font-weight:400}
 .case-more{position:relative}
 .case-more>summary{list-style:none;background:var(--surface-raised);color:var(--text-primary);border:1px solid var(--border-default)}
 .case-more>summary::-webkit-details-marker{display:none}

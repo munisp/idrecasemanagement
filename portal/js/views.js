@@ -1373,7 +1373,7 @@ const Views = (() => {
     const ms = new Date(at) - Date.now(), late = ms < 0, s = Math.floor(Math.abs(ms) / 1000);
     const d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60, sec = s % 60, p = (n) => String(n).padStart(2, "0");
     const span = d ? `${d}d ${p(h)}h ${p(m)}m ${p(sec)}s` : `${p(h)}:${p(m)}:${p(sec)}`;
-    return { text: late ? `late by ${span}` : `${span} left`, cls: late ? "late" : ms <= 3 * 864e5 ? "soon" : "ok" };
+    return { text: late ? `late by ${span}` : `${span} left`, cls: late ? "late" : ms <= 3 * 864e5 ? "soon" : ms <= 7 * 864e5 ? "week" : "ok" };
   };
   const countdown = (due) => {
     if (!due) return "";
